@@ -85,13 +85,37 @@ A standalone static analyzer that enforces Rust-like ownership and borrowing rul
 
 ### 📦 Installation
 
-#### Prerequisites
+#### ⚠️ Build Requirements (IMPORTANT)
+
+This tool requires the following native dependencies to be installed **before** building from source or installing via cargo:
 
 - **Rust**: 1.70+ (for building the analyzer)
-- **LLVM/Clang**: 14+ (for parsing C++)
-- **Z3**: 4.8+ (for constraint solving)
+- **LLVM/Clang**: 14+ (for parsing C++ - required by clang-sys)
+- **Z3**: 4.8+ (for constraint solving - required by z3-sys)
 
-#### macOS
+**Note**: These dependencies must be installed system-wide before running `cargo install rusty-cpp` or building from source. The build will fail without them.
+
+#### Installing from crates.io
+
+Once you have the prerequisites installed:
+
+```bash
+# macOS: Set environment variable for Z3
+export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
+
+# Linux: Set environment variable for Z3
+export Z3_SYS_Z3_HEADER=/usr/include/z3.h
+
+# Install from crates.io
+cargo install rusty-cpp
+
+# The binary will be installed as 'rusty-cpp-checker'
+rusty-cpp-checker --help
+```
+
+#### Building from Source
+
+##### macOS
 
 ```bash
 # Install dependencies
@@ -113,7 +137,7 @@ export PATH="$PATH:$(pwd)/target/release"
 
 **Note**: The project includes a `.cargo/config.toml` file that automatically sets the required environment variables for Z3. If you encounter build issues, you may need to adjust the paths in this file based on your system configuration.
 
-#### Linux (Ubuntu/Debian)
+##### Linux (Ubuntu/Debian)
 
 ```bash
 # Install dependencies
@@ -126,7 +150,7 @@ cd rusty-cpp
 cargo build --release
 ```
 
-#### Windows
+##### Windows
 
 ```bash
 # Install LLVM from https://releases.llvm.org/
