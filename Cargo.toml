@@ -11,6 +11,7 @@ readme = "README.md"
 keywords = ["cpp", "static-analysis", "borrow-checker", "memory-safety", "rust"]
 categories = ["development-tools", "development-tools::build-utils"]
 license = "MIT OR Apache-2.0"
+exclude = ["tests/*", "examples/*", ".git/*", ".github/*", "*.bak"]
 
 [[bin]]
 name = "rusty-cpp-checker"
@@ -32,3 +33,7 @@ z3 = "0.12"
 
 [dev-dependencies]
 tempfile = "3.20.0"
+
+[package.metadata.docs.rs]
+# This tells docs.rs to skip building the documentation since it requires Z3 and LLVM
+no-default-features = true
