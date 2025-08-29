@@ -1,4 +1,4 @@
-# RustyCpp: Making C++ Rusty
+# rusty-cpp: Making C++ Rusty
 
 This project aims to make C++ safer and more reliable by adopting Rust's proven safety principles, especially its borrow-checking system.  We provide a static analyzer that enforces Rust-like ownership and borrowing rules through compile-time analysis. 
 <!-- 2. **Style Guide** - Best practices and utilities for writing safer C++ code with Rust-like patterns -->
@@ -98,7 +98,7 @@ A standalone static analyzer that enforces Rust-like ownership and borrowing rul
 brew install llvm z3
 
 # Clone the repository
-git clone https://github.com/shuaimu/rustycpp
+git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 
 # Build the project
@@ -121,8 +121,8 @@ sudo apt-get update
 sudo apt-get install llvm-14-dev libclang-14-dev libz3-dev
 
 # Clone and build
-git clone https://github.com/shuaimu/rustycpp
-cd rustycpp
+git clone https://github.com/shuaimu/rusty-cpp
+cd rusty-cpp
 cargo build --release
 ```
 

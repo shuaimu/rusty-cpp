@@ -1,4 +1,4 @@
-# Rusty C++ Checker - Project Context for Claude
+# Rusty-CPP - Project Context for Claude
 
 ## Project Overview
 
@@ -350,7 +350,7 @@ const T& function(const T& longer, const T& shorter);
 ## Example Output
 
 ```
-Rusty C++ Checker
+Rusty-CPP
 Analyzing: examples/reference_demo.cpp
 ✗ Found 3 violation(s):
 Cannot create mutable reference to 'value': already mutably borrowed

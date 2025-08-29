@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Rusty C++ Checker Installation Script
-# This script builds and installs the Rusty C++ Checker for use with CMake and other build systems
+# Rusty-CPP Installation Script
+# This script builds and installs Rusty-CPP for use with CMake and other build systems
 
 set -e  # Exit on error
 
@@ -9,7 +9,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
 BUILD_TYPE="${BUILD_TYPE:-release}"
 
-echo "Rusty C++ Checker Installation"
+echo "Rusty-CPP Installation"
 echo "=============================="
 echo "Install prefix: $INSTALL_PREFIX"
 echo "Build type: $BUILD_TYPE"
@@ -71,7 +71,7 @@ esac
 
 # Build the project
 echo
-echo "Building Rusty C++ Checker..."
+echo "Building Rusty-CPP..."
 cd "$SCRIPT_DIR"
 
 if [ "$BUILD_TYPE" = "release" ]; then

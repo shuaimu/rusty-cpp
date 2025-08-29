@@ -1,7 +1,16 @@
 [package]
-name = "rusty-cpp-checker"
+name = "rusty-cpp"
 version = "0.1.0"
 edition = "2021"
+authors = ["Shuai Mu <shuai@cs.stonybrook.edu>"]
+description = "A Rust-based static analyzer that applies Rust's ownership and borrowing rules to C++ code"
+documentation = "https://docs.rs/rusty-cpp"
+homepage = "https://github.com/shuaimu/rusty-cpp"
+repository = "https://github.com/shuaimu/rusty-cpp"
+readme = "README.md"
+keywords = ["cpp", "static-analysis", "borrow-checker", "memory-safety", "rust"]
+categories = ["development-tools", "development-tools::build-utils"]
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "rusty-cpp-checker"
