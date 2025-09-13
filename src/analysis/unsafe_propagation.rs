@@ -1,5 +1,6 @@
 use crate::parser::{Function, Statement, Expression};
 use crate::parser::safety_annotations::SafetyContext;
+use crate::parser::external_annotations::ExternalAnnotations;
 use std::collections::HashSet;
 
 /// Check for unsafe propagation in safe functions
@@ -13,11 +14,23 @@ pub fn check_unsafe_propagation(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Vec<String> {
+    check_unsafe_propagation_with_external(function, safety_context, known_safe_functions, None)
+}
+
+/// Check for unsafe propagation with external annotations support
+pub fn check_unsafe_propagation_with_external(
+    function: &Function,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+) -> Vec<String> {
     let mut errors = Vec::new();
     
     // Check each statement in the function
     for stmt in &function.body {
-        if let Some(error) = check_statement_for_unsafe_calls(stmt, safety_context, known_safe_functions) {
+        if let Some(error) = check_statement_for_unsafe_calls_with_external(
+            stmt, safety_context, known_safe_functions, external_annotations
+        ) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
     }
@@ -30,12 +43,21 @@ fn check_statement_for_unsafe_calls(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Option<String> {
+    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None)
+}
+
+fn check_statement_for_unsafe_calls_with_external(
+    stmt: &Statement,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+) -> Option<String> {
     use crate::parser::Statement;
     
     match stmt {
         Statement::FunctionCall { name, location, .. } => {
             // Check if the called function is safe
-            if !is_function_safe(name, safety_context, known_safe_functions) {
+            if !is_function_safe_with_external(name, safety_context, known_safe_functions, external_annotations) {
                 return Some(format!(
                     "Calling unsafe function '{}' at line {} requires unsafe context",
                     name, location.line
@@ -44,7 +66,7 @@ fn check_statement_for_unsafe_calls(
         }
         Statement::Assignment { rhs, location, .. } => {
             // Check for function calls in the right-hand side
-            if let Some(unsafe_func) = find_unsafe_function_call(rhs, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(rhs, safety_context, known_safe_functions, external_annotations) {
                 return Some(format!(
                     "Calling unsafe function '{}' at line {} requires unsafe context",
                     unsafe_func, location.line
@@ -53,7 +75,7 @@ fn check_statement_for_unsafe_calls(
         }
         Statement::Return(Some(expr)) => {
             // Check for function calls in return expression
-            if let Some(unsafe_func) = find_unsafe_function_call(expr, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, external_annotations) {
                 return Some(format!(
                     "Calling unsafe function '{}' in return statement requires unsafe context",
                     unsafe_func
@@ -62,7 +84,7 @@ fn check_statement_for_unsafe_calls(
         }
         Statement::If { condition, then_branch, else_branch, location } => {
             // Check condition
-            if let Some(unsafe_func) = find_unsafe_function_call(condition, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(condition, safety_context, known_safe_functions, external_annotations) {
                 return Some(format!(
                     "Calling unsafe function '{}' in condition at line {} requires unsafe context",
                     unsafe_func, location.line
@@ -71,14 +93,14 @@ fn check_statement_for_unsafe_calls(
             
             // Recursively check branches
             for branch_stmt in then_branch {
-                if let Some(error) = check_statement_for_unsafe_calls(branch_stmt, safety_context, known_safe_functions) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations) {
                     return Some(error);
                 }
             }
             
             if let Some(else_stmts) = else_branch {
                 for branch_stmt in else_stmts {
-                    if let Some(error) = check_statement_for_unsafe_calls(branch_stmt, safety_context, known_safe_functions) {
+                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations) {
                         return Some(error);
                     }
                 }
@@ -87,7 +109,7 @@ fn check_statement_for_unsafe_calls(
         Statement::Block(statements) => {
             // Check all statements in the block
             for block_stmt in statements {
-                if let Some(error) = check_statement_for_unsafe_calls(block_stmt, safety_context, known_safe_functions) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations) {
                     return Some(error);
                 }
             }
@@ -103,34 +125,43 @@ fn find_unsafe_function_call(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Option<String> {
+    find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, None)
+}
+
+fn find_unsafe_function_call_with_external(
+    expr: &Expression,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+) -> Option<String> {
     use crate::parser::Expression;
     
     match expr {
         Expression::FunctionCall { name, args } => {
             // Check if this function is safe
-            if !is_function_safe(name, safety_context, known_safe_functions) {
+            if !is_function_safe_with_external(name, safety_context, known_safe_functions, external_annotations) {
                 return Some(name.clone());
             }
             
             // Check arguments for nested unsafe calls
             for arg in args {
-                if let Some(unsafe_func) = find_unsafe_function_call(arg, safety_context, known_safe_functions) {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations) {
                     return Some(unsafe_func);
                 }
             }
         }
         Expression::BinaryOp { left, right, .. } => {
             // Check both sides
-            if let Some(unsafe_func) = find_unsafe_function_call(left, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(left, safety_context, known_safe_functions, external_annotations) {
                 return Some(unsafe_func);
             }
-            if let Some(unsafe_func) = find_unsafe_function_call(right, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(right, safety_context, known_safe_functions, external_annotations) {
                 return Some(unsafe_func);
             }
         }
         Expression::Move(inner) | Expression::Dereference(inner) | Expression::AddressOf(inner) => {
             // Check inner expression
-            if let Some(unsafe_func) = find_unsafe_function_call(inner, safety_context, known_safe_functions) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(inner, safety_context, known_safe_functions, external_annotations) {
                 return Some(unsafe_func);
             }
         }
@@ -145,10 +176,26 @@ fn is_function_safe(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> bool {
+    is_function_safe_with_external(func_name, safety_context, known_safe_functions, None)
+}
+
+fn is_function_safe_with_external(
+    func_name: &str,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+) -> bool {
     // Check if it's explicitly marked as safe
     // Only functions with explicit @safe annotation are considered safe
     if known_safe_functions.contains(func_name) {
         return true;
+    }
+    
+    // Check external annotations if provided
+    if let Some(annotations) = external_annotations {
+        if let Some(is_safe) = annotations.is_function_safe(func_name) {
+            return is_safe;
+        }
     }
     
     // Check for standard library functions we consider safe

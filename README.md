@@ -322,6 +322,83 @@ int& dangling_reference() {
 - **Solver** (`src/solver/`): Z3-based constraint solving for lifetimes
 - **Diagnostics** (`src/diagnostics/`): User-friendly error reporting
 
+### 🆕 Advanced Features
+
+#### STL Lifetime Annotations
+
+RustyCpp now provides comprehensive lifetime checking for C++ STL types without modifying standard library headers:
+
+```cpp
+#include <stl_lifetimes.hpp>
+#include <vector>
+
+// @safe
+void example() {
+    std::vector<int> vec = {1, 2, 3};
+    int& ref = vec[0];     // Borrows &'vec mut
+    vec.push_back(4);      // ERROR: Cannot modify vec while ref exists
+}
+```
+
+See [docs/stl_lifetimes.md](docs/stl_lifetimes.md) for complete STL support.
+
+#### External Function Annotations
+
+Annotate third-party functions with both safety and lifetime information without modifying their source:
+
+```cpp
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   strchr: [safe, (const char* str, int c) -> const char* where str: 'a, return: 'a]
+//   malloc: [unsafe, (size_t size) -> owned void*]
+//   sqlite3_column_text: [safe, (sqlite3_stmt* stmt, int col) -> const char* where stmt: 'a, return: 'a]
+// }
+
+// @safe
+void use_third_party() {
+    const char* text = "hello";
+    const char* found = strchr(text, 'e');  // OK: safe with lifetime checking
+    // void* buf = malloc(100);  // ERROR: unsafe function in safe context
+}
+```
+
+Features:
+- Combined safety + lifetime annotations
+- Pre-configured for common C/C++ libraries
+- Pattern-based matching for groups of functions
+- Library profiles for easy configuration
+
+See [docs/unified_annotations.md](docs/unified_annotations.md) for details.
+
+#### In-Place Lifetime Annotations
+
+Annotate your own functions directly in the source code:
+
+```cpp
+// @safe
+class Container {
+    std::vector<int> data;
+public:
+    // @lifetime: (&'a, size_t) -> &'a
+    const int& get(size_t idx) const { 
+        return data[idx];  // Return lifetime tied to 'this'
+    }
+    
+    // @lifetime: (&'a mut) -> void
+    void clear() { 
+        data.clear();  // Mutable borrow of 'this'
+    }
+    
+    // @lifetime: owned
+    std::vector<int> clone() const { 
+        return data;  // Returns owned copy
+    }
+};
+```
+
+See [docs/inline_lifetime_annotations.md](docs/inline_lifetime_annotations.md) for complete guide.
+
 ---
 
 ## Tips in writing rusty c++

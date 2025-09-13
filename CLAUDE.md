@@ -7,6 +7,23 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 ## Current State (Updated: Added unsafe propagation checking)
 
 ### What's Fully Implemented ✅
+
+**New Advanced Features (Added 2025):**
+- ✅ **STL Lifetime Annotations** - Complete lifetime checking for C++ STL types
+  - Vector, map, unique_ptr, shared_ptr, string, etc.
+  - Iterator invalidation detection
+  - Reference stability rules
+  - No modification to STL headers required
+  - See `include/stl_lifetimes.hpp` and `docs/stl_lifetimes.md`
+  
+- ✅ **Unified External Annotations** - Combined safety + lifetime for third-party code
+  - Annotate external functions without source modification
+  - Compact syntax: `func: [safety, lifetime_spec]`
+  - Pre-configured for C stdlib, POSIX, Boost, SQLite, etc.
+  - Pattern-based matching and library profiles
+  - See `include/unified_external_annotations.hpp` and `docs/unified_annotations.md`
+
+**Core Features:**
 - ✅ **Complete reference borrow checking** for C++ const and mutable references
   - Multiple immutable borrows allowed
   - Single mutable borrow enforced
@@ -214,6 +231,7 @@ export CPATH=/usr/include
 
 ## Usage Examples
 
+### Basic Usage
 ```bash
 # Basic usage
 cargo run -- file.cpp
@@ -227,6 +245,50 @@ cargo run -- file.cpp --compile-commands build/compile_commands.json
 # Using environment variables
 export CPLUS_INCLUDE_PATH=/project/include:/third_party/include
 cargo run -- src/main.cpp
+```
+
+### Using STL Lifetime Annotations
+```cpp
+#include <stl_lifetimes.hpp>
+#include <vector>
+#include <memory>
+
+// @safe
+void stl_example() {
+    // Vector iterator invalidation detection
+    std::vector<int> vec = {1, 2, 3};
+    auto it = vec.begin();  // Iterator borrows from vec
+    vec.push_back(4);       // ERROR: Would invalidate iterator
+    
+    // Smart pointer ownership tracking
+    std::unique_ptr<int> ptr = std::make_unique<int>(42);
+    int& ref = *ptr;        // Reference borrows from ptr
+    auto ptr2 = std::move(ptr);  // ERROR: Cannot move while borrowed
+}
+```
+
+### Using External Annotations
+```cpp
+#include <unified_external_annotations.hpp>
+
+// Annotate third-party functions
+// @external: {
+//   third_party::process: [safe, (const Data& d) -> Result]
+//   third_party::allocate: [unsafe, (size_t) -> owned void*]
+//   sqlite3_column_text: [safe, (stmt* s, int col) -> const char* where s: 'a, return: 'a]
+// }
+
+// @safe
+void external_example() {
+    // C stdlib with lifetime checking
+    const char* str = "hello";
+    const char* found = strchr(str, 'e');  // Lifetime tied to str
+    
+    // Third-party functions checked
+    Data d;
+    Result r = third_party::process(d);  // OK: safe function
+    // void* buf = third_party::allocate(100);  // ERROR: unsafe in safe context
+}
 ```
 
 ## Lifetime Annotation Syntax

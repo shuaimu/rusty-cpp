@@ -5,6 +5,8 @@ pub mod ast_visitor;
 pub mod annotations;
 pub mod header_cache;
 pub mod safety_annotations;
+pub mod type_annotations;
+pub mod external_annotations;
 
 pub use ast_visitor::{CppAst, Function, Statement, Expression};
 pub use header_cache::HeaderCache;
