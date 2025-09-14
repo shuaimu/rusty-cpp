@@ -95,7 +95,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     let ast = parser::parse_cpp_file_with_includes_and_defines(path, &all_include_paths, defines)?;
     
     // Parse safety annotations using the unified rule
-    let safety_context = parser::safety_annotations::parse_safety_annotations(path)?;
+    let mut safety_context = parser::safety_annotations::parse_safety_annotations(path)?;
+    
+    // Merge safety annotations from headers into the context
+    safety_context.merge_header_annotations(&header_cache);
     
     // Build a set of known safe functions from the safety context
     let mut known_safe_functions = std::collections::HashSet::new();

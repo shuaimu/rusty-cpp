@@ -5,12 +5,15 @@ use regex::Regex;
 use clang::{Clang, Index};
 
 use super::annotations::{FunctionSignature, extract_annotations};
+use super::safety_annotations::{SafetyMode, parse_entity_safety};
 
 /// Cache for storing function signatures from header files
 #[derive(Debug, Default)]
 pub struct HeaderCache {
     /// Map from function name to its lifetime signature
     signatures: HashMap<String, FunctionSignature>,
+    /// Map from function name to its safety annotation from header
+    pub safety_annotations: HashMap<String, SafetyMode>,
     /// Paths of headers that have been processed
     processed_headers: Vec<PathBuf>,
     /// Include paths to search for headers
@@ -32,10 +35,18 @@ impl HeaderCache {
         self.signatures.get(func_name)
     }
     
+    /// Get safety annotation for a function from headers
+    pub fn get_safety_annotation(&self, func_name: &str) -> Option<SafetyMode> {
+        self.safety_annotations.get(func_name).copied()
+    }
+    
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
+        // eprintln!("DEBUG HEADER: Parsing header file: {}", header_path.display());
+        
         // Skip if already processed
         if self.processed_headers.iter().any(|p| p == header_path) {
+            // eprintln!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
         }
         
@@ -45,7 +56,11 @@ impl HeaderCache {
         let index = Index::new(&clang, false, false);
         
         // Build arguments with include paths
-        let mut args = vec!["-std=c++17".to_string(), "-xc++".to_string()];
+        let mut args = vec![
+            "-std=c++17".to_string(), 
+            "-xc++".to_string(),
+            "-fparse-all-comments".to_string(),  // Essential for getting comments from headers
+        ];
         for include_path in &self.include_paths {
             args.push(format!("-I{}", include_path.display()));
         }
@@ -60,6 +75,11 @@ impl HeaderCache {
         // Extract function signatures with annotations
         let root = tu.get_entity();
         self.visit_entity_for_signatures(&root);
+        
+        // eprintln!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
+        // for (name, mode) in &self.safety_annotations {
+        //     eprintln!("DEBUG HEADER:   - {} : {:?}", name, mode);
+        // }
         
         self.processed_headers.push(header_path.to_path_buf());
         Ok(())
@@ -119,20 +139,66 @@ impl HeaderCache {
     }
     
     fn visit_entity_for_signatures(&mut self, entity: &clang::Entity) {
+        self.visit_entity_with_namespace(entity, None);
+    }
+    
+    fn visit_entity_with_namespace(&mut self, entity: &clang::Entity, namespace_safety: Option<SafetyMode>) {
         use clang::EntityKind;
+        
+        // Check if this is a namespace with safety annotation
+        let mut current_namespace_safety = namespace_safety;
+        if entity.get_kind() == EntityKind::Namespace {
+            if let Some(safety) = parse_entity_safety(entity) {
+                current_namespace_safety = Some(safety);
+                // eprintln!("DEBUG SAFETY: Found namespace with {:?} annotation", safety);
+            }
+        }
         
         match entity.get_kind() {
             EntityKind::FunctionDecl | EntityKind::Method => {
+                // Extract lifetime annotations
                 if let Some(sig) = extract_annotations(entity) {
                     self.signatures.insert(sig.name.clone(), sig);
+                }
+                
+                // Extract safety annotations from the entity itself
+                let mut safety = parse_entity_safety(entity);
+                
+                // If no explicit safety annotation, inherit from namespace
+                if safety.is_none() {
+                    safety = current_namespace_safety;
+                }
+                
+                // if let Some(name) = entity.get_name() {
+                //     eprintln!("DEBUG HEADER: Processing function '{}'", name);
+                //     if let Some(comment) = entity.get_comment() {
+                //         eprintln!("DEBUG HEADER:   Comment: {}", comment);
+                //     }
+                // }
+                
+                if let Some(safety_mode) = safety {
+                    if let Some(name) = entity.get_name() {
+                        // Store with simple name
+                        self.safety_annotations.insert(name.clone(), safety_mode);
+                        // eprintln!("DEBUG SAFETY: Found function '{}' with {:?} annotation", name, safety_mode);
+                        
+                        // For methods, also store with qualified name if available
+                        if entity.get_kind() == EntityKind::Method {
+                            if let Some(qualified) = entity.get_display_name() {
+                                if qualified != name {
+                                    self.safety_annotations.insert(qualified, safety_mode);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
         }
         
-        // Recursively visit children
+        // Recursively visit children, passing down namespace safety
         for child in entity.get_children() {
-            self.visit_entity_for_signatures(&child);
+            self.visit_entity_with_namespace(&child, current_namespace_safety);
         }
     }
     

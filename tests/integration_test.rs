@@ -6,11 +6,25 @@ use std::fs;
 use std::env;
 
 fn run_analyzer(cpp_file: &Path) -> (bool, String) {
-    let output = Command::new("cargo")
-        .args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
-        .output()
+    // Set Z3 header path based on platform
+    let z3_header = if cfg!(target_os = "macos") {
+        "/opt/homebrew/include/z3.h"
+    } else {
+        "/usr/include/z3.h"
+    };
+    
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
+        .env("Z3_SYS_Z3_HEADER", z3_header);
+    
+    // Set library paths based on platform
+    if cfg!(target_os = "macos") {
+        cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
+    } else {
+        cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
+    }
+    
+    let output = cmd.output()
         .expect("Failed to execute analyzer");
     
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -468,12 +482,26 @@ void test_env() {
     fs::write(&cpp_path, cpp_content).unwrap();
     
     // Run analyzer with environment variable set
-    let output = Command::new("cargo")
-        .args(&["run", "--quiet", "--", cpp_path.to_str().unwrap()])
+    // Set Z3 header path based on platform
+    let z3_header = if cfg!(target_os = "macos") {
+        "/opt/homebrew/include/z3.h"
+    } else {
+        "/usr/include/z3.h"
+    };
+    
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["run", "--quiet", "--", cpp_path.to_str().unwrap()])
         .env("CPLUS_INCLUDE_PATH", include_dir.to_str().unwrap())
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
-        .output()
+        .env("Z3_SYS_Z3_HEADER", z3_header);
+    
+    // Set library paths based on platform
+    if cfg!(target_os = "macos") {
+        cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
+    } else {
+        cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
+    }
+    
+    let output = cmd.output()
         .expect("Failed to execute analyzer");
     
     let stdout = String::from_utf8_lossy(&output.stdout);

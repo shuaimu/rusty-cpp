@@ -25,6 +25,26 @@ impl SafetyContext {
         }
     }
     
+    /// Merge safety annotations from headers into this context
+    pub fn merge_header_annotations(&mut self, header_cache: &super::header_cache::HeaderCache) {
+        // For each function that has a safety annotation in a header,
+        // add it to our overrides if not already present
+        for (func_name, &safety_mode) in header_cache.safety_annotations.iter() {
+            // Check if we already have an override for this function
+            let already_has_override = self.function_overrides.iter()
+                .any(|(name, _)| name == func_name);
+            
+            if !already_has_override {
+                // Add the header's safety annotation
+                // eprintln!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
+                self.function_overrides.push((func_name.clone(), safety_mode));
+            } else {
+                eprintln!("DEBUG SAFETY: Function '{}' already has annotation, keeping source file version", func_name);
+            }
+            // If we already have an override from the source file, it takes precedence
+        }
+    }
+    
     /// Check if a specific function should be checked
     pub fn should_check_function(&self, func_name: &str) -> bool {
         // First check for function-specific override
