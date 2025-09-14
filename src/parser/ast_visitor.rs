@@ -284,8 +284,35 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let mut name = "unknown".to_string();
                 let mut args = Vec::new();
                 
+                // First check if the CallExpr itself has a reference (for implicit member functions)
+                if let Some(ref_entity) = child.get_reference() {
+                    if let Some(n) = ref_entity.get_name() {
+                        // Build qualified name for member functions
+                        if ref_entity.get_kind() == EntityKind::Method {
+                            name = get_qualified_name(&ref_entity);
+                        } else {
+                            name = n;
+                        }
+                    }
+                }
+                
                 for c in children {
                     match c.get_kind() {
+                        EntityKind::MemberRefExpr => {
+                            // Handle member function calls
+                            if name == "unknown" {
+                                if let Some(ref_entity) = c.get_reference() {
+                                    if let Some(n) = ref_entity.get_name() {
+                                        // Build qualified name for member functions
+                                        if ref_entity.get_kind() == EntityKind::Method {
+                                            name = get_qualified_name(&ref_entity);
+                                        } else {
+                                            name = n;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
                             if name == "unknown" {
                                 if let Some(n) = c.get_name() {
@@ -385,6 +412,81 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             let mut name = "unknown".to_string();
             let mut args = Vec::new();
+            
+            // First check if the CallExpr itself has a reference (for implicit member functions)
+            if name == "unknown" {
+                if let Some(ref_entity) = entity.get_reference() {
+                    debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
+                    if let Some(n) = ref_entity.get_name() {
+                        // Build qualified name for member functions
+                        if ref_entity.get_kind() == EntityKind::Method {
+                            name = get_qualified_name(&ref_entity);
+                        } else {
+                            name = n;
+                        }
+                    }
+                }
+            }
+            
+            // Debug: print all child entity kinds
+            for c in &children {
+                debug_println!("DEBUG AST: CallExpr child kind: {:?}, name: {:?}, display_name: {:?}", 
+                    c.get_kind(), c.get_name(), c.get_display_name());
+                    
+                // For member function calls, check for MemberRefExpr first
+                if c.get_kind() == EntityKind::MemberRefExpr {
+                    // This is definitely a member function call
+                    if let Some(ref_entity) = c.get_reference() {
+                        debug_println!("DEBUG AST: MemberRefExpr references: {:?}", ref_entity.get_name());
+                        if let Some(n) = ref_entity.get_name() {
+                            if name == "unknown" {
+                                // Build qualified name for member functions
+                                if ref_entity.get_kind() == EntityKind::Method {
+                                    name = get_qualified_name(&ref_entity);
+                                } else {
+                                    name = n;
+                                }
+                            }
+                        }
+                    }
+                } else if c.get_kind() == EntityKind::UnexposedExpr {
+                    // Try to get the referenced entity
+                    if let Some(ref_entity) = c.get_reference() {
+                        debug_println!("DEBUG AST: UnexposedExpr references: {:?}", ref_entity.get_name());
+                        if let Some(n) = ref_entity.get_name() {
+                            if name == "unknown" {
+                                name = n;
+                            }
+                        }
+                    }
+                    // Also try children of UnexposedExpr
+                    for ue_child in c.get_children() {
+                        debug_println!("DEBUG AST: UnexposedExpr child: kind={:?}, name={:?}, display_name={:?}", 
+                            ue_child.get_kind(), ue_child.get_name(), ue_child.get_display_name());
+                        
+                        // Try to extract member function name from MemberRefExpr
+                        if let Some(n) = ue_child.get_name() {
+                            if name == "unknown" {
+                                name = n;
+                            }
+                        } else if let Some(dn) = ue_child.get_display_name() {
+                            if name == "unknown" && !dn.is_empty() {
+                                name = dn;
+                            }
+                        }
+                        
+                        // Also check if this child has a reference
+                        if let Some(ref_entity) = ue_child.get_reference() {
+                            debug_println!("DEBUG AST: Child references: {:?}", ref_entity.get_name());
+                            if let Some(n) = ref_entity.get_name() {
+                                if name == "unknown" {
+                                    name = n;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             
             for c in children {
                 match c.get_kind() {

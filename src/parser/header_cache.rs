@@ -7,9 +7,10 @@ use crate::debug_println;
 
 use super::annotations::{FunctionSignature, extract_annotations};
 use super::safety_annotations::{SafetyMode, parse_entity_safety};
+use super::external_annotations::ExternalAnnotations;
 
 /// Cache for storing function signatures from header files
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HeaderCache {
     /// Map from function name to its lifetime signature
     signatures: HashMap<String, FunctionSignature>,
@@ -19,11 +20,19 @@ pub struct HeaderCache {
     processed_headers: Vec<PathBuf>,
     /// Include paths to search for headers
     include_paths: Vec<PathBuf>,
+    /// External annotations found in headers
+    pub external_annotations: ExternalAnnotations,
 }
 
 impl HeaderCache {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            signatures: HashMap::new(),
+            safety_annotations: HashMap::new(),
+            processed_headers: Vec::new(),
+            include_paths: Vec::new(),
+            external_annotations: ExternalAnnotations::new(),
+        }
     }
     
     /// Set the include paths for header file resolution
@@ -49,6 +58,17 @@ impl HeaderCache {
         if self.processed_headers.iter().any(|p| p == header_path) {
             debug_println!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
+        }
+        
+        // First, try to parse any external annotations from the header file
+        if let Ok(content) = fs::read_to_string(header_path) {
+            // Parse external annotations from the file content
+            // These might be in comments or in the file directly
+            if let Err(e) = self.external_annotations.parse_content(&content) {
+                debug_println!("DEBUG HEADER: Failed to parse external annotations: {}", e);
+            } else {
+                debug_println!("DEBUG HEADER: Parsed external annotations from header");
+            }
         }
         
         // Initialize Clang

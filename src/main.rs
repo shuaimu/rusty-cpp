@@ -122,11 +122,12 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function);
             violations.extend(pointer_errors);
             
-            // Check for calls to unsafe functions
-            let propagation_errors = analysis::unsafe_propagation::check_unsafe_propagation(
+            // Check for calls to unsafe functions with external annotations from headers
+            let propagation_errors = analysis::unsafe_propagation::check_unsafe_propagation_with_external(
                 function,
                 &safety_context,
-                &known_safe_functions
+                &known_safe_functions,
+                Some(&header_cache.external_annotations)
             );
             violations.extend(propagation_errors);
         }
