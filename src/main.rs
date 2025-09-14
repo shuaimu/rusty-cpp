@@ -60,7 +60,7 @@ fn main() {
     match analyze_file(&args.input, &args.include_paths, &args.defines, args.compile_commands.as_ref()) {
         Ok(results) => {
             if results.is_empty() {
-                println!("{}", "✓ No borrow checking violations found!".green());
+                println!("{}", "✓ rusty-cpp: no violations found!".green());
             } else {
                 println!("{}", format!("✗ Found {} violation(s) in {}:", results.len(), args.input.display()).red());
                 for error in results {

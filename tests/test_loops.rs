@@ -61,7 +61,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     
     // Should NOT find any violations
-    assert!(stdout.contains("No borrow checking violations") || 
+    assert!(stdout.contains("no violations found") || 
             stdout.contains("✓") ||
             !stdout.contains("violation"),
             "Loop without moves should be OK. Output: {}", stdout);

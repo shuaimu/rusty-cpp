@@ -71,7 +71,7 @@ void unsafe_function() {
     let output = run_checker(&cpp_path);
     
     // Should not have violations for unsafe function
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             !output.contains("unsafe_function"),
             "Unsafe functions should be able to use STL, got: {}", output);
 }
@@ -95,7 +95,7 @@ void undeclared_function() {
     let output = run_checker(&cpp_path);
     
     // Should not check undeclared functions
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             !output.contains("undeclared_function"),
             "Undeclared functions should not be checked, got: {}", output);
 }

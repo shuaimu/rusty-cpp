@@ -144,7 +144,7 @@ void function_safe_in_header() {
     
     // Should not have violations since source file overrides header
     assert!(!stdout.contains("function_safe_in_header") || 
-            stdout.contains("No borrow checking violations"),
+            stdout.contains("no violations found"),
             "Source file @unsafe should override header @safe");
 }
 

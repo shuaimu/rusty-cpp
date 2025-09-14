@@ -55,7 +55,7 @@ void safe_function() {
     let output = run_checker(&cpp_path);
     
     // Should not report errors about function calls
-    assert!(!output.contains("safe_helper") || output.contains("No borrow checking violations"),
+    assert!(!output.contains("safe_helper") || output.contains("no violations found"),
             "Should allow safe to call safe, got: {}", output);
 }
 
@@ -81,7 +81,7 @@ void safe_function() {
     let output = run_checker(&cpp_path);
     
     // Should NOT report an error about calling unsafe function
-    assert!(!output.contains("unsafe_function") || output.contains("No borrow checking violations"),
+    assert!(!output.contains("unsafe_function") || output.contains("no violations found"),
             "Safe should be able to call explicitly unsafe functions, got: {}", output);
 }
 

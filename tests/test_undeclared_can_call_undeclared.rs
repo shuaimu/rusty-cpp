@@ -36,7 +36,7 @@ void unsafe_function() {
     let output = run_checker(&cpp_path);
     
     // Should have no violations - undeclared calling undeclared is fine
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             !output.contains("undeclared_function"),
             "Undeclared functions should be able to call other undeclared functions, got: {}", output);
 }
@@ -99,7 +99,7 @@ void safe_func() {
     let output = run_checker(&cpp_path);
     
     // Should have no violations
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             (!output.contains("func_a") && !output.contains("func_b") && !output.contains("func_c")),
             "Chains of undeclared functions should be allowed, got: {}", output);
 }

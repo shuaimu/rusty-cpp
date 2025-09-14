@@ -33,7 +33,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     
     // Should find NO violations
-    assert!(stdout.contains("No borrow checking violations") || 
+    assert!(stdout.contains("no violations found") || 
             stdout.contains("✓"),
             "Should not report false positives for scoped references. Output: {}", stdout);
     
@@ -101,7 +101,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     
     // Should find NO violations
-    assert!(stdout.contains("No borrow checking violations") || 
+    assert!(stdout.contains("no violations found") || 
             stdout.contains("✓") ||
             !stdout.contains("violation"),
             "Nested scopes should work correctly. Output: {}", stdout);

@@ -25,7 +25,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     
     // Should NOT detect any violations (unsafe by default)
-    assert!(stdout.contains("No borrow checking violations") || stdout.contains("✓"),
+    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
             "Should not check unsafe code by default. Output: {}", stdout);
     
     // Clean up

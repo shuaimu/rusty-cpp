@@ -59,7 +59,7 @@ fn test_valid_cpp_code_passes() {
     let (success, output) = run_analyzer(temp_file.path());
     
     assert!(success, "Valid code should pass analysis. Output: {}", output);
-    assert!(output.contains("No borrow checking violations found"));
+    assert!(output.contains("no violations found found"));
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn test_const_references_allowed() {
     let (success, output) = run_analyzer(temp_file.path());
     
     assert!(success, "Multiple const references should be allowed. Output: {}", output);
-    assert!(output.contains("No borrow checking violations"));
+    assert!(output.contains("no violations found"));
 }
 
 #[test]
@@ -386,7 +386,7 @@ void test_function() {
     
     // Should succeed - no borrow violations
     assert!(success, "Should successfully analyze file with header. Output: {}", output);
-    assert!(output.contains("No borrow checking violations"), 
+    assert!(output.contains("no violations found"), 
             "Should find no violations. Output: {}", output);
 }
 

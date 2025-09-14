@@ -49,7 +49,7 @@ void test_methods() {
     let output = run_checker_with_include(&cpp_path, temp_dir.path());
     
     // Should have no violations - we're not calling the methods
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             !output.contains("violation"),
             "Qualified method names should be handled correctly, got: {}", output);
 }
@@ -94,7 +94,7 @@ void test_collision() {
     let output = run_checker(&cpp_path);
     
     // Should properly distinguish between the two process methods
-    assert!(output.contains("No borrow checking violations") || 
+    assert!(output.contains("no violations found") || 
             !output.contains("violation"),
             "Qualified names in implementations should work, got: {}", output);
 }
