@@ -206,48 +206,92 @@ export Z3_SYS_Z3_HEADER=/opt/homebrew/opt/z3/include/z3.h
 export DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib:$DYLD_LIBRARY_PATH
 ```
 
-### 🛡️ Safety Annotations
+### 🛡️ Safety System
 
-The borrow checker uses a unified annotation system for gradual adoption in existing codebases:
+The borrow checker uses a three-state safety system with automatic header-to-implementation propagation:
 
-#### Unified Rule
-`@safe` and `@unsafe` annotations attach to the **next** code element (namespace, function, or first statement).
+#### Three Safety States
+
+1. **`@safe`** - Functions with full borrow checking and strict calling rules
+2. **`@unsafe`** - Explicitly marked unsafe functions (documented risks)
+3. **Undeclared** (default) - Functions without annotations (unaudited legacy code)
+
+#### Safety Rules
 
 ```cpp
-// Example 1: Namespace-level safety
 // @safe
-namespace myapp {
-    void func() { /* checked */ }
+void safe_function() {
+    // ✅ CAN call other @safe functions
+    safe_helper();
+    
+    // ✅ CAN call @unsafe functions (risks are documented)
+    explicitly_unsafe_func();
+    
+    // ❌ CANNOT call undeclared functions (must audit first!)
+    // legacy_function();  // ERROR: must be marked @safe or @unsafe
+    
+    // ❌ CANNOT do pointer operations
+    // int* ptr = &x;  // ERROR: requires unsafe context
 }
 
-// Example 2: Function-level safety
-// @safe
-void checked_function() { /* checked */ }
+// @unsafe
+void unsafe_function() {
+    // Can call anything and do pointer operations
+    legacy_function();  // OK
+    safe_function();    // OK
+    int* ptr = nullptr; // OK
+}
 
-void unchecked_function() { /* not checked - default is unsafe */ }
-
-// Example 3: First-element rule
-// @safe
-int global = 42;  // Makes entire file safe
-
-// Example 4: Unsafe blocks within safe functions
-// @safe
-void mixed_safety() {
-    int value = 42;
-    int& ref1 = value;
-    
-    // @unsafe
-    {
-        int& ref2 = value;  // Not checked in unsafe block
-    }
-    // @endunsafe
+// No annotation - undeclared
+void legacy_function() {
+    // Not checked, can call anything
+    // Treated as "unaudited" code
 }
 ```
 
-#### Default Behavior
-- Files are **unsafe by default** (no checking) for backward compatibility
-- Use `@safe` to opt into borrow checking
-- Use `@unsafe` to explicitly disable checking
+#### Header-to-Implementation Propagation
+
+Safety annotations in headers automatically apply to implementations:
+
+```cpp
+// math.h
+// @safe
+int calculate(int a, int b);
+
+// @unsafe  
+void process_raw_memory(void* ptr);
+
+// math.cpp
+#include "math.h"
+
+int calculate(int a, int b) {
+    // Automatically @safe from header
+    return a + b;
+}
+
+void process_raw_memory(void* ptr) {
+    // Automatically @unsafe from header
+    // Pointer operations allowed
+}
+```
+
+#### STL and External Libraries
+
+By default, all STL and external functions are **undeclared**, meaning safe functions cannot call them without explicit annotation:
+
+```cpp
+// @safe
+void safe_with_stl() {
+    // ❌ ERROR: STL functions are undeclared by default
+    // std::vector<int> vec;
+    // vec.push_back(42);  // Must mark STL as @safe or @unsafe first
+    
+    // ✅ OK: Whitelisted functions
+    printf("Hello\n");  // Explicitly whitelisted
+}
+```
+
+This forces you to audit external code before using it in safe contexts.
 
 ### 📝 Examples
 

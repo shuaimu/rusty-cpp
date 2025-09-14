@@ -12,22 +12,41 @@ RustyCpp supports three main categories of annotations:
 
 ## In-Place Annotations (Your Code)
 
-### Safety Annotations
+### Safety Annotations (Three-State System)
 
 ```cpp
-// Mark next element as safe (checked for memory safety)
-// @safe
-void myFunction() { }
+// Three states: @safe, @unsafe, and undeclared (default)
 
-// Mark next element as unsafe (skip checking)
+// Mark next element as safe (full borrow checking + strict calling rules)
+// @safe
+void myFunction() {
+    // Can call @safe and @unsafe functions
+    // CANNOT call undeclared functions
+    // Cannot do pointer operations
+}
+
+// Mark next element as unsafe (skip checking, explicitly documented)
 // @unsafe
-void lowLevelFunction() { }
+void lowLevelFunction() {
+    // Can call anything
+    // Can do pointer operations
+}
+
+// No annotation = undeclared (unaudited legacy code)
+void legacyFunction() {
+    // Not checked, can call anything
+    // Safe functions CANNOT call this
+}
 
 // Apply to namespace
 // @safe
 namespace myapp {
-    // All functions here are checked
+    // All functions here are safe
 }
+
+// Header-to-implementation propagation
+// In header: @safe void func();
+// In .cpp: void func() { /* automatically safe */ }
 ```
 
 ### Lifetime Annotations
@@ -260,11 +279,26 @@ project/
     └── library/           # Unannotated third-party code
 ```
 
+## Safety Rules Matrix
+
+| Caller | Can Call @safe? | Can Call @unsafe? | Can Call Undeclared? |
+|--------|----------------|-------------------|---------------------|
+| @safe | ✅ Yes | ✅ Yes | ❌ No |
+| @unsafe | ✅ Yes | ✅ Yes | ✅ Yes |
+| Undeclared | ✅ Yes | ✅ Yes | ✅ Yes |
+
+### Key Insights:
+- **@unsafe ≠ Undeclared**: Unsafe is explicitly marked (audited), undeclared is not
+- **Safe enforces auditing**: Can't call unaudited code
+- **STL is undeclared by default**: Must explicitly mark before use in safe code
+
 ## Best Practices
 
 ### 1. Gradual Adoption
-- Start with `@safe` on small functions
-- Add lifetime annotations as needed
+- Start by marking obviously safe functions as `@safe`
+- Mark dangerous functions as `@unsafe` 
+- Leave legacy code undeclared initially
+- Gradually audit and mark undeclared functions
 - Use external annotations for dependencies
 
 ### 2. Annotation Placement

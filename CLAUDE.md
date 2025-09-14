@@ -4,11 +4,24 @@
 
 This is a Rust-based static analyzer that applies Rust's ownership and borrowing rules to C++ code. The goal is to catch memory safety issues at compile-time without runtime overhead.
 
-## Current State (Updated: Added unsafe propagation checking)
+## Current State (Updated: Three-state safety system with header propagation)
 
 ### What's Fully Implemented ✅
 
-**New Advanced Features (Added 2025):**
+**Latest Features (January 2025):**
+- ✅ **Three-State Safety System** - Safe/Unsafe/Undeclared distinction
+  - Safe functions have strict calling rules
+  - Safe CAN call unsafe (documented risks)
+  - Safe CANNOT call undeclared (unaudited code)
+  - Creates audit ratchet effect
+  
+- ✅ **Header-to-Implementation Propagation** - Annotations flow from .h to .cpp
+  - Safety annotations in headers automatically apply to implementations
+  - Source file annotations can override header annotations
+  - Supports namespace-level safety
+  - Works with class methods and free functions
+
+**Advanced Features (Added 2025):**
 - ✅ **STL Lifetime Annotations** - Complete lifetime checking for C++ STL types
   - Vector, map, unique_ptr, shared_ptr, string, etc.
   - Iterator invalidation detection
@@ -51,16 +64,19 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Variable is moved only if moved in ALL paths
   - Borrows cleared when not present in all branches
   - Handles nested conditionals
-- ✅ **Unified safe/unsafe annotation system for gradual adoption**
-  - **Single rule**: Both `@safe` and `@unsafe` only attach to the NEXT code element
-  - C++ files are unsafe by default (no checking) for backward compatibility
+- ✅ **Three-state safety annotation system**
+  - **Three states**: `@safe`, `@unsafe`, and undeclared (default)
+  - **Single rule**: Annotations only attach to the NEXT code element
+  - C++ files are undeclared by default (not checked, but distinct from unsafe)
+  - **Safety rules**:
+    - Safe functions CAN call @safe functions
+    - Safe functions CAN call @unsafe functions (documented risks)
+    - Safe functions CANNOT call undeclared functions (unaudited)
   - **Namespace-level**: `// @safe` before namespace applies to entire namespace contents
   - **Function-level**: `// @safe` before function enables checking for that function only
-  - **No file-level annotation**: To make whole file safe, wrap code in namespace
-  - `// @unsafe` works identically to `@safe` - only affects next element
-  - No `@endunsafe` - unsafe regions are not supported
-  - Fine-grained control over which code is checked
-  - Allows gradual migration of existing codebases
+  - **Header propagation**: Annotations in headers automatically apply to implementations
+  - STL and external libraries are undeclared by default (must be explicitly marked)
+  - Creates "audit ratchet" - forces explicit safety decisions
 - ✅ **Cross-file analysis with lifetime annotations**
   - Rust-like lifetime syntax in headers (`&'a`, `&'a mut`, `owned`)
   - Header parsing and caching system
