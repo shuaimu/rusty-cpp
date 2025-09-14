@@ -1,6 +1,39 @@
 use clang::{Entity, EntityKind, Type, TypeKind};
 use crate::debug_println;
 
+/// Get the qualified name of an entity (including namespace/class context)
+pub fn get_qualified_name(entity: &Entity) -> String {
+    let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
+    
+    // Try to build qualified name by walking up the semantic parents
+    let mut parts = vec![simple_name.clone()];
+    let mut current = entity.get_semantic_parent();
+    
+    while let Some(parent) = current {
+        match parent.get_kind() {
+            EntityKind::Namespace | EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate => {
+                if let Some(parent_name) = parent.get_name() {
+                    if !parent_name.is_empty() {
+                        parts.push(parent_name);
+                    }
+                }
+            }
+            _ => {}
+        }
+        current = parent.get_semantic_parent();
+    }
+    
+    // Reverse to get the correct order (namespace::class::method)
+    parts.reverse();
+    
+    // Join with :: but skip if we only have the simple name
+    if parts.len() > 1 {
+        parts.join("::")
+    } else {
+        simple_name
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CppAst {
     pub functions: Vec<Function>,
@@ -113,7 +146,13 @@ pub struct SourceLocation {
 }
 
 pub fn extract_function(entity: &Entity) -> Function {
-    let name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
+    // Use qualified name for methods to avoid collisions
+    let name = if entity.get_kind() == EntityKind::Method || entity.get_kind() == EntityKind::Constructor {
+        // For methods, try to get the qualified name
+        get_qualified_name(entity)
+    } else {
+        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
+    };
     let location = extract_location(entity);
     
     let mut parameters = Vec::new();

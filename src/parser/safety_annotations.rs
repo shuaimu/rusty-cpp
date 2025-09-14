@@ -53,7 +53,7 @@ impl SafetyContext {
     
     /// Get the safety mode of a specific function
     pub fn get_function_safety(&self, func_name: &str) -> SafetyMode {
-        // First check for function-specific override
+        // First check for exact match with function-specific override
         for (name, mode) in &self.function_overrides {
             if name == func_name {
                 return *mode;
@@ -193,21 +193,47 @@ fn is_function_declaration(line: &str) -> bool {
     has_parens && (has_type || line.contains("::"))
 }
 
-/// Extract function name from a declaration line
+/// Extract function name from a declaration line (including qualified names)
 fn extract_function_name(line: &str) -> Option<String> {
     // Find the function name before the opening parenthesis
     if let Some(paren_pos) = line.find('(') {
         let before_paren = &line[..paren_pos];
-        // Split by whitespace and get the last identifier
+        // Split by whitespace and get the last identifier (which may be qualified)
         let parts: Vec<&str> = before_paren.split_whitespace().collect();
         if let Some(last) = parts.last() {
-            // Remove any qualifiers like * or &
+            // Remove any qualifiers like * or & but keep :: for qualified names
             let name = last.trim_start_matches('*').trim_start_matches('&');
             if !name.is_empty() {
+                // If the line contains :: and looks like a method definition,
+                // try to build the qualified name
+                if line.contains("::") && !line.trim_start().starts_with("//") {
+                    // Look for pattern like "ReturnType ClassName::methodName("
+                    // or "ClassName::methodName("
+                    if let Some(qualified_name) = extract_qualified_function_name(before_paren) {
+                        return Some(qualified_name);
+                    }
+                }
                 return Some(name.to_string());
             }
         }
     }
+    None
+}
+
+/// Extract qualified function name (e.g., "MyClass::myMethod") from a declaration
+fn extract_qualified_function_name(before_paren: &str) -> Option<String> {
+    // Look for the pattern "ClassName::methodName" 
+    // This could be preceded by return type and other qualifiers
+    let parts: Vec<&str> = before_paren.split_whitespace().collect();
+    
+    for part in parts.iter().rev() {
+        if part.contains("::") {
+            // This is likely our qualified name
+            let clean_name = part.trim_start_matches('*').trim_start_matches('&');
+            return Some(clean_name.to_string());
+        }
+    }
+    
     None
 }
 

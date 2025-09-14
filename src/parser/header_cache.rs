@@ -178,20 +178,15 @@ impl HeaderCache {
                 // }
                 
                 if let Some(safety_mode) = safety {
-                    if let Some(name) = entity.get_name() {
-                        // Store with simple name
-                        self.safety_annotations.insert(name.clone(), safety_mode);
-                        // debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation", name, safety_mode);
-                        
-                        // For methods, also store with qualified name if available
-                        if entity.get_kind() == EntityKind::Method {
-                            if let Some(qualified) = entity.get_display_name() {
-                                if qualified != name {
-                                    self.safety_annotations.insert(qualified, safety_mode);
-                                }
-                            }
-                        }
-                    }
+                    // Use qualified name for methods to avoid collisions
+                    let name = if entity.get_kind() == EntityKind::Method {
+                        crate::parser::ast_visitor::get_qualified_name(entity)
+                    } else {
+                        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
+                    };
+                    
+                    self.safety_annotations.insert(name.clone(), safety_mode);
+                    debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation in header", name, safety_mode);
                 }
             }
             _ => {}
