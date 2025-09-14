@@ -59,7 +59,7 @@ fn main() {
             if results.is_empty() {
                 println!("{}", "✓ No borrow checking violations found!".green());
             } else {
-                println!("{}", format!("✗ Found {} violation(s):", results.len()).red());
+                println!("{}", format!("✗ Found {} violation(s) in {}:", results.len(), args.input.display()).red());
                 for error in results {
                     println!("{}", error);
                 }

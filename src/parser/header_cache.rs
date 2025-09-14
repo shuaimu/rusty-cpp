@@ -42,11 +42,11 @@ impl HeaderCache {
     
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
-        // eprintln!("DEBUG HEADER: Parsing header file: {}", header_path.display());
+        eprintln!("DEBUG HEADER: Parsing header file: {}", header_path.display());
         
         // Skip if already processed
         if self.processed_headers.iter().any(|p| p == header_path) {
-            // eprintln!("DEBUG HEADER: Already processed, skipping");
+            eprintln!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
         }
         
@@ -76,10 +76,10 @@ impl HeaderCache {
         let root = tu.get_entity();
         self.visit_entity_for_signatures(&root);
         
-        // eprintln!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
-        // for (name, mode) in &self.safety_annotations {
-        //     eprintln!("DEBUG HEADER:   - {} : {:?}", name, mode);
-        // }
+        eprintln!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
+        for (name, mode) in &self.safety_annotations {
+            eprintln!("DEBUG HEADER:   - {} : {:?}", name, mode);
+        }
         
         self.processed_headers.push(header_path.to_path_buf());
         Ok(())
