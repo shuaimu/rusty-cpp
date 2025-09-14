@@ -5,6 +5,9 @@ use std::fs;
 use std::env;
 use serde_json;
 
+#[macro_use]
+mod debug_macros;
+
 mod parser;
 mod ir;
 mod analysis;
@@ -110,11 +113,11 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
-    eprintln!("DEBUG: Found {} functions in AST", ast.functions.len());
+    debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
     for function in &ast.functions {
-        eprintln!("DEBUG: Processing function '{}' with {} statements", function.name, function.body.len());
+        debug_println!("DEBUG: Processing function '{}' with {} statements", function.name, function.body.len());
         if safety_context.should_check_function(&function.name) {
-            eprintln!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
+            debug_println!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
             // Check for pointer operations
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function);
             violations.extend(pointer_errors);

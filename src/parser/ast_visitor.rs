@@ -1,4 +1,5 @@
 use clang::{Entity, EntityKind, Type, TypeKind};
+use crate::debug_println;
 
 #[derive(Debug, Clone)]
 pub struct CppAst {
@@ -368,12 +369,12 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             
             // Check if this is std::move
-            eprintln!("DEBUG: Found function call: name='{}', args_count={}", name, args.len());
+            debug_println!("DEBUG: Found function call: name='{}', args_count={}", name, args.len());
             if name == "move" || name == "std::move" || name.ends_with("::move") || name.contains("move") {
-                eprintln!("DEBUG: Detected move function!");
+                debug_println!("DEBUG: Detected move function!");
                 // std::move takes one argument and we treat it as a Move expression
                 if args.len() == 1 {
-                    eprintln!("DEBUG: Creating Move expression");
+                    debug_println!("DEBUG: Creating Move expression");
                     return Some(Expression::Move(Box::new(args.into_iter().next().unwrap())));
                 }
             }

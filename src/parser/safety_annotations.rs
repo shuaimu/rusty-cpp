@@ -2,6 +2,7 @@ use std::path::Path;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use clang::Entity;
+use crate::debug_println;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SafetyMode {
@@ -36,10 +37,10 @@ impl SafetyContext {
             
             if !already_has_override {
                 // Add the header's safety annotation
-                // eprintln!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
+                // debug_println!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
                 self.function_overrides.push((func_name.clone(), safety_mode));
             } else {
-                eprintln!("DEBUG SAFETY: Function '{}' already has annotation, keeping source file version", func_name);
+                debug_println!("DEBUG SAFETY: Function '{}' already has annotation, keeping source file version", func_name);
             }
             // If we already have an override from the source file, it takes precedence
         }
@@ -152,23 +153,23 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             // If we have a pending annotation and a complete declaration, apply it
             if should_check_annotation {
                 if let Some(annotation) = pending_annotation.take() {
-                    eprintln!("DEBUG SAFETY: Applying {:?} annotation to: {}", annotation, &accumulated_line);
+                    debug_println!("DEBUG SAFETY: Applying {:?} annotation to: {}", annotation, &accumulated_line);
                     // Check what kind of code element follows
                     if accumulated_line.starts_with("namespace") || 
                        (accumulated_line.contains("namespace") && !accumulated_line.contains("using")) {
                         // Namespace declaration - applies to whole namespace contents
                         context.file_default = annotation;
-                        eprintln!("DEBUG SAFETY: Set file default to {:?} (namespace)", annotation);
+                        debug_println!("DEBUG SAFETY: Set file default to {:?} (namespace)", annotation);
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function name and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
                             context.function_overrides.push((func_name.clone(), annotation));
-                            eprintln!("DEBUG SAFETY: Set function '{}' to {:?}", func_name, annotation);
+                            debug_println!("DEBUG SAFETY: Set function '{}' to {:?}", func_name, annotation);
                         }
                     } else {
                         // Any other code - annotation was consumed but doesn't apply to whole file
                         // It only applied to this single statement/declaration
-                        eprintln!("DEBUG SAFETY: Annotation consumed by single statement: {}", &accumulated_line);
+                        debug_println!("DEBUG SAFETY: Annotation consumed by single statement: {}", &accumulated_line);
                     }
                     accumulated_line.clear();
                     accumulating_for_annotation = false;

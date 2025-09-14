@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use regex::Regex;
 use clang::{Clang, Index};
+use crate::debug_println;
 
 use super::annotations::{FunctionSignature, extract_annotations};
 use super::safety_annotations::{SafetyMode, parse_entity_safety};
@@ -42,11 +43,11 @@ impl HeaderCache {
     
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
-        eprintln!("DEBUG HEADER: Parsing header file: {}", header_path.display());
+        debug_println!("DEBUG HEADER: Parsing header file: {}", header_path.display());
         
         // Skip if already processed
         if self.processed_headers.iter().any(|p| p == header_path) {
-            eprintln!("DEBUG HEADER: Already processed, skipping");
+            debug_println!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
         }
         
@@ -76,9 +77,9 @@ impl HeaderCache {
         let root = tu.get_entity();
         self.visit_entity_for_signatures(&root);
         
-        eprintln!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
+        debug_println!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
         for (name, mode) in &self.safety_annotations {
-            eprintln!("DEBUG HEADER:   - {} : {:?}", name, mode);
+            debug_println!("DEBUG HEADER:   - {} : {:?}", name, mode);
         }
         
         self.processed_headers.push(header_path.to_path_buf());
@@ -150,7 +151,7 @@ impl HeaderCache {
         if entity.get_kind() == EntityKind::Namespace {
             if let Some(safety) = parse_entity_safety(entity) {
                 current_namespace_safety = Some(safety);
-                // eprintln!("DEBUG SAFETY: Found namespace with {:?} annotation", safety);
+                // debug_println!("DEBUG SAFETY: Found namespace with {:?} annotation", safety);
             }
         }
         
@@ -170,9 +171,9 @@ impl HeaderCache {
                 }
                 
                 // if let Some(name) = entity.get_name() {
-                //     eprintln!("DEBUG HEADER: Processing function '{}'", name);
+                //     debug_println!("DEBUG HEADER: Processing function '{}'", name);
                 //     if let Some(comment) = entity.get_comment() {
-                //         eprintln!("DEBUG HEADER:   Comment: {}", comment);
+                //         debug_println!("DEBUG HEADER:   Comment: {}", comment);
                 //     }
                 // }
                 
@@ -180,7 +181,7 @@ impl HeaderCache {
                     if let Some(name) = entity.get_name() {
                         // Store with simple name
                         self.safety_annotations.insert(name.clone(), safety_mode);
-                        // eprintln!("DEBUG SAFETY: Found function '{}' with {:?} annotation", name, safety_mode);
+                        // debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation", name, safety_mode);
                         
                         // For methods, also store with qualified name if available
                         if entity.get_kind() == EntityKind::Method {
