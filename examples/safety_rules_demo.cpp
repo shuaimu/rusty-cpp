@@ -1,8 +1,9 @@
 // This example demonstrates the refined safety rules:
 // 1. Functions can be @safe, @unsafe, or undeclared (default)
-// 2. Safe functions CANNOT call undeclared functions
-// 3. Safe functions CANNOT call unsafe functions (without explicit unsafe block - TODO)
-// 4. Undeclared and unsafe functions can call anything
+// 2. Safe functions CAN call @safe functions
+// 3. Safe functions CAN call @unsafe functions (they're explicitly marked)
+// 4. Safe functions CANNOT call undeclared functions (must be audited first)
+// 5. Undeclared and unsafe functions can call anything
 
 #include <iostream>
 
@@ -64,13 +65,13 @@ void safe_function() {
     // Safe functions can call other safe functions
     safe_helper();  // OK
     
+    // Safe functions CAN call explicitly unsafe functions
+    explicitly_unsafe_function();  // OK: it's explicitly marked as unsafe
+    
     // But CANNOT call undeclared functions
     // undeclared_helper();  // ERROR: must be explicitly marked @safe or @unsafe
     
-    // And CANNOT call unsafe functions
-    // explicitly_unsafe_function();  // ERROR: requires unsafe context
-    
-    // Safe functions also cannot do pointer operations
+    // Safe functions also cannot do pointer operations themselves
     // int x = 5;
     // int* ptr = &x;  // ERROR: pointer operations require unsafe context
 }
@@ -122,14 +123,16 @@ int main() {
 // 
 // 1. Default (undeclared) != Explicitly unsafe
 //    - Undeclared functions are "legacy code" that hasn't been audited
-//    - Explicitly unsafe functions are known to be dangerous
+//    - Explicitly unsafe functions have been reviewed and marked as unsafe
 //
-// 2. Safe functions have the strictest rules
-//    - Can only call other safe functions or explicitly unsafe (with marking)
+// 2. Safe functions enforce auditing
+//    - Can call other safe functions (obviously safe)
+//    - Can call explicitly unsafe functions (risks are known and documented)
 //    - CANNOT call undeclared functions (forces you to audit them first)
 //
 // 3. This creates a "ratchet" effect
-//    - You can gradually mark functions as @safe or @unsafe
+//    - You must gradually audit and mark functions as @safe or @unsafe
 //    - Safe code is isolated from unaudited code
 //    - Forces explicit decisions about function safety
+//    - Unsafe functions serve as documented boundaries of unsafety
 // ============================================================================

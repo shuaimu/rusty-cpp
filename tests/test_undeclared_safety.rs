@@ -60,7 +60,7 @@ void safe_function() {
 }
 
 #[test]
-fn test_safe_cannot_call_unsafe() {
+fn test_safe_can_call_unsafe() {
     let temp_dir = TempDir::new().unwrap();
     
     let cpp_path = temp_dir.path().join("test.cpp");
@@ -68,21 +68,21 @@ fn test_safe_cannot_call_unsafe() {
 // @unsafe
 void unsafe_function() {
     int* ptr = nullptr;
-    *ptr = 42;
+    // Unsafe operations are allowed here
 }
 
 // @safe
 void safe_function() {
-    unsafe_function();  // ERROR: safe cannot call unsafe (without explicit marking)
+    unsafe_function();  // OK: safe can call explicitly unsafe functions
 }
 "#;
     fs::write(&cpp_path, cpp_content).unwrap();
     
     let output = run_checker(&cpp_path);
     
-    // Should report an error about calling unsafe function
-    assert!(output.contains("unsafe_function") && output.contains("unsafe"),
-            "Expected error about unsafe function call, got: {}", output);
+    // Should NOT report an error about calling unsafe function
+    assert!(!output.contains("unsafe_function") || output.contains("No borrow checking violations"),
+            "Safe should be able to call explicitly unsafe functions, got: {}", output);
 }
 
 #[test]

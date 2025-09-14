@@ -63,15 +63,15 @@ fn check_statement_for_unsafe_calls_with_external(
                 SafetyMode::Safe => {
                     // OK: safe can call safe
                 }
+                SafetyMode::Unsafe => {
+                    // OK: safe can call explicitly unsafe functions
+                    // The unsafe function takes responsibility for its own safety
+                }
                 SafetyMode::Undeclared => {
+                    // ERROR: safe cannot call undeclared functions
+                    // They must be explicitly audited and marked
                     return Some(format!(
                         "Calling undeclared function '{}' at line {} - must be explicitly marked @safe or @unsafe",
-                        name, location.line
-                    ));
-                }
-                SafetyMode::Unsafe => {
-                    return Some(format!(
-                        "Calling unsafe function '{}' at line {} requires unsafe context",
                         name, location.line
                     ));
                 }
@@ -154,21 +154,20 @@ fn find_unsafe_function_call_with_external(
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
             
-            // Apply the new rules:
-            // - Safe functions cannot call undeclared functions
-            // - Safe functions cannot call unsafe functions (unless explicitly marked - TODO)
+            // Apply the corrected rules:
+            // - Safe functions can call safe functions
+            // - Safe functions can call unsafe functions (they're explicitly marked)
+            // - Safe functions CANNOT call undeclared functions
             match called_safety {
                 SafetyMode::Safe => {
-                    // Safe to call safe functions
+                    // OK: safe can call safe
+                }
+                SafetyMode::Unsafe => {
+                    // OK: safe can call explicitly unsafe functions
                 }
                 SafetyMode::Undeclared => {
                     // Error: safe function cannot call undeclared function
                     return Some(format!("{} (undeclared - must be explicitly marked @safe or @unsafe)", name));
-                }
-                SafetyMode::Unsafe => {
-                    // Error: safe function cannot call unsafe function
-                    // TODO: Allow if explicitly marked with unsafe block
-                    return Some(format!("{} (unsafe)", name));
                 }
             }
             
