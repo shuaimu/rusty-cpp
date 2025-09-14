@@ -1,5 +1,5 @@
 use crate::parser::{Function, Statement, Expression};
-use crate::parser::safety_annotations::SafetyContext;
+use crate::parser::safety_annotations::{SafetyContext, SafetyMode};
 use crate::parser::external_annotations::ExternalAnnotations;
 use std::collections::HashSet;
 
@@ -56,12 +56,25 @@ fn check_statement_for_unsafe_calls_with_external(
     
     match stmt {
         Statement::FunctionCall { name, location, .. } => {
-            // Check if the called function is safe
-            if !is_function_safe_with_external(name, safety_context, known_safe_functions, external_annotations) {
-                return Some(format!(
-                    "Calling unsafe function '{}' at line {} requires unsafe context",
-                    name, location.line
-                ));
+            // Get the safety mode of the called function
+            let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
+            
+            match called_safety {
+                SafetyMode::Safe => {
+                    // OK: safe can call safe
+                }
+                SafetyMode::Undeclared => {
+                    return Some(format!(
+                        "Calling undeclared function '{}' at line {} - must be explicitly marked @safe or @unsafe",
+                        name, location.line
+                    ));
+                }
+                SafetyMode::Unsafe => {
+                    return Some(format!(
+                        "Calling unsafe function '{}' at line {} requires unsafe context",
+                        name, location.line
+                    ));
+                }
             }
         }
         Statement::Assignment { rhs, location, .. } => {
@@ -138,9 +151,25 @@ fn find_unsafe_function_call_with_external(
     
     match expr {
         Expression::FunctionCall { name, args } => {
-            // Check if this function is safe
-            if !is_function_safe_with_external(name, safety_context, known_safe_functions, external_annotations) {
-                return Some(name.clone());
+            // Get the safety mode of the called function
+            let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
+            
+            // Apply the new rules:
+            // - Safe functions cannot call undeclared functions
+            // - Safe functions cannot call unsafe functions (unless explicitly marked - TODO)
+            match called_safety {
+                SafetyMode::Safe => {
+                    // Safe to call safe functions
+                }
+                SafetyMode::Undeclared => {
+                    // Error: safe function cannot call undeclared function
+                    return Some(format!("{} (undeclared - must be explicitly marked @safe or @unsafe)", name));
+                }
+                SafetyMode::Unsafe => {
+                    // Error: safe function cannot call unsafe function
+                    // TODO: Allow if explicitly marked with unsafe block
+                    return Some(format!("{} (unsafe)", name));
+                }
             }
             
             // Check arguments for nested unsafe calls
@@ -179,40 +208,52 @@ fn is_function_safe(
     is_function_safe_with_external(func_name, safety_context, known_safe_functions, None)
 }
 
+/// Get the safety mode of a called function
+fn get_called_function_safety(
+    func_name: &str,
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+) -> SafetyMode {
+    // Check for standard library functions we consider safe first
+    if is_standard_safe_function(func_name) {
+        return SafetyMode::Safe;
+    }
+    
+    // First check if we know about this function in our context
+    let local_safety = safety_context.get_function_safety(func_name);
+    if local_safety != SafetyMode::Undeclared {
+        return local_safety;
+    }
+    
+    // Check if it's in our known safe functions set
+    if known_safe_functions.contains(func_name) {
+        return SafetyMode::Safe;
+    }
+    
+    // Check external annotations if provided
+    if let Some(annotations) = external_annotations {
+        if let Some(is_safe) = annotations.is_function_safe(func_name) {
+            return if is_safe { SafetyMode::Safe } else { SafetyMode::Unsafe };
+        }
+    }
+    
+    // Default to undeclared
+    SafetyMode::Undeclared
+}
+
 fn is_function_safe_with_external(
     func_name: &str,
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
 ) -> bool {
-    // Check if it's explicitly marked as safe
-    // Only functions with explicit @safe annotation are considered safe
-    if known_safe_functions.contains(func_name) {
-        return true;
-    }
-    
-    // Check external annotations if provided
-    if let Some(annotations) = external_annotations {
-        if let Some(is_safe) = annotations.is_function_safe(func_name) {
-            return is_safe;
-        }
-    }
-    
-    // Check for standard library functions we consider safe
+    // Check for standard library functions we consider safe first
     if is_standard_safe_function(func_name) {
         return true;
     }
     
-    // Check if it's explicitly marked as unsafe - still unsafe
-    for (name, mode) in &safety_context.function_overrides {
-        if name == func_name {
-            use crate::parser::safety_annotations::SafetyMode;
-            return *mode == SafetyMode::Safe;
-        }
-    }
-    
-    // If no explicit annotation, it's unsafe (even in safe namespace/file)
-    false
+    get_called_function_safety(func_name, safety_context, known_safe_functions, external_annotations) == SafetyMode::Safe
 }
 
 fn is_standard_safe_function(func_name: &str) -> bool {
@@ -223,6 +264,9 @@ fn is_standard_safe_function(func_name: &str) -> bool {
         "memcpy" | "memset" | "strcpy" |        // String ops (many are actually unsafe!)
         "sin" | "cos" | "sqrt" | "pow" |        // Math
         "move" | "std::move" |                  // Move semantics
+        "cout" | "cin" | "cerr" | "clog" |      // C++ streams
+        "operator<<" | "operator>>" |           // Stream operators
+        "endl" | "flush" |                      // Stream manipulators
         "std::forward" | "std::swap"            // Utility
     )
     // Note: This list is intentionally conservative. 

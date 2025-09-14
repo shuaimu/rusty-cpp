@@ -5,9 +5,9 @@ use clang::Entity;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SafetyMode {
-    Safe,    // Enforce borrow checking
-    Unsafe,  // Skip borrow checking
-    Default, // Use parent context or default (unsafe)
+    Safe,       // Enforce borrow checking, strict call rules
+    Unsafe,     // Skip borrow checking, explicitly marked as unsafe
+    Undeclared, // Not explicitly marked - treated as unsafe but safe functions cannot call them
 }
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct SafetyContext {
 impl SafetyContext {
     pub fn new() -> Self {
         Self {
-            file_default: SafetyMode::Default,
+            file_default: SafetyMode::Undeclared,
             function_overrides: Vec::new(),
         }
     }
@@ -47,15 +47,20 @@ impl SafetyContext {
     
     /// Check if a specific function should be checked
     pub fn should_check_function(&self, func_name: &str) -> bool {
+        self.get_function_safety(func_name) == SafetyMode::Safe
+    }
+    
+    /// Get the safety mode of a specific function
+    pub fn get_function_safety(&self, func_name: &str) -> SafetyMode {
         // First check for function-specific override
         for (name, mode) in &self.function_overrides {
             if name == func_name {
-                return *mode == SafetyMode::Safe;
+                return *mode;
             }
         }
         
         // Fall back to file default
-        self.file_default == SafetyMode::Safe
+        self.file_default
     }
 }
 
@@ -84,10 +89,11 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             if trimmed.contains("*/") {
                 in_comment_block = false;
             }
-            // Check for annotations in multi-line comments
-            if trimmed.contains("@safe") {
+            // Check for annotations in multi-line comments (must be on their own)
+            let cleaned = trimmed.trim_start_matches('*').trim();
+            if cleaned == "@safe" {
                 pending_annotation = Some(SafetyMode::Safe);
-            } else if trimmed.contains("@unsafe") {
+            } else if cleaned == "@unsafe" {
                 pending_annotation = Some(SafetyMode::Unsafe);
             }
             continue;
@@ -96,19 +102,26 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         // Check for comment start
         if trimmed.starts_with("/*") {
             in_comment_block = true;
-            if trimmed.contains("@safe") {
-                pending_annotation = Some(SafetyMode::Safe);
-            } else if trimmed.contains("@unsafe") {
-                pending_annotation = Some(SafetyMode::Unsafe);
+            // Check if it's a single-line /* @safe */ or /* @unsafe */ comment
+            if let Some(end_pos) = trimmed.find("*/") {
+                let comment_content = trimmed[2..end_pos].trim();
+                if comment_content == "@safe" {
+                    pending_annotation = Some(SafetyMode::Safe);
+                } else if comment_content == "@unsafe" {
+                    pending_annotation = Some(SafetyMode::Unsafe);
+                }
+                in_comment_block = false;
             }
             continue;
         }
         
         // Check single-line comments
         if trimmed.starts_with("//") {
-            if trimmed.contains("@safe") {
+            // Only look for annotations that are word boundaries (not part of other text)
+            let comment_text = trimmed[2..].trim();
+            if comment_text == "@safe" || comment_text.starts_with("@safe ") {
                 pending_annotation = Some(SafetyMode::Safe);
-            } else if trimmed.contains("@unsafe") {
+            } else if comment_text == "@unsafe" || comment_text.starts_with("@unsafe ") {
                 pending_annotation = Some(SafetyMode::Unsafe);
             }
             continue;
@@ -278,6 +291,6 @@ void func() {}
         
         let context = parse_safety_annotations(file.path()).unwrap();
         // @safe only applies to the next element (global_var), not the whole file
-        assert_eq!(context.file_default, SafetyMode::Default);
+        assert_eq!(context.file_default, SafetyMode::Undeclared);
     }
 }
