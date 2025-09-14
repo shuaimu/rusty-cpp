@@ -68,10 +68,11 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - **Three states**: `@safe`, `@unsafe`, and undeclared (default)
   - **Single rule**: Annotations only attach to the NEXT code element
   - C++ files are undeclared by default (not checked, but distinct from unsafe)
-  - **Safety rules**:
-    - Safe functions CAN call @safe functions
-    - Safe functions CAN call @unsafe functions (documented risks)
-    - Safe functions CANNOT call undeclared functions (unaudited)
+  - **Calling rules matrix**:
+    - `@safe` → can call: @safe ✅, @unsafe ✅, undeclared ❌
+    - `@unsafe` → can call: @safe ✅, @unsafe ✅, undeclared ✅
+    - `undeclared` → can call: @safe ✅, @unsafe ✅, undeclared ✅
+  - **Key insight**: Undeclared functions can call other undeclared functions, enabling gradual migration
   - **Namespace-level**: `// @safe` before namespace applies to entire namespace contents
   - **Function-level**: `// @safe` before function enables checking for that function only
   - **Header propagation**: Annotations in headers automatically apply to implementations

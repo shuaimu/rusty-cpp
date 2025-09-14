@@ -281,16 +281,44 @@ project/
 
 ## Safety Rules Matrix
 
-| Caller | Can Call @safe? | Can Call @unsafe? | Can Call Undeclared? |
-|--------|----------------|-------------------|---------------------|
-| @safe | ✅ Yes | ✅ Yes | ❌ No |
-| @unsafe | ✅ Yes | ✅ Yes | ✅ Yes |
-| Undeclared | ✅ Yes | ✅ Yes | ✅ Yes |
+### Calling Permissions
+
+| Caller → Can Call | @safe | @unsafe | Undeclared |
+|-------------------|-------|---------|------------|
+| **@safe**         | ✅ Yes | ✅ Yes  | ❌ No      |
+| **@unsafe**       | ✅ Yes | ✅ Yes  | ✅ Yes     |
+| **Undeclared**    | ✅ Yes | ✅ Yes  | ✅ Yes     |
 
 ### Key Insights:
 - **@unsafe ≠ Undeclared**: Unsafe is explicitly marked (audited), undeclared is not
 - **Safe enforces auditing**: Can't call unaudited code
+- **Undeclared can call undeclared**: Legacy code continues to work without modification
 - **STL is undeclared by default**: Must explicitly mark before use in safe code
+- **Audit ratchet**: Once marked @safe, all dependencies must be explicitly audited
+
+### Example Scenarios
+
+```cpp
+// Scenario 1: Legacy code chains work fine
+void helper() { }           // undeclared
+void process() { helper(); } // undeclared calling undeclared ✅
+void init() { process(); }   // undeclared calling undeclared ✅
+
+// Scenario 2: Safe function forces auditing
+// @safe
+void secure_function() {
+    // helper();  // ERROR: safe cannot call undeclared ❌
+    // Must explicitly mark helper as @safe or @unsafe first
+}
+
+// Scenario 3: Unsafe as escape hatch
+// @unsafe
+void low_level_function() {
+    helper();     // OK: unsafe can call undeclared ✅
+    process();    // OK: unsafe can call undeclared ✅
+    init();       // OK: unsafe can call undeclared ✅
+}
+```
 
 ## Best Practices
 

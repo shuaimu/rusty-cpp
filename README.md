@@ -216,7 +216,15 @@ The borrow checker uses a three-state safety system with automatic header-to-imp
 2. **`@unsafe`** - Explicitly marked unsafe functions (documented risks)
 3. **Undeclared** (default) - Functions without annotations (unaudited legacy code)
 
-#### Safety Rules
+#### Calling Rules Matrix
+
+| Caller → Can Call | @safe | @unsafe | Undeclared |
+|-------------------|-------|---------|------------|
+| **@safe**         | ✅ Yes | ✅ Yes  | ❌ No      |
+| **@unsafe**       | ✅ Yes | ✅ Yes  | ✅ Yes     |
+| **Undeclared**    | ✅ Yes | ✅ Yes  | ✅ Yes     |
+
+#### Safety Rules Explained
 
 ```cpp
 // @safe
@@ -236,18 +244,26 @@ void safe_function() {
 
 // @unsafe
 void unsafe_function() {
-    // Can call anything and do pointer operations
-    legacy_function();  // OK
-    safe_function();    // OK
-    int* ptr = nullptr; // OK
+    // ✅ Can call anything and do pointer operations
+    legacy_function();     // OK: can call undeclared
+    safe_function();       // OK: can call safe
+    another_unsafe();      // OK: can call unsafe
+    int* ptr = nullptr;    // OK: pointer operations allowed
 }
 
-// No annotation - undeclared
+// No annotation - undeclared (default)
 void legacy_function() {
-    // Not checked, can call anything
-    // Treated as "unaudited" code
+    // Not checked by borrow checker
+    // ✅ Can call anything including other undeclared functions
+    another_legacy();      // OK: undeclared can call undeclared
+    safe_function();       // OK: undeclared can call safe
+    unsafe_function();     // OK: undeclared can call unsafe
+    
+    // This enables gradual migration of existing codebases
 }
 ```
+
+**Key Insight**: This creates an "audit ratchet" - once you mark a function as `@safe`, you must explicitly audit all its dependencies. Undeclared functions can freely call each other, allowing existing code to work without modification.
 
 #### Header-to-Implementation Propagation
 
