@@ -32,12 +32,17 @@ impl SafetyContext {
         // add it to our overrides if not already present
         for (func_name, &safety_mode) in header_cache.safety_annotations.iter() {
             // Check if we already have an override for this function
+            // Need to check both exact match and qualified/unqualified variations
             let already_has_override = self.function_overrides.iter()
-                .any(|(name, _)| name == func_name);
+                .any(|(name, _)| {
+                    name == func_name || 
+                    name.ends_with(&format!("::{}", func_name)) || 
+                    func_name.ends_with(&format!("::{}", name))
+                });
             
             if !already_has_override {
                 // Add the header's safety annotation
-                // debug_println!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
+                debug_println!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
                 self.function_overrides.push((func_name.clone(), safety_mode));
             } else {
                 debug_println!("DEBUG SAFETY: Function '{}' already has annotation, keeping source file version", func_name);
@@ -56,6 +61,12 @@ impl SafetyContext {
         // First check for exact match with function-specific override
         for (name, mode) in &self.function_overrides {
             if name == func_name {
+                return *mode;
+            }
+            
+            // Also check if one is a suffix of the other (for namespace::Class::method matching)
+            // This handles cases where header has "rrr::Timer::start" and impl has "Timer::start"
+            if name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", name)) {
                 return *mode;
             }
         }
