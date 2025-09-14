@@ -284,8 +284,29 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let mut name = "unknown".to_string();
                 let mut args = Vec::new();
                 
-                // First check if the CallExpr itself has a reference (for implicit member functions)
+                // Check if this might be a variable declaration disguised as a CallExpr
+                // This happens with constructs like "struct timeval now;" or "ClassName obj;"
+                let mut is_likely_var_decl = false;
+                
+                // Debug: Log all CallExprs
+                debug_println!("DEBUG AST: Found CallExpr with {} children", children.len());
+                
+                // First check if the CallExpr itself has a reference
                 if let Some(ref_entity) = child.get_reference() {
+                    debug_println!("DEBUG AST: CallExpr references entity kind: {:?}, name: {:?}", 
+                        ref_entity.get_kind(), ref_entity.get_name());
+                    
+                    // Check if it references a type (struct/class/typedef)
+                    if ref_entity.get_kind() == EntityKind::StructDecl || 
+                       ref_entity.get_kind() == EntityKind::ClassDecl ||
+                       ref_entity.get_kind() == EntityKind::TypedefDecl ||
+                       ref_entity.get_kind() == EntityKind::TypeAliasDecl {
+                        // This is likely a variable declaration, not a function call
+                        debug_println!("DEBUG AST: CallExpr appears to be a variable declaration of type {:?}", 
+                            ref_entity.get_name());
+                        is_likely_var_decl = true;
+                    }
+                    
                     if let Some(n) = ref_entity.get_name() {
                         // Build qualified name for member functions
                         if ref_entity.get_kind() == EntityKind::Method {
@@ -294,6 +315,41 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             name = n;
                         }
                     }
+                }
+                
+                // If this looks like a variable declaration, skip it
+                if is_likely_var_decl && children.is_empty() {
+                    debug_println!("DEBUG AST: Skipping variable declaration disguised as CallExpr: {}", name);
+                    continue;
+                }
+                
+                // Try to extract the function name from children
+                for c in &children {
+                    if c.get_kind() == EntityKind::UnexposedExpr || c.get_kind() == EntityKind::DeclRefExpr {
+                        if let Some(n) = c.get_name() {
+                            if name == "unknown" {
+                                debug_println!("DEBUG AST: Got name from child: {}", n);
+                                name = n;
+                            }
+                        }
+                    }
+                }
+                
+                // Check if this is a type name being used as a constructor/declaration
+                // Common pattern: TypeName varname; is parsed as CallExpr
+                if children.len() == 1 && name != "unknown" {
+                    // Check if the name matches known type patterns
+                    if name.ends_with("val") || name.ends_with("spec") || 
+                       name.starts_with("struct") || name.starts_with("class") {
+                        debug_println!("DEBUG AST: Likely variable declaration based on name pattern: {}", name);
+                        is_likely_var_decl = true;
+                    }
+                }
+                
+                // If this looks like a variable declaration, skip it
+                if is_likely_var_decl {
+                    debug_println!("DEBUG AST: Skipping variable declaration disguised as CallExpr: {}", name);
+                    continue;
                 }
                 
                 for c in children {
@@ -413,18 +469,28 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             let mut name = "unknown".to_string();
             let mut args = Vec::new();
             
-            // First check if the CallExpr itself has a reference (for implicit member functions)
-            if name == "unknown" {
-                if let Some(ref_entity) = entity.get_reference() {
-                    debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
-                    if let Some(n) = ref_entity.get_name() {
-                        // Build qualified name for member functions
-                        if ref_entity.get_kind() == EntityKind::Method {
-                            name = get_qualified_name(&ref_entity);
-                        } else {
-                            name = n;
-                        }
-                    }
+            // Check if this might be a variable declaration disguised as a CallExpr
+            // This happens with constructs like "struct timeval now;" or "ClassName obj;"
+            // The pattern is: CallExpr with 0 children that references a type name
+            
+            // First check if the CallExpr itself has a reference
+            if let Some(ref_entity) = entity.get_reference() {
+                debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
+                
+                if let Some(n) = ref_entity.get_name() {
+                    name = n;
+                }
+                
+                // Check if it references a type (struct/class/typedef)
+                // BUT: A CallExpr with 0 children is likely a constructor/declaration
+                if children.is_empty() {
+                    debug_println!("DEBUG AST: CallExpr with 0 children referencing '{}' - likely a variable declaration", name);
+                    return None;  // Not a function call, it's a variable declaration
+                }
+                
+                // Build qualified name for member functions
+                if ref_entity.get_kind() == EntityKind::Method {
+                    name = get_qualified_name(&ref_entity);
                 }
             }
             
