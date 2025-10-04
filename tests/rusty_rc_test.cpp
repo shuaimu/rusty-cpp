@@ -1,5 +1,6 @@
 // Tests for rusty::Rc<T>
 #include "../include/rusty/rc.hpp"
+#include "../include/rusty/weak.hpp"
 #include <cassert>
 #include <cstdio>
 
@@ -13,11 +14,11 @@ void test_rc_construction() {
         assert(rc1.is_valid());
         assert(*rc1 == 42);
         assert(rc1.strong_count() == 1);
-        
-        auto rc2 = rc<int>(100);
+
+        auto rc2 = Rc<int>::new_(100);
         assert(rc2.is_valid());
         assert(*rc2 == 100);
-        
+
         auto rc3 = make_rc<int>(200);
         assert(rc3.is_valid());
         assert(*rc3 == 200);
@@ -54,7 +55,7 @@ void test_rc_move() {
         auto rc1 = Rc<int>::new_(42);
         auto rc2 = rc1.clone();
         assert(rc1.strong_count() == 2);
-        
+
         auto rc3 = std::move(rc1);
         assert(!rc1.is_valid());  // rc1 should be empty
         assert(rc3.strong_count() == 2);  // Count unchanged
@@ -141,32 +142,32 @@ void test_rc_weak() {
     printf("test_rc_weak: ");
     {
         auto rc1 = Rc<int>::new_(42);
-        Weak<int> weak(rc1);
-        
-        // Note: Weak doesn't increment strong count
+        auto weak = downgrade(rc1);
+
+        // Weak references should not change strong count
         assert(rc1.strong_count() == 1);
-        
-        auto rc2 = weak.upgrade();
-        if (rc2.is_valid()) {
-            assert(*rc2 == 42);
-            // Now we have 2 strong references
-            assert(rc1.strong_count() == 2);
-        }
-    }
-    
-    // Test expired weak
-    {
-        Weak<int> weak;
-        {
-            auto rc = Rc<int>::new_(42);
-            weak = Weak<int>(rc);
-            // Weak doesn't affect strong count
-            assert(rc.strong_count() == 1);
-        }
-        // rc is destroyed, upgrade should fail
+        assert(!weak.expired());
+
         auto upgraded = weak.upgrade();
-        // Note: This is simplified, might not work correctly
+        assert(upgraded.is_some());
+        auto rc2 = upgraded.unwrap();
+        assert(rc1.strong_count() == 2);
+        assert(*rc2 == 42);
     }
+
+    {
+        rc::Weak<int> weak;
+        {
+            auto rc = Rc<int>::new_(99);
+            weak = downgrade(rc);
+            assert(!weak.expired());
+        }
+        // All strong references gone
+        assert(weak.expired());
+        auto upgraded = weak.upgrade();
+        assert(upgraded.is_none());
+    }
+
     printf("PASS\n");
 }
 

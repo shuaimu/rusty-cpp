@@ -2,70 +2,56 @@
 #define RUSTY_SYNC_WEAK_HPP
 
 #include <atomic>
-#include <cassert>
-#include <cstddef>
+
 #include "../option.hpp"
 #include "../arc.hpp"
-
-// sync::Weak<T> - Weak reference for thread-safe Arc<T>
-// Equivalent to Rust's std::sync::Weak
-//
-// Guarantees:
-// - Does not prevent deallocation of the value
-// - Can be upgraded to strong reference if value still exists
-// - Breaks reference cycles
-// - Thread-safe (uses atomic operations)
 
 namespace rusty {
 namespace sync {
 
-// Forward declaration
-template<typename T> class Weak;
-
-// Weak reference for Arc (thread-safe)
 template<typename T>
 class Weak {
 private:
     friend class rusty::Arc<T>;
+
     typename rusty::Arc<T>::ControlBlock* ptr;
-    
+
+    Weak(typename rusty::Arc<T>::ControlBlock* p, bool add_ref)
+        : ptr(p) {
+        if (ptr && add_ref) {
+            ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
 public:
-    // Default constructor
     Weak() : ptr(nullptr) {}
-    
-    // Private constructor from control block (for Arc to use)
-    explicit Weak(typename rusty::Arc<T>::ControlBlock* p) : ptr(p) {
+
+    explicit Weak(const rusty::Arc<T>& arc)
+        : ptr(arc.ptr) {
         if (ptr) {
             ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    
-    // Copy constructor
-    Weak(const Weak& other) : ptr(other.ptr) {
+
+    Weak(const Weak& other)
+        : ptr(other.ptr) {
         if (ptr) {
             ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    
-    // Move constructor
-    Weak(Weak&& other) noexcept : ptr(other.ptr) {
+
+    Weak(Weak&& other) noexcept
+        : ptr(other.ptr) {
         other.ptr = nullptr;
     }
-    
-    // Copy assignment
+
+    ~Weak() {
+        reset();
+    }
+
     Weak& operator=(const Weak& other) {
         if (this != &other) {
-            // Release old weak reference
-            if (ptr) {
-                if (ptr->weak_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                    // Last weak reference, check if we should delete control block
-                    if (ptr->ref_count.load(std::memory_order_acquire) == 0) {
-                        delete ptr;
-                    }
-                }
-            }
-            
-            // Acquire new weak reference
+            reset();
             ptr = other.ptr;
             if (ptr) {
                 ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
@@ -73,87 +59,76 @@ public:
         }
         return *this;
     }
-    
-    // Move assignment
+
     Weak& operator=(Weak&& other) noexcept {
         if (this != &other) {
-            // Release old weak reference
-            if (ptr) {
-                if (ptr->weak_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                    // Last weak reference, check if we should delete control block
-                    if (ptr->ref_count.load(std::memory_order_acquire) == 0) {
-                        delete ptr;
-                    }
-                }
-            }
-            
-            // Take ownership from other
+            reset();
             ptr = other.ptr;
             other.ptr = nullptr;
         }
         return *this;
     }
-    
-    // Destructor
-    ~Weak() {
+
+    Weak& operator=(const rusty::Arc<T>& arc) {
+        reset();
+        ptr = arc.ptr;
         if (ptr) {
-            if (ptr->weak_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                // Last weak reference, check if we should delete control block
-                if (ptr->ref_count.load(std::memory_order_acquire) == 0) {
-                    delete ptr;
-                }
-            }
+            ptr->weak_count.fetch_add(1, std::memory_order_relaxed);
+        }
+        return *this;
+    }
+
+    void reset() {
+        if (ptr) {
+            rusty::Arc<T>::release_weak(ptr);
+            ptr = nullptr;
         }
     }
-    
-    // Try to upgrade to strong reference
+
     Option<rusty::Arc<T>> upgrade() const {
         if (!ptr) {
-            return None;
+            return ::rusty::None;
         }
-        
-        // Try to increment strong count atomically
-        size_t old_count = ptr->ref_count.load(std::memory_order_acquire);
-        while (old_count > 0) {
-            if (ptr->ref_count.compare_exchange_weak(
-                old_count, old_count + 1,
-                std::memory_order_acquire,
-                std::memory_order_relaxed)) {
-                // Successfully incremented, create Arc with already-incremented count
-                return Some(rusty::Arc<T>(ptr, false));  // false = don't increment again
+
+        size_t count = ptr->strong_count.load(std::memory_order_acquire);
+        while (count != 0) {
+            if (ptr->strong_count.compare_exchange_weak(
+                    count,
+                    count + 1,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed)) {
+                return ::rusty::Some(rusty::Arc<T>(ptr, false));
             }
-            // CAS failed, old_count was updated, retry
         }
-        
-        // ref_count is 0, value has been dropped
-        return None;
+        return ::rusty::None;
     }
-    
-    // Check if the value has been dropped
+
     bool expired() const {
-        return !ptr || ptr->ref_count.load(std::memory_order_acquire) == 0;
+        return !ptr || ptr->strong_count.load(std::memory_order_acquire) == 0;
     }
-    
-    // Get strong count (0 if expired)
+
     size_t strong_count() const {
-        return ptr ? ptr->ref_count.load(std::memory_order_acquire) : 0;
+        return ptr ? ptr->strong_count.load(std::memory_order_acquire) : 0;
     }
-    
-    // Get weak count (excluding this one)
+
     size_t weak_count() const {
-        return ptr ? ptr->weak_count.load(std::memory_order_acquire) - 1 : 0;
+        if (!ptr) {
+            return 0;
+        }
+        size_t count = ptr->weak_count.load(std::memory_order_acquire);
+        return count > 0 ? count - 1 : 0;
     }
-    
-    // Clone - explicitly create a new Weak to the same value
+
     Weak clone() const {
         return Weak(*this);
     }
 };
 
 // Downgrade function - create weak from strong
+// @safe
 template<typename T>
 Weak<T> downgrade(const rusty::Arc<T>& arc) {
-    return Weak<T>(arc.ptr);
+    return Weak<T>(arc);
 }
 
 } // namespace sync

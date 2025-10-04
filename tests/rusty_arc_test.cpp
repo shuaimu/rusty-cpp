@@ -1,5 +1,6 @@
 // Tests for rusty::Arc<T>
 #include "../include/rusty/arc.hpp"
+#include "../include/rusty/weak.hpp"
 #include <cassert>
 #include <cstdio>
 #include <thread>
@@ -56,7 +57,7 @@ void test_arc_move() {
         auto arc1 = Arc<int>::new_(42);
         auto arc2 = arc1.clone();
         assert(arc1.strong_count() == 2);
-        
+
         auto arc3 = std::move(arc1);
         assert(!arc1.is_valid());  // arc1 should be empty
         assert(arc3.strong_count() == 2);  // Count unchanged
@@ -153,6 +154,48 @@ void test_arc_thread_safety() {
     printf("PASS\n");
 }
 
+// Test Weak references
+void test_arc_weak() {
+    printf("test_arc_weak: ");
+    {
+        auto arc1 = Arc<int>::new_(42);
+        auto weak = downgrade(arc1);
+
+        assert(arc1.strong_count() == 1);
+        assert(!weak.expired());
+
+        auto upgraded = weak.upgrade();
+        assert(upgraded.is_some());
+        auto arc2 = upgraded.unwrap();
+        assert(arc1.strong_count() == 2);
+        assert(*arc2 == 42);
+    }
+
+    {
+        sync::Weak<int> weak;
+        {
+            auto arc = Arc<int>::new_(99);
+            weak = downgrade(arc);
+            assert(!weak.expired());
+        }
+        assert(weak.expired());
+        auto upgraded = weak.upgrade();
+        assert(upgraded.is_none());
+    }
+
+    {
+        auto arc = Arc<int>::new_(7);
+        auto weak = downgrade(arc);
+        std::thread t([weak]() mutable {
+            auto upgraded = weak.upgrade();
+            assert(upgraded.is_some());
+        });
+        t.join();
+    }
+
+    printf("PASS\n");
+}
+
 // Test empty Arc
 void test_arc_empty() {
     printf("test_arc_empty: ");
@@ -194,6 +237,7 @@ int main() {
     test_arc_get_mut();
     test_arc_destructor();
     test_arc_thread_safety();
+    test_arc_weak();
     test_arc_empty();
     test_arc_assignment();
     
