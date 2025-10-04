@@ -2,3 +2,5 @@
 .vscode
 *.out
 tests/build/
+
+build-tests/

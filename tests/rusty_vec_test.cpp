@@ -15,11 +15,11 @@ void test_vec_construction() {
         
         auto vec2 = Vec<int>::with_capacity(10);
         assert(vec2.is_empty());
-        assert(vec2.cap() >= 10);
+        assert(vec2.capacity() >= 10);
         
         auto vec3 = Vec<int>(10);  // Using explicit capacity constructor
         assert(vec3.is_empty());
-        assert(vec3.cap() == 10);
+        assert(vec3.capacity() == 10);
     }
     printf("PASS\n");
 }
@@ -109,12 +109,12 @@ void test_vec_clear() {
         vec.push(30);
         
         assert(vec.len() == 3);
-        size_t old_cap = vec.cap();
+        size_t old_cap = vec.capacity();
         
         vec.clear();
         assert(vec.is_empty());
         assert(vec.len() == 0);
-        assert(vec.cap() == old_cap);  // Capacity unchanged
+        assert(vec.capacity() == old_cap);  // Capacity unchanged
     }
     printf("PASS\n");
 }
@@ -145,15 +145,15 @@ void test_vec_reserve() {
     printf("test_vec_reserve: ");
     {
         auto vec = Vec<int>::new_();
-        assert(vec.cap() == 0);
+        assert(vec.capacity() == 0);
         
         vec.reserve(100);
-        assert(vec.cap() >= 100);
+        assert(vec.capacity() >= 100);
         assert(vec.is_empty());  // Still empty
         
         vec.push(10);
         assert(vec.len() == 1);
-        assert(vec.cap() >= 100);  // Capacity preserved
+        assert(vec.capacity() >= 100);  // Capacity preserved
     }
     printf("PASS\n");
 }
