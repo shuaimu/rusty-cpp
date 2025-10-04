@@ -19,14 +19,21 @@
 // @safe
 namespace rusty {
 
-// Forward declaration for friend
-template<typename T>
-class Weak;
+// Forward declarations for weak references
+template<typename T> class Rc;
+template<typename T> class RcWeak;
+namespace rc { template<typename T> class Weak; }
+template<typename T> RcWeak<T> downgrade(const Rc<T>&);
 
 template<typename T>
 class Rc {
 private:
-    friend class Weak<T>;
+    template<typename U>
+    friend class RcWeak;
+    template<typename U>
+    friend class rc::Weak;
+    template<typename U>
+    friend RcWeak<U> downgrade(const Rc<U>&);
     
     struct ControlBlock {
         T value;
@@ -71,6 +78,13 @@ public:
     
     // Private constructor from control block
     explicit Rc(ControlBlock* p) : ptr(p) {}
+    
+    // Private constructor for weak upgrade (with increment flag)
+    Rc(ControlBlock* p, bool increment) : ptr(p) {
+        if (increment && ptr) {
+            ++ptr->ref_count;
+        }
+    }
     
     // Copy constructor - increases reference count
     Rc(const Rc& other) : ptr(other.ptr) {
@@ -167,50 +181,14 @@ public:
     }
 };
 
-// Rust-idiomatic factory function
-template<typename T, typename... Args>
-// @lifetime: owned
-Rc<T> rc(Args&&... args) {
-    return Rc<T>::new_(T(std::forward<Args>(args)...));
-}
-
-// C++-friendly factory function (kept for compatibility)
+// Factory function for creating Rc
 template<typename T, typename... Args>
 // @lifetime: owned
 Rc<T> make_rc(Args&&... args) {
     return Rc<T>::make(T(std::forward<Args>(args)...));
 }
 
-// Weak reference support (simplified)
-template<typename T>
-class Weak {
-private:
-    typename Rc<T>::ControlBlock* ptr;
-    
-public:
-    Weak() : ptr(nullptr) {}
-    
-    // Downgrade from Rc
-    explicit Weak(const Rc<T>& rc) : ptr(rc.ptr) {
-        // In a full implementation, would track weak count
-    }
-    
-    // Try to upgrade to Rc
-    // @lifetime: owned
-    Rc<T> upgrade() const {
-        if (ptr && ptr->ref_count > 0) {
-            Rc<T> result;
-            result.ptr = ptr;
-            result.increment();
-            return result;
-        }
-        return Rc<T>();
-    }
-    
-    bool expired() const {
-        return !ptr || ptr->ref_count == 0;
-    }
-};
+// Weak reference support moved to weak.hpp and rc/weak.hpp
 
 } // namespace rusty
 

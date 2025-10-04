@@ -16,9 +16,15 @@
 #include "rusty/box.hpp"
 #include "rusty/arc.hpp"
 #include "rusty/rc.hpp"
+#include "rusty/weak.hpp"  // Compatibility aliases (Weak<T> for Rc, ArcWeak<T> for Arc)
+// TODO: Enable once namespace conflicts are resolved
+// #include "rusty/rc/weak.hpp"  // Namespace-organized: rusty::rc_impl::Weak<T>
+// #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
 #include "rusty/vec.hpp"
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
+#include "rusty/cell.hpp"
+#include "rusty/refcell.hpp"
 #include "rusty/string.hpp"
 #include "rusty/hashmap.hpp"
 #include "rusty/hashset.hpp"

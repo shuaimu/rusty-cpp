@@ -18,9 +18,21 @@
 // @safe
 namespace rusty {
 
+// Forward declarations for weak references
+template<typename T> class Arc;
+template<typename T> class ArcWeak;
+namespace sync { template<typename T> class Weak; }
+template<typename T> ArcWeak<T> downgrade(const Arc<T>&);
+
 template<typename T>
 class Arc {
 private:
+    template<typename U>
+    friend class ArcWeak;
+    template<typename U>
+    friend class sync::Weak;
+    template<typename U>
+    friend ArcWeak<U> downgrade(const Arc<U>&);
     struct ControlBlock {
         T value;
         std::atomic<size_t> ref_count;
@@ -64,8 +76,22 @@ public:
         return Arc<T>(new ControlBlock(std::move(value)));
     }
     
+    // Factory method for in-place construction with arguments
+    // @lifetime: owned
+    template<typename... Args>
+    static Arc<T> make_in_place(Args&&... args) {
+        return Arc<T>(new ControlBlock(std::forward<Args>(args)...));
+    }
+    
     // Private constructor from control block
     explicit Arc(ControlBlock* p) : ptr(p) {}
+    
+    // Private constructor for weak upgrade (with increment flag)
+    Arc(ControlBlock* p, bool increment) : ptr(p) {
+        if (increment && ptr) {
+            ptr->ref_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     
     // Copy constructor - increases reference count
     Arc(const Arc& other) : ptr(other.ptr) {
