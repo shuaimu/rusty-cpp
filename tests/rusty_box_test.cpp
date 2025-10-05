@@ -13,7 +13,7 @@ void test_box_construction() {
         assert(box1.is_valid());
         assert(*box1 == 42);
         
-        auto box2 = box<int>(100);
+        auto box2 = make_box<int>(100);
         assert(box2.is_valid());
         assert(*box2 == 100);
         

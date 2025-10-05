@@ -126,14 +126,7 @@ public:
     }
 };
 
-// Rust-idiomatic factory function
-template<typename T, typename... Args>
-// @lifetime: owned
-Box<T> box(Args&&... args) {
-    return Box<T>(new T(std::forward<Args>(args)...));
-}
-
-// C++-friendly factory function (kept for compatibility)
+// Factory function following C++ make_* convention
 template<typename T, typename... Args>
 // @lifetime: owned
 Box<T> make_box(Args&&... args) {

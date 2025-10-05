@@ -22,9 +22,9 @@ void demo_box_rust_style() {
     auto box2 = rusty::Box<int>::new_(100);
     printf("Box::new_(100): %d\n", *box2);
     
-    // Short form: rusty::box()
-    auto box3 = rusty::box<int>(200);
-    printf("rusty::box(200): %d\n", *box3);
+    // Short form: rusty::make_box()
+    auto box3 = rusty::make_box<int>(200);
+    printf("rusty::make_box(200): %d\n", *box3);
     
     // C++ style (still works)
     auto box4 = rusty::make_box<int>(300);
@@ -201,7 +201,7 @@ void demo_combined_rust_style() {
     auto vec = rusty::Vec<rusty::Box<int>>::new_();
     vec.push(rusty::Box<int>::new_(1));
     vec.push(rusty::Box<int>::new_(2));
-    vec.push(rusty::box<int>(3));
+    vec.push(rusty::make_box<int>(3));
     
     printf("Vec<Box<int>> with %zu elements\n", vec.len());
     
