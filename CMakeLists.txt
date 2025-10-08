@@ -3,7 +3,7 @@ project(rusty_cpp_tests LANGUAGES CXX)
 
 include(CTest)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -16,6 +16,9 @@ set(TEST_SOURCES
     tests/rusty_refcell_test.cpp
     tests/rusty_result_test.cpp
     tests/rusty_vec_test.cpp
+    tests/test_traits.cpp
+    tests/test_mutex.cpp
+    tests/test_thread.cpp
 )
 
 find_package(Threads REQUIRED)
