@@ -37,13 +37,12 @@ void test_try_lock() {
 
         // Try to acquire while already locked
         auto guard2 = m.try_lock();
-        assert(!guard2.has_value());  // Should fail
+        assert(guard2.is_none());  // Should fail (using rusty::Option API)
     }
 
     // After first guard released, should succeed
-    auto guard3 = m.try_lock();
-    assert(guard3.has_value());
-    assert(**guard3 == 42);
+    auto guard3 = m.try_lock().unwrap();  // Using unwrap() now!
+    assert(*guard3 == 42);
 
     std::cout << "PASSED\n";
 }
@@ -153,6 +152,48 @@ void test_const_mutex() {
     std::cout << "PASSED\n";
 }
 
+void test_new_api() {
+    std::cout << "Test: New API (unwrap, expect, into_inner, get_mut)... ";
+
+    Mutex<int> m(100);
+
+    // Test unwrap() - cleaner than has_value() + **
+    {
+        auto guard = m.try_lock().unwrap();
+        assert(*guard == 100);
+    }
+
+    // Test expect() with custom message
+    {
+        auto guard = m.try_lock().expect("Should succeed when unlocked");
+        assert(*guard == 100);
+    }
+
+    // Test get_mut() - Rust-like naming
+    {
+        auto guard = m.lock();
+        guard.get_mut() = 200;
+        assert(*guard == 200);
+    }
+
+    // Test into_inner() - consumes guard and extracts value
+    {
+        auto guard = m.lock();
+        int value = std::move(guard).into_inner();
+        assert(value == 200);
+        // guard is now moved-from, lock released
+    }
+
+    // Test is_none() with rusty::Option
+    {
+        auto guard1 = m.lock();
+        auto maybe_guard2 = m.try_lock();
+        assert(maybe_guard2.is_none());  // Can't lock twice
+    }
+
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "Running Mutex tests...\n\n";
 
@@ -163,6 +204,7 @@ int main() {
     test_thread_safety();
     test_scoped_threads_with_mutex();
     test_const_mutex();
+    test_new_api();
 
     std::cout << "\nAll Mutex tests passed!\n";
     return 0;

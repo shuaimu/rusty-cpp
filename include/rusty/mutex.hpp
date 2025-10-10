@@ -1,7 +1,7 @@
 #pragma once
 
 #include <mutex>
-#include <optional>
+#include "option.hpp"
 
 namespace rusty {
 
@@ -35,6 +35,16 @@ public:
         T* get() { return data_; }
         const T* get() const { return data_; }
 
+        // Get mutable reference (Rust-like API)
+        T& get_mut() { return *data_; }
+
+        // Consume guard and extract data (like Rust's into_inner)
+        T into_inner() && {
+            T result = std::move(*data_);
+            // Lock will be released by destructor
+            return result;
+        }
+
         // Non-copyable, movable
         MutexGuard(const MutexGuard&) = delete;
         MutexGuard& operator=(const MutexGuard&) = delete;
@@ -59,21 +69,21 @@ public:
     }
 
     // Try-lock and return optional guard
-    [[nodiscard]] std::optional<MutexGuard> try_lock() {
+    [[nodiscard]] Option<MutexGuard> try_lock() {
         std::unique_lock lock(mtx_, std::try_to_lock);
         if (lock.owns_lock()) {
-            return MutexGuard(std::move(lock), &data_);
+            return Some(MutexGuard(std::move(lock), &data_));
         }
-        return std::nullopt;
+        return None;
     }
 
     // Try-lock with const access
-    [[nodiscard]] std::optional<MutexGuard> try_lock() const {
+    [[nodiscard]] Option<MutexGuard> try_lock() const {
         std::unique_lock lock(mtx_, std::try_to_lock);
         if (lock.owns_lock()) {
-            return MutexGuard(std::move(lock), const_cast<T*>(&data_));
+            return Some(MutexGuard(std::move(lock), const_cast<T*>(&data_)));
         }
-        return std::nullopt;
+        return None;
     }
 
     // Mutex is not copyable or movable
