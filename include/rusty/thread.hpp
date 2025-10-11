@@ -3,7 +3,6 @@
 #include <thread>
 #include <future>
 #include <memory>
-#include <concepts>
 #include <chrono>
 #include <stdexcept>
 #include <vector>
@@ -141,17 +140,19 @@ public:
 // spawn() - Launch thread with Send checking
 // ============================================================================
 
-template<typename F, typename... Args>
-    requires (Send<std::decay_t<Args>> && ...) &&
-             std::invocable<F, Args...>
+template<typename F, typename... Args,
+         typename = std::enable_if_t<(Send<std::decay_t<Args>> && ...) &&
+                                      std::is_invocable_v<F, Args...>>>
 auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args...>> {
     using ReturnType = std::invoke_result_t<F, Args...>;
 
-    // Package task with arguments captured
+    // Package task with arguments captured (C++17 compatible)
     auto task = std::make_shared<std::packaged_task<ReturnType()>>(
         [func = std::forward<F>(func),
-         ...args = std::forward<Args>(args)]() mutable -> ReturnType {
-            return std::invoke(func, std::move(args)...);
+         args_tuple = std::make_tuple(std::forward<Args>(args)...)]() mutable -> ReturnType {
+            return std::apply([&func](auto&&... args) {
+                return std::invoke(func, std::forward<decltype(args)>(args)...);
+            }, std::move(args_tuple));
         }
     );
 
@@ -191,12 +192,14 @@ private:
 
 public:
     // Spawn thread within scope - NO Send requirement (lifetime guaranteed)
-    template<typename Fn, typename... Args>
-        requires std::invocable<Fn, Args...>
+    template<typename Fn, typename... Args,
+             typename = std::enable_if_t<std::is_invocable_v<Fn, Args...>>>
     void spawn(Fn&& fn, Args&&... args) {
         std::thread t([fn = std::forward<Fn>(fn),
-                      ...args = std::forward<Args>(args)]() mutable {
-            std::invoke(fn, std::forward<Args>(args)...);
+                      args_tuple = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+            std::apply([&fn](auto&&... args) {
+                std::invoke(fn, std::forward<decltype(args)>(args)...);
+            }, std::move(args_tuple));
         });
 
         threads_.emplace_back(std::move(t));
@@ -210,8 +213,8 @@ public:
 // scope() - Scoped threads with guaranteed joining
 // ============================================================================
 
-template<typename F>
-    requires std::invocable<F, Scope&>
+template<typename F,
+         typename = std::enable_if_t<std::is_invocable_v<F, Scope&>>>
 void scope(F&& func) {
     Scope s;
     func(s);

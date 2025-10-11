@@ -59,7 +59,7 @@ fn test_valid_cpp_code_passes() {
     let (success, output) = run_analyzer(temp_file.path());
     
     assert!(success, "Valid code should pass analysis. Output: {}", output);
-    assert!(output.contains("no violations found found"));
+    assert!(output.contains("no violations found"));
 }
 
 #[test]

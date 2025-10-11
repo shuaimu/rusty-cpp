@@ -1,6 +1,5 @@
 #pragma once
 
-#include <concepts>
 #include <type_traits>
 #include <memory>
 
@@ -16,7 +15,7 @@ template<typename T> class Mutex;
 template<typename T> class Atomic;
 
 // Forward declare is_sync for circular dependency with is_send
-template<typename T>
+template<typename T, typename = void>
 struct is_sync;
 
 // ============================================================================
@@ -24,13 +23,12 @@ struct is_sync;
 // ============================================================================
 
 // Default: types are NOT Send
-template<typename T>
+template<typename T, typename = void>
 struct is_send : std::false_type {};
 
 // Primitives are Send
 template<typename T>
-    requires std::is_arithmetic_v<T>
-struct is_send<T> : std::true_type {};
+struct is_send<T, std::enable_if_t<std::is_arithmetic_v<T>>> : std::true_type {};
 
 // RUST RULE 1: const T& is Send if T is Sync
 // This mimics Rust's: &T is Send if T is Sync
@@ -88,13 +86,12 @@ struct is_send<const T*> : std::false_type {};
 // ============================================================================
 
 // Default: types are NOT Sync
-template<typename T>
+template<typename T, typename>
 struct is_sync : std::false_type {};
 
 // Primitives are Sync
 template<typename T>
-    requires std::is_arithmetic_v<T>
-struct is_sync<T> : std::true_type {};
+struct is_sync<T, std::enable_if_t<std::is_arithmetic_v<T>>> : std::true_type {};
 
 // RUST RULE 3: const T& is Sync if T is Sync
 // This mimics Rust's: &T is Sync if T is Sync
@@ -152,16 +149,16 @@ template<typename T>
 struct is_sync<const T*> : std::false_type {};
 
 // ============================================================================
-// C++20 Concepts
+// Helper constexpr variables (C++17 compatible)
 // ============================================================================
 
 template<typename T>
-concept Send = is_send<T>::value;
+inline constexpr bool Send = is_send<T>::value;
 
 template<typename T>
-concept Sync = is_sync<T>::value;
+inline constexpr bool Sync = is_sync<T>::value;
 
 template<typename T>
-concept ThreadSafe = Send<T> && Sync<T>;
+inline constexpr bool ThreadSafe = Send<T> && Sync<T>;
 
 } // namespace rusty
