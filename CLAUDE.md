@@ -264,31 +264,58 @@ export CPLUS_INCLUDE_PATH=/project/include:/third_party/include
 cargo run -- src/main.cpp
 ```
 
-### Using STL Lifetime Annotations
+### Using Rusty Structures (Recommended)
 ```cpp
-#include <stl_lifetimes.hpp>
-#include <vector>
-#include <memory>
+#include <rusty/vec.hpp>
+#include <rusty/box.hpp>
 
 // @safe
-void stl_example() {
+void safe_example() {
     // Vector iterator invalidation detection
-    std::vector<int> vec = {1, 2, 3};
+    rusty::Vec<int> vec = {1, 2, 3};
     auto it = vec.begin();  // Iterator borrows from vec
     vec.push_back(4);       // ERROR: Would invalidate iterator
-    
+
     // Smart pointer ownership tracking
-    std::unique_ptr<int> ptr = std::make_unique<int>(42);
+    rusty::Box<int> ptr = rusty::Box<int>::make(42);
     int& ref = *ptr;        // Reference borrows from ptr
     auto ptr2 = std::move(ptr);  // ERROR: Cannot move while borrowed
 }
 ```
 
-### Using External Annotations
+### Using External Annotations for STL (If Needed)
+```cpp
+#include <vector>
+#include <unified_external_annotations.hpp>
+
+// STL structures are undeclared by default and need to be annotated as unsafe
+// @external: {
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+// }
+
+// @safe
+void stl_example() {
+    // Must use unsafe block for STL
+    // @unsafe
+    {
+        std::vector<int> vec = {1, 2, 3};
+        vec.push_back(4);  // OK in unsafe block
+    }
+}
+
+// Better: Use Rusty structures instead
+// @safe
+void better_example() {
+    rusty::Vec<int> vec = {1, 2, 3};
+    vec.push_back(4);  // Safe by design, no annotations needed
+}
+```
+
+### Annotating Third-Party Functions
 ```cpp
 #include <unified_external_annotations.hpp>
 
-// Annotate third-party functions
 // @external: {
 //   third_party::process: [safe, (const Data& d) -> Result]
 //   third_party::allocate: [unsafe, (size_t) -> owned void*]
@@ -300,7 +327,7 @@ void external_example() {
     // C stdlib with lifetime checking
     const char* str = "hello";
     const char* found = strchr(str, 'e');  // Lifetime tied to str
-    
+
     // Third-party functions checked
     Data d;
     Result r = third_party::process(d);  // OK: safe function

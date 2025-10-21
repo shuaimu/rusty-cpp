@@ -2,6 +2,8 @@
 
 RustyCpp uses a unified external annotation system that combines safety and lifetime information for third-party functions. This provides a complete contract for external code without modifying the source.
 
+**IMPORTANT**: By default, all STL and external functions are **undeclared**, meaning they cannot be called from `@safe` functions without explicit annotation. The recommended approach is to use Rusty structures (rusty::Vec, rusty::Box, etc.) instead of STL structures. If you must use STL, you need to annotate them as `unsafe`.
+
 ## Overview
 
 The external annotation system provides:
@@ -137,6 +139,61 @@ C string functions with lifetime relationships:
 // }
 ```
 
+### C++ STL (Standard Template Library)
+
+**Recommended**: Use Rusty structures instead of STL. If you must use STL in `@safe` code, annotate them as unsafe:
+
+```cpp
+// @external: {
+//   // Vector - mark as unsafe
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::pop_back: [unsafe, (&'a mut) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+//   std::vector::at: [unsafe, (&'a, size_t) -> &'a]
+//   std::vector::begin: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+//   std::vector::end: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+//   std::vector::data: [unsafe, (&'a) -> *mut where this: 'a, return: 'a]
+//   std::vector::clear: [unsafe, (&'a mut) -> void]
+//   std::vector::resize: [unsafe, (&'a mut, size_t) -> void]
+//
+//   // Map - mark as unsafe
+//   std::map::operator[]: [unsafe, (&'a, const K&) -> &'a mut]
+//   std::map::at: [unsafe, (&'a, const K&) -> &'a]
+//   std::map::insert: [unsafe, (&'a mut, pair<K,V>) -> void]
+//   std::map::erase: [unsafe, (&'a mut, const K&) -> void]
+//   std::map::find: [unsafe, (&'a, const K&) -> iterator where this: 'a, return: 'a]
+//
+//   // Smart pointers - mark as unsafe
+//   std::unique_ptr::get: [unsafe, (&'a) -> *mut where this: 'a, return: 'a]
+//   std::unique_ptr::release: [unsafe, (&'a mut) -> owned *mut]
+//   std::unique_ptr::reset: [unsafe, (&'a mut, *mut) -> void]
+//   std::make_unique: [unsafe, template<T>(Args...) -> owned unique_ptr<T>]
+//
+//   std::shared_ptr::get: [unsafe, (&'a) -> *mut where this: 'a, return: 'a]
+//   std::shared_ptr::reset: [unsafe, (&'a mut, *mut) -> void]
+//   std::make_shared: [unsafe, template<T>(Args...) -> owned shared_ptr<T>]
+//
+//   // String - mark as unsafe
+//   std::string::c_str: [unsafe, (&'a) -> const char* where this: 'a, return: 'a]
+//   std::string::data: [unsafe, (&'a) -> const char* where this: 'a, return: 'a]
+//   std::string::operator[]: [unsafe, (&'a, size_t) -> &'a]
+//   std::string::substr: [unsafe, (&'a, size_t, size_t) -> owned string]
+// }
+```
+
+**Better approach - Use Rusty structures:**
+```cpp
+#include <rusty/vec.hpp>
+#include <rusty/box.hpp>
+
+// @safe
+void safe_code() {
+    // No annotations needed - these are safe by design
+    rusty::Vec<int> vec = {1, 2, 3};
+    rusty::Box<Widget> widget = rusty::Box<Widget>::make(args);
+}
+```
+
 ### Boost Library
 
 ```cpp
@@ -214,19 +271,31 @@ Functions taking callbacks with lifetime requirements:
 Once annotated, the functions are checked according to their contracts:
 
 ```cpp
+#include <rusty/vec.hpp>
+
 // @safe
 void example() {
+    // Recommended: Use Rusty structures (no annotations needed)
+    rusty::Vec<int> vec = {1, 2, 3};
+    int& ref = vec[0];  // ref lifetime tied to vec
+    // vec.clear();  // ERROR: would invalidate ref
+
     // Safe function with lifetime checking
     const char* text = "Hello, world!";
     const char* found = strchr(text, 'o');  // OK: safe, found lifetime tied to text
-    
+
     // Unsafe function requires unsafe context
     // void* buffer = malloc(100);  // ERROR: malloc is unsafe
-    
-    // Lifetime relationships enforced
-    std::vector<int> vec = {1, 2, 3};
-    int& ref = vec[0];  // ref lifetime tied to vec
-    // vec.clear();  // ERROR: would invalidate ref
+}
+
+// @safe
+void use_stl_if_needed() {
+    // If you must use STL, wrap in unsafe block
+    // @unsafe
+    {
+        std::vector<int> vec = {1, 2, 3};  // OK in unsafe block
+        vec.push_back(4);
+    }
 }
 
 // @unsafe
@@ -235,6 +304,10 @@ void unsafe_example() {
     void* buffer = malloc(100);  // OK in unsafe
     memset(buffer, 0, 100);      // OK in unsafe
     free(buffer);                 // OK in unsafe
+
+    // STL also works in unsafe functions
+    std::vector<int> vec = {1, 2, 3};
+    vec.push_back(4);
 }
 ```
 

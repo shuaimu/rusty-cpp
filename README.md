@@ -293,33 +293,55 @@ void process_raw_memory(void* ptr) {
 
 #### STL and External Libraries
 
-By default, all STL and external functions are **undeclared**, meaning safe functions cannot call them without explicit annotation:
+By default, all STL and external functions are **undeclared**, meaning safe functions cannot call them without explicit annotation. **The recommended approach is to use Rusty structures instead of STL structures in safe code:**
 
 ```cpp
+#include <rusty/box.hpp>
+#include <rusty/vec.hpp>
+
 // @safe
-void safe_with_stl() {
-    // ❌ ERROR: STL functions are undeclared by default
-    // std::vector<int> vec;
-    // vec.push_back(42);  // Must mark STL as @safe or @unsafe first
-    
-    // ✅ OK: Whitelisted functions
-    printf("Hello\n");  // Explicitly whitelisted
+void safe_with_rusty() {
+    // ✅ OK: Rusty structures are designed for safe code
+    rusty::Vec<int> vec;
+    vec.push_back(42);  // Safe by design
+
+    rusty::Box<Widget> widget = rusty::Box<Widget>::make(args);
 }
 ```
 
-This forces you to audit external code before using it in safe contexts.
+If you need to use STL structures in safe code, you must explicitly annotate them as unsafe:
+
+```cpp
+#include <vector>
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+// }
+
+// @safe
+void safe_with_stl_marked_unsafe() {
+    std::vector<int> vec;
+    vec.push_back(42);  // OK: vec::push_back is marked as unsafe
+    printf("Hello\n");  
+}
+```
+
+This forces you to audit external code before using it in safe contexts. See [External Annotations](docs/unified_annotations.md) for more details on annotating STL functions.
 
 ### 📝 Examples
 
 #### Example 1: Use After Move
 
 ```cpp
-#include <memory>
+#include <rusty/box.hpp>
 
+// @safe
 void bad_code() {
-    std::unique_ptr<int> ptr1 = std::make_unique<int>(42);
-    std::unique_ptr<int> ptr2 = std::move(ptr1);
-    
+    rusty::Box<int> ptr1 = rusty::Box<int>::make(42);
+    rusty::Box<int> ptr2 = std::move(ptr1);
+
     *ptr1 = 10;  // ERROR: Use after move!
 }
 ```
@@ -333,10 +355,10 @@ error: use of moved value: `ptr1`
    |     ^^^^^ value used here after move
    |
 note: value moved here
-  --> example.cpp:5:34
+  --> example.cpp:5:29
    |
-5  |     std::unique_ptr<int> ptr2 = std::move(ptr1);
-   |                                  ^^^^^^^^^^^^^^
+5  |     rusty::Box<int> ptr2 = std::move(ptr1);
+   |                             ^^^^^^^^^^^^^^
 ```
 
 #### Example 2: Multiple Mutable Borrows
@@ -384,23 +406,35 @@ int& dangling_reference() {
 
 ### 🆕 Advanced Features
 
-#### STL Lifetime Annotations
+#### Using Rusty Structures (Recommended)
 
-RustyCpp now provides comprehensive lifetime checking for C++ STL types without modifying standard library headers:
+RustyCpp provides safe data structures that integrate seamlessly with the borrow checker:
 
 ```cpp
-#include <stl_lifetimes.hpp>
-#include <vector>
+#include <rusty/vec.hpp>
+#include <rusty/box.hpp>
 
 // @safe
 void example() {
-    std::vector<int> vec = {1, 2, 3};
+    rusty::Vec<int> vec = {1, 2, 3};
     int& ref = vec[0];     // Borrows &'vec mut
     vec.push_back(4);      // ERROR: Cannot modify vec while ref exists
 }
 ```
 
-See [docs/stl_lifetimes.md](docs/stl_lifetimes.md) for complete STL support.
+**For STL structures**, you must use external annotations to mark them as unsafe:
+
+```cpp
+#include <vector>
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+// }
+```
+
+See [docs/unified_annotations.md](docs/unified_annotations.md) for annotating STL functions.
 
 #### External Function Annotations
 

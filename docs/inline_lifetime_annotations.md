@@ -38,10 +38,13 @@ const std::string& selectLonger(const std::string& a, const std::string& b) {
 Mark functions or namespaces as safe or unsafe:
 
 ```cpp
+#include <rusty/vec.hpp>
+
 // @safe
 void processData() {
     // This function is checked for safety
-    std::vector<int> data = {1, 2, 3};
+    // Use Rusty structures in safe code
+    rusty::Vec<int> data = {1, 2, 3};
     int& ref = data[0];
     // data.push_back(4);  // ERROR: Would invalidate ref
 }
@@ -134,12 +137,14 @@ class Container {
 Function creates and returns a new object:
 
 ```cpp
+#include <rusty/box.hpp>
+
 // @lifetime: owned
-std::unique_ptr<Widget> createWidget(int type) {
+rusty::Box<Widget> createWidget(int type) {
     switch(type) {
-        case 1: return std::make_unique<ButtonWidget>();
-        case 2: return std::make_unique<LabelWidget>();
-        default: return std::make_unique<DefaultWidget>();
+        case 1: return rusty::Box<ButtonWidget>::make();
+        case 2: return rusty::Box<LabelWidget>::make();
+        default: return rusty::Box<DefaultWidget>::make();
     }
 }
 ```
@@ -315,26 +320,26 @@ public:
 // @safe
 template<typename T>
 class SafeContainer {
-    std::vector<T> items;
+    rusty::Vec<T> items;
     T* cached_ptr = nullptr;
-    
+
 public:
     // @lifetime: (&'a mut, T) -> void
     void add(T item) {
         items.push_back(std::move(item));
         cached_ptr = nullptr;  // Invalidate cache
     }
-    
+
     // @lifetime: (&'a) -> &'a
     const T& first() const {
         return items.front();
     }
-    
+
     // @lifetime: (&'a) -> &'a
     const T& last() const {
         return items.back();
     }
-    
+
     // @lifetime: (&'a mut) -> &'a mut
     T& getCached() {
         if (!cached_ptr && !items.empty()) {
@@ -399,9 +404,11 @@ Begin with basic annotations and add complexity as needed:
 Always clarify whether functions transfer ownership:
 
 ```cpp
+#include <rusty/box.hpp>
+
 // Clear ownership transfer
 // @lifetime: owned
-std::unique_ptr<T> create();
+rusty::Box<T> create();
 
 // Clear borrowing
 // @lifetime: (&'a) -> &'a

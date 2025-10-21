@@ -1,22 +1,47 @@
 # STL Lifetime Annotations
 
-RustyCpp now supports lifetime checking for C++ Standard Template Library (STL) types without modifying the standard library headers. This is achieved through external lifetime annotations that describe how lifetimes flow through STL methods.
+**IMPORTANT: For safe code, it is recommended to use Rusty structures (rusty::Vec, rusty::Box, etc.) instead of STL structures.**
 
-## Quick Start
+STL structures are **undeclared by default**, meaning they cannot be called from `@safe` functions without explicit annotation. This document explains how to annotate STL types if you need to use them.
 
-To enable STL lifetime checking in your code:
+## Recommended Approach: Use Rusty Structures
+
+For safe code, use RustyCpp's built-in data structures:
 
 ```cpp
-#include <stl_lifetimes.hpp>  // RustyCpp STL annotations
-#include <vector>
-#include <map>
-#include <memory>
+#include <rusty/vec.hpp>
+#include <rusty/box.hpp>
+#include <rusty/rc.hpp>
 
 // @safe
 void example() {
-    std::vector<int> vec = {1, 2, 3};
+    rusty::Vec<int> vec = {1, 2, 3};
     int& ref = vec[0];     // Borrows &'vec mut
     vec.push_back(4);      // ERROR: Cannot modify vec while ref exists
+}
+```
+
+## Annotating STL Types (When Required)
+
+If you must use STL structures in your codebase, you need to explicitly annotate them as **unsafe** using external annotations:
+
+```cpp
+#include <vector>
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+//   std::vector::begin: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+// }
+
+// @safe
+void use_stl() {
+    // @unsafe
+    {
+        std::vector<int> vec = {1, 2, 3};
+        vec.push_back(4);  // OK: in unsafe block
+    }
 }
 ```
 
@@ -44,87 +69,136 @@ The `stl_lifetimes.hpp` header contains special comments that RustyCpp recognize
 - `*mut` - Mutable raw pointer (requires unsafe)
 - `owned` - Ownership transfer, no borrowing
 
-## Common STL Patterns
+## Common Patterns with Rusty Structures
 
 ### Vector Iterator Invalidation
 
 ```cpp
+#include <rusty/vec.hpp>
+
 // @safe
 void iterator_invalidation() {
-    std::vector<int> vec = {1, 2, 3};
-    
+    rusty::Vec<int> vec = {1, 2, 3};
+
     auto it = vec.begin();  // it borrows &'vec mut
     vec.push_back(4);       // ERROR: Would invalidate iterator
     *it = 5;                // Would be use-after-invalidation
 }
 ```
 
-### Map Reference Stability
-
-```cpp
-// @safe
-void map_references() {
-    std::map<int, std::string> m;
-    m[1] = "one";
-    
-    std::string& ref = m[1];  // ref borrows &'m mut
-    m[3] = "three";           // OK: map references are stable
-    m.erase(1);               // ERROR: Would invalidate ref
-}
-```
-
 ### Smart Pointer Ownership
 
 ```cpp
+#include <rusty/box.hpp>
+
 // @safe
 void unique_ptr_ownership() {
-    std::unique_ptr<int> ptr1 = std::make_unique<int>(42);
-    int& ref = *ptr1;                          // ref borrows &'ptr1
-    
-    std::unique_ptr<int> ptr2 = std::move(ptr1); // ERROR: Cannot move while borrowed
+    rusty::Box<int> ptr1 = rusty::Box<int>::make(42);
+    int& ref = *ptr1;                    // ref borrows &'ptr1
+
+    rusty::Box<int> ptr2 = std::move(ptr1); // ERROR: Cannot move while borrowed
 }
 ```
 
-### Raw Pointers Require Unsafe
+## Using STL with External Annotations
+
+If you need to use STL types, annotate them as unsafe:
+
+### Vector with External Annotations
 
 ```cpp
+#include <vector>
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+//   std::vector::begin: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+//   std::vector::data: [unsafe, (&'a) -> *mut where this: 'a, return: 'a]
+// }
+
 // @safe
 void requires_unsafe() {
-    std::vector<int> vec = {1, 2, 3};
-    int* ptr = vec.data();  // Getting pointer is OK
-    *ptr = 10;              // ERROR: Dereferencing requires @unsafe
-}
-
-// @unsafe
-void with_unsafe() {
-    std::vector<int> vec = {1, 2, 3};
-    int* ptr = vec.data();
-    *ptr = 10;              // OK in unsafe context
+    // @unsafe
+    {
+        std::vector<int> vec = {1, 2, 3};
+        int* ptr = vec.data();  // OK in unsafe block
+        *ptr = 10;              // OK in unsafe context
+    }
 }
 ```
 
-## Supported STL Types
+### Map with External Annotations
 
-### Containers
-- `std::vector<T>` - Dynamic array with iterator invalidation rules
-- `std::map<K,V>` - Ordered map with stable references
-- `std::unordered_map<K,V>` - Hash map with invalidation on rehash
-- `std::set<T>` - Ordered set with stable iterators
-- `std::unordered_set<T>` - Hash set with invalidation on rehash
+```cpp
+#include <map>
+#include <unified_external_annotations.hpp>
+
+// @external: {
+//   std::map::operator[]: [unsafe, (&'a, const K&) -> &'a mut]
+//   std::map::erase: [unsafe, (&'a mut, const K&) -> void]
+// }
+
+// @safe
+void map_references() {
+    // @unsafe
+    {
+        std::map<int, std::string> m;
+        m[1] = "one";
+
+        std::string& ref = m[1];  // ref borrows &'m mut
+        m[3] = "three";           // OK: map references are stable
+        m.erase(1);               // ERROR: Would invalidate ref
+    }
+}
+```
+
+## STL Types Requiring External Annotations
+
+**Note**: All these types must be annotated as `unsafe` to use in `@safe` code. The preferred approach is to use Rusty equivalents instead.
+
+### Containers (Use rusty::Vec, rusty::Map instead)
+- `std::vector<T>` - Dynamic array (use `rusty::Vec<T>`)
+- `std::map<K,V>` - Ordered map
+- `std::unordered_map<K,V>` - Hash map
+- `std::set<T>` - Ordered set
+- `std::unordered_set<T>` - Hash set
 - `std::deque<T>` - Double-ended queue
-- `std::list<T>` - Doubly-linked list with stable iterators
+- `std::list<T>` - Doubly-linked list
 - `std::array<T,N>` - Fixed-size array
 
-### Smart Pointers
-- `std::unique_ptr<T>` - Unique ownership with move semantics
-- `std::shared_ptr<T>` - Shared ownership with reference counting
-- `std::weak_ptr<T>` - Weak references to shared objects
+### Smart Pointers (Use rusty::Box, rusty::Arc, rusty::Rc instead)
+- `std::unique_ptr<T>` - Unique ownership (use `rusty::Box<T>`)
+- `std::shared_ptr<T>` - Shared ownership (use `rusty::Arc<T>` or `rusty::Rc<T>`)
+- `std::weak_ptr<T>` - Weak references (use custom `Weak<T>`)
 
 ### Other Types
 - `std::string` - String with small-string optimization
 - `std::optional<T>` - Optional values
 - `std::pair<T1,T2>` - Pair of values
 - `std::tuple<T...>` - Tuple of values
+
+### Example External Annotations for Common STL Types
+
+```cpp
+// @external: {
+//   // Vector
+//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
+//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
+//   std::vector::begin: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+//   std::vector::end: [unsafe, (&'a) -> iterator where this: 'a, return: 'a]
+//
+//   // Map
+//   std::map::operator[]: [unsafe, (&'a, const K&) -> &'a mut]
+//   std::map::at: [unsafe, (&'a, const K&) -> &'a]
+//   std::map::insert: [unsafe, (&'a mut, pair<K,V>) -> void]
+//
+//   // Smart pointers
+//   std::unique_ptr::get: [unsafe, (&'a) -> *mut where this: 'a, return: 'a]
+//   std::unique_ptr::release: [unsafe, (&'a mut) -> owned *mut]
+//   std::make_unique: [unsafe, (Args...) -> owned unique_ptr<T>]
+// }
+```
 
 ## Lifetime Rules
 

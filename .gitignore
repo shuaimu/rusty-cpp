@@ -1,6 +1,8 @@
 /target
 .vscode
 *.out
+*.swp
 tests/build/
+build/*
 
 build-tests/
