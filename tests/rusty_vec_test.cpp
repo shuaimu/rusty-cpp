@@ -9,7 +9,7 @@ using namespace rusty;
 void test_vec_construction() {
     printf("test_vec_construction: ");
     {
-        auto vec1 = Vec<int>::new_();
+        auto vec1 = Vec<int>::make();
         assert(vec1.is_empty());
         assert(vec1.len() == 0);
         
@@ -28,7 +28,7 @@ void test_vec_construction() {
 void test_vec_push_pop() {
     printf("test_vec_push_pop: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         
         vec.push(10);
         vec.push(20);
@@ -58,7 +58,7 @@ void test_vec_push_pop() {
 void test_vec_indexing() {
     printf("test_vec_indexing: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(10);
         vec.push(20);
         vec.push(30);
@@ -80,7 +80,7 @@ void test_vec_indexing() {
 void test_vec_move() {
     printf("test_vec_move: ");
     {
-        auto vec1 = Vec<int>::new_();
+        auto vec1 = Vec<int>::make();
         vec1.push(10);
         vec1.push(20);
         
@@ -103,7 +103,7 @@ void test_vec_move() {
 void test_vec_clear() {
     printf("test_vec_clear: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(10);
         vec.push(20);
         vec.push(30);
@@ -123,7 +123,7 @@ void test_vec_clear() {
 void test_vec_front_back() {
     printf("test_vec_front_back: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(10);
         vec.push(20);
         vec.push(30);
@@ -144,7 +144,7 @@ void test_vec_front_back() {
 void test_vec_reserve() {
     printf("test_vec_reserve: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         assert(vec.capacity() == 0);
         
         vec.reserve(100);
@@ -162,7 +162,7 @@ void test_vec_reserve() {
 void test_vec_clone() {
     printf("test_vec_clone: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(10);
         vec.push(20);
         vec.push(30);
@@ -185,7 +185,7 @@ void test_vec_clone() {
 void test_vec_iteration() {
     printf("test_vec_iteration: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(1);
         vec.push(2);
         vec.push(3);
@@ -224,7 +224,7 @@ void test_vec_destructor() {
     printf("test_vec_destructor: ");
     TestStruct::instances = 0;
     {
-        auto vec = Vec<TestStruct>::new_();
+        auto vec = Vec<TestStruct>::make();
         vec.push(TestStruct(1));
         vec.push(TestStruct(2));
         vec.push(TestStruct(3));
@@ -255,7 +255,7 @@ void test_vec_of() {
 void test_vec_size() {
     printf("test_vec_size: ");
     {
-        auto vec = Vec<int>::new_();
+        auto vec = Vec<int>::make();
         vec.push(10);
         vec.push(20);
         vec.push(30);

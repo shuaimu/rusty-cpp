@@ -24,7 +24,7 @@ public:
     HashSet() = default;
     
     // @lifetime: owned
-    static HashSet new_() {
+    static auto make() {
         return HashSet();
     }
     
@@ -346,7 +346,7 @@ public:
 template<typename T>
 // @lifetime: owned
 HashSet<T> hashset() {
-    return HashSet<T>::new_();
+    return HashSet<T>::make();
 }
 
 template<typename T>

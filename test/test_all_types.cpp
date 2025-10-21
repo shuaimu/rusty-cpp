@@ -11,14 +11,14 @@ void test_all_types_together() {
     HashMap<String, Vec<int>> map;
     
     String key1 = String::from("numbers");
-    Vec<int> vec1 = Vec<int>::new_();
+    Vec<int> vec1 = Vec<int>::make();
     vec1.push(1);
     vec1.push(2);
     vec1.push(3);
     map.insert(std::move(key1), std::move(vec1));
     
     String key2 = String::from("more_numbers");
-    Vec<int> vec2 = Vec<int>::new_();
+    Vec<int> vec2 = Vec<int>::make();
     vec2.push(10);
     vec2.push(20);
     map.insert(std::move(key2), std::move(vec2));
@@ -71,7 +71,7 @@ void test_all_types_together() {
     }
     
     // Create a Vec of Strings
-    Vec<String> string_vec = Vec<String>::new_();
+    Vec<String> string_vec = Vec<String>::make();
     string_vec.push(String::from("hello"));
     string_vec.push(String::from("world"));
     string_vec.push(String::from("from"));
@@ -101,9 +101,9 @@ void test_nested_containers() {
     std::cout << "Testing nested containers..." << std::endl;
     
     // Vec of Vecs
-    Vec<Vec<int>> matrix = Vec<Vec<int>>::new_();
+    Vec<Vec<int>> matrix = Vec<Vec<int>>::make();
     for (int i = 0; i < 3; i++) {
-        Vec<int> row = Vec<int>::new_();
+        Vec<int> row = Vec<int>::make();
         for (int j = 0; j < 3; j++) {
             row.push(i * 3 + j);
         }
@@ -147,7 +147,7 @@ void test_memory_safety() {
     assert(s2.len() == 5);
     
     // Test Vec move
-    Vec<int> v1 = Vec<int>::new_();
+    Vec<int> v1 = Vec<int>::make();
     v1.push(1);
     v1.push(2);
     Vec<int> v2 = std::move(v1);
@@ -163,7 +163,7 @@ void test_memory_safety() {
     
     // Test that containers properly manage memory of contained objects
     {
-        Vec<String> vec_of_strings = Vec<String>::new_();
+        Vec<String> vec_of_strings = Vec<String>::make();
         for (int i = 0; i < 100; i++) {
             vec_of_strings.push(String::from("test string"));
         }

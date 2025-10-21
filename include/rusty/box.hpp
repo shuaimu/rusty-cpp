@@ -27,13 +27,7 @@ public:
     // @lifetime: owned
     explicit Box(T* p) : ptr(p) {}
     
-    // Rust-idiomatic factory method - Box::new()
-    // @lifetime: owned
-    static Box<T> new_(T value) {
-        return Box<T>(new T(std::move(value)));
-    }
-    
-    // C++-friendly factory method (kept for compatibility)
+    // Factory method - Box::make()
     // @lifetime: owned
     static Box<T> make(T value) {
         return Box<T>(new T(std::move(value)));

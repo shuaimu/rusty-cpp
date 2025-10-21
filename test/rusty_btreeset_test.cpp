@@ -355,7 +355,7 @@ void test_from_vec() {
     // assert(sorted1[6] == 9);
     
     // Test with rusty::Vec
-    Vec<int> vec = Vec<int>::new_();
+    Vec<int> vec = Vec<int>::make();
     vec.push(3); vec.push(1); vec.push(4);
     vec.push(1); vec.push(5); vec.push(9);
     vec.push(2); vec.push(6); vec.push(5);

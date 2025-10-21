@@ -47,9 +47,9 @@ public:
     // Default constructor - empty vec
     Vec() : data_(nullptr), size_(0), capacity_(0) {}
     
-    // Rust-idiomatic factory method - Vec::new()
+    // Factory method - Vec::make()
     // @lifetime: owned
-    static Vec<T> new_() {
+    static Vec<T> make() {
         return Vec<T>();
     }
     

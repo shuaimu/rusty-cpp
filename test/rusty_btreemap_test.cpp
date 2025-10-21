@@ -361,7 +361,7 @@ void test_equality() {
 void test_from_vec() {
     std::cout << "Testing from_vec..." << std::endl;
     
-    Vec<std::pair<int, std::string>> vec = Vec<std::pair<int, std::string>>::new_();
+    Vec<std::pair<int, std::string>> vec = Vec<std::pair<int, std::string>>::make();
     vec.push(std::make_pair(3, std::string("three")));
     vec.push(std::make_pair(1, std::string("one")));
     vec.push(std::make_pair(2, std::string("two")));

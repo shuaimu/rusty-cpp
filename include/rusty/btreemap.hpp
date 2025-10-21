@@ -525,7 +525,7 @@ public:
     }
     
     // @lifetime: owned
-    static BTreeMap new_() {
+    static auto make() {
         return BTreeMap();
     }
     
@@ -826,7 +826,7 @@ public:
 template<typename K, typename V>
 // @lifetime: owned
 BTreeMap<K, V> btreemap() {
-    return BTreeMap<K, V>::new_();
+    return BTreeMap<K, V>::make();
 }
 
 } // namespace rusty

@@ -345,8 +345,9 @@ public:
         allocate(capacity);
     }
     
+    // Factory method - HashMap::make()
     // @lifetime: owned
-    static HashMap new_() {
+    static HashMap make() {
         return HashMap();
     }
     
@@ -802,7 +803,7 @@ public:
 template<typename K, typename V>
 // @lifetime: owned
 HashMap<K, V> hashmap() {
-    return HashMap<K, V>::new_();
+    return HashMap<K, V>::make();
 }
 
 } // namespace rusty

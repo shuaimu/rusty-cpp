@@ -12,20 +12,17 @@ This library provides C++ implementations of popular Rust types that work with t
 ```cpp
 #include "rusty/box.hpp"
 
-// Rust-idiomatic API
-auto box1 = rusty::Box<int>::new_(42);      // Box::new()
-auto box2 = rusty::make_box<int>(42);             // Short form
-
-// C++-friendly API (also supported)
-auto box4 = rusty::make_box<int>(42);
+// Factory method API
+auto box1 = rusty::Box<int>::make(42);      // Box::make()
+auto box2 = rusty::make_box<int>(42);       // Short form
 
 // Move ownership
-auto box5 = std::move(box1);  // box1 is now invalid
+auto box3 = std::move(box1);  // box1 is now invalid
 
-// Rust-style methods
-int* raw = box2.into_raw();   // Extract raw pointer (Rust style)
+// Extract raw pointer
+int* raw = box2.into_raw();   // Rust style
 // or
-int* raw2 = box3.release();   // C++ style
+int* raw2 = box2.release();   // C++ style
 
 // Automatic cleanup when Box goes out of scope
 ```
@@ -40,15 +37,13 @@ int* raw2 = box3.release();   // C++ style
 ```cpp
 #include "rusty/arc.hpp"
 
-// Rust-idiomatic API
-auto arc1 = rusty::Arc<int>::new_(100);      // Arc::new()
+// Factory method API
+auto arc1 = rusty::Arc<int>::make(100);      // Arc::make()
 auto arc2 = rusty::arc<int>(100);            // Short form
-
-// C++-friendly API
-auto arc4 = rusty::make_arc<int>(100);
+auto arc3 = rusty::make_arc<int>(100);       // Alternative
 
 // Clone increases ref count
-auto arc5 = arc1.clone();
+auto arc4 = arc1.clone();
 
 // Thread-safe reference counting
 // Immutable access only
@@ -63,12 +58,10 @@ auto arc5 = arc1.clone();
 ```cpp
 #include "rusty/rc.hpp"
 
-// Rust-idiomatic API
-auto rc1 = rusty::Rc<int>::new_(50);        // Rc::new()
+// Factory method API
+auto rc1 = rusty::Rc<int>::make(50);        // Rc::make()
 auto rc2 = rusty::rc<int>(50);              // Short form
-
-// C++-friendly API
-auto rc3 = rusty::make_rc<int>(50);
+auto rc3 = rusty::make_rc<int>(50);         // Alternative
 
 // Clone increases ref count
 auto rc4 = rc1.clone();
@@ -85,9 +78,9 @@ auto rc4 = rc1.clone();
 ```cpp
 #include "rusty/vec.hpp"
 
-// Rust-idiomatic API
-auto vec1 = rusty::Vec<int>::new_();           // Vec::new()
-auto vec2 = rusty::Vec<int>::with_capacity(10); // Vec::with_capacity()
+// Factory method API
+auto vec1 = rusty::Vec<int>::make();             // Vec::make()
+auto vec2 = rusty::Vec<int>::with_capacity(10);  // Vec::with_capacity()
 
 // Standard usage
 vec1.push(10);

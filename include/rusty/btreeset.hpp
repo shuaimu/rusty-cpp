@@ -23,7 +23,7 @@ public:
     BTreeSet() = default;
     
     // @lifetime: owned
-    static BTreeSet new_() {
+    static auto make() {
         return BTreeSet();
     }
     
@@ -392,7 +392,7 @@ public:
 template<typename T>
 // @lifetime: owned
 BTreeSet<T> btreeset() {
-    return BTreeSet<T>::new_();
+    return BTreeSet<T>::make();
 }
 
 // Create BTreeSet from Vec
