@@ -1,6 +1,8 @@
 # RustyCpp Annotation Quick Reference
 
-This is a comprehensive reference for all annotation types supported by RustyCpp.
+> **📘 This is a quick reference for syntax lookup. For complete documentation with examples, migration guides, and detailed explanations, see [annotations.md](annotations.md).**
+
+Quick syntax reference for all annotation types supported by RustyCpp.
 
 ## Annotation Types Overview
 

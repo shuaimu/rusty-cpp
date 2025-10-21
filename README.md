@@ -328,7 +328,7 @@ void safe_with_stl_marked_unsafe() {
 }
 ```
 
-This forces you to audit external code before using it in safe contexts. See [External Annotations](docs/unified_annotations.md) for more details on annotating STL functions.
+This forces you to audit external code before using it in safe contexts. See [Complete Annotations Guide](docs/annotations.md) for comprehensive documentation on all annotation features, including safety, lifetime, external, and STL annotations.
 
 ### 📝 Examples
 
@@ -434,7 +434,7 @@ void example() {
 // }
 ```
 
-See [docs/unified_annotations.md](docs/unified_annotations.md) for annotating STL functions.
+See [Complete Annotations Guide](docs/annotations.md) for all annotation features.
 
 #### External Function Annotations
 
@@ -457,41 +457,9 @@ void use_third_party() {
 }
 ```
 
-Features:
-- Combined safety + lifetime annotations
-- Pre-configured for common C/C++ libraries
-- Pattern-based matching for groups of functions
-- Library profiles for easy configuration
+See [Complete Annotations Guide](docs/annotations.md) for comprehensive documentation on safety annotations, lifetime annotations, external annotations, and STL handling.
 
-See [docs/unified_annotations.md](docs/unified_annotations.md) for details.
-
-#### In-Place Lifetime Annotations
-
-Annotate your own functions directly in the source code:
-
-```cpp
-// @safe
-class Container {
-    std::vector<int> data;
-public:
-    // @lifetime: (&'a, size_t) -> &'a
-    const int& get(size_t idx) const { 
-        return data[idx];  // Return lifetime tied to 'this'
-    }
-    
-    // @lifetime: (&'a mut) -> void
-    void clear() { 
-        data.clear();  // Mutable borrow of 'this'
-    }
-    
-    // @lifetime: owned
-    std::vector<int> clone() const { 
-        return data;  // Returns owned copy
-    }
-};
-```
-
-See [docs/inline_lifetime_annotations.md](docs/inline_lifetime_annotations.md) for complete guide.
+For detailed examples, migration guides, troubleshooting, and complete reference tables, see [Complete Annotations Guide](docs/annotations.md).
 
 ---
 
