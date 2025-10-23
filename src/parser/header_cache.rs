@@ -171,12 +171,14 @@ impl HeaderCache {
         if entity.get_kind() == EntityKind::Namespace {
             if let Some(safety) = parse_entity_safety(entity) {
                 current_namespace_safety = Some(safety);
-                // debug_println!("DEBUG SAFETY: Found namespace with {:?} annotation", safety);
+                if let Some(name) = entity.get_name() {
+                    debug_println!("DEBUG SAFETY: Found namespace '{}' with {:?} annotation", name, safety);
+                }
             }
         }
         
         match entity.get_kind() {
-            EntityKind::FunctionDecl | EntityKind::Method => {
+            EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor => {
                 // Extract lifetime annotations
                 if let Some(sig) = extract_annotations(entity) {
                     self.signatures.insert(sig.name.clone(), sig);
@@ -198,13 +200,13 @@ impl HeaderCache {
                 // }
                 
                 if let Some(safety_mode) = safety {
-                    // Use qualified name for methods to avoid collisions
-                    let name = if entity.get_kind() == EntityKind::Method {
+                    // Use qualified name for methods and constructors to avoid collisions
+                    let name = if entity.get_kind() == EntityKind::Method || entity.get_kind() == EntityKind::Constructor {
                         crate::parser::ast_visitor::get_qualified_name(entity)
                     } else {
                         entity.get_name().unwrap_or_else(|| "anonymous".to_string())
                     };
-                    
+
                     self.safety_annotations.insert(name.clone(), safety_mode);
                     debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation in header", name, safety_mode);
                 }

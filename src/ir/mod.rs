@@ -114,6 +114,11 @@ pub enum IrStatement {
     // Safety markers
     EnterUnsafe,
     ExitUnsafe,
+    // Variable usage (for checking moved state)
+    UseVariable {
+        var: String,
+        operation: String, // "dereference", "method_call", etc.
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +249,7 @@ fn get_statement_line(stmt: &crate::parser::Statement) -> Option<u32> {
         Statement::ReferenceBinding { location, .. } => Some(location.line),
         Statement::FunctionCall { location, .. } => Some(location.line),
         Statement::If { location, .. } => Some(location.line),
+        Statement::ExpressionStatement { location, .. } => Some(location.line),
         _ => None,
     }
 }
@@ -401,11 +407,23 @@ fn convert_statement(
             // Standalone function call (no assignment)
             let mut statements = Vec::new();
             let mut arg_names = Vec::new();
-            
+
+            // Check if this is a method call (has :: or is an operator)
+            let is_method_call = name.contains("::operator") ||
+                                 name.contains("::");
+
             // Process arguments, looking for std::move
-            for arg in args {
+            for (i, arg) in args.iter().enumerate() {
                 match arg {
                     crate::parser::Expression::Variable(var) => {
+                        // For method calls, the first arg is the receiver object
+                        if is_method_call && i == 0 {
+                            // Check if the receiver has been moved
+                            statements.push(IrStatement::UseVariable {
+                                var: var.clone(),
+                                operation: format!("call method '{}'", name),
+                            });
+                        }
                         arg_names.push(var.clone());
                     }
                     crate::parser::Expression::Move(inner) => {
@@ -422,13 +440,13 @@ fn convert_statement(
                     _ => {}
                 }
             }
-            
+
             statements.push(IrStatement::CallExpr {
                 func: name.clone(),
                 args: arg_names,
                 result: None,
             });
-            
+
             Ok(Some(statements))
         }
         Statement::Return(expr) => {
@@ -485,6 +503,27 @@ fn convert_statement(
                 then_branch: then_ir,
                 else_branch: else_ir,
             }]))
+        }
+        Statement::ExpressionStatement { expr, .. } => {
+            // Handle expression statements (dereference, method calls, etc.)
+            match expr {
+                crate::parser::Expression::Dereference(inner) => {
+                    // Extract the variable being dereferenced
+                    if let crate::parser::Expression::Variable(var) = inner.as_ref() {
+                        Ok(Some(vec![IrStatement::UseVariable {
+                            var: var.clone(),
+                            operation: "dereference".to_string(),
+                        }]))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                crate::parser::Expression::AddressOf(inner) => {
+                    // Address-of doesn't use the value, so no moved-state check needed
+                    Ok(None)
+                }
+                _ => Ok(None),
+            }
         }
         _ => Ok(None),
     }

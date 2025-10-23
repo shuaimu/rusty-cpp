@@ -472,7 +472,23 @@ fn process_statement(
                 ownership_tracker.merge_states(&state_after_then, &state_before_if);
             }
         }
-        
+
+        crate::ir::IrStatement::UseVariable { var, operation } => {
+            // Skip checking if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            // Check if the variable has been moved
+            let var_state = ownership_tracker.get_ownership(var);
+            if var_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Use after move: cannot {} variable '{}' because it has been moved",
+                    operation, var
+                ));
+            }
+        }
+
         _ => {}
     }
 }

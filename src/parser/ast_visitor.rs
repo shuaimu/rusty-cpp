@@ -114,6 +114,11 @@ pub enum Statement {
         else_branch: Option<Vec<Statement>>,
         location: SourceLocation,
     },
+    // Expression statements (e.g., standalone dereference, method calls)
+    ExpressionStatement {
+        expr: Expression,
+        location: SourceLocation,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -352,44 +357,66 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     continue;
                 }
                 
-                for c in children {
-                    match c.get_kind() {
-                        EntityKind::MemberRefExpr => {
-                            // Handle member function calls
-                            if name == "unknown" {
+                // Two-pass approach: identify name-providing child, then extract args
+                let mut name_providing_child_idx: Option<usize> = None;
+
+                // Pass 1: If name still unknown, find it; otherwise identify which child has it
+                if name == "unknown" {
+                    for (i, c) in children.iter().enumerate() {
+                        match c.get_kind() {
+                            EntityKind::MemberRefExpr => {
                                 if let Some(ref_entity) = c.get_reference() {
                                     if let Some(n) = ref_entity.get_name() {
-                                        // Build qualified name for member functions
                                         if ref_entity.get_kind() == EntityKind::Method {
                                             name = get_qualified_name(&ref_entity);
                                         } else {
                                             name = n;
                                         }
+                                        name_providing_child_idx = Some(i);
+                                        break;
                                     }
                                 }
                             }
-                        }
-                        EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
-                            if name == "unknown" {
+                            EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
                                 if let Some(n) = c.get_name() {
                                     name = n;
-                                }
-                            } else {
-                                // This is an argument
-                                if let Some(expr) = extract_expression(&c) {
-                                    args.push(expr);
+                                    name_providing_child_idx = Some(i);
+                                    break;
                                 }
                             }
+                            _ => {}
                         }
-                        _ => {
-                            // Try to extract as argument
-                            if let Some(expr) = extract_expression(&c) {
-                                args.push(expr);
+                    }
+                } else {
+                    // Name already known, find which child provides it
+                    for (i, c) in children.iter().enumerate() {
+                        match c.get_kind() {
+                            EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                                if let Some(child_name) = c.get_name() {
+                                    if name.ends_with(&child_name) || name == child_name {
+                                        name_providing_child_idx = Some(i);
+                                        break;
+                                    }
+                                }
                             }
+                            _ => {}
                         }
                     }
                 }
+
+                // Pass 2: Extract arguments, skipping name-providing child
+                for (i, c) in children.into_iter().enumerate() {
+                    if Some(i) == name_providing_child_idx {
+                        continue;  // Skip function name
+                    }
+
+                    // Extract as argument
+                    if let Some(expr) = extract_expression(&c) {
+                        args.push(expr);
+                    }
+                }
                 
+                debug_println!("DEBUG STMT: Creating FunctionCall statement: name='{}', args={:?}", name, args);
                 statements.push(Statement::FunctionCall {
                     name,
                     args,
@@ -451,10 +478,25 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     location: extract_location(&child),
                 });
             }
+            EntityKind::UnaryOperator => {
+                // Handle standalone dereference operations
+                if let Some(expr) = extract_expression(&child) {
+                    // Only add as statement if it's a dereference or address-of
+                    match &expr {
+                        Expression::Dereference(_) | Expression::AddressOf(_) => {
+                            statements.push(Statement::ExpressionStatement {
+                                expr,
+                                location: extract_location(&child),
+                            });
+                        }
+                        _ => {} // Ignore other unary operators for now
+                    }
+                }
+            }
             _ => {}
         }
     }
-    
+
     statements
 }
 
@@ -488,8 +530,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     return None;  // Not a function call, it's a variable declaration
                 }
                 
-                // Build qualified name for member functions
-                if ref_entity.get_kind() == EntityKind::Method {
+                // Build qualified name for member functions and constructors
+                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
                     name = get_qualified_name(&ref_entity);
                 }
             }
@@ -506,8 +548,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         debug_println!("DEBUG AST: MemberRefExpr references: {:?}", ref_entity.get_name());
                         if let Some(n) = ref_entity.get_name() {
                             if name == "unknown" {
-                                // Build qualified name for member functions
-                                if ref_entity.get_kind() == EntityKind::Method {
+                                // Build qualified name for member functions and constructors
+                                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
                                     name = get_qualified_name(&ref_entity);
                                 } else {
                                     name = n;
@@ -554,29 +596,62 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             
-            for c in children {
-                match c.get_kind() {
-                    EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
-                        if name == "unknown" {
+            // Two-pass approach to avoid adding function name as an argument
+            // Pass 1: If name is still unknown, find which child provides it
+            // Also identify children that represent the function name (not arguments)
+            let mut name_providing_child_idx: Option<usize> = None;
+            if name == "unknown" {
+                for (i, c) in children.iter().enumerate() {
+                    match c.get_kind() {
+                        EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
                             if let Some(n) = c.get_name() {
                                 name = n;
-                            }
-                        } else {
-                            if let Some(expr) = extract_expression(&c) {
-                                args.push(expr);
+                                name_providing_child_idx = Some(i);
+                                break;
                             }
                         }
+                        _ => {}
                     }
-                    _ => {
-                        if let Some(expr) = extract_expression(&c) {
-                            args.push(expr);
+                }
+            } else {
+                // Name was already extracted, but we still need to identify which child
+                // represents the function name (to skip it when extracting arguments)
+                for (i, c) in children.iter().enumerate() {
+                    match c.get_kind() {
+                        EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                            // Check if this child's name matches or is part of the function name
+                            if let Some(child_name) = c.get_name() {
+                                // Simple heuristic: if the child name matches the end of function name,
+                                // it's likely the function name node, not an argument
+                                if name.ends_with(&child_name) || name == child_name {
+                                    name_providing_child_idx = Some(i);
+                                    break;
+                                }
+                            }
                         }
+                        _ => {}
                     }
+                }
+            }
+
+            // Pass 2: Extract arguments, skipping the name-providing child
+            for (i, c) in children.into_iter().enumerate() {
+                // Skip the child that provided the function name
+                if Some(i) == name_providing_child_idx {
+                    continue;
+                }
+
+                // Extract all other children as arguments
+                if let Some(expr) = extract_expression(&c) {
+                    args.push(expr);
                 }
             }
             
             // Check if this is std::move
             debug_println!("DEBUG: Found function call: name='{}', args_count={}", name, args.len());
+            for (i, arg) in args.iter().enumerate() {
+                debug_println!("  DEBUG: arg[{}] = {:?}", i, arg);
+            }
             if name == "move" || name == "std::move" || name.ends_with("::move") || name.contains("move") {
                 debug_println!("DEBUG: Detected move function!");
                 // std::move takes one argument and we treat it as a Move expression
@@ -590,11 +665,17 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         }
         EntityKind::UnexposedExpr => {
             // UnexposedExpr often wraps other expressions, so look at its children
+            debug_println!("DEBUG EXTRACT: UnexposedExpr with name={:?}, {} children",
+                entity.get_name(), entity.get_children().len());
             for child in entity.get_children() {
+                debug_println!("  DEBUG EXTRACT: Child kind={:?}, name={:?}",
+                    child.get_kind(), child.get_name());
                 if let Some(expr) = extract_expression(&child) {
+                    debug_println!("  DEBUG EXTRACT: Returning {:?}", expr);
                     return Some(expr);
                 }
             }
+            debug_println!("  DEBUG EXTRACT: Returning None");
             None
         }
         EntityKind::BinaryOperator => {
@@ -615,7 +696,15 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             None
         }
         EntityKind::IntegerLiteral => {
-            entity.get_name().map(Expression::Literal)
+            // IntegerLiterals often have name=None, try display_name or tokens
+            if let Some(name) = entity.get_name() {
+                Some(Expression::Literal(name))
+            } else if let Some(display) = entity.get_display_name() {
+                Some(Expression::Literal(display))
+            } else {
+                // Try to get the literal value from the token
+                None  // Fall back to None if we can't extract it
+            }
         }
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&) or dereference (*)
