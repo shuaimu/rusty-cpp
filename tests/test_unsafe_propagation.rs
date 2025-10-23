@@ -9,8 +9,8 @@ fn compile_and_check(source: &str) -> Result<Vec<String>, String> {
     
     let output = Command::new("cargo")
         .args(&["run", "--", file_path.to_str().unwrap()])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .map_err(|e| format!("Failed to run checker: {}", e))?;
     

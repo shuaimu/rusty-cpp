@@ -26,7 +26,7 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_scopes.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -56,7 +56,7 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_double_borrow.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -94,7 +94,7 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_nested.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
+        
         .output()
         .expect("Failed to run borrow checker");
     

@@ -17,8 +17,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_pointer_deref.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -47,8 +47,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_address_of.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -79,8 +79,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_pointers.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -111,8 +111,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_references_safe.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -144,8 +144,8 @@ namespace myapp {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_namespace_pointers.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -181,8 +181,8 @@ void unsafe_func() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_mixed_pointers.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     

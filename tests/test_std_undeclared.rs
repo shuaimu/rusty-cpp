@@ -121,8 +121,7 @@ void safe_function() {
     let output = run_checker(&cpp_path);
     
     // Should not have violations for whitelisted functions
-    // But might have issues with pointer operations if any
-    assert!(!output.contains("printf") || output.contains("No borrow"),
+    assert!(output.contains("no violations found") || output.contains("✓"),
             "Whitelisted functions should be allowed, got: {}", output);
 }
 
@@ -138,9 +137,7 @@ fn run_checker(cpp_file: &std::path::Path) -> String {
     cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
         .env("Z3_SYS_Z3_HEADER", z3_header);
     
-    if cfg!(target_os = "macos") {
-        cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
-    } else {
+    if !cfg!(target_os = "macos") {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
     

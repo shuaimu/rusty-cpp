@@ -463,12 +463,12 @@ fn process_statement(
                     process_statement(stmt, ownership_tracker, errors);
                 }
                 let state_after_else = ownership_tracker.clone_state();
-                
-                // Merge states: a variable is moved only if moved in BOTH branches
+
+                // Merge states: a variable is moved if moved in ANY branch (Rust's aggressive approach)
                 ownership_tracker.merge_states(&state_after_then, &state_after_else);
             } else {
                 // No else branch: merge with original state
-                // Variable is moved only if moved in then branch AND was moved before
+                // Variable is moved if moved in then branch (aggressive approach)
                 ownership_tracker.merge_states(&state_after_then, &state_before_if);
             }
         }
@@ -689,17 +689,14 @@ impl OwnershipTracker {
     }
     
     fn merge_states(&mut self, then_state: &TrackerState, else_state: &TrackerState) {
-        // Merge ownership states conservatively
-        // A variable is considered moved only if moved in BOTH branches
+        // Merge ownership states aggressively (matching Rust's behavior)
+        // A variable is considered moved if moved in ANY branch
         for (var, then_ownership) in &then_state.ownership {
             if let Some(else_ownership) = else_state.ownership.get(var) {
-                if *then_ownership == OwnershipState::Moved && *else_ownership == OwnershipState::Moved {
-                    // Moved in both branches - stays moved
+                if *then_ownership == OwnershipState::Moved || *else_ownership == OwnershipState::Moved {
+                    // Moved in at least one branch - mark as moved (Rust's aggressive approach)
+                    // This is sound: if any path moves the variable, it's unsafe to use after
                     self.ownership.insert(var.clone(), OwnershipState::Moved);
-                } else if *then_ownership == OwnershipState::Moved || *else_ownership == OwnershipState::Moved {
-                    // Moved in only one branch - mark as "maybe moved" (for now, treat as owned)
-                    // In a more sophisticated analysis, we'd track MaybeMoved state
-                    self.ownership.insert(var.clone(), OwnershipState::Owned);
                 } else {
                     // Not moved in either branch - use the common state
                     self.ownership.insert(var.clone(), then_ownership.clone());

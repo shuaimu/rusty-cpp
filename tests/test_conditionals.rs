@@ -5,6 +5,7 @@ use std::fs;
 fn test_if_else_move_in_both_branches() {
     // Variable moved in both branches - should be moved after if
     let test_code = r#"
+// @safe
 class UniquePtr {
 public:
     UniquePtr(int* p) : ptr(p) {}
@@ -16,16 +17,17 @@ UniquePtr&& move(UniquePtr& p) {
     return static_cast<UniquePtr&&>(p);
 }
 
+// @safe
 void test() {
     int* raw = new int(42);
     UniquePtr ptr(raw);
-    
+
     if (raw != nullptr) {
         UniquePtr a = move(ptr);
     } else {
         UniquePtr b = move(ptr);
     }
-    
+
     // ptr is moved in both branches
     UniquePtr c = move(ptr);  // Error: use after move
 }
@@ -35,8 +37,6 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_both.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
         .output()
         .expect("Failed to run borrow checker");
     
@@ -52,8 +52,9 @@ void test() {
 
 #[test]
 fn test_if_else_move_in_one_branch() {
-    // Variable moved in only one branch - should NOT be considered moved after
+    // Variable moved in only one branch - should be considered moved (Rust's aggressive approach)
     let test_code = r#"
+// @safe
 class UniquePtr {
 public:
     UniquePtr(int* p) : ptr(p) {}
@@ -65,21 +66,21 @@ UniquePtr&& move(UniquePtr& p) {
     return static_cast<UniquePtr&&>(p);
 }
 
+// @safe
 void test() {
     int* raw = new int(42);
     UniquePtr ptr(raw);
     int x = 0;
-    
+
     if (x == 0) {
         UniquePtr a = move(ptr);
     } else {
         // ptr not moved in else branch
         int y = 42;
     }
-    
-    // ptr may or may not be moved - conservative analysis should allow this
-    // (though in reality this would be a bug if x == 0)
-    int* p = ptr.ptr;  // Should be OK in conservative analysis
+
+    // ptr moved in one branch - Rust marks it as moved (aggressive)
+    int* p = ptr.ptr;  // ERROR: should detect use after move
 }
 "#;
     
@@ -87,16 +88,14 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_one.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
         .output()
         .expect("Failed to run borrow checker");
     
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
-    // Should NOT report error (conservative analysis)
-    assert!(!stdout.contains("after move"),
-            "Should not report use-after-move when moved in only one branch. Output: {}", stdout);
+
+    // Should report error (Rust's aggressive analysis)
+    assert!(stdout.contains("moved") || stdout.contains("violation"),
+            "Should report use-after-move when moved in one branch (Rust's aggressive approach). Output: {}", stdout);
     
     // Clean up
     let _ = fs::remove_file("test_if_one.cpp");
@@ -106,6 +105,7 @@ void test() {
 fn test_if_no_else_with_move() {
     // If without else - move in if branch
     let test_code = r#"
+// @safe
 class UniquePtr {
 public:
     UniquePtr(int* p) : ptr(p) {}
@@ -117,18 +117,19 @@ UniquePtr&& move(UniquePtr& p) {
     return static_cast<UniquePtr&&>(p);
 }
 
+// @safe
 void test() {
     int* raw = new int(42);
     UniquePtr ptr(raw);
     int x = 0;
-    
+
     if (x == 0) {
         UniquePtr a = move(ptr);
     }
     // No else branch
-    
-    // ptr may or may not be moved
-    int* p = ptr.ptr;  // Should be OK (conservative)
+
+    // ptr moved in if - Rust marks it as moved (aggressive)
+    int* p = ptr.ptr;  // ERROR: should detect use after move
 }
 "#;
     
@@ -136,16 +137,14 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_no_else.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
         .output()
         .expect("Failed to run borrow checker");
     
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
-    // Should NOT report error (conservative analysis)
-    assert!(!stdout.contains("after move"),
-            "Should not report error for if without else. Output: {}", stdout);
+
+    // Should report error (Rust's aggressive analysis)
+    assert!(stdout.contains("moved") || stdout.contains("violation"),
+            "Should report error for if without else (Rust's aggressive approach). Output: {}", stdout);
     
     // Clean up
     let _ = fs::remove_file("test_if_no_else.cpp");
@@ -155,10 +154,11 @@ void test() {
 fn test_nested_if_with_borrows() {
     // Test nested if statements with borrows
     let test_code = r#"
+// @safe
 void test() {
     int value = 42;
     int x = 0;
-    
+
     if (x == 0) {
         int& ref1 = value;
         if (x == 1) {
@@ -172,8 +172,6 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_nested_if.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
         .output()
         .expect("Failed to run borrow checker");
     
@@ -191,10 +189,11 @@ void test() {
 fn test_if_else_different_borrows() {
     // Different borrows in different branches
     let test_code = r#"
+// @safe
 void test() {
     int value = 42;
     int x = 0;
-    
+
     if (x == 0) {
         int& ref1 = value;
         ref1 = 100;
@@ -202,7 +201,7 @@ void test() {
         const int& ref2 = value;
         int y = ref2;
     }
-    
+
     // Both refs out of scope
     int& ref3 = value;  // Should be OK
 }
@@ -212,8 +211,6 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_else_borrows.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
         .output()
         .expect("Failed to run borrow checker");
     

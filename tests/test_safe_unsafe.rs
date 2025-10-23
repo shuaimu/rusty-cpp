@@ -17,8 +17,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_default.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -62,8 +62,8 @@ void test() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_safe_namespace.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -112,8 +112,8 @@ void safe_func() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_safe_func.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -166,8 +166,8 @@ void safe_func() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_func.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
@@ -208,8 +208,8 @@ void unchecked_function() {
     
     let output = Command::new("cargo")
         .args(&["run", "--", "test_mixed.cpp"])
-        .env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h")
-        .env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib")
+        
+        
         .output()
         .expect("Failed to run borrow checker");
     
