@@ -12,7 +12,7 @@ using namespace rusty;
 void test_arc_construction() {
     printf("test_arc_construction: ");
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         assert(arc1.is_valid());
         assert(*arc1 == 42);
         assert(arc1.strong_count() == 1);
@@ -32,7 +32,7 @@ void test_arc_construction() {
 void test_arc_clone() {
     printf("test_arc_clone: ");
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         assert(arc1.strong_count() == 1);
         
         auto arc2 = arc1.clone();
@@ -54,7 +54,7 @@ void test_arc_clone() {
 void test_arc_move() {
     printf("test_arc_move: ");
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         auto arc2 = arc1.clone();
         assert(arc1.strong_count() == 2);
 
@@ -70,7 +70,7 @@ void test_arc_move() {
 void test_arc_get_mut() {
     printf("test_arc_get_mut: ");
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         
         // Should get mutable reference when unique
         int* mut_ref = arc1.get_mut();
@@ -105,7 +105,7 @@ void test_arc_destructor() {
     
     // Test 1: Arc properly manages memory
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         auto arc2 = arc1.clone();
         assert(arc1.strong_count() == 2);
         assert(arc2.strong_count() == 2);
@@ -114,7 +114,7 @@ void test_arc_destructor() {
     
     // Test 2: Value is preserved through clones
     {
-        auto arc1 = Arc<int>::new_(100);
+        auto arc1 = Arc<int>::make(100);
         auto arc2 = arc1.clone();
         auto arc3 = arc2.clone();
         assert(*arc1 == 100);
@@ -129,7 +129,7 @@ void test_arc_destructor() {
 void test_arc_thread_safety() {
     printf("test_arc_thread_safety: ");
     {
-        auto arc = Arc<int>::new_(0);
+        auto arc = Arc<int>::make(0);
         std::vector<std::thread> threads;
         
         // Create multiple threads that clone the Arc
@@ -158,7 +158,7 @@ void test_arc_thread_safety() {
 void test_arc_weak() {
     printf("test_arc_weak: ");
     {
-        auto arc1 = Arc<int>::new_(42);
+        auto arc1 = Arc<int>::make(42);
         auto weak = downgrade(arc1);
 
         assert(arc1.strong_count() == 1);
@@ -174,7 +174,7 @@ void test_arc_weak() {
     {
         sync::Weak<int> weak;
         {
-            auto arc = Arc<int>::new_(99);
+            auto arc = Arc<int>::make(99);
             weak = downgrade(arc);
             assert(!weak.expired());
         }
@@ -184,7 +184,7 @@ void test_arc_weak() {
     }
 
     {
-        auto arc = Arc<int>::new_(7);
+        auto arc = Arc<int>::make(7);
         auto weak = downgrade(arc);
         std::thread t([weak]() mutable {
             auto upgraded = weak.upgrade();
@@ -213,14 +213,14 @@ void test_arc_empty() {
 void test_arc_assignment() {
     printf("test_arc_assignment: ");
     {
-        auto arc1 = Arc<int>::new_(42);
-        auto arc2 = Arc<int>::new_(100);
+        auto arc1 = Arc<int>::make(42);
+        auto arc2 = Arc<int>::make(100);
         
         arc2 = arc1;  // Copy assignment
         assert(arc1.strong_count() == 2);
         assert(*arc2 == 42);
         
-        auto arc3 = Arc<int>::new_(200);
+        auto arc3 = Arc<int>::make(200);
         arc3 = std::move(arc1);  // Move assignment
         assert(!arc1.is_valid());
         assert(arc3.strong_count() == 2);

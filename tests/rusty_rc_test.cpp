@@ -10,12 +10,12 @@ using namespace rusty;
 void test_rc_construction() {
     printf("test_rc_construction: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         assert(rc1.is_valid());
         assert(*rc1 == 42);
         assert(rc1.strong_count() == 1);
 
-        auto rc2 = Rc<int>::new_(100);
+        auto rc2 = Rc<int>::make(100);
         assert(rc2.is_valid());
         assert(*rc2 == 100);
 
@@ -30,7 +30,7 @@ void test_rc_construction() {
 void test_rc_clone() {
     printf("test_rc_clone: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         assert(rc1.strong_count() == 1);
         
         auto rc2 = rc1.clone();
@@ -52,7 +52,7 @@ void test_rc_clone() {
 void test_rc_move() {
     printf("test_rc_move: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         auto rc2 = rc1.clone();
         assert(rc1.strong_count() == 2);
 
@@ -68,7 +68,7 @@ void test_rc_move() {
 void test_rc_get_mut() {
     printf("test_rc_get_mut: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         
         // Should get mutable reference when unique
         int* mut_ref = rc1.get_mut();
@@ -88,7 +88,7 @@ void test_rc_get_mut() {
 void test_rc_make_unique() {
     printf("test_rc_make_unique: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         auto rc2 = rc1.clone();
         assert(rc1.strong_count() == 2);
         
@@ -116,7 +116,7 @@ void test_rc_destructor() {
     printf("test_rc_destructor: ");
     TestStruct::instances = 0;
     {
-        auto rc1 = Rc<TestStruct>::new_(TestStruct(42));
+        auto rc1 = Rc<TestStruct>::make(TestStruct(42));
         // There will be at least one instance
         assert(TestStruct::instances >= 1);
         
@@ -141,7 +141,7 @@ void test_rc_destructor() {
 void test_rc_weak() {
     printf("test_rc_weak: ");
     {
-        auto rc1 = Rc<int>::new_(42);
+        auto rc1 = Rc<int>::make(42);
         auto weak = downgrade(rc1);
 
         // Weak references should not change strong count
@@ -158,7 +158,7 @@ void test_rc_weak() {
     {
         rc::Weak<int> weak;
         {
-            auto rc = Rc<int>::new_(99);
+            auto rc = Rc<int>::make(99);
             weak = downgrade(rc);
             assert(!weak.expired());
         }
@@ -188,14 +188,14 @@ void test_rc_empty() {
 void test_rc_assignment() {
     printf("test_rc_assignment: ");
     {
-        auto rc1 = Rc<int>::new_(42);
-        auto rc2 = Rc<int>::new_(100);
+        auto rc1 = Rc<int>::make(42);
+        auto rc2 = Rc<int>::make(100);
         
         rc2 = rc1;  // Copy assignment
         assert(rc1.strong_count() == 2);
         assert(*rc2 == 42);
         
-        auto rc3 = Rc<int>::new_(200);
+        auto rc3 = Rc<int>::make(200);
         rc3 = std::move(rc1);  // Move assignment
         assert(!rc1.is_valid());
         assert(rc3.strong_count() == 2);
@@ -207,7 +207,7 @@ void test_rc_assignment() {
 void test_rc_arrow() {
     printf("test_rc_arrow: ");
     {
-        auto rc = Rc<TestStruct>::new_(TestStruct(42));
+        auto rc = Rc<TestStruct>::make(TestStruct(42));
         assert(rc->value == 42);
         
         // Can't modify through const arrow

@@ -9,7 +9,7 @@ using namespace rusty;
 void test_box_construction() {
     printf("test_box_construction: ");
     {
-        auto box1 = Box<int>::new_(42);
+        auto box1 = Box<int>::make(42);
         assert(box1.is_valid());
         assert(*box1 == 42);
         
@@ -28,7 +28,7 @@ void test_box_construction() {
 void test_box_move() {
     printf("test_box_move: ");
     {
-        auto box1 = Box<int>::new_(42);
+        auto box1 = Box<int>::make(42);
         assert(box1.is_valid());
         
         auto box2 = std::move(box1);
@@ -49,13 +49,13 @@ void test_box_move() {
 void test_box_raw_pointer() {
     printf("test_box_raw_pointer: ");
     {
-        auto box1 = Box<int>::new_(42);
+        auto box1 = Box<int>::make(42);
         int* raw = box1.into_raw();
         assert(!box1.is_valid());  // box1 should be empty after into_raw
         assert(*raw == 42);
         delete raw;  // Manual cleanup required after into_raw
         
-        auto box2 = Box<int>::new_(100);
+        auto box2 = Box<int>::make(100);
         int* raw2 = box2.release();  // C++ style alias
         assert(!box2.is_valid());
         assert(*raw2 == 100);
@@ -68,7 +68,7 @@ void test_box_raw_pointer() {
 void test_box_reset() {
     printf("test_box_reset: ");
     {
-        auto box1 = Box<int>::new_(42);
+        auto box1 = Box<int>::make(42);
         assert(box1.is_valid());
         
         box1.reset(new int(100));
