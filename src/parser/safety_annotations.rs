@@ -215,15 +215,14 @@ fn extract_function_name(line: &str) -> Option<String> {
             // Remove any qualifiers like * or & but keep :: for qualified names
             let name = last.trim_start_matches('*').trim_start_matches('&');
             if !name.is_empty() {
-                // If the line contains :: and looks like a method definition,
-                // try to build the qualified name
-                if line.contains("::") && !line.trim_start().starts_with("//") {
-                    // Look for pattern like "ReturnType ClassName::methodName("
-                    // or "ClassName::methodName("
-                    if let Some(qualified_name) = extract_qualified_function_name(before_paren) {
-                        return Some(qualified_name);
-                    }
+                // Check if THIS part (the last token) contains "::"
+                // If it does, it's a qualified method name like "MyClass::myMethod"
+                // If it doesn't but the line has "::", the "::" is in the return type
+                if name.contains("::") {
+                    // This is a qualified method name (e.g., "MyClass::myMethod")
+                    return Some(name.to_string());
                 }
+                // Otherwise, return the simple function name
                 return Some(name.to_string());
             }
         }

@@ -363,9 +363,13 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 // Pass 1: If name still unknown, find it; otherwise identify which child has it
                 if name == "unknown" {
                     for (i, c) in children.iter().enumerate() {
+                        debug_println!("DEBUG AST: Child {}: kind={:?}, name={:?}", i, c.get_kind(), c.get_name());
                         match c.get_kind() {
                             EntityKind::MemberRefExpr => {
+                                debug_println!("DEBUG AST: Found MemberRefExpr!");
                                 if let Some(ref_entity) = c.get_reference() {
+                                    debug_println!("DEBUG AST: MemberRefExpr has reference: kind={:?}, name={:?}",
+                                        ref_entity.get_kind(), ref_entity.get_name());
                                     if let Some(n) = ref_entity.get_name() {
                                         if ref_entity.get_kind() == EntityKind::Method {
                                             name = get_qualified_name(&ref_entity);
@@ -375,6 +379,8 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                         name_providing_child_idx = Some(i);
                                         break;
                                     }
+                                } else {
+                                    debug_println!("DEBUG AST: MemberRefExpr has NO reference!");
                                 }
                             }
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
@@ -389,11 +395,49 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 } else {
                     // Name already known, find which child provides it
+                    debug_println!("DEBUG AST: Name already known: '{}', searching {} children", name, children.len());
                     for (i, c) in children.iter().enumerate() {
+                        debug_println!("DEBUG AST: Child {}: kind={:?}, name={:?}", i, c.get_kind(), c.get_name());
                         match c.get_kind() {
+                            EntityKind::MemberRefExpr => {
+                                // For .method() calls, MemberRefExpr contains the method name
+                                debug_println!("DEBUG AST: Exploring MemberRefExpr for receiver object:");
+                                debug_println!("  - name: {:?}", c.get_name());
+                                debug_println!("  - display_name: {:?}", c.get_display_name());
+                                debug_println!("  - num children: {}", c.get_children().len());
+
+                                // Check if MemberRefExpr has children
+                                for (child_idx, member_child) in c.get_children().iter().enumerate() {
+                                    debug_println!("    - MemberRefExpr child {}: kind={:?}, name={:?}",
+                                        child_idx, member_child.get_kind(), member_child.get_name());
+                                }
+
+                                // Check semantic parent
+                                if let Some(semantic_parent) = c.get_semantic_parent() {
+                                    debug_println!("  - semantic_parent: kind={:?}, name={:?}",
+                                        semantic_parent.get_kind(), semantic_parent.get_name());
+                                }
+
+                                // Check lexical parent
+                                if let Some(lexical_parent) = c.get_lexical_parent() {
+                                    debug_println!("  - lexical_parent: kind={:?}, name={:?}",
+                                        lexical_parent.get_kind(), lexical_parent.get_name());
+                                }
+
+                                if let Some(child_name) = c.get_name() {
+                                    debug_println!("DEBUG AST: Checking if '{}' matches name '{}'", child_name, name);
+                                    if name.ends_with(&child_name) || name == child_name {
+                                        debug_println!("DEBUG AST: Match found! Setting name_providing_child_idx = {}", i);
+                                        name_providing_child_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
                                 if let Some(child_name) = c.get_name() {
+                                    debug_println!("DEBUG AST: Checking if '{}' matches name '{}'", child_name, name);
                                     if name.ends_with(&child_name) || name == child_name {
+                                        debug_println!("DEBUG AST: Match found! Setting name_providing_child_idx = {}", i);
                                         name_providing_child_idx = Some(i);
                                         break;
                                     }
@@ -402,12 +446,24 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             _ => {}
                         }
                     }
+                    debug_println!("DEBUG AST: name_providing_child_idx = {:?}", name_providing_child_idx);
                 }
 
                 // Pass 2: Extract arguments, skipping name-providing child
                 for (i, c) in children.into_iter().enumerate() {
                     if Some(i) == name_providing_child_idx {
-                        continue;  // Skip function name
+                        // For MemberRefExpr, extract the receiver from its children
+                        if c.get_kind() == EntityKind::MemberRefExpr {
+                            debug_println!("DEBUG AST: Extracting receiver from MemberRefExpr children");
+                            for member_child in c.get_children() {
+                                if let Some(receiver_expr) = extract_expression(&member_child) {
+                                    debug_println!("DEBUG AST: Found receiver: {:?}", receiver_expr);
+                                    args.push(receiver_expr);
+                                    break; // Only take the first child (the receiver)
+                                }
+                            }
+                        }
+                        continue;  // Skip the MemberRefExpr itself
                     }
 
                     // Extract as argument
@@ -667,9 +723,23 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // UnexposedExpr often wraps other expressions, so look at its children
             debug_println!("DEBUG EXTRACT: UnexposedExpr with name={:?}, {} children",
                 entity.get_name(), entity.get_children().len());
+
+            // Check if this UnexposedExpr has a reference (might be a method call)
+            if let Some(ref_entity) = entity.get_reference() {
+                debug_println!("  DEBUG EXTRACT: UnexposedExpr has reference: kind={:?}, name={:?}",
+                    ref_entity.get_kind(), ref_entity.get_name());
+            }
+
             for child in entity.get_children() {
                 debug_println!("  DEBUG EXTRACT: Child kind={:?}, name={:?}",
                     child.get_kind(), child.get_name());
+
+                // Check if child has a reference
+                if let Some(child_ref) = child.get_reference() {
+                    debug_println!("    DEBUG EXTRACT: Child has reference: kind={:?}, name={:?}",
+                        child_ref.get_kind(), child_ref.get_name());
+                }
+
                 if let Some(expr) = extract_expression(&child) {
                     debug_println!("  DEBUG EXTRACT: Returning {:?}", expr);
                     return Some(expr);
