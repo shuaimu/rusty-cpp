@@ -4,6 +4,9 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <fcntl.h>      // For open()
+#include <sys/stat.h>   // For mkdir()
+#include <unistd.h>     // For close()
 
 // Mock third-party library functions
 namespace third_party {

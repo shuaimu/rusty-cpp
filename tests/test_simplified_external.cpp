@@ -5,6 +5,7 @@
 #include "../include/external_annotations.hpp"
 #include <cstring>
 #include <memory>
+#include <vector>
 
 // Mock legacy namespace (entire namespace marked unsafe)
 namespace legacy {
@@ -12,6 +13,15 @@ namespace legacy {
     void* old_malloc(size_t size) { return malloc(size); }
     void old_free(void* ptr) { free(ptr); }
     char* old_strcpy(char* dest, const char* src) { return strcpy(dest, src); }
+
+    // Mock old C-style class (moved into legacy namespace)
+    class OldFileHandler {
+    public:
+        static FILE* open(const char* path) { return fopen(path, "r"); }
+        static void close(FILE* f) { fclose(f); }
+        static size_t read(void* buf, size_t size, FILE* f) { return fread(buf, 1, size, f); }
+        static size_t write(const void* buf, size_t size, FILE* f) { return fwrite(buf, 1, size, f); }
+    };
 }
 
 // Mock vendor library with internal unsafe parts
@@ -20,22 +30,13 @@ namespace vendor {
         int process(int x) { return x + 1; }
         bool validate(int x) { return x > 0; }
     }
-    
+
     namespace internal {
         void* allocate(size_t size) { return malloc(size); }
         void deallocate(void* ptr) { free(ptr); }
         void low_level_operation() { }
     }
 }
-
-// Mock old C-style class
-class OldFileHandler {
-public:
-    static FILE* open(const char* path) { return fopen(path, "r"); }
-    static void close(FILE* f) { fclose(f); }
-    static size_t read(void* buf, size_t size, FILE* f) { return fread(buf, 1, size, f); }
-    static size_t write(const void* buf, size_t size, FILE* f) { return fwrite(buf, 1, size, f); }
-};
 
 // External annotations for this test
 
@@ -46,7 +47,7 @@ public:
 // @external_unsafe: vendor::internal::*
 
 // Mark old C-style class as unsafe
-// @external_unsafe: OldFileHandler::*
+// @external_unsafe: legacy::OldFileHandler::*
 
 // Unified annotations for specific functions
 // @external: {
@@ -109,16 +110,16 @@ namespace test_unsafe_scopes {
         // OldFileHandler class is entirely unsafe
         
         // ERROR: All methods are unsafe
-        // FILE* f = OldFileHandler::open("test.txt");
-        // OldFileHandler::close(f);
+        // FILE* f = legacy::OldFileHandler::open("test.txt");
+        // legacy::OldFileHandler::close(f);
         
         // @unsafe
         {
-            FILE* f = OldFileHandler::open("test.txt");  // OK in unsafe
+            FILE* f = legacy::OldFileHandler::open("test.txt");  // OK in unsafe
             if (f) {
                 char buffer[100];
-                size_t bytes = OldFileHandler::read(buffer, 100, f);  // OK in unsafe
-                OldFileHandler::close(f);  // OK in unsafe
+                size_t bytes = legacy::OldFileHandler::read(buffer, 100, f);  // OK in unsafe
+                legacy::OldFileHandler::close(f);  // OK in unsafe
             }
         }
     }
@@ -237,12 +238,12 @@ namespace test_real_world {
         void save_to_file(const char* path) {
             // @unsafe
             {
-                FILE* f = OldFileHandler::open(path);
+                FILE* f = legacy::OldFileHandler::open(path);
                 if (f) {
                     for (int val : data) {
-                        OldFileHandler::write(&val, sizeof(int), f);
+                        legacy::OldFileHandler::write(&val, sizeof(int), f);
                     }
-                    OldFileHandler::close(f);
+                    legacy::OldFileHandler::close(f);
                 }
             }
         }
