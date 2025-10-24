@@ -15,7 +15,6 @@ pub enum SafetyMode {
 pub struct SafetyContext {
     pub file_default: SafetyMode,
     pub function_overrides: Vec<(String, SafetyMode)>, // Function name -> safety mode
-    pub check_by_default: bool, // If true, all non-@unsafe functions are checked (for @safe namespaces)
 }
 
 
@@ -24,7 +23,6 @@ impl SafetyContext {
         Self {
             file_default: SafetyMode::Undeclared,
             function_overrides: Vec::new(),
-            check_by_default: false,
         }
     }
     
@@ -55,11 +53,7 @@ impl SafetyContext {
     
     /// Check if a specific function should be checked
     pub fn should_check_function(&self, func_name: &str) -> bool {
-        let safety_mode = self.get_function_safety(func_name);
-        // Function is checked if:
-        // 1. It's explicitly marked @safe, OR
-        // 2. check_by_default is true (e.g., in @safe namespace) AND it's not explicitly @unsafe
-        safety_mode == SafetyMode::Safe || (self.check_by_default && safety_mode != SafetyMode::Unsafe)
+        self.get_function_safety(func_name) == SafetyMode::Safe
     }
     
     /// Get the safety mode of a specific function
@@ -182,25 +176,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                     // Check what kind of code element follows
                     if accumulated_line.starts_with("namespace") ||
                        (accumulated_line.contains("namespace") && !accumulated_line.contains("using")) {
-                        // Namespace declaration with @safe/@unsafe annotation
-                        match annotation {
-                            SafetyMode::Safe => {
-                                // @safe namespace: enable checking by default, but functions remain undeclared
-                                context.check_by_default = true;
-                                context.file_default = SafetyMode::Undeclared;
-                                debug_println!("DEBUG SAFETY: Set check_by_default=true for @safe namespace");
-                            },
-                            SafetyMode::Unsafe => {
-                                // @unsafe namespace: disable checking
-                                context.check_by_default = false;
-                                context.file_default = SafetyMode::Unsafe;
-                                debug_println!("DEBUG SAFETY: Set file default to Unsafe (namespace)");
-                            },
-                            SafetyMode::Undeclared => {
-                                // This shouldn't happen, but handle it
-                                context.file_default = SafetyMode::Undeclared;
-                            }
-                        }
+                        // Namespace declaration - applies to whole namespace contents
+                        context.file_default = annotation;
+                        debug_println!("DEBUG SAFETY: Set file default to {:?} (namespace)", annotation);
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function name and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
@@ -314,10 +292,7 @@ namespace myapp {
         file.flush().unwrap();
 
         let context = parse_safety_annotations(file.path()).unwrap();
-        // @safe namespace sets check_by_default=true, but file_default remains Undeclared
-        // This means functions are checked, but remain undeclared unless explicitly marked
-        assert_eq!(context.check_by_default, true);
-        assert_eq!(context.file_default, SafetyMode::Undeclared);
+        assert_eq!(context.file_default, SafetyMode::Safe);
     }
     
     #[test]
