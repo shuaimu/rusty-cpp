@@ -480,7 +480,11 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 });
             }
             EntityKind::ReturnStmt => {
-                statements.push(Statement::Return(None));
+                // Extract the return value expression
+                let return_expr = child.get_children()
+                    .into_iter()
+                    .find_map(|c| extract_expression(&c));
+                statements.push(Statement::Return(return_expr));
             }
             EntityKind::CompoundStmt => {
                 // Regular nested block scope - add scope markers

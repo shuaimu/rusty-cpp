@@ -62,16 +62,20 @@ pub fn check_borrows_with_safety_context(
     safety_context: crate::parser::safety_annotations::SafetyContext
 ) -> Result<Vec<String>, String> {
     use crate::parser::safety_annotations::SafetyMode;
-    
+
     // If the file default is unsafe and no functions are marked safe, skip checking
-    if safety_context.file_default != SafetyMode::Safe && 
+    if safety_context.file_default != SafetyMode::Safe &&
        !safety_context.function_overrides.iter().any(|(_, mode)| *mode == SafetyMode::Safe) &&
        !has_any_safe_functions(&program, &header_cache) {
         return Ok(Vec::new()); // No checking for unsafe code
     }
-    
+
     let mut errors = Vec::new();
-    
+
+    // PHASE 1: Check that safe functions returning references have lifetime annotations
+    let annotation_errors = check_lifetime_annotation_requirements(&program, &header_cache, &safety_context)?;
+    errors.extend(annotation_errors);
+
     // Check each function based on its safety mode
     for function in &program.functions {
         debug_println!("DEBUG: Checking function '{}'", function.name);
@@ -81,7 +85,7 @@ pub fn check_borrows_with_safety_context(
             continue; // Skip unsafe functions
         }
         debug_println!("DEBUG: Function '{}' is safe, checking...", function.name);
-        
+
         let function_errors = check_function(function)?;
         errors.extend(function_errors);
     }
@@ -109,7 +113,7 @@ pub fn check_borrows_with_safety_context(
 
 fn has_any_safe_functions(program: &IrProgram, header_cache: &HeaderCache) -> bool {
     use crate::parser::annotations::SafetyAnnotation;
-    
+
     for function in &program.functions {
         if let Some(sig) = header_cache.get_signature(&function.name) {
             if let Some(SafetyAnnotation::Safe) = sig.safety {
@@ -118,6 +122,68 @@ fn has_any_safe_functions(program: &IrProgram, header_cache: &HeaderCache) -> bo
         }
     }
     false
+}
+
+/// Check if a return type string represents a reference
+fn returns_reference(return_type: &str) -> bool {
+    // Check for reference types: &, const &, const Type&, Type&, etc.
+    // This is a simple heuristic based on the string representation
+    return_type.contains('&') && !return_type.contains("&&") // Exclude rvalue references for now
+}
+
+/// Phase 1: Check that safe functions returning references have lifetime annotations
+fn check_lifetime_annotation_requirements(
+    program: &IrProgram,
+    header_cache: &HeaderCache,
+    safety_context: &crate::parser::safety_annotations::SafetyContext
+) -> Result<Vec<String>, String> {
+    let mut errors = Vec::new();
+
+    for function in &program.functions {
+        // Only check safe functions
+        if !safety_context.should_check_function(&function.name) {
+            continue;
+        }
+
+        // Get the function's return type from the original AST
+        // We need to access this through the parser/AST, but for now we can check
+        // if the function has a Return statement with a reference
+
+        // Check if function signature has lifetime annotation
+        let has_lifetime_annotation = if let Some(sig) = header_cache.get_signature(&function.name) {
+            debug_println!("DEBUG LIFETIME ANN: Found signature for '{}': return_lifetime={:?}",
+                          function.name, sig.return_lifetime);
+            sig.return_lifetime.is_some()
+        } else {
+            debug_println!("DEBUG LIFETIME ANN: No signature found for '{}'", function.name);
+            false
+        };
+
+        // Check if the function returns a reference by analyzing return statements
+        let returns_ref = check_if_function_returns_reference(function);
+
+        if returns_ref && !has_lifetime_annotation {
+            errors.push(format!(
+                "Safe function '{}' returns a reference but has no @lifetime annotation",
+                function.name
+            ));
+        }
+    }
+
+    Ok(errors)
+}
+
+/// Check if a function returns a reference by analyzing its return type
+fn check_if_function_returns_reference(function: &IrFunction) -> bool {
+    debug_println!("DEBUG LIFETIME: Checking function '{}'", function.name);
+    debug_println!("DEBUG LIFETIME:   Return type: '{}'", function.return_type);
+
+    // Check if the return type is a reference
+    // References have & in the type (e.g., "const int&", "int&", "Type&")
+    let is_reference = function.return_type.contains('&') && !function.return_type.contains("&&");
+
+    debug_println!("DEBUG LIFETIME:   Is reference: {}", is_reference);
+    is_reference
 }
 
 #[allow(dead_code)]
@@ -793,6 +859,7 @@ mod tests {
             name: name.to_string(),
             cfg,
             variables: HashMap::new(),
+            return_type: "void".to_string(),
         }
     }
 
@@ -874,6 +941,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -884,6 +952,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -922,6 +991,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -959,6 +1029,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1002,6 +1073,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1012,6 +1084,7 @@ mod tests {
                 ty: crate::ir::VariableType::Reference("int".to_string()),
                 ownership: OwnershipState::Borrowed(BorrowKind::Immutable),
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1054,6 +1127,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1064,6 +1138,7 @@ mod tests {
                 ty: crate::ir::VariableType::MutableReference("int".to_string()),
                 ownership: OwnershipState::Borrowed(BorrowKind::Mutable),
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1104,6 +1179,7 @@ mod tests {
                 ty: crate::ir::VariableType::Reference("int".to_string()),
                 ownership: OwnershipState::Borrowed(BorrowKind::Immutable),
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1114,6 +1190,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1148,6 +1225,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1193,6 +1271,7 @@ mod tests {
                 ty: crate::ir::VariableType::UniquePtr("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1234,6 +1313,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1258,6 +1338,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1297,6 +1378,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1307,6 +1389,7 @@ mod tests {
                 ty: crate::ir::VariableType::Owned("int".to_string()),
                 ownership: OwnershipState::Owned,
                 lifetime: None,
+                is_parameter: false,
             },
         );
         
@@ -1369,6 +1452,7 @@ mod scope_tests {
             name: "test".to_string(),
             cfg,
             variables: HashMap::new(),
+            return_type: "void".to_string(),
         }
     }
 

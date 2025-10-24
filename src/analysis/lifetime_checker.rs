@@ -297,11 +297,11 @@ fn check_return_lifetime(
     errors
 }
 
-fn is_parameter(var_name: &str, _function: &IrFunction) -> bool {
-    // Check if the variable is a function parameter
-    // In a real implementation, we'd track this properly
-    // For now, assume variables starting with "param" are parameters
-    var_name.starts_with("param") || var_name.starts_with("arg")
+fn is_parameter(var_name: &str, function: &IrFunction) -> bool {
+    // Check if variable is marked as a parameter in the IR
+    function.variables.get(var_name)
+        .map(|var_info| var_info.is_parameter)
+        .unwrap_or(false)
 }
 
 fn map_lifetime_to_actual(lifetime_name: &str, arg_lifetimes: &[Option<String>]) -> Option<String> {

@@ -1,5 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use crate::ir::{IrFunction, IrStatement, BorrowKind};
+use crate::debug_println;
+
+/// Check if a return type string represents a reference
+fn returns_reference(return_type: &str) -> bool {
+    // Check for reference types: &, const &, const Type&, Type&, etc.
+    return_type.contains('&') && !return_type.contains("&&") // Exclude rvalue references
+}
 
 /// Represents an inferred lifetime for a variable
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +240,15 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                 }
                 
                 IrStatement::Return { value } => {
+                    // PHASE 2: If function returns a reference but return value is None,
+                    // it's returning a temporary (e.g., return 42;)
+                    if value.is_none() && returns_reference(&function.return_type) {
+                        errors.push(format!(
+                            "Cannot return reference to temporary value in function '{}'",
+                            function.name
+                        ));
+                    }
+
                     if let Some(val) = value {
                         // Check if returning a reference to a local variable
                         // Only check if this is actually a reference type
@@ -240,10 +256,21 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                             match var_info.ty {
                                 crate::ir::VariableType::Reference(_) |
                                 crate::ir::VariableType::MutableReference(_) => {
+                                    // PHASE 2: Check if returning a direct reference to a local variable
+                                    let is_param = is_parameter(val, function);
+                                    debug_println!("DEBUG PARAM CHECK: var='{}', is_parameter={}", val, is_param);
+                                    if !is_param {
+                                        errors.push(format!(
+                                            "Cannot return reference to local variable '{}'",
+                                            val
+                                        ));
+                                    }
+
+                                    // Also check if it depends on local variables
                                     if let Some(lifetime) = lifetimes.get(val) {
                                         // If this variable depends on local variables, it's potentially problematic
                                         for dep in &lifetime.dependencies {
-                                            if !is_likely_parameter(dep) {
+                                            if !is_parameter(dep, function) {
                                                 errors.push(format!(
                                                     "Potential dangling reference: returning '{}' which depends on local variable '{}'",
                                                     val, dep
@@ -268,9 +295,11 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
     Ok(errors)
 }
 
-fn is_likely_parameter(var_name: &str) -> bool {
-    // Simple heuristic to identify parameters
-    var_name.starts_with("param") || var_name.starts_with("arg") || var_name.len() == 1
+fn is_parameter(var_name: &str, function: &IrFunction) -> bool {
+    // Check if variable is marked as a parameter in the IR
+    function.variables.get(var_name)
+        .map(|var_info| var_info.is_parameter)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -312,6 +341,7 @@ mod tests {
             name: "test".to_string(),
             cfg,
             variables: HashMap::new(),
+            return_type: "void".to_string(),
         };
         
         let lifetimes = inferencer.infer_function_lifetimes(&function);

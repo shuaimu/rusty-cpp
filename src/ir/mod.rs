@@ -16,6 +16,7 @@ pub struct IrFunction {
     pub name: String,
     pub cfg: ControlFlowGraph,
     pub variables: HashMap<String, VariableInfo>,
+    pub return_type: String,  // Return type from AST
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ pub struct VariableInfo {
     pub ownership: OwnershipState,
     #[allow(dead_code)]
     pub lifetime: Option<Lifetime>,
+    pub is_parameter: bool,  // True if this is a function parameter
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -229,6 +231,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
                 ty: var_type,
                 ownership,
                 lifetime: None,
+                is_parameter: true,  // This is a parameter
             },
         );
     }
@@ -237,6 +240,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
         name: func.name.clone(),
         cfg,
         variables,
+        return_type: func.return_type.clone(),
     })
 }
 
@@ -283,6 +287,7 @@ fn convert_statement(
                     ty: var_type,
                     ownership,
                     lifetime: None,
+                    is_parameter: false,  // This is a local variable
                 },
             );
             Ok(None)
