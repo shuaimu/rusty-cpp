@@ -27,13 +27,17 @@ set(TEST_SOURCES
     tests/test_stl_lifetimes.cpp
     tests/test_unified_annotations.cpp
 
-    # TODO: Re-enable when BTreeMap/Set/HashMap/HashSet APIs are complete
-    # Missing methods: remove_entry, get_key_value, first_key_value, last_key_value,
-    #                  pop_first, pop_last, range, split_off, append, extend, retain
-    # tests/rusty_btreemap_test.cpp
-    # tests/rusty_btreeset_test.cpp
-    # tests/rusty_hashmap_test.cpp
-    # tests/rusty_hashset_test.cpp
+    # BTreeMap tests - RE-ENABLED (all methods implemented)
+    tests/rusty_btreemap_test.cpp
+
+    # HashMap/HashSet tests - RE-ENABLED (APIs complete)
+    tests/rusty_hashmap_test.cpp
+    tests/rusty_hashset_test.cpp
+
+    # BTreeSet tests - RE-ENABLED (fixed range and iterator)
+    tests/rusty_btreeset_test.cpp
+
+    # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
 

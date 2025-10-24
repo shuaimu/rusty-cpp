@@ -156,8 +156,8 @@ public:
     // @lifetime: owned
     Vec<T> range(const T& min, const T& max) const {
         auto map_range = map_.range(min, max);
-        Vec<T> result = Vec<T>::with_capacity(map_range.len());
-        for (size_t i = 0; i < map_range.len(); i++) {
+        Vec<T> result = Vec<T>::with_capacity(map_range.size());
+        for (size_t i = 0; i < map_range.size(); i++) {
             result.push(map_range[i].first);
         }
         return result;
@@ -293,52 +293,54 @@ public:
     class iterator {
     private:
         typename BTreeMap<T, Unit, Compare>::iterator inner_;
-        
+
     public:
         iterator(typename BTreeMap<T, Unit, Compare>::iterator it) : inner_(it) {}
-        
+
         const T& operator*() {
-            return inner_->first;
+            return (*inner_).first;
         }
-        
+
         const T* operator->() {
-            return &(inner_->first);
+            auto pair = *inner_;
+            return &(pair.first);
         }
-        
+
         iterator& operator++() {
             ++inner_;
             return *this;
         }
-        
+
         bool operator!=(const iterator& other) const {
             return inner_ != other.inner_;
         }
-        
+
         bool operator==(const iterator& other) const {
             return inner_ == other.inner_;
         }
     };
-    
+
     class const_iterator {
     private:
         typename BTreeMap<T, Unit, Compare>::const_iterator inner_;
-        
+
     public:
         const_iterator(typename BTreeMap<T, Unit, Compare>::const_iterator it) : inner_(it) {}
-        
+
         const T& operator*() const {
-            return inner_->first;
+            return (*inner_).first;
         }
-        
+
         const T* operator->() const {
-            return &(inner_->first);
+            auto pair = *inner_;
+            return &(pair.first);
         }
-        
+
         const_iterator& operator++() {
             ++inner_;
             return *this;
         }
-        
+
         bool operator!=(const const_iterator& other) const {
             return inner_ != other.inner_;
         }

@@ -804,7 +804,186 @@ public:
     Option<V*> get_mut(const K& key) {
         return get(key); // Since get already returns mutable
     }
-    
+
+    // Get key-value pair
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<K*, V*>> get_key_value(const K& key) {
+        auto [node, pos] = find_node(key);
+        if (node && node->is_leaf) {
+            auto* leaf = static_cast<LeafNode*>(node);
+            return Some(std::make_pair(&leaf->keys[pos], &leaf->values[pos]));
+        }
+        return None;
+    }
+
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<const K*, const V*>> get_key_value(const K& key) const {
+        auto [node, pos] = find_node(key);
+        if (node && node->is_leaf) {
+            auto* leaf = static_cast<const LeafNode*>(node);
+            const K* key_ptr = &leaf->keys[pos];
+            const V* val_ptr = &leaf->values[pos];
+            return Some(std::make_pair(key_ptr, val_ptr));
+        }
+        return None;
+    }
+
+    // Remove entry (returns both key and value)
+    // @lifetime: owned
+    Option<std::pair<K, V>> remove_entry(const K& key) {
+        if (size_ == 0) return None;
+
+        auto [node, pos] = find_node(key);
+        if (node && node->is_leaf) {
+            auto* leaf = static_cast<LeafNode*>(node);
+            K removed_key = std::move(leaf->keys[pos]);
+            V value = leaf->remove_at(pos);
+            size_--;
+            return Some(std::make_pair(std::move(removed_key), std::move(value)));
+        }
+
+        return None;
+    }
+
+    // Get first key-value pair
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<K*, V*>> first_key_value() {
+        if (first_leaf_ && first_leaf_->len > 0) {
+            return Some(std::make_pair(&first_leaf_->keys[0], &first_leaf_->values[0]));
+        }
+        return None;
+    }
+
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<const K*, const V*>> first_key_value() const {
+        if (first_leaf_ && first_leaf_->len > 0) {
+            const K* key_ptr = &first_leaf_->keys[0];
+            const V* val_ptr = &first_leaf_->values[0];
+            return Some(std::make_pair(key_ptr, val_ptr));
+        }
+        return None;
+    }
+
+    // Get last key-value pair
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<K*, V*>> last_key_value() {
+        if (last_leaf_ && last_leaf_->len > 0) {
+            size_t last_idx = last_leaf_->len - 1;
+            return Some(std::make_pair(&last_leaf_->keys[last_idx], &last_leaf_->values[last_idx]));
+        }
+        return None;
+    }
+
+    // @lifetime: (&'a) -> &'a
+    Option<std::pair<const K*, const V*>> last_key_value() const {
+        if (last_leaf_ && last_leaf_->len > 0) {
+            size_t last_idx = last_leaf_->len - 1;
+            const K* key_ptr = &last_leaf_->keys[last_idx];
+            const V* val_ptr = &last_leaf_->values[last_idx];
+            return Some(std::make_pair(key_ptr, val_ptr));
+        }
+        return None;
+    }
+
+    // Pop first entry
+    // @lifetime: owned
+    Option<std::pair<K, V>> pop_first() {
+        if (first_leaf_ && first_leaf_->len > 0) {
+            K key = std::move(first_leaf_->keys[0]);
+            V value = first_leaf_->remove_at(0);
+            size_--;
+            return Some(std::make_pair(std::move(key), std::move(value)));
+        }
+        return None;
+    }
+
+    // Pop last entry
+    // @lifetime: owned
+    Option<std::pair<K, V>> pop_last() {
+        if (last_leaf_ && last_leaf_->len > 0) {
+            size_t last_idx = last_leaf_->len - 1;
+            K key = std::move(last_leaf_->keys[last_idx]);
+            V value = last_leaf_->remove_at(last_idx);
+            size_--;
+            return Some(std::make_pair(std::move(key), std::move(value)));
+        }
+        return None;
+    }
+
+    // Range query (returns vector of key-value pairs in range [start, end])
+    // @lifetime: owned
+    std::vector<std::pair<K, V>> range(const K& start, const K& end) const {
+        std::vector<std::pair<K, V>> result;
+
+        // Iterate through all entries
+        for (const auto& [key, value] : *this) {
+            // Check if key is in range [start, end]
+            if (!comp_(key, start) && !comp_(end, key)) {
+                result.push_back(std::make_pair(key, value));
+            }
+        }
+
+        return result;
+    }
+
+    // Split off all entries >= at_key into a new map
+    // @lifetime: owned
+    BTreeMap split_off(const K& at_key) {
+        BTreeMap upper;
+
+        // Collect keys to move
+        Vec<K> keys_to_move = Vec<K>::make();
+        for (const auto& [key, _] : *this) {
+            if (!comp_(key, at_key)) {  // key >= at_key
+                keys_to_move.push(key);
+            }
+        }
+
+        // Move entries to upper map
+        for (size_t i = 0; i < keys_to_move.len(); i++) {
+            const K& key = keys_to_move[i];
+            auto removed = remove(key);
+            if (removed.is_some()) {
+                upper.insert(key, removed.unwrap());
+            }
+        }
+
+        return upper;
+    }
+
+    // Append another map (all keys in other must be > all keys in this)
+    void append(BTreeMap&& other) {
+        // Simple implementation: just insert all entries
+        for (const auto& [key, value] : other) {
+            insert(key, value);
+        }
+        other.clear();
+    }
+
+    // Extend with entries from another map
+    void extend(BTreeMap&& other) {
+        for (const auto& [key, value] : other) {
+            insert(key, value);
+        }
+        other.clear();
+    }
+
+    // Retain only entries that satisfy predicate
+    template<typename Pred>
+    void retain(Pred predicate) {
+        Vec<K> keys_to_remove = Vec<K>::make();
+
+        for (const auto& [key, value] : *this) {
+            if (!predicate(key, value)) {
+                keys_to_remove.push(key);
+            }
+        }
+
+        for (size_t i = 0; i < keys_to_remove.len(); i++) {
+            remove(keys_to_remove[i]);
+        }
+    }
+
     // Equality comparison
     bool operator==(const BTreeMap& other) const {
         if (size_ != other.size_) return false;
@@ -827,6 +1006,18 @@ template<typename K, typename V>
 // @lifetime: owned
 BTreeMap<K, V> btreemap() {
     return BTreeMap<K, V>::make();
+}
+
+// Create BTreeMap from Vec of pairs
+template<typename K, typename V>
+// @lifetime: owned
+BTreeMap<K, V> btreemap_from_vec(Vec<std::pair<K, V>>&& vec) {
+    BTreeMap<K, V> map;
+    for (size_t i = 0; i < vec.len(); i++) {
+        auto& pair = vec[i];
+        map.insert(std::move(pair.first), std::move(pair.second));
+    }
+    return map;
 }
 
 } // namespace rusty

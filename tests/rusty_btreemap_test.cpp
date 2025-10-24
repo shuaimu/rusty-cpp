@@ -66,7 +66,6 @@ void test_move_semantics() {
     std::cout << "✓ Move semantics tests passed" << std::endl;
 }
 
-#if 0  // TODO: Implement BTreeMap::remove_entry()
 void test_update_and_remove() {
     std::cout << "Testing update and remove..." << std::endl;
 
@@ -100,7 +99,6 @@ void test_update_and_remove() {
 
     std::cout << "✓ Update and remove tests passed" << std::endl;
 }
-#endif
 
 void test_get_operations() {
     std::cout << "Testing get operations..." << std::endl;
@@ -250,12 +248,20 @@ void test_iteration() {
         prev_key = key;
         assert(!value.empty());
     }
-    
-    // Mutable iteration
-    for (auto& [key, value] : map) {
-        value = "modified";
-    }
-    
+
+    // Mutable access through get_mut
+    auto val_mut = map.get_mut(1);
+    assert(val_mut.is_some());
+    *val_mut.unwrap() = "modified";
+
+    val_mut = map.get_mut(2);
+    assert(val_mut.is_some());
+    *val_mut.unwrap() = "modified";
+
+    val_mut = map.get_mut(3);
+    assert(val_mut.is_some());
+    *val_mut.unwrap() = "modified";
+
     for (const auto& [key, value] : map) {
         assert(value == "modified");
     }
