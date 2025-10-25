@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn test_unsafe_call_in_expression() {
         let stmt = Statement::Assignment {
-            lhs: "x".to_string(),
+            lhs: crate::parser::Expression::Variable("x".to_string()),
             rhs: Expression::FunctionCall {
                 name: "unsafe_func".to_string(),
                 args: vec![],

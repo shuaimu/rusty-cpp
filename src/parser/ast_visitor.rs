@@ -81,7 +81,7 @@ pub struct Variable {
 pub enum Statement {
     VariableDecl(Variable),
     Assignment {
-        lhs: String,
+        lhs: Expression,  // Changed to Expression to support dereference: *ptr = value
         rhs: Expression,
         location: SourceLocation,
     },
@@ -233,8 +233,9 @@ fn extract_function_body(entity: &Entity) -> Vec<Statement> {
 
 fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     let mut statements = Vec::new();
-    
+
     for child in entity.get_children() {
+        debug_println!("DEBUG STMT: Compound child kind: {:?}", child.get_kind());
         match child.get_kind() {
             EntityKind::DeclStmt => {
                 for decl_child in child.get_children() {
@@ -259,7 +260,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 } else {
                                     // Regular assignment/initialization
                                     statements.push(Statement::Assignment {
-                                        lhs: var.name.clone(),
+                                        lhs: Expression::Variable(var.name.clone()),
                                         rhs: expr,
                                         location: extract_location(&decl_child),
                                     });
@@ -273,14 +274,23 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             EntityKind::BinaryOperator => {
                 // Handle assignments
                 let children: Vec<Entity> = child.get_children().into_iter().collect();
+                debug_println!("DEBUG STMT: BinaryOperator has {} children", children.len());
                 if children.len() == 2 {
-                    if let (Some(lhs_expr), Some(rhs_expr)) = 
-                        (extract_expression(&children[0]), extract_expression(&children[1])) {
+                    debug_println!("DEBUG STMT: BinaryOperator child[0] kind: {:?}", children[0].get_kind());
+                    debug_println!("DEBUG STMT: BinaryOperator child[1] kind: {:?}", children[1].get_kind());
+                    let lhs_expr = extract_expression(&children[0]);
+                    let rhs_expr = extract_expression(&children[1]);
+                    debug_println!("DEBUG STMT: BinaryOperator LHS: {:?}", lhs_expr);
+                    debug_println!("DEBUG STMT: BinaryOperator RHS: {:?}", rhs_expr);
+                    if let (Some(lhs), Some(rhs)) = (lhs_expr, rhs_expr) {
+                        debug_println!("DEBUG STMT: Creating Assignment statement");
                         statements.push(Statement::Assignment {
-                            lhs: format!("{:?}", lhs_expr), // Simplified for now
-                            rhs: rhs_expr,
+                            lhs,  // Now supports dereference: *ptr = value
+                            rhs,
                             location: extract_location(&child),
                         });
+                    } else {
+                        debug_println!("DEBUG STMT: Failed to extract expressions from BinaryOperator");
                     }
                 }
             }
@@ -776,8 +786,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             } else if let Some(display) = entity.get_display_name() {
                 Some(Expression::Literal(display))
             } else {
-                // Try to get the literal value from the token
-                None  // Fall back to None if we can't extract it
+                // For integer literals, we can use a placeholder since we don't
+                // need the actual value for ownership/borrow checking
+                Some(Expression::Literal("0".to_string()))
             }
         }
         EntityKind::UnaryOperator => {

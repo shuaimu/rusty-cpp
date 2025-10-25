@@ -2,7 +2,6 @@ use std::process::Command;
 use std::fs;
 
 #[test]
-#[ignore] // TODO: Requires dereference assignment tracking (*ptr = value)
 fn test_std_move_basic() {
     // Create a test file with std::move
     let test_code = r#"
@@ -38,7 +37,7 @@ void test() {
 }
 
 #[test]
-#[ignore] // TODO: Requires if-condition and dereference tracking
+#[ignore] // TODO: Requires if-condition tracking (if (ptr) { *ptr = 100; })
 fn test_std_move_in_function_call() {
     let test_code = r#"
 #include <memory>

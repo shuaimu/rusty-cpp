@@ -101,7 +101,6 @@ fn test_multiple_functions() {
 
 // These tests would fail with proper implementation but pass with current skeleton
 #[test]
-#[ignore] // TODO: Requires dereference assignment tracking (*ptr = value)
 fn test_use_after_move_with_unique_ptr() {
     let code = r#"
     #include <memory>

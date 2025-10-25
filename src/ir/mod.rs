@@ -263,7 +263,20 @@ fn convert_statement(
     variables: &mut HashMap<String, VariableInfo>,
 ) -> Result<Option<Vec<IrStatement>>, String> {
     use crate::parser::Statement;
-    
+
+    debug_println!("DEBUG IR: Converting statement: {:?}", match stmt {
+        Statement::VariableDecl(_) => "VariableDecl",
+        Statement::Assignment { .. } => "Assignment",
+        Statement::ReferenceBinding { .. } => "ReferenceBinding",
+        Statement::Return(_) => "Return",
+        Statement::FunctionCall { name, .. } => {
+            debug_println!("DEBUG IR:   FunctionCall name: {}", name);
+            "FunctionCall"
+        },
+        Statement::ExpressionStatement { .. } => "ExpressionStatement",
+        _ => "Other"
+    });
+
     match stmt {
         Statement::VariableDecl(var) => {
             let (var_type, ownership) = if var.is_unique_ptr {
@@ -373,8 +386,66 @@ fn convert_statement(
             Ok(Some(statements))
         }
         Statement::Assignment { lhs, rhs, .. } => {
-            // Handle assignments that might involve references or function calls
+            // Check if lhs is a dereference: *ptr = value
+            if let crate::parser::Expression::Dereference(ptr_expr) = lhs {
+                // Dereference assignment: *ptr = value
+                if let crate::parser::Expression::Variable(ptr_var) = ptr_expr.as_ref() {
+                    // Extract the RHS variable
+                    let _value_var = match rhs {
+                        crate::parser::Expression::Variable(v) => v.clone(),
+                        _ => return Ok(None), // For now, only handle simple cases
+                    };
+
+                    // Create a UseVariable statement to check that ptr is valid
+                    return Ok(Some(vec![IrStatement::UseVariable {
+                        var: ptr_var.clone(),
+                        operation: "dereference_write".to_string(),
+                    }]));
+                }
+                return Ok(None);
+            }
+
+            // Check if lhs is a function call (e.g., *ptr via operator*)
+            if let crate::parser::Expression::FunctionCall { name, args } = lhs {
+                debug_println!("DEBUG IR: Assignment LHS is function call: {}", name);
+                // Check if this is operator* (dereference for smart pointers)
+                if name.contains("::operator*") || name == "operator*" {
+                    debug_println!("DEBUG IR: Detected operator* on LHS, args: {:?}", args);
+                    // This is a dereference assignment via operator*
+                    // The first argument is the object being dereferenced
+                    if let Some(crate::parser::Expression::Variable(ptr_var)) = args.first() {
+                        debug_println!("DEBUG IR: Creating UseVariable for dereference_write on '{}'", ptr_var);
+                        // Create a UseVariable statement to check that ptr is valid
+                        return Ok(Some(vec![IrStatement::UseVariable {
+                            var: ptr_var.clone(),
+                            operation: "dereference_write (via operator*)".to_string(),
+                        }]));
+                    }
+                }
+                // Other method calls on LHS are not supported for now
+                debug_println!("DEBUG IR: Unsupported function call on LHS");
+                return Ok(None);
+            }
+
+            // Regular assignment (not a dereference)
+            let lhs_var = match lhs {
+                crate::parser::Expression::Variable(v) => v,
+                _ => return Ok(None), // Skip complex lhs for now
+            };
+
             match rhs {
+                crate::parser::Expression::Dereference(ptr_expr) => {
+                    // Dereference read: lhs = *ptr
+                    if let crate::parser::Expression::Variable(ptr_var) = ptr_expr.as_ref() {
+                        // Create a UseVariable statement to check that ptr is valid
+                        Ok(Some(vec![IrStatement::UseVariable {
+                            var: ptr_var.clone(),
+                            operation: "dereference_read".to_string(),
+                        }]))
+                    } else {
+                        Ok(None)
+                    }
+                }
                 crate::parser::Expression::Variable(rhs_var) => {
                     // Check if this is a move or a copy
                     if let Some(rhs_info) = variables.get(rhs_var) {
@@ -383,13 +454,13 @@ fn convert_statement(
                                 // This is a move
                                 Ok(Some(vec![IrStatement::Move {
                                     from: rhs_var.clone(),
-                                    to: lhs.clone(),
+                                    to: lhs_var.clone(),
                                 }]))
                             }
                             _ => {
                                 // Regular assignment (copy)
                                 Ok(Some(vec![IrStatement::Assign {
-                                    lhs: lhs.clone(),
+                                    lhs: lhs_var.clone(),
                                     rhs: IrExpression::Variable(rhs_var.clone()),
                                 }]))
                             }
@@ -402,17 +473,17 @@ fn convert_statement(
                     debug_println!("DEBUG IR: Processing Move expression in assignment");
                     // This is an explicit std::move call
                     if let crate::parser::Expression::Variable(var) = inner.as_ref() {
-                        debug_println!("DEBUG IR: Creating IrStatement::Move from '{}' to '{}'", var, lhs);
+                        debug_println!("DEBUG IR: Creating IrStatement::Move from '{}' to '{}'", var, lhs_var);
                         // Transfer type from source if needed
                         let source_type = variables.get(var).map(|info| info.ty.clone());
-                        if let Some(var_info) = variables.get_mut(lhs) {
+                        if let Some(var_info) = variables.get_mut(lhs_var) {
                             if let Some(ty) = source_type {
                                 var_info.ty = ty;
                             }
                         }
                         Ok(Some(vec![IrStatement::Move {
                             from: var.clone(),
-                            to: lhs.clone(),
+                            to: lhs_var.clone(),
                         }]))
                     } else {
                         debug_println!("DEBUG IR: Move expression doesn't contain a variable");
@@ -424,10 +495,29 @@ fn convert_statement(
                     // Convert function call arguments, handling moves
                     let mut statements = Vec::new();
                     let mut arg_names = Vec::new();
-                    
-                    for arg in args {
+
+                    // Check if this is a method call (operator* or other methods)
+                    let is_method_call = name.contains("::operator") || name.contains("::");
+
+                    for (i, arg) in args.iter().enumerate() {
                         match arg {
                             crate::parser::Expression::Variable(var) => {
+                                // For method calls, the first arg is the receiver object
+                                if is_method_call && i == 0 {
+                                    // Check if this is operator* (dereference)
+                                    if name.contains("::operator*") || name == "operator*" {
+                                        statements.push(IrStatement::UseVariable {
+                                            var: var.clone(),
+                                            operation: "dereference_read (via operator*)".to_string(),
+                                        });
+                                    } else {
+                                        // Other method calls also use the receiver
+                                        statements.push(IrStatement::UseVariable {
+                                            var: var.clone(),
+                                            operation: format!("call method '{}'", name),
+                                        });
+                                    }
+                                }
                                 arg_names.push(var.clone());
                             }
                             crate::parser::Expression::Move(inner) => {
@@ -443,19 +533,20 @@ fn convert_statement(
                             _ => {}
                         }
                     }
-                    
+
                     statements.push(IrStatement::CallExpr {
                         func: name.clone(),
                         args: arg_names,
-                        result: Some(lhs.clone()),
+                        result: Some(lhs_var.clone()),
                     });
-                    
+
                     Ok(Some(statements))
                 }
                 _ => Ok(None)
             }
         }
         Statement::FunctionCall { name, args, .. } => {
+            debug_println!("DEBUG IR: Processing FunctionCall statement: {} with {} args", name, args.len());
             // Standalone function call (no assignment)
             let mut statements = Vec::new();
             let mut arg_names = Vec::new();
@@ -470,10 +561,16 @@ fn convert_statement(
                     crate::parser::Expression::Variable(var) => {
                         // For method calls, the first arg is the receiver object
                         if is_method_call && i == 0 {
-                            // Check if the receiver has been moved
+                            // Check if this is operator* (dereference)
+                            let operation = if name.contains("::operator*") || name == "operator*" {
+                                "dereference (via operator*)".to_string()
+                            } else {
+                                format!("call method '{}'", name)
+                            };
+
                             statements.push(IrStatement::UseVariable {
                                 var: var.clone(),
-                                operation: format!("call method '{}'", name),
+                                operation,
                             });
                         }
                         arg_names.push(var.clone());

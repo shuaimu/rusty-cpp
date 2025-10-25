@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn test_pointer_in_assignment() {
         let stmt = Statement::Assignment {
-            lhs: "x".to_string(),
+            lhs: crate::parser::Expression::Variable("x".to_string()),
             rhs: Expression::Dereference(Box::new(Expression::Variable("ptr".to_string()))),
             location: SourceLocation {
                 file: "test.cpp".to_string(),
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_address_of_in_assignment() {
         let stmt = Statement::Assignment {
-            lhs: "ptr".to_string(),
+            lhs: crate::parser::Expression::Variable("ptr".to_string()),
             rhs: Expression::AddressOf(Box::new(Expression::Variable("x".to_string()))),
             location: SourceLocation {
                 file: "test.cpp".to_string(),

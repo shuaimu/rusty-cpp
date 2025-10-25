@@ -137,7 +137,7 @@ void test() {
 }
 
 #[test]
-#[ignore] // TODO: Requires dereference operator support (*ptr)
+#[ignore] // TODO: Requires if-condition tracking (if (i == 0) { ... } else { *ptr })
 fn test_loop_conditional_move() {
     // Test move that only happens sometimes in loop
     let test_code = r#"
