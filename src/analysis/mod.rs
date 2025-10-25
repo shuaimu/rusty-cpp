@@ -531,13 +531,18 @@ fn process_statement(
         }
 
         crate::ir::IrStatement::UseVariable { var, operation } => {
+            debug_println!("DEBUG ANALYSIS: UseVariable var='{}', operation='{}'", var, operation);
+
             // Skip checking if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
+                debug_println!("DEBUG ANALYSIS: Skipping check - in unsafe block");
                 return;
             }
 
             // Check if the variable has been moved
             let var_state = ownership_tracker.get_ownership(var);
+            debug_println!("DEBUG ANALYSIS: var_state for '{}' = {:?}", var, var_state);
+
             if var_state == Some(&OwnershipState::Moved) {
                 errors.push(format!(
                     "Use after move: cannot {} variable '{}' because it has been moved",

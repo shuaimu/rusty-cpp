@@ -563,6 +563,28 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 }
             }
+            EntityKind::UnexposedExpr => {
+                // UnexposedExpr can contain function calls or other expressions
+                // Try to extract it as an expression and create appropriate statement
+                if let Some(expr) = extract_expression(&child) {
+                    match expr {
+                        Expression::FunctionCall { name, args } => {
+                            statements.push(Statement::FunctionCall {
+                                name,
+                                args,
+                                location: extract_location(&child),
+                            });
+                        }
+                        _ => {
+                            // Other expression types - add as expression statement
+                            statements.push(Statement::ExpressionStatement {
+                                expr,
+                                location: extract_location(&child),
+                            });
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -627,6 +649,14 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             }
                         }
                     }
+
+                    // Debug: Check if MemberRefExpr has children (which might be the receiver object)
+                    let member_children = c.get_children();
+                    debug_println!("DEBUG AST: MemberRefExpr has {} children", member_children.len());
+                    for (i, mc) in member_children.iter().enumerate() {
+                        debug_println!("  DEBUG AST: MemberRefExpr child[{}]: kind={:?}, name={:?}",
+                            i, mc.get_kind(), mc.get_name());
+                    }
                 } else if c.get_kind() == EntityKind::UnexposedExpr {
                     // Try to get the referenced entity
                     if let Some(ref_entity) = c.get_reference() {
@@ -666,45 +696,71 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             
-            // Two-pass approach to avoid adding function name as an argument
-            // Pass 1: If name is still unknown, find which child provides it
-            // Also identify children that represent the function name (not arguments)
+            // Three-pass approach:
+            // Pass 1: Extract receiver from MemberRefExpr (for method calls)
+            // Pass 2: Identify which child provides the function name
+            // Pass 3: Extract remaining arguments, skipping name-providing child
+
+            let mut receiver: Option<Expression> = None;
             let mut name_providing_child_idx: Option<usize> = None;
-            if name == "unknown" {
-                for (i, c) in children.iter().enumerate() {
-                    match c.get_kind() {
-                        EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
-                            if let Some(n) = c.get_name() {
-                                name = n;
-                                name_providing_child_idx = Some(i);
-                                break;
-                            }
+
+            // Pass 1: Look for MemberRefExpr and extract receiver
+            for (i, c) in children.iter().enumerate() {
+                if c.get_kind() == EntityKind::MemberRefExpr {
+                    // Extract receiver from MemberRefExpr's children
+                    let member_children = c.get_children();
+                    if !member_children.is_empty() {
+                        // First child of MemberRefExpr is the receiver object
+                        if let Some(recv_expr) = extract_expression(&member_children[0]) {
+                            debug_println!("DEBUG AST: Extracted receiver from MemberRefExpr: {:?}", recv_expr);
+                            receiver = Some(recv_expr);
                         }
-                        _ => {}
                     }
+                    // Mark this as the name-providing child to skip later
+                    name_providing_child_idx = Some(i);
+                    break;
                 }
-            } else {
-                // Name was already extracted, but we still need to identify which child
-                // represents the function name (to skip it when extracting arguments)
-                for (i, c) in children.iter().enumerate() {
-                    match c.get_kind() {
-                        EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
-                            // Check if this child's name matches or is part of the function name
-                            if let Some(child_name) = c.get_name() {
-                                // Simple heuristic: if the child name matches the end of function name,
-                                // it's likely the function name node, not an argument
-                                if name.ends_with(&child_name) || name == child_name {
+            }
+
+            // Pass 2: If no MemberRefExpr, use existing logic to find name provider
+            if name_providing_child_idx.is_none() {
+                if name == "unknown" {
+                    for (i, c) in children.iter().enumerate() {
+                        match c.get_kind() {
+                            EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                                if let Some(n) = c.get_name() {
+                                    name = n;
                                     name_providing_child_idx = Some(i);
                                     break;
                                 }
                             }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                } else {
+                    // Name was already extracted, identify which child represents it
+                    for (i, c) in children.iter().enumerate() {
+                        match c.get_kind() {
+                            EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                                if let Some(child_name) = c.get_name() {
+                                    if name.ends_with(&child_name) || name == child_name {
+                                        name_providing_child_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
 
-            // Pass 2: Extract arguments, skipping the name-providing child
+            // Add receiver as first argument if present
+            if let Some(recv) = receiver {
+                args.push(recv);
+            }
+
+            // Pass 3: Extract remaining arguments, skipping name-providing child
             for (i, c) in children.into_iter().enumerate() {
                 // Skip the child that provided the function name
                 if Some(i) == name_providing_child_idx {

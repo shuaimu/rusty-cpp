@@ -274,6 +274,10 @@ fn convert_statement(
             "FunctionCall"
         },
         Statement::ExpressionStatement { .. } => "ExpressionStatement",
+        Statement::If { condition, .. } => {
+            debug_println!("DEBUG IR:   If condition: {:?}", condition);
+            "If"
+        },
         _ => "Other"
     });
 
@@ -497,7 +501,8 @@ fn convert_statement(
                     let mut arg_names = Vec::new();
 
                     // Check if this is a method call (operator* or other methods)
-                    let is_method_call = name.contains("::operator") || name.contains("::");
+                    // Methods can be: qualified (Class::method), operators (operator*, operator bool), or have :: in name
+                    let is_method_call = name.contains("::") || name.starts_with("operator");
 
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
@@ -552,8 +557,8 @@ fn convert_statement(
             let mut arg_names = Vec::new();
 
             // Check if this is a method call (has :: or is an operator)
-            let is_method_call = name.contains("::operator") ||
-                                 name.contains("::");
+            // Methods can be: qualified (Class::method), operators (operator*, operator bool), or have :: in name
+            let is_method_call = name.contains("::") || name.starts_with("operator");
 
             // Process arguments, looking for std::move
             for (i, arg) in args.iter().enumerate() {
@@ -585,6 +590,23 @@ fn convert_statement(
                             });
                             arg_names.push(var.clone());
                         }
+                    }
+                    crate::parser::Expression::FunctionCall { name: inner_name, args: inner_args } => {
+                        debug_println!("DEBUG IR: Nested FunctionCall in argument: {}", inner_name);
+                        // Recursively check for moves in nested function call
+                        for inner_arg in inner_args {
+                            if let crate::parser::Expression::Move(move_inner) = inner_arg {
+                                if let crate::parser::Expression::Variable(var) = move_inner.as_ref() {
+                                    debug_println!("DEBUG IR: Found Move in nested call: {}", var);
+                                    statements.push(IrStatement::Move {
+                                        from: var.clone(),
+                                        to: format!("_moved_{}", var),
+                                    });
+                                }
+                            }
+                        }
+                        // Use placeholder for nested call result
+                        arg_names.push(format!("_result_of_{}", inner_name));
                     }
                     _ => {}
                 }
@@ -627,15 +649,51 @@ fn convert_statement(
         Statement::ExitUnsafe => {
             Ok(Some(vec![IrStatement::ExitUnsafe]))
         }
-        Statement::If { then_branch, else_branch, .. } => {
-            // Convert if statement branches to IR
+        Statement::If { condition, then_branch, else_branch, .. } => {
+            // Convert if statement to IR
+            // First, process the condition (which might contain uses like `if (ptr)`)
+            let mut condition_ir = Vec::new();
+
+            // Extract uses from the condition expression
+            match condition {
+                crate::parser::Expression::FunctionCall { name, args } => {
+                    // Method call in condition (e.g., if (ptr.operator bool()))
+                    let is_method_call = name.contains("::") || name.starts_with("operator");
+
+                    for (i, arg) in args.iter().enumerate() {
+                        if let crate::parser::Expression::Variable(var) = arg {
+                            // For method calls, first arg is the receiver
+                            if is_method_call && i == 0 {
+                                debug_println!("DEBUG IR: Creating UseVariable for '{}' in condition (method: {})", var, name);
+                                condition_ir.push(IrStatement::UseVariable {
+                                    var: var.clone(),
+                                    operation: format!("call method '{}' in condition", name),
+                                });
+                            }
+                        }
+                    }
+                }
+                crate::parser::Expression::Variable(var) => {
+                    // Direct variable use in condition
+                    condition_ir.push(IrStatement::UseVariable {
+                        var: var.clone(),
+                        operation: "use in condition".to_string(),
+                    });
+                }
+                _ => {
+                    // Other expression types - ignore for now
+                }
+            }
+
+            // Convert then branch
             let mut then_ir = Vec::new();
             for stmt in then_branch {
                 if let Some(ir_stmts) = convert_statement(stmt, variables)? {
                     then_ir.extend(ir_stmts);
                 }
             }
-            
+
+            // Convert else branch if present
             let else_ir = if let Some(else_stmts) = else_branch {
                 let mut else_ir = Vec::new();
                 for stmt in else_stmts {
@@ -647,11 +705,14 @@ fn convert_statement(
             } else {
                 None
             };
-            
-            Ok(Some(vec![IrStatement::If {
+
+            // Return condition uses followed by the If statement
+            let mut result = condition_ir;
+            result.push(IrStatement::If {
                 then_branch: then_ir,
                 else_branch: else_ir,
-            }]))
+            });
+            Ok(Some(result))
         }
         Statement::ExpressionStatement { expr, .. } => {
             // Handle expression statements (dereference, method calls, etc.)

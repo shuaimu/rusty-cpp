@@ -37,7 +37,6 @@ void test() {
 }
 
 #[test]
-#[ignore] // TODO: Requires if-condition tracking (if (ptr) { *ptr = 100; })
 fn test_std_move_in_function_call() {
     let test_code = r#"
 #include <memory>
