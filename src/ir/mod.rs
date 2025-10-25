@@ -525,6 +525,25 @@ fn convert_statement(
                                 }
                                 arg_names.push(var.clone());
                             }
+                            crate::parser::Expression::FunctionCall { name: recv_name, args: recv_args } if is_method_call && i == 0 => {
+                                // Receiver is a method call itself (e.g., ptr->method() where ptr-> is operator->)
+                                debug_println!("DEBUG IR: Receiver is FunctionCall: {}", recv_name);
+
+                                // Check if this is operator-> (pointer dereference for method call)
+                                if recv_name.contains("::operator->") || recv_name == "operator->" {
+                                    // Extract the actual pointer variable from operator-> args
+                                    for recv_arg in recv_args {
+                                        if let crate::parser::Expression::Variable(var) = recv_arg {
+                                            debug_println!("DEBUG IR: Found pointer variable in operator->: {}", var);
+                                            statements.push(IrStatement::UseVariable {
+                                                var: var.clone(),
+                                                operation: format!("call method '{}' via operator->", name),
+                                            });
+                                        }
+                                    }
+                                }
+                                arg_names.push(format!("_result_of_{}", recv_name));
+                            }
                             crate::parser::Expression::Move(inner) => {
                                 if let crate::parser::Expression::Variable(var) = inner.as_ref() {
                                     // Mark as moved before the call
@@ -593,6 +612,24 @@ fn convert_statement(
                     }
                     crate::parser::Expression::FunctionCall { name: inner_name, args: inner_args } => {
                         debug_println!("DEBUG IR: Nested FunctionCall in argument: {}", inner_name);
+
+                        // Check if this is the receiver of a method call (i == 0)
+                        if is_method_call && i == 0 {
+                            // Check if this is operator-> (pointer dereference for method call)
+                            if inner_name.contains("::operator->") || inner_name == "operator->" {
+                                // Extract the actual pointer variable from operator-> args
+                                for inner_arg in inner_args {
+                                    if let crate::parser::Expression::Variable(var) = inner_arg {
+                                        debug_println!("DEBUG IR: Found pointer variable in operator->: {}", var);
+                                        statements.push(IrStatement::UseVariable {
+                                            var: var.clone(),
+                                            operation: format!("call method '{}' via operator->", name),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         // Recursively check for moves in nested function call
                         for inner_arg in inner_args {
                             if let crate::parser::Expression::Move(move_inner) = inner_arg {
