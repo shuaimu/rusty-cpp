@@ -293,37 +293,84 @@ fn convert_statement(
             Ok(None)
         }
         Statement::ReferenceBinding { name, target, is_mutable, .. } => {
-            // Convert to a borrow statement
-            if let crate::parser::Expression::Variable(target_var) = target {
-                let kind = if *is_mutable {
-                    BorrowKind::Mutable
-                } else {
-                    BorrowKind::Immutable
-                };
-                
-                // Update the reference variable's ownership state and type
-                if let Some(var_info) = variables.get_mut(name) {
-                    var_info.ownership = OwnershipState::Borrowed(kind.clone());
-                    // Update the type to reflect this is a reference
-                    if *is_mutable {
-                        if let VariableType::Owned(type_name) = &var_info.ty {
-                            var_info.ty = VariableType::MutableReference(type_name.clone());
-                        }
+            let mut statements = Vec::new();
+
+            match target {
+                // Reference to a variable: create a borrow
+                crate::parser::Expression::Variable(target_var) => {
+                    let kind = if *is_mutable {
+                        BorrowKind::Mutable
                     } else {
-                        if let VariableType::Owned(type_name) = &var_info.ty {
-                            var_info.ty = VariableType::Reference(type_name.clone());
+                        BorrowKind::Immutable
+                    };
+
+                    // Update the reference variable's ownership state and type
+                    if let Some(var_info) = variables.get_mut(name) {
+                        var_info.ownership = OwnershipState::Borrowed(kind.clone());
+                        // Update the type to reflect this is a reference
+                        if *is_mutable {
+                            if let VariableType::Owned(type_name) = &var_info.ty {
+                                var_info.ty = VariableType::MutableReference(type_name.clone());
+                            }
+                        } else {
+                            if let VariableType::Owned(type_name) = &var_info.ty {
+                                var_info.ty = VariableType::Reference(type_name.clone());
+                            }
                         }
                     }
-                }
-                
-                Ok(Some(vec![IrStatement::Borrow {
-                    from: target_var.clone(),
-                    to: name.clone(),
-                    kind,
-                }]))
-            } else {
-                Ok(None)
+
+                    statements.push(IrStatement::Borrow {
+                        from: target_var.clone(),
+                        to: name.clone(),
+                        kind,
+                    });
+                },
+
+                // Reference to function call result: create CallExpr with result
+                crate::parser::Expression::FunctionCall { name: func_name, args } => {
+                    let mut arg_names = Vec::new();
+
+                    // Process arguments
+                    for arg in args {
+                        match arg {
+                            crate::parser::Expression::Variable(var) => {
+                                arg_names.push(var.clone());
+                            }
+                            crate::parser::Expression::Move(inner) => {
+                                if let crate::parser::Expression::Variable(var) = inner.as_ref() {
+                                    statements.push(IrStatement::Move {
+                                        from: var.clone(),
+                                        to: format!("_moved_{}", var),
+                                    });
+                                    arg_names.push(var.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Create CallExpr with result bound to the reference variable
+                    statements.push(IrStatement::CallExpr {
+                        func: func_name.clone(),
+                        args: arg_names,
+                        result: Some(name.clone()),
+                    });
+
+                    // Update the reference variable's ownership state
+                    if let Some(var_info) = variables.get_mut(name) {
+                        let kind = if *is_mutable {
+                            BorrowKind::Mutable
+                        } else {
+                            BorrowKind::Immutable
+                        };
+                        var_info.ownership = OwnershipState::Borrowed(kind);
+                    }
+                },
+
+                _ => return Ok(None),
             }
+
+            Ok(Some(statements))
         }
         Statement::Assignment { lhs, rhs, .. } => {
             // Handle assignments that might involve references or function calls

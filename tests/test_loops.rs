@@ -2,15 +2,15 @@ use std::process::Command;
 use std::fs;
 
 #[test]
-#[ignore] // Requires std::unique_ptr support
 fn test_loop_use_after_move() {
     // This code should have an error - using a moved value in second iteration
     let test_code = r#"
 #include <memory>
 
+// @safe
 void test() {
     std::unique_ptr<int> ptr(new int(42));
-    
+
     for (int i = 0; i < 2; i++) {
         auto moved = std::move(ptr);  // Error on second iteration
     }
@@ -69,16 +69,16 @@ void test() {
 }
 
 #[test]
-#[ignore] // Requires std::unique_ptr support
 fn test_while_loop_use_after_move() {
     // Test with while loop
     let test_code = r#"
 #include <memory>
 
+// @safe
 void test() {
     std::unique_ptr<int> ptr(new int(42));
     int count = 0;
-    
+
     while (count < 2) {
         auto moved = std::move(ptr);  // Error on second iteration
         count++;
@@ -137,21 +137,22 @@ void test() {
 }
 
 #[test]
-#[ignore] // Requires std::unique_ptr support
+#[ignore] // TODO: Requires dereference operator support (*ptr)
 fn test_loop_conditional_move() {
     // Test move that only happens sometimes in loop
     let test_code = r#"
 #include <memory>
 
+// @safe
 void test() {
     std::unique_ptr<int> ptr(new int(42));
-    
+
     for (int i = 0; i < 2; i++) {
         if (i == 0) {
             auto moved = std::move(ptr);  // Moves on first iteration
         } else {
             // ptr is already moved on second iteration
-            auto value = *ptr;  // Error: use after move
+            auto value = *ptr;  // Error: use after move (requires dereference tracking)
         }
     }
 }

@@ -151,11 +151,8 @@ fn check_lifetime_annotation_requirements(
 
         // Check if function signature has lifetime annotation
         let has_lifetime_annotation = if let Some(sig) = header_cache.get_signature(&function.name) {
-            debug_println!("DEBUG LIFETIME ANN: Found signature for '{}': return_lifetime={:?}",
-                          function.name, sig.return_lifetime);
             sig.return_lifetime.is_some()
         } else {
-            debug_println!("DEBUG LIFETIME ANN: No signature found for '{}'", function.name);
             false
         };
 
@@ -175,15 +172,9 @@ fn check_lifetime_annotation_requirements(
 
 /// Check if a function returns a reference by analyzing its return type
 fn check_if_function_returns_reference(function: &IrFunction) -> bool {
-    debug_println!("DEBUG LIFETIME: Checking function '{}'", function.name);
-    debug_println!("DEBUG LIFETIME:   Return type: '{}'", function.return_type);
-
     // Check if the return type is a reference
     // References have & in the type (e.g., "const int&", "int&", "Type&")
-    let is_reference = function.return_type.contains('&') && !function.return_type.contains("&&");
-
-    debug_println!("DEBUG LIFETIME:   Is reference: {}", is_reference);
-    is_reference
+    function.return_type.contains('&') && !function.return_type.contains("&&")
 }
 
 #[allow(dead_code)]

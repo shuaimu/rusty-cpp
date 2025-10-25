@@ -193,12 +193,12 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
     let mut inferencer = LifetimeInferencer::new();
     let lifetimes = inferencer.infer_function_lifetimes(function);
     let mut errors = Vec::new();
-    
+
     // Check for conflicts between inferred lifetimes
     let mut statement_index = 0;
     for node_idx in function.cfg.node_indices() {
         let block = &function.cfg[node_idx];
-        
+
         for statement in &block.statements {
             match statement {
                 IrStatement::Borrow { from, to, kind } => {
@@ -250,36 +250,39 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     }
 
                     if let Some(val) = value {
-                        // Check if returning a reference to a local variable
-                        // Only check if this is actually a reference type
-                        if let Some(var_info) = function.variables.get(val) {
-                            match var_info.ty {
-                                crate::ir::VariableType::Reference(_) |
-                                crate::ir::VariableType::MutableReference(_) => {
-                                    // PHASE 2: Check if returning a direct reference to a local variable
-                                    let is_param = is_parameter(val, function);
-                                    debug_println!("DEBUG PARAM CHECK: var='{}', is_parameter={}", val, is_param);
-                                    if !is_param {
-                                        errors.push(format!(
-                                            "Cannot return reference to local variable '{}'",
-                                            val
-                                        ));
-                                    }
+                        // PHASE 2: If function returns a reference, check what we're returning
+                        if returns_reference(&function.return_type) {
+                            if let Some(var_info) = function.variables.get(val) {
+                                // Check if we're returning a local variable
+                                // This applies whether the variable is owned or already a reference
+                                let is_param = is_parameter(val, function);
 
-                                    // Also check if it depends on local variables
-                                    if let Some(lifetime) = lifetimes.get(val) {
-                                        // If this variable depends on local variables, it's potentially problematic
-                                        for dep in &lifetime.dependencies {
-                                            if !is_parameter(dep, function) {
-                                                errors.push(format!(
-                                                    "Potential dangling reference: returning '{}' which depends on local variable '{}'",
-                                                    val, dep
-                                                ));
+                                if !is_param {
+                                    // Returning a local variable when function returns a reference
+                                    errors.push(format!(
+                                        "Cannot return reference to local variable '{}'",
+                                        val
+                                    ));
+                                }
+
+                                // If the returned variable is itself a reference, check dependencies
+                                match var_info.ty {
+                                    crate::ir::VariableType::Reference(_) |
+                                    crate::ir::VariableType::MutableReference(_) => {
+                                        if let Some(lifetime) = lifetimes.get(val) {
+                                            // Check if it depends on local variables
+                                            for dep in &lifetime.dependencies {
+                                                if !is_parameter(dep, function) {
+                                                    errors.push(format!(
+                                                        "Potential dangling reference: returning '{}' which depends on local variable '{}'",
+                                                        val, dep
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
+                                    _ => {} // Owned variable - already checked above
                                 }
-                                _ => {} // Not a reference, no dangling check needed
                             }
                         }
                     }

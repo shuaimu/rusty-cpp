@@ -101,15 +101,16 @@ fn test_multiple_functions() {
 
 // These tests would fail with proper implementation but pass with current skeleton
 #[test]
-#[ignore] // Requires std::unique_ptr support
+#[ignore] // TODO: Requires dereference assignment tracking (*ptr = value)
 fn test_use_after_move_with_unique_ptr() {
     let code = r#"
     #include <memory>
-    
+
+    // @safe
     void bad_function() {
         std::unique_ptr<int> ptr1(new int(42));
         std::unique_ptr<int> ptr2 = std::move(ptr1);
-        *ptr1 = 10;  // Should be detected as use-after-move
+        *ptr1 = 10;  // Should be detected as use-after-move (requires dereference tracking)
     }
     "#;
     
@@ -141,9 +142,9 @@ fn test_multiple_mutable_borrows() {
 }
 
 #[test]
-#[ignore] // Requires lifetime analysis
 fn test_dangling_reference_lifetime() {
     let code = r#"
+    // @safe
     int& get_dangling() {
         int local = 42;
         return local;  // Should be detected as returning reference to local

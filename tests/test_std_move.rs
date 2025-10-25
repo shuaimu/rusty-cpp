@@ -2,18 +2,19 @@ use std::process::Command;
 use std::fs;
 
 #[test]
-#[ignore] // Requires std::unique_ptr and header support
+#[ignore] // TODO: Requires dereference assignment tracking (*ptr = value)
 fn test_std_move_basic() {
     // Create a test file with std::move
     let test_code = r#"
 #include <memory>
 #include <utility>
 
+// @safe
 void test() {
     std::unique_ptr<int> ptr(new int(42));
     std::unique_ptr<int> ptr2 = std::move(ptr);
-    
-    // This should error - use after move
+
+    // This should error - use after move (requires dereference tracking)
     *ptr = 100;
 }
 "#;
@@ -37,7 +38,7 @@ void test() {
 }
 
 #[test]
-#[ignore] // Requires std::unique_ptr and header support
+#[ignore] // TODO: Requires if-condition and dereference tracking
 fn test_std_move_in_function_call() {
     let test_code = r#"
 #include <memory>
@@ -45,11 +46,12 @@ fn test_std_move_in_function_call() {
 
 void consume(std::unique_ptr<int> p);
 
+// @safe
 void test() {
     std::unique_ptr<int> ptr(new int(42));
     consume(std::move(ptr));
-    
-    // This should error - use after move
+
+    // This should error - use after move (requires if-condition tracking)
     if (ptr) {
         *ptr = 100;
     }

@@ -2,6 +2,7 @@ use crate::parser::annotations::{LifetimeAnnotation, FunctionSignature, Lifetime
 use crate::parser::HeaderCache;
 use crate::ir::{IrProgram, IrStatement, IrFunction};
 use std::collections::{HashMap, HashSet};
+use crate::debug_println;
 
 /// Tracks lifetime information for variables in the current scope
 #[derive(Debug, Clone)]
@@ -55,14 +56,28 @@ impl LifetimeScope {
         if longer == shorter {
             return true;
         }
-        
+
+        // Check scope-based lifetimes: 'scope_X outlives 'scope_Y if X < Y
+        // Lower scope number = outer scope = longer lifetime
+        if let (Some(longer_scope), Some(shorter_scope)) = (
+            longer.strip_prefix("'scope_"),
+            shorter.strip_prefix("'scope_")
+        ) {
+            if let (Ok(longer_depth), Ok(shorter_depth)) = (
+                longer_scope.parse::<usize>(),
+                shorter_scope.parse::<usize>()
+            ) {
+                return longer_depth <= shorter_depth;
+            }
+        }
+
         // Check explicit constraints
         for constraint in &self.constraints {
             if constraint.longer == longer && constraint.shorter == shorter {
                 return true;
             }
         }
-        
+
         // Implement transitive outlives checking
         // If 'a: 'b and 'b: 'c, then 'a: 'c
         self.check_outlives_transitive(longer, shorter, &mut HashSet::new())
@@ -112,7 +127,7 @@ pub fn check_lifetimes_with_annotations(
 }
 
 fn check_function_lifetimes(
-    function: &IrFunction, 
+    function: &IrFunction,
     scope: &mut LifetimeScope,
     header_cache: &HeaderCache
 ) -> Result<Vec<String>, String> {
@@ -134,12 +149,86 @@ fn check_function_lifetimes(
         }
     }
     
+    // Track scope depth for lifetime inference
+    let mut scope_depth = 0;
+    let mut variable_scopes: HashMap<String, usize> = HashMap::new();
+
+    // First pass: assign scope depths to variables based on where they're declared/used
+    for node_idx in function.cfg.node_indices() {
+        let block = &function.cfg[node_idx];
+
+        for statement in &block.statements {
+            match statement {
+                IrStatement::EnterScope => {
+                    scope_depth += 1;
+                }
+                IrStatement::ExitScope => {
+                    if scope_depth > 0 {
+                        scope_depth -= 1;
+                    }
+                }
+                IrStatement::Assign { lhs, .. } |
+                IrStatement::Borrow { to: lhs, .. } => {
+                    // Record the scope depth where this variable is first assigned
+                    if !variable_scopes.contains_key(lhs) {
+                        variable_scopes.insert(lhs.clone(), scope_depth);
+                    }
+                }
+                IrStatement::CallExpr { args, result, .. } => {
+                    // Record result variable if present
+                    if let Some(lhs) = result {
+                        if !variable_scopes.contains_key(lhs) {
+                            variable_scopes.insert(lhs.clone(), scope_depth);
+                        }
+                    }
+                    // For arguments that don't have lifetimes yet, record their scope
+                    for arg in args {
+                        if !variable_scopes.contains_key(arg) && scope.is_owned(arg) {
+                            variable_scopes.insert(arg.clone(), scope_depth);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Assign scope-based lifetimes to owned variables
+    // Variables not in variable_scopes must have been declared before any tracked statements (scope 0)
+    // This includes function parameters and variables declared at the start of the function
+    for (var_name, var_info) in &function.variables {
+        if scope.is_owned(var_name) {
+            // Check if this variable was assigned/declared in a tracked statement
+            if let Some(&depth) = variable_scopes.get(var_name) {
+                // Variable was assigned/declared, use that scope
+                let lifetime = format!("'scope_{}", depth);
+                scope.set_lifetime(var_name.clone(), lifetime.clone());
+            } else {
+                // Variable exists but was never assigned/declared in statements
+                // It must be a parameter or declared at function start (scope 0)
+                let lifetime = "'scope_0".to_string();
+                scope.set_lifetime(var_name.clone(), lifetime.clone());
+            }
+        }
+    }
+
+    // Reset scope depth for statement processing
+    scope_depth = 0;
+
     // Check each statement in the function
     for node_idx in function.cfg.node_indices() {
         let block = &function.cfg[node_idx];
-        
-        for statement in &block.statements {
+
+        for (idx, statement) in block.statements.iter().enumerate() {
             match statement {
+                IrStatement::EnterScope => {
+                    scope_depth += 1;
+                }
+                IrStatement::ExitScope => {
+                    if scope_depth > 0 {
+                        scope_depth -= 1;
+                    }
+                }
                 IrStatement::CallExpr { func, args, result } => {
                     // Check if we have annotations for this function
                     if let Some(signature) = header_cache.get_signature(func) {
@@ -209,17 +298,15 @@ fn check_function_call(
     }
     
     // Check parameter lifetime requirements
+    // Note: In C++, passing owned values to const reference parameters is legal (creates temporary)
+    // So we only check for ownership transfer violations
     for (i, (arg, expected)) in args.iter().zip(&signature.param_lifetimes).enumerate() {
         if let Some(expected_lifetime) = expected {
             match expected_lifetime {
                 LifetimeAnnotation::Ref(_expected) | LifetimeAnnotation::MutRef(_expected) => {
-                    // The argument must be a reference with appropriate lifetime
-                    if scope.is_owned(arg) {
-                        errors.push(format!(
-                            "Function '{}' expects a reference for parameter {}, but '{}' is owned",
-                            func_name, i + 1, arg
-                        ));
-                    }
+                    // In C++, you can pass owned values to reference parameters
+                    // The compiler creates a temporary reference
+                    // So we don't error here - just note that owned values will create temporaries
                 }
                 LifetimeAnnotation::Owned => {
                     // The argument should transfer ownership
@@ -240,9 +327,10 @@ fn check_function_call(
         // Map lifetime names from signature to actual argument lifetimes
         let longer_lifetime = map_lifetime_to_actual(&bound.longer, &arg_lifetimes);
         let shorter_lifetime = map_lifetime_to_actual(&bound.shorter, &arg_lifetimes);
-        
+
         if let (Some(longer), Some(shorter)) = (longer_lifetime, shorter_lifetime) {
-            if !scope.check_outlives(&longer, &shorter) {
+            let outlives = scope.check_outlives(&longer, &shorter);
+            if !outlives {
                 errors.push(format!(
                     "Lifetime constraint violated in call to '{}': '{}' must outlive '{}'",
                     func_name, longer, shorter
