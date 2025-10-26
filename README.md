@@ -1,10 +1,12 @@
-# rusty-cpp: Making C++ Rusty
+# rusty-cpp
 
 Bringing Rust's safety to C++ through:
 
-**1. 🔍 Static Borrow Checker** - Compile-time ownership and lifetime analysis via `rusty-cpp-checker`
-**2. 📦 Safe Types** - `Box<T>`, `RefCell<T>`, `Vec<T>`, `HashMap<K,V>`, etc.
-**3. 🔐 Rust Idioms** - `Send`/`Sync` traits, RAII guards, type-state patterns, `Result<T,E>`/`Option<T>`
+**1. Static Borrow Checker** - Compile-time ownership and lifetime analysis via `rusty-cpp-checker`.
+<br>
+**2. Safe Types** - `Box<T>`, `RefCell<T>`, `Vec<T>`, `HashMap<K,V>`, etc.
+<br>
+**3. Rust Idioms** - `Send`/`Sync` traits, RAII guards, type-state patterns, `Result<T,E>`/`Option<T>`, etc.
 
 ---
 
