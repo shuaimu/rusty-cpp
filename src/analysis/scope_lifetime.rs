@@ -312,18 +312,21 @@ fn analyze_block(
                     // Check for dangling references
                     if let Some(var_scope) = tracker.variable_scope.get(val) {
                         // If returning a reference to a local variable, it's an error
+                        // Static variables are OK to return (they have 'static lifetime)
                         if *var_scope != 0 && !is_parameter(val, function) {
-                            // Check if this is a reference type
+                            // Check if this is a reference type and not a static variable
                             if let Some(var_info) = function.variables.get(val) {
-                                match var_info.ty {
-                                    crate::ir::VariableType::Reference(_) |
-                                    crate::ir::VariableType::MutableReference(_) => {
-                                        errors.push(format!(
-                                            "Returning reference to local variable '{}' - will create dangling reference",
-                                            val
-                                        ));
+                                if !var_info.is_static {  // Static variables are safe to return
+                                    match var_info.ty {
+                                        crate::ir::VariableType::Reference(_) |
+                                        crate::ir::VariableType::MutableReference(_) => {
+                                            errors.push(format!(
+                                                "Returning reference to local variable '{}' - will create dangling reference",
+                                                val
+                                            ));
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                         }

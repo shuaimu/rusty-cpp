@@ -72,6 +72,7 @@ pub struct Variable {
     pub is_unique_ptr: bool,
     #[allow(dead_code)]
     pub is_shared_ptr: bool,
+    pub is_static: bool,
     #[allow(dead_code)]
     pub location: SourceLocation,
 }
@@ -137,6 +138,11 @@ pub enum Expression {
         left: Box<Expression>,
         op: String,
         right: Box<Expression>,
+    },
+    // NEW: Member access (obj.field)
+    MemberAccess {
+        object: Box<Expression>,
+        field: String,
     },
 }
 
@@ -206,7 +212,11 @@ pub fn extract_variable(entity: &Entity) -> Variable {
     
     let is_unique_ptr = type_name.contains("unique_ptr");
     let is_shared_ptr = type_name.contains("shared_ptr");
-    
+
+    // Check if this is a static variable
+    // In clang, static variables have StorageClass::Static
+    let is_static = entity.get_storage_class() == Some(clang::StorageClass::Static);
+
     Variable {
         name,
         type_name,
@@ -215,6 +225,7 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         is_const,
         is_unique_ptr,
         is_shared_ptr,
+        is_static,
         location,
     }
 }
@@ -696,33 +707,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             
-            // Three-pass approach:
-            // Pass 1: Extract receiver from MemberRefExpr (for method calls)
-            // Pass 2: Identify which child provides the function name
-            // Pass 3: Extract remaining arguments, skipping name-providing child
+            // Two-pass approach:
+            // Pass 1: Identify which child provides the function name
+            // Pass 2: Extract arguments, handling MemberRefExpr specially if it's the name provider
 
-            let mut receiver: Option<Expression> = None;
             let mut name_providing_child_idx: Option<usize> = None;
 
-            // Pass 1: Look for MemberRefExpr and extract receiver
-            for (i, c) in children.iter().enumerate() {
-                if c.get_kind() == EntityKind::MemberRefExpr {
-                    // Extract receiver from MemberRefExpr's children
-                    let member_children = c.get_children();
-                    if !member_children.is_empty() {
-                        // First child of MemberRefExpr is the receiver object
-                        if let Some(recv_expr) = extract_expression(&member_children[0]) {
-                            debug_println!("DEBUG AST: Extracted receiver from MemberRefExpr: {:?}", recv_expr);
-                            receiver = Some(recv_expr);
-                        }
-                    }
-                    // Mark this as the name-providing child to skip later
-                    name_providing_child_idx = Some(i);
-                    break;
-                }
-            }
-
-            // Pass 2: If no MemberRefExpr, use existing logic to find name provider
+            // Pass 1: Find the name-providing child
             if name_providing_child_idx.is_none() {
                 if name == "unknown" {
                     for (i, c) in children.iter().enumerate() {
@@ -755,19 +746,28 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
 
-            // Add receiver as first argument if present
-            if let Some(recv) = receiver {
-                args.push(recv);
-            }
-
-            // Pass 3: Extract remaining arguments, skipping name-providing child
+            // Pass 2: Extract arguments, handling MemberRefExpr specially if it's the name provider
             for (i, c) in children.into_iter().enumerate() {
-                // Skip the child that provided the function name
+                // If this child provided the function name
                 if Some(i) == name_providing_child_idx {
+                    // For method calls (MemberRefExpr is name provider), extract the receiver
+                    if c.get_kind() == EntityKind::MemberRefExpr {
+                        debug_println!("DEBUG AST: MemberRefExpr is name provider - extracting receiver");
+                        // Extract receiver from MemberRefExpr's children
+                        let member_children = c.get_children();
+                        if !member_children.is_empty() {
+                            // First child of MemberRefExpr is the receiver object
+                            if let Some(recv_expr) = extract_expression(&member_children[0]) {
+                                debug_println!("DEBUG AST: Extracted receiver from MemberRefExpr: {:?}", recv_expr);
+                                args.push(recv_expr);
+                            }
+                        }
+                    }
+                    // Skip the name-providing child itself
                     continue;
                 }
 
-                // Extract all other children as arguments
+                // Extract all other children as normal arguments
                 if let Some(expr) = extract_expression(&c) {
                     args.push(expr);
                 }
@@ -856,10 +856,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     // LibClang doesn't give us the operator directly, but we can check the types
                     if let Some(result_type) = entity.get_type() {
                         let type_str = type_to_string(&result_type);
-                        
+
                         if let Some(child_type) = children[0].get_type() {
                             let child_type_str = type_to_string(&child_type);
-                            
+
                             // If child is pointer and result is not, it's dereference
                             if child_type_str.contains('*') && !type_str.contains('*') {
                                 return Some(Expression::Dereference(Box::new(inner)));
@@ -872,6 +872,40 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     }
                     // Default to address-of if we can't determine
                     return Some(Expression::AddressOf(Box::new(inner)));
+                }
+            }
+            None
+        }
+        EntityKind::MemberRefExpr => {
+            // NEW: Parse member access expressions (obj.field)
+            // MemberRefExpr is used for both field access and method calls
+            // For field access, we extract: object from first child, field name from reference
+            debug_println!("DEBUG: Found MemberRefExpr");
+
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if !children.is_empty() {
+                // First child is the object being accessed
+                if let Some(object_expr) = extract_expression(&children[0]) {
+                    // Get the field/member name from the entity's reference or name
+                    let field_name = if let Some(ref_entity) = entity.get_reference() {
+                        // Check if it's a field (not a method)
+                        if ref_entity.get_kind() == EntityKind::FieldDecl {
+                            ref_entity.get_name().unwrap_or_else(|| "unknown_field".to_string())
+                        } else {
+                            // It's a method call, not field access - return None to let CallExpr handle it
+                            return None;
+                        }
+                    } else if let Some(name) = entity.get_name() {
+                        name
+                    } else {
+                        "unknown_field".to_string()
+                    };
+
+                    debug_println!("DEBUG: MemberRefExpr object={:?}, field={}", object_expr, field_name);
+                    return Some(Expression::MemberAccess {
+                        object: Box::new(object_expr),
+                        field: field_name,
+                    });
                 }
             }
             None

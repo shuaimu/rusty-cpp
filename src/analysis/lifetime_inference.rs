@@ -255,10 +255,12 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                             if let Some(var_info) = function.variables.get(val) {
                                 // Check if we're returning a local variable
                                 // This applies whether the variable is owned or already a reference
+                                // Static variables are OK to return (they have 'static lifetime)
                                 let is_param = is_parameter(val, function);
 
-                                if !is_param {
+                                if !is_param && !var_info.is_static {
                                     // Returning a local variable when function returns a reference
+                                    // (but static variables are safe)
                                     errors.push(format!(
                                         "Cannot return reference to local variable '{}'",
                                         val

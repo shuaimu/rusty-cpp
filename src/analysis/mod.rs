@@ -371,14 +371,38 @@ fn process_statement(
                 ));
                 return;
             }
-            
+
+            // NEW: Can't move from a variable that is currently borrowed
+            if let Some(borrows) = ownership_tracker.get_active_borrows(from) {
+                if !borrows.is_empty() {
+                    let borrower_names: Vec<String> = borrows.iter().map(|b| b.borrower.clone()).collect();
+                    errors.push(format!(
+                        "Cannot move '{}' because it is borrowed by: {}",
+                        from,
+                        borrower_names.join(", ")
+                    ));
+                    return;
+                }
+            }
+
             if from_state == Some(&OwnershipState::Moved) {
                 errors.push(format!(
                     "Use after move: variable '{}' has already been moved",
                     from
                 ));
             }
-            
+
+            // NEW: Check if the object has any moved fields (partial move)
+            if ownership_tracker.has_moved_fields(from) {
+                let moved_fields = ownership_tracker.get_moved_fields(from);
+                errors.push(format!(
+                    "Cannot move '{}' because it has been partially moved (moved fields: {})",
+                    from,
+                    moved_fields.join(", ")
+                ));
+                return;
+            }
+
             // Handle temporary move markers (from std::move in function calls)
             if to.starts_with("_temp_move_") || to.starts_with("_moved_") {
                 // Just mark the source as moved, don't create the temporary
@@ -390,6 +414,116 @@ fn process_statement(
             }
         }
         
+        // NEW: Handle field-level operations
+        crate::ir::IrStatement::MoveField { object, field, to } => {
+            debug_println!("DEBUG ANALYSIS: Processing MoveField from '{}.{}' to '{}'", object, field, to);
+
+            // Skip checks if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                ownership_tracker.mark_field_moved(object.clone(), field.clone());
+                ownership_tracker.set_ownership(to.clone(), OwnershipState::Owned);
+                return;
+            }
+
+            // Check if the object itself has been moved
+            let object_state = ownership_tracker.get_ownership(object);
+            if object_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Cannot move field '{}' from '{}' because '{}' has been moved",
+                    field, object, object
+                ));
+                return;
+            }
+
+            // Check if the field has already been moved
+            let field_state = ownership_tracker.get_field_ownership(object, field);
+            if field_state == OwnershipState::Moved {
+                errors.push(format!(
+                    "Use after move: field '{}.{}' has already been moved",
+                    object, field
+                ));
+                return;
+            }
+
+            // Check if the object is currently borrowed
+            if let Some(borrows) = ownership_tracker.get_active_borrows(object) {
+                if !borrows.is_empty() {
+                    let borrower_names: Vec<String> = borrows.iter().map(|b| b.borrower.clone()).collect();
+                    errors.push(format!(
+                        "Cannot move field '{}.{}' because '{}' is borrowed by: {}",
+                        object, field, object, borrower_names.join(", ")
+                    ));
+                    return;
+                }
+            }
+
+            // Mark the field as moved
+            ownership_tracker.mark_field_moved(object.clone(), field.clone());
+            ownership_tracker.set_ownership(to.clone(), OwnershipState::Owned);
+        }
+
+        crate::ir::IrStatement::UseField { object, field, operation } => {
+            debug_println!("DEBUG ANALYSIS: UseField object='{}', field='{}', operation='{}'", object, field, operation);
+
+            // Skip checking if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            // Check if the object has been moved
+            let object_state = ownership_tracker.get_ownership(object);
+            if object_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Cannot {} field '{}.{}' because '{}' has been moved",
+                    operation, object, field, object
+                ));
+                return;
+            }
+
+            // Check if the field has been moved
+            let field_state = ownership_tracker.get_field_ownership(object, field);
+            if field_state == OwnershipState::Moved {
+                errors.push(format!(
+                    "Cannot {} field '{}.{}' because it has been moved",
+                    operation, object, field
+                ));
+            }
+        }
+
+        crate::ir::IrStatement::BorrowField { object, field, to, kind } => {
+            debug_println!("DEBUG ANALYSIS: BorrowField from '{}.{}' to '{}'", object, field, to);
+
+            // Skip checking if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            // Check if the object has been moved
+            let object_state = ownership_tracker.get_ownership(object);
+            if object_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Cannot borrow field '{}.{}' because '{}' has been moved",
+                    field, object, object
+                ));
+                return;
+            }
+
+            // Check if the field has been moved
+            let field_state = ownership_tracker.get_field_ownership(object, field);
+            if field_state == OwnershipState::Moved {
+                errors.push(format!(
+                    "Cannot borrow field '{}.{}' because it has been moved",
+                    object, field
+                ));
+                return;
+            }
+
+            // Record the borrow (for now, borrow the whole object)
+            // In a complete implementation, we'd track field-level borrows separately
+            ownership_tracker.add_borrow(object.clone(), to.clone(), kind.clone());
+            ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
+        }
+
         crate::ir::IrStatement::Borrow { from, to, kind } => {
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
@@ -551,6 +685,25 @@ fn process_statement(
             }
         }
 
+        crate::ir::IrStatement::Return { value } => {
+            // Skip if in unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            if let Some(val) = value {
+                // Check if returning a moved value
+                let var_state = ownership_tracker.get_ownership(val);
+
+                if var_state == Some(&OwnershipState::Moved) {
+                    errors.push(format!(
+                        "Cannot return '{}' because it has been moved",
+                        val
+                    ));
+                }
+            }
+        }
+
         _ => {}
     }
 }
@@ -567,6 +720,14 @@ struct OwnershipTracker {
     loop_entry_states: Vec<LoopEntryState>,
     // Track if we're in an unsafe block
     unsafe_depth: usize,
+    // Track active borrows: which variables are currently borrowed from
+    // Key: variable being borrowed from, Value: list of active borrows on it
+    active_borrows: HashMap<String, Vec<ActiveBorrow>>,
+    // NEW: Track field-level ownership state
+    // Key: object name, Value: map of field name to ownership state
+    field_ownership: HashMap<String, HashMap<String, OwnershipState>>,
+    // NEW: Track method context (are we in a method? is 'this' owned or borrowed?)
+    this_context: Option<ThisContext>,
 }
 
 #[derive(Clone)]
@@ -574,6 +735,9 @@ struct TrackerState {
     ownership: HashMap<String, OwnershipState>,
     borrows: HashMap<String, BorrowInfo>,
     reference_info: HashMap<String, ReferenceInfo>,
+    active_borrows: HashMap<String, Vec<ActiveBorrow>>,
+    // NEW: Field-level ownership tracking
+    field_ownership: HashMap<String, HashMap<String, OwnershipState>>,
 }
 
 #[derive(Clone)]
@@ -602,6 +766,25 @@ struct ReferenceInfo {
     is_mutable: bool,
 }
 
+// Track active borrows: when a variable is borrowed by a reference,
+// we need to prevent moving the borrowed variable
+#[derive(Clone, Debug)]
+struct ActiveBorrow {
+    borrower: String,      // The reference variable that is borrowing (e.g., "ref")
+    borrowed_from: String, // The variable being borrowed from (e.g., "ptr")
+    kind: BorrowKind,
+    scope: usize,          // Scope level where this borrow was created
+}
+
+// Track method context: how is 'this' accessed in methods?
+#[derive(Clone, Debug, PartialEq)]
+enum ThisContext {
+    Borrowed,       // Regular method - implicit &self
+    MutBorrowed,    // Mutable method - implicit &mut self
+    ConstBorrowed,  // Const method - const &self
+    Consumed,       // Rvalue ref method - implicit &&self (owned)
+}
+
 impl OwnershipTracker {
     fn new() -> Self {
         let mut tracker = Self {
@@ -612,6 +795,9 @@ impl OwnershipTracker {
             loop_depth: 0,
             loop_entry_states: Vec::new(),
             unsafe_depth: 0,
+            active_borrows: HashMap::new(),
+            field_ownership: HashMap::new(),  // NEW
+            this_context: None,                // NEW
         };
         // Start with a root scope
         tracker.scope_stack.push(ScopeInfo::default());
@@ -635,41 +821,121 @@ impl OwnershipTracker {
     }
     
     fn add_borrow(&mut self, from: String, to: String, kind: BorrowKind) {
-        let borrow_info = self.borrows.entry(from).or_default();
+        let borrow_info = self.borrows.entry(from.clone()).or_default();
         borrow_info.borrowers.insert(to.clone());
-        
+
         // Track this borrow in the current scope
         if let Some(current_scope) = self.scope_stack.last_mut() {
-            current_scope.local_borrows.insert(to);
+            current_scope.local_borrows.insert(to.clone());
         }
-        
+
         match kind {
             BorrowKind::Immutable => borrow_info.immutable_count += 1,
             BorrowKind::Mutable => borrow_info.has_mutable = true,
         }
+
+        // NEW: Record active borrow - track that 'from' is currently borrowed by 'to'
+        let current_scope_level = self.scope_stack.len();
+        let active_borrow = ActiveBorrow {
+            borrower: to,
+            borrowed_from: from.clone(),
+            kind,
+            scope: current_scope_level,
+        };
+        self.active_borrows.entry(from).or_default().push(active_borrow);
     }
-    
+
+    // NEW: Get active borrows for a variable
+    fn get_active_borrows(&self, var: &str) -> Option<&Vec<ActiveBorrow>> {
+        self.active_borrows.get(var)
+    }
+
+    // NEW: Helper methods for field-level ownership tracking
+
+    /// Get ownership state of a specific field
+    fn get_field_ownership(&self, object: &str, field: &str) -> OwnershipState {
+        self.field_ownership
+            .get(object)
+            .and_then(|fields| fields.get(field))
+            .cloned()
+            .unwrap_or(OwnershipState::Owned)
+    }
+
+    /// Mark field as moved
+    fn mark_field_moved(&mut self, object: String, field: String) {
+        self.field_ownership
+            .entry(object)
+            .or_default()
+            .insert(field, OwnershipState::Moved);
+    }
+
+    /// Check if object has any moved fields
+    fn has_moved_fields(&self, object: &str) -> bool {
+        self.field_ownership
+            .get(object)
+            .map(|fields| fields.values().any(|s| *s == OwnershipState::Moved))
+            .unwrap_or(false)
+    }
+
+    /// Get list of moved fields
+    fn get_moved_fields(&self, object: &str) -> Vec<String> {
+        self.field_ownership
+            .get(object)
+            .map(|fields| {
+                fields.iter()
+                    .filter(|(_, state)| **state == OwnershipState::Moved)
+                    .map(|(field, _)| field.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Check if can move from 'this' in current context
+    fn can_move_from_this(&self) -> bool {
+        match &self.this_context {
+            Some(ThisContext::Consumed) => true,  // && method - can move
+            Some(_) => false,  // All other methods - cannot move
+            None => true,  // Not in method - OK (though this shouldn't happen)
+        }
+    }
+
+    /// Set method context
+    fn set_this_context(&mut self, context: Option<ThisContext>) {
+        self.this_context = context;
+    }
+
     fn enter_scope(&mut self) {
         self.scope_stack.push(ScopeInfo::default());
     }
     
     fn exit_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
+            let current_scope_level = self.scope_stack.len() + 1; // +1 because we just popped
+
             // Clean up all borrows created in this scope
-            for borrow_name in scope.local_borrows {
+            for borrow_name in &scope.local_borrows {
                 // Remove from reference info
-                self.reference_info.remove(&borrow_name);
-                
+                self.reference_info.remove(borrow_name);
+
                 // Remove from all borrow tracking
                 for borrow_info in self.borrows.values_mut() {
-                    borrow_info.borrowers.remove(&borrow_name);
+                    borrow_info.borrowers.remove(borrow_name);
                     // Note: In a more complete implementation, we'd also
                     // decrement counts based on the borrow kind
                 }
+
+                // NEW: Remove from active borrows
+                // Remove any active borrow where this variable is the borrower
+                for active_borrows in self.active_borrows.values_mut() {
+                    active_borrows.retain(|b| &b.borrower != borrow_name);
+                }
             }
-            
+
             // Clean up empty borrow entries
             self.borrows.retain(|_, info| !info.borrowers.is_empty());
+
+            // NEW: Clean up empty active borrow entries
+            self.active_borrows.retain(|_, borrows| !borrows.is_empty());
         }
     }
     
@@ -741,13 +1007,17 @@ impl OwnershipTracker {
             ownership: self.ownership.clone(),
             borrows: self.borrows.clone(),
             reference_info: self.reference_info.clone(),
+            active_borrows: self.active_borrows.clone(),
+            field_ownership: self.field_ownership.clone(),  // NEW
         }
     }
-    
+
     fn restore_state(&mut self, state: &TrackerState) {
         self.ownership = state.ownership.clone();
         self.borrows = state.borrows.clone();
         self.reference_info = state.reference_info.clone();
+        self.active_borrows = state.active_borrows.clone();
+        self.field_ownership = state.field_ownership.clone();  // NEW
     }
     
     fn merge_states(&mut self, then_state: &TrackerState, else_state: &TrackerState) {
@@ -794,6 +1064,80 @@ impl OwnershipTracker {
             }
         }
         self.reference_info.retain(|var, _| refs_to_keep.contains(var));
+
+        // Merge active borrows - keep only borrows that exist in BOTH branches
+        // This is conservative: if a borrow doesn't exist in one branch, it's not guaranteed after the if
+        self.active_borrows.clear();
+        for (var, then_borrows) in &then_state.active_borrows {
+            if let Some(else_borrows) = else_state.active_borrows.get(var) {
+                // Borrow exists in both branches - keep common borrows
+                let then_borrowers: HashSet<String> = then_borrows.iter().map(|b| b.borrower.clone()).collect();
+                let else_borrowers: HashSet<String> = else_borrows.iter().map(|b| b.borrower.clone()).collect();
+
+                let common_borrowers: Vec<ActiveBorrow> = then_borrows.iter()
+                    .filter(|b| else_borrowers.contains(&b.borrower))
+                    .cloned()
+                    .collect();
+
+                if !common_borrowers.is_empty() {
+                    self.active_borrows.insert(var.clone(), common_borrowers);
+                }
+            }
+        }
+
+        // NEW: Merge field ownership - field moved in EITHER branch is marked as moved
+        self.field_ownership.clear();
+        // Collect all objects that have field ownership in either branch
+        let mut all_objects: HashSet<String> = HashSet::new();
+        all_objects.extend(then_state.field_ownership.keys().cloned());
+        all_objects.extend(else_state.field_ownership.keys().cloned());
+
+        for object in all_objects {
+            let then_fields = then_state.field_ownership.get(&object);
+            let else_fields = else_state.field_ownership.get(&object);
+
+            match (then_fields, else_fields) {
+                (Some(then_f), Some(else_f)) => {
+                    // Object has fields in both branches
+                    let mut merged_fields = HashMap::new();
+
+                    // Collect all field names
+                    let mut all_field_names: HashSet<String> = HashSet::new();
+                    all_field_names.extend(then_f.keys().cloned());
+                    all_field_names.extend(else_f.keys().cloned());
+
+                    for field in all_field_names {
+                        let then_state = then_f.get(&field);
+                        let else_state = else_f.get(&field);
+
+                        match (then_state, else_state) {
+                            (Some(t), Some(e)) => {
+                                // Field exists in both - moved if moved in either
+                                if *t == OwnershipState::Moved || *e == OwnershipState::Moved {
+                                    merged_fields.insert(field, OwnershipState::Moved);
+                                } else {
+                                    merged_fields.insert(field, t.clone());
+                                }
+                            }
+                            (Some(t), None) | (None, Some(t)) => {
+                                // Field only in one branch - use that state
+                                merged_fields.insert(field, t.clone());
+                            }
+                            (None, None) => unreachable!(),
+                        }
+                    }
+
+                    if !merged_fields.is_empty() {
+                        self.field_ownership.insert(object, merged_fields);
+                    }
+                }
+                (Some(fields), None) | (None, Some(fields)) => {
+                    // Object only has fields in one branch - keep those fields
+                    self.field_ownership.insert(object, fields.clone());
+                }
+                (None, None) => unreachable!(),
+            }
+        }
     }
     
     fn clear_loop_locals(&mut self, loop_locals: &HashSet<String>) {
@@ -938,6 +1282,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -949,6 +1294,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -988,6 +1334,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1026,6 +1373,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1070,6 +1418,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1081,6 +1430,7 @@ mod tests {
                 ownership: OwnershipState::Borrowed(BorrowKind::Immutable),
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1124,6 +1474,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1135,6 +1486,7 @@ mod tests {
                 ownership: OwnershipState::Borrowed(BorrowKind::Mutable),
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1176,6 +1528,7 @@ mod tests {
                 ownership: OwnershipState::Borrowed(BorrowKind::Immutable),
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1187,6 +1540,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1222,6 +1576,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1268,6 +1623,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1310,6 +1666,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1335,6 +1692,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1375,6 +1733,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         
@@ -1386,6 +1745,7 @@ mod tests {
                 ownership: OwnershipState::Owned,
                 lifetime: None,
                 is_parameter: false,
+                is_static: false,
             },
         );
         

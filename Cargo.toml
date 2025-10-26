@@ -18,7 +18,7 @@ name = "rusty-cpp-checker"
 path = "src/main.rs"
 
 [dependencies]
-clang = "2.0.0"
+clang = { version = "2.0.0", features = ["clang_3_6"] }
 clang-sys = "1.8.1"
 clap = { version = "4.5.44", features = ["derive"] }
 colored = "3.0.0"

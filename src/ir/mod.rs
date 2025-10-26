@@ -29,6 +29,7 @@ pub struct VariableInfo {
     #[allow(dead_code)]
     pub lifetime: Option<Lifetime>,
     pub is_parameter: bool,  // True if this is a function parameter
+    pub is_static: bool,     // True if this is a static variable
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +121,23 @@ pub enum IrStatement {
     UseVariable {
         var: String,
         operation: String, // "dereference", "method_call", etc.
+    },
+    // NEW: Field-level operations
+    MoveField {
+        object: String,      // "container"
+        field: String,       // "data"
+        to: String,          // "_moved_data"
+    },
+    UseField {
+        object: String,
+        field: String,
+        operation: String,   // "read", "write", "call"
+    },
+    BorrowField {
+        object: String,
+        field: String,
+        to: String,
+        kind: BorrowKind,
     },
 }
 
@@ -232,6 +250,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
                 ownership,
                 lifetime: None,
                 is_parameter: true,  // This is a parameter
+                is_static: false,    // Parameters are not static
             },
         );
     }
@@ -305,6 +324,7 @@ fn convert_statement(
                     ownership,
                     lifetime: None,
                     is_parameter: false,  // This is a local variable
+                    is_static: var.is_static,  // Propagate static status from parser
                 },
             );
             Ok(None)
@@ -473,26 +493,66 @@ fn convert_statement(
                         Ok(None)
                     }
                 }
+                // NEW: Handle field access (not a move)
+                crate::parser::Expression::MemberAccess { object, field } => {
+                    debug_println!("DEBUG IR: Processing MemberAccess read from '{}.{}'",
+                        if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                        field);
+                    // Extract object name
+                    if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                        Ok(Some(vec![
+                            IrStatement::UseField {
+                                object: obj_name.clone(),
+                                field: field.clone(),
+                                operation: "read".to_string(),
+                            },
+                            IrStatement::Assign {
+                                lhs: lhs_var.clone(),
+                                rhs: IrExpression::Variable(format!("{}.{}", obj_name, field)),
+                            }
+                        ]))
+                    } else {
+                        debug_println!("DEBUG IR: MemberAccess object is not a simple variable");
+                        Ok(None)
+                    }
+                }
                 crate::parser::Expression::Move(inner) => {
                     debug_println!("DEBUG IR: Processing Move expression in assignment");
                     // This is an explicit std::move call
-                    if let crate::parser::Expression::Variable(var) = inner.as_ref() {
-                        debug_println!("DEBUG IR: Creating IrStatement::Move from '{}' to '{}'", var, lhs_var);
-                        // Transfer type from source if needed
-                        let source_type = variables.get(var).map(|info| info.ty.clone());
-                        if let Some(var_info) = variables.get_mut(lhs_var) {
-                            if let Some(ty) = source_type {
-                                var_info.ty = ty;
+                    match inner.as_ref() {
+                        crate::parser::Expression::Variable(var) => {
+                            debug_println!("DEBUG IR: Creating IrStatement::Move from '{}' to '{}'", var, lhs_var);
+                            // Transfer type from source if needed
+                            let source_type = variables.get(var).map(|info| info.ty.clone());
+                            if let Some(var_info) = variables.get_mut(lhs_var) {
+                                if let Some(ty) = source_type {
+                                    var_info.ty = ty;
+                                }
+                            }
+                            Ok(Some(vec![IrStatement::Move {
+                                from: var.clone(),
+                                to: lhs_var.clone(),
+                            }]))
+                        }
+                        // NEW: Handle std::move(obj.field)
+                        crate::parser::Expression::MemberAccess { object, field } => {
+                            debug_println!("DEBUG IR: Creating MoveField for field '{}' of object", field);
+                            // Extract object name
+                            if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                Ok(Some(vec![IrStatement::MoveField {
+                                    object: obj_name.clone(),
+                                    field: field.clone(),
+                                    to: lhs_var.clone(),
+                                }]))
+                            } else {
+                                debug_println!("DEBUG IR: MemberAccess object is not a simple variable");
+                                Ok(None)
                             }
                         }
-                        Ok(Some(vec![IrStatement::Move {
-                            from: var.clone(),
-                            to: lhs_var.clone(),
-                        }]))
-                    } else {
-                        debug_println!("DEBUG IR: Move expression doesn't contain a variable");
-                        // Handle nested expressions if needed
-                        Ok(None)
+                        _ => {
+                            debug_println!("DEBUG IR: Move expression doesn't contain a variable or member access");
+                            Ok(None)
+                        }
                     }
                 }
                 crate::parser::Expression::FunctionCall { name, args } => {
@@ -552,6 +612,21 @@ fn convert_statement(
                                         to: format!("_temp_move_{}", var),
                                     });
                                     arg_names.push(var.clone());
+                                }
+                            }
+                            // NEW: Handle field access as function argument
+                            crate::parser::Expression::MemberAccess { object, field } => {
+                                debug_println!("DEBUG IR: MemberAccess as function argument in assignment: {}.{}",
+                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                                    field);
+                                // Generate UseField statement to check if field is valid
+                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                    statements.push(IrStatement::UseField {
+                                        object: obj_name.clone(),
+                                        field: field.clone(),
+                                        operation: "use in function call".to_string(),
+                                    });
+                                    arg_names.push(format!("{}.{}", obj_name, field));
                                 }
                             }
                             _ => {}
@@ -645,6 +720,21 @@ fn convert_statement(
                         // Use placeholder for nested call result
                         arg_names.push(format!("_result_of_{}", inner_name));
                     }
+                    // NEW: Handle field access as function argument
+                    crate::parser::Expression::MemberAccess { object, field } => {
+                        debug_println!("DEBUG IR: MemberAccess as function argument: {}.{}",
+                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                            field);
+                        // Generate UseField statement to check if field is valid
+                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                            statements.push(IrStatement::UseField {
+                                object: obj_name.clone(),
+                                field: field.clone(),
+                                operation: "use in function call".to_string(),
+                            });
+                            arg_names.push(format!("{}.{}", obj_name, field));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -659,13 +749,23 @@ fn convert_statement(
         }
         Statement::Return(expr) => {
             let value = expr.as_ref().and_then(|e| {
-                if let crate::parser::Expression::Variable(var) = e {
-                    Some(var.clone())
-                } else {
-                    None
+                match e {
+                    crate::parser::Expression::Variable(var) => {
+                        Some(var.clone())
+                    }
+                    crate::parser::Expression::FunctionCall { name: _, args } => {
+                        // For return statements with implicit constructor calls (e.g., return ptr;)
+                        // the variable might be in the arguments
+                        if let Some(crate::parser::Expression::Variable(var)) = args.first() {
+                            Some(var.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None
                 }
             });
-            
+
             Ok(Some(vec![IrStatement::Return { value }]))
         }
         Statement::EnterScope => {
@@ -804,6 +904,7 @@ mod tests {
             is_const: false,
             is_unique_ptr,
             is_shared_ptr: false,
+            is_static: false,
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 1,
