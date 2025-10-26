@@ -1,11 +1,14 @@
 # rusty-cpp: Making C++ Rusty
 
-This project aims to make C++ safer and more reliable by adopting Rust's proven safety principles, especially its borrow-checking system.  We provide a static analyzer that enforces Rust-like ownership and borrowing rules through compile-time analysis. 
-<!-- 2. **Style Guide** - Best practices and utilities for writing safer C++ code with Rust-like patterns -->
+Bringing Rust's safety to C++ through:
+
+**1. 🔍 Static Borrow Checker** - Compile-time ownership and lifetime analysis via `rusty-cpp-checker`
+**2. 📦 Safe Types** - `Box<T>`, `RefCell<T>`, `Vec<T>`, `HashMap<K,V>`, etc.
+**3. 🔐 Rust Idioms** - `Send`/`Sync` traits, RAII guards, type-state patterns, `Result<T,E>`/`Option<T>`
 
 ---
 
-## Borrow checking and lifetime analysis
+## 1. Borrow Checking and Lifetime Analysis
 
 ### 🎯 Vision
 
@@ -452,6 +455,138 @@ void use_third_party() {
 See [Complete Annotations Guide](docs/annotations.md) for comprehensive documentation on safety annotations, lifetime annotations, external annotations, and STL handling.
 
 For detailed examples, migration guides, troubleshooting, and complete reference tables, see [Complete Annotations Guide](docs/annotations.md).
+
+---
+
+## 2. Safe Type Alternatives
+
+RustyCpp provides drop-in replacements for C++ standard library types with built-in safety guarantees:
+
+### Available Types
+
+#### Smart Pointers
+- **`rusty::Box<T>`** - Single ownership pointer with move-only semantics
+  ```cpp
+  rusty::Box<Widget> widget = rusty::Box<Widget>::make(42);
+  auto widget2 = std::move(widget);  // OK: explicit ownership transfer
+  // widget.get();  // ERROR: use-after-move detected
+  ```
+
+#### Interior Mutability
+- **`rusty::RefCell<T>`** - Runtime borrow checking for interior mutability
+  ```cpp
+  rusty::RefCell<int> cell(42);
+  {
+      auto ref = cell.borrow();      // Immutable borrow
+      // auto mut_ref = cell.borrow_mut();  // ERROR: already borrowed
+  }
+  auto mut_ref = cell.borrow_mut();  // OK: previous borrow ended
+  ```
+
+#### Containers
+- **`rusty::Vec<T>`** - Dynamic array with iterator invalidation detection
+  ```cpp
+  rusty::Vec<int> vec = {1, 2, 3};
+  auto it = vec.begin();
+  // vec.push_back(4);  // ERROR: would invalidate iterator
+  ```
+
+- **`rusty::HashMap<K, V>`** - Hash map with safe concurrent access patterns
+- **`rusty::HashSet<T>`** - Hash set with ownership semantics
+- **`rusty::Rc<T>`** - Reference counted pointer (single-threaded)
+- **`rusty::Arc<T>`** - Atomic reference counted pointer (thread-safe)
+
+#### Utility Types
+- **`rusty::Option<T>`** - Explicit handling of optional values
+- **`rusty::Result<T, E>`** - Explicit error handling
+
+### Usage
+
+Include the headers:
+```cpp
+#include <rusty/box.hpp>
+#include <rusty/refcell.hpp>
+#include <rusty/vec.hpp>
+#include <rusty/hashmap.hpp>
+```
+
+These types are designed to work seamlessly with the borrow checker and enforce Rust's safety guarantees at runtime.
+
+---
+
+## 3. Rust Design Idioms
+
+RustyCpp implements key Rust design patterns for safer concurrent programming:
+
+### Thread Safety Traits
+
+#### Send and Sync
+Compile-time markers for thread safety:
+- **`Send`** - Types safe to transfer between threads
+- **`Sync`** - Types safe to share references between threads
+
+```cpp
+template<typename T>
+concept Send = /* implementation */;
+
+template<typename T>
+concept Sync = /* implementation */;
+
+// Use in function signatures
+template<Send T>
+void process_in_thread(T data) {
+    std::thread([data = std::move(data)]() {
+        // OK: T is Send, can be moved to another thread
+    }).detach();
+}
+```
+
+### RAII Guards
+
+Scope-based resource management following Rust's guard pattern:
+
+```cpp
+// MutexGuard automatically unlocks on scope exit
+auto guard = mutex.lock();
+// ... use protected data ...
+// Guard destroyed here, mutex automatically unlocked
+```
+
+### Type-State Patterns
+
+Encode state machines in the type system:
+
+```cpp
+struct Unopened {};
+struct Opened {};
+
+template<typename State>
+class File {
+    // Only available when Opened
+    std::string read_line() requires std::same_as<State, Opened>;
+};
+
+File<Unopened> file("data.txt");
+File<Opened> opened = file.open();  // State transition via move
+std::string line = opened.read_line();  // OK
+```
+
+### Error Handling
+
+Rust-style `Result` and `Option` types:
+
+```cpp
+rusty::Result<int, std::string> parse_number(const std::string& str);
+rusty::Option<int> find_value(const std::string& key);
+
+// Pattern matching style
+auto result = parse_number("42");
+if (result.is_ok()) {
+    int value = result.unwrap();
+} else {
+    std::string error = result.unwrap_err();
+}
+```
 
 ---
 
