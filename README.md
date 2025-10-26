@@ -58,14 +58,6 @@ error: cannot borrow `value` as mutable because it is also borrowed as immutable
    |          ^^^^^^^ mutable borrow occurs here
 ```
 
-<!-- The next best alternative is runtime checking, similar to Rust's `RefCell` smart pointer. 
-This repository includes a C++ implementation of this concept (see `ref_cell.h`).
-Consider using it instead of `shared_ptr` when appropriate.
-
-A standalone static analyzer that enforces Rust-like ownership and borrowing rules for C++ code, bringing memory safety guarantees to existing C++ codebases without runtime overhead. -->
-
-
-
 ### ✨ Features
 
 #### Core Capabilities
