@@ -11,6 +11,7 @@ pub mod scope_lifetime;
 pub mod lifetime_inference;
 pub mod pointer_safety;
 pub mod unsafe_propagation;
+pub mod this_tracking;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -220,11 +221,18 @@ pub fn check_borrows_with_annotations(program: IrProgram, header_cache: HeaderCa
 fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
     let mut ownership_tracker = OwnershipTracker::new();
-    
+
+    // Create this pointer tracker if this is a method
+    let mut this_tracker = if function.is_method {
+        Some(this_tracking::ThisPointerTracker::new(function.method_qualifier.clone()))
+    } else {
+        None
+    };
+
     // Initialize ownership for parameters and variables
     for (name, var_info) in &function.variables {
         ownership_tracker.set_ownership(name.clone(), var_info.ownership.clone());
-        
+
         // Track reference types
         match &var_info.ty {
             crate::ir::VariableType::Reference(_) => {
@@ -274,7 +282,7 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
                     if let crate::ir::IrStatement::Borrow { to, .. } = loop_stmt {
                         loop_local_vars.insert(to.clone());
                     }
-                    process_statement(loop_stmt, &mut ownership_tracker, &mut errors);
+                    process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors);
                 }
                 
                 // Save state after first iteration (but only for non-loop-local variables)
@@ -288,7 +296,7 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
                     // Before processing each statement in second iteration,
                     // check if it would cause use-after-move (but only for non-loop-local vars)
                     check_statement_for_loop_errors(loop_stmt, &state_after_first, &mut errors);
-                    process_statement(loop_stmt, &mut ownership_tracker, &mut errors);
+                    process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors);
                 }
                 
                 // Clear loop-local borrows at end of second iteration
@@ -300,7 +308,7 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
                 i = loop_end;
             } else {
                 // Normal statement processing
-                process_statement(statement, &mut ownership_tracker, &mut errors);
+                process_statement(statement, &mut ownership_tracker, &mut this_tracker, &mut errors);
                 i += 1;
             }
         }
@@ -346,6 +354,7 @@ fn check_statement_for_loop_errors(
 fn process_statement(
     statement: &crate::ir::IrStatement,
     ownership_tracker: &mut OwnershipTracker,
+    this_tracker: &mut Option<this_tracking::ThisPointerTracker>,
     errors: &mut Vec<String>,
 ) {
     match statement {
@@ -457,9 +466,27 @@ fn process_statement(
                 }
             }
 
+            // NEW: Check method qualifier restrictions on field moves
+            // If object is "this" (or we're in a method context), check this pointer rules
+            if let Some(tracker) = this_tracker {
+                if object == "this" {
+                    if let Err(err) = tracker.can_move_member(field) {
+                        errors.push(err);
+                        return;
+                    }
+                }
+            }
+
             // Mark the field as moved
             ownership_tracker.mark_field_moved(object.clone(), field.clone());
             ownership_tracker.set_ownership(to.clone(), OwnershipState::Owned);
+
+            // Update this tracker state if this is a field of 'this'
+            if let Some(tracker) = this_tracker {
+                if object == "this" {
+                    tracker.mark_field_moved(field.clone());
+                }
+            }
         }
 
         crate::ir::IrStatement::UseField { object, field, operation } => {
@@ -487,6 +514,27 @@ fn process_statement(
                     "Cannot {} field '{}.{}' because it has been moved",
                     operation, object, field
                 ));
+                return;
+            }
+
+            // NEW: Check method qualifier restrictions on field usage
+            if let Some(tracker) = this_tracker {
+                if object == "this" {
+                    // For read operations, just check if we can read
+                    if operation == "read" {
+                        if let Err(err) = tracker.can_read_member(field) {
+                            errors.push(err);
+                            return;
+                        }
+                    }
+                    // For write operations, check if we can modify
+                    else if operation == "write" {
+                        if let Err(err) = tracker.can_modify_member(field) {
+                            errors.push(err);
+                            return;
+                        }
+                    }
+                }
             }
         }
 
@@ -518,10 +566,27 @@ fn process_statement(
                 return;
             }
 
+            // NEW: Check method qualifier restrictions on field borrows
+            if let Some(tracker) = this_tracker {
+                if object == "this" {
+                    if let Err(err) = tracker.can_borrow_member(field, kind.clone()) {
+                        errors.push(err);
+                        return;
+                    }
+                }
+            }
+
             // Record the borrow (for now, borrow the whole object)
             // In a complete implementation, we'd track field-level borrows separately
             ownership_tracker.add_borrow(object.clone(), to.clone(), kind.clone());
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
+
+            // Update this tracker state if this is a field of 'this'
+            if let Some(tracker) = this_tracker {
+                if object == "this" {
+                    tracker.mark_field_borrowed(field.clone(), kind.clone());
+                }
+            }
         }
 
         crate::ir::IrStatement::Borrow { from, to, kind } => {
@@ -642,16 +707,16 @@ fn process_statement(
             
             // Process then branch
             for stmt in then_branch {
-                process_statement(stmt, ownership_tracker, errors);
+                process_statement(stmt, ownership_tracker, this_tracker, errors);
             }
             let state_after_then = ownership_tracker.clone_state();
-            
+
             // Restore state and process else branch if it exists
             ownership_tracker.restore_state(&state_before_if);
-            
+
             if let Some(else_stmts) = else_branch {
                 for stmt in else_stmts {
-                    process_statement(stmt, ownership_tracker, errors);
+                    process_statement(stmt, ownership_tracker, this_tracker, errors);
                 }
                 let state_after_else = ownership_tracker.clone_state();
 
@@ -1200,6 +1265,9 @@ mod tests {
             cfg,
             variables: HashMap::new(),
             return_type: "void".to_string(),
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
         }
     }
 
@@ -1809,6 +1877,9 @@ mod scope_tests {
             cfg,
             variables: HashMap::new(),
             return_type: "void".to_string(),
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
         }
     }
 

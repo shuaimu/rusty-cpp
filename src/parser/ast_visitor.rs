@@ -49,6 +49,13 @@ impl CppAst {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MethodQualifier {
+    Const,        // const method (like Rust's &self)
+    NonConst,     // regular method (like Rust's &mut self)
+    RvalueRef,    // && qualified method (like Rust's self)
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
@@ -59,6 +66,10 @@ pub struct Function {
     pub body: Vec<Statement>,
     #[allow(dead_code)]
     pub location: SourceLocation,
+    // NEW: Method information
+    pub is_method: bool,
+    pub method_qualifier: Option<MethodQualifier>,
+    pub class_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,35 +168,82 @@ pub struct SourceLocation {
 }
 
 pub fn extract_function(entity: &Entity) -> Function {
+    let kind = entity.get_kind();
+    let is_method = kind == EntityKind::Method || kind == EntityKind::Constructor;
+
     // Use qualified name for methods to avoid collisions
-    let name = if entity.get_kind() == EntityKind::Method || entity.get_kind() == EntityKind::Constructor {
+    let name = if is_method {
         // For methods, try to get the qualified name
         get_qualified_name(entity)
     } else {
         entity.get_name().unwrap_or_else(|| "anonymous".to_string())
     };
     let location = extract_location(entity);
-    
+
     let mut parameters = Vec::new();
     for child in entity.get_children() {
         if child.get_kind() == EntityKind::ParmDecl {
             parameters.push(extract_variable(&child));
         }
     }
-    
+
     let return_type = entity
         .get_result_type()
         .map(|t| type_to_string(&t))
         .unwrap_or_else(|| "void".to_string());
-    
+
     let body = extract_function_body(entity);
-    
+
+    // NEW: Detect method qualifier and class name
+    let (method_qualifier, class_name) = if is_method {
+        let qualifier = detect_method_qualifier(entity);
+        let class_name = entity.get_semantic_parent()
+            .and_then(|parent| parent.get_name());
+        (Some(qualifier), class_name)
+    } else {
+        (None, None)
+    };
+
     Function {
         name,
         parameters,
         return_type,
         body,
         location,
+        is_method,
+        method_qualifier,
+        class_name,
+    }
+}
+
+/// Detect the qualifier of a method (const, non-const, or rvalue-ref)
+fn detect_method_qualifier(entity: &Entity) -> MethodQualifier {
+    // Check if this is a const method
+    let is_const = entity.is_const_method();
+
+    // Check for && qualifier (rvalue reference qualifier)
+    // LibClang doesn't expose this directly, so we check the function type
+    let has_rvalue_ref_qualifier = if let Some(func_type) = entity.get_type() {
+        // Check the display name for && qualifier
+        let type_str = type_to_string(&func_type);
+        debug_println!("DEBUG METHOD: type_str = {}", type_str);
+
+        // The type string may contain "&&" for rvalue ref qualifier
+        // Example: "void () &&" or "void (int) &&"
+        type_str.contains(" &&") || type_str.ends_with("&&")
+    } else {
+        false
+    };
+
+    debug_println!("DEBUG METHOD: is_const={}, has_rvalue_ref={}", is_const, has_rvalue_ref_qualifier);
+
+    // Determine the qualifier
+    if has_rvalue_ref_qualifier {
+        MethodQualifier::RvalueRef
+    } else if is_const {
+        MethodQualifier::Const
+    } else {
+        MethodQualifier::NonConst
     }
 }
 
@@ -791,8 +849,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         }
         EntityKind::UnexposedExpr => {
             // UnexposedExpr often wraps other expressions, so look at its children
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
             debug_println!("DEBUG EXTRACT: UnexposedExpr with name={:?}, {} children",
-                entity.get_name(), entity.get_children().len());
+                entity.get_name(), children.len());
 
             // Check if this UnexposedExpr has a reference (might be a method call)
             if let Some(ref_entity) = entity.get_reference() {
@@ -800,7 +859,24 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     ref_entity.get_kind(), ref_entity.get_name());
             }
 
-            for child in entity.get_children() {
+            // If there are exactly 2 children, this might be a binary operation (e.g., assignment)
+            if children.len() == 2 {
+                debug_println!("  DEBUG EXTRACT: UnexposedExpr with 2 children - checking for binary op");
+                if let (Some(left), Some(right)) =
+                    (extract_expression(&children[0]), extract_expression(&children[1])) {
+                    debug_println!("  DEBUG EXTRACT: Extracted both children, treating as assignment");
+                    // UnexposedExpr with 2 operands is typically an assignment in a const method
+                    // (C++ allows it syntactically even though it's a semantic error)
+                    return Some(Expression::BinaryOp {
+                        left: Box::new(left),
+                        op: "=".to_string(),
+                        right: Box::new(right),
+                    });
+                }
+            }
+
+            // Otherwise, try to extract single child expression
+            for child in children {
                 debug_println!("  DEBUG EXTRACT: Child kind={:?}, name={:?}",
                     child.get_kind(), child.get_name());
 
@@ -882,31 +958,43 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // For field access, we extract: object from first child, field name from reference
             debug_println!("DEBUG: Found MemberRefExpr");
 
+            // Get the field/member name from the entity's reference or name
+            let field_name = if let Some(ref_entity) = entity.get_reference() {
+                debug_println!("DEBUG: MemberRefExpr references kind={:?}, name={:?}",
+                    ref_entity.get_kind(), ref_entity.get_name());
+                // Check if it's a field (not a method)
+                if ref_entity.get_kind() == EntityKind::FieldDecl {
+                    ref_entity.get_name().unwrap_or_else(|| "unknown_field".to_string())
+                } else {
+                    // It's a method call, not field access - return None to let CallExpr handle it
+                    debug_println!("DEBUG: MemberRefExpr is method, not field");
+                    return None;
+                }
+            } else if let Some(name) = entity.get_name() {
+                debug_println!("DEBUG: MemberRefExpr has name={}", name);
+                name
+            } else {
+                debug_println!("DEBUG: MemberRefExpr has no reference or name");
+                "unknown_field".to_string()
+            };
+
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
-                // First child is the object being accessed
+                // First child is the object being accessed (explicit object.field)
                 if let Some(object_expr) = extract_expression(&children[0]) {
-                    // Get the field/member name from the entity's reference or name
-                    let field_name = if let Some(ref_entity) = entity.get_reference() {
-                        // Check if it's a field (not a method)
-                        if ref_entity.get_kind() == EntityKind::FieldDecl {
-                            ref_entity.get_name().unwrap_or_else(|| "unknown_field".to_string())
-                        } else {
-                            // It's a method call, not field access - return None to let CallExpr handle it
-                            return None;
-                        }
-                    } else if let Some(name) = entity.get_name() {
-                        name
-                    } else {
-                        "unknown_field".to_string()
-                    };
-
-                    debug_println!("DEBUG: MemberRefExpr object={:?}, field={}", object_expr, field_name);
+                    debug_println!("DEBUG: MemberRefExpr explicit access: object={:?}, field={}", object_expr, field_name);
                     return Some(Expression::MemberAccess {
                         object: Box::new(object_expr),
                         field: field_name,
                     });
                 }
+            } else {
+                // No children means implicit 'this->field' access in a method
+                debug_println!("DEBUG: MemberRefExpr implicit 'this' access: this.{}", field_name);
+                return Some(Expression::MemberAccess {
+                    object: Box::new(Expression::Variable("this".to_string())),
+                    field: field_name,
+                });
             }
             None
         }

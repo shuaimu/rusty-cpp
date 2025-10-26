@@ -1,4 +1,4 @@
-use crate::parser::CppAst;
+use crate::parser::{CppAst, MethodQualifier};
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use crate::debug_println;
@@ -17,6 +17,10 @@ pub struct IrFunction {
     pub cfg: ControlFlowGraph,
     pub variables: HashMap<String, VariableInfo>,
     pub return_type: String,  // Return type from AST
+    // NEW: Method information for tracking 'this' pointer
+    pub is_method: bool,
+    pub method_qualifier: Option<MethodQualifier>,
+    pub class_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +264,9 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
         cfg,
         variables,
         return_type: func.return_type.clone(),
+        is_method: func.is_method,
+        method_qualifier: func.method_qualifier.clone(),
+        class_name: func.class_name.clone(),
     })
 }
 
@@ -404,6 +411,44 @@ fn convert_statement(
                     }
                 },
 
+                // Reference to a field: create a field borrow
+                crate::parser::Expression::MemberAccess { object, field } => {
+                    debug_println!("DEBUG IR: ReferenceBinding to field: {}.{}",
+                        if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                        field);
+
+                    if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                        let kind = if *is_mutable {
+                            BorrowKind::Mutable
+                        } else {
+                            BorrowKind::Immutable
+                        };
+
+                        // Update the reference variable's ownership state and type
+                        if let Some(var_info) = variables.get_mut(name) {
+                            var_info.ownership = OwnershipState::Borrowed(kind.clone());
+                            // Update the type to reflect this is a reference
+                            if *is_mutable {
+                                if let VariableType::Owned(type_name) = &var_info.ty {
+                                    var_info.ty = VariableType::MutableReference(type_name.clone());
+                                }
+                            } else {
+                                if let VariableType::Owned(type_name) = &var_info.ty {
+                                    var_info.ty = VariableType::Reference(type_name.clone());
+                                }
+                            }
+                        }
+
+                        // Generate BorrowField IR statement
+                        statements.push(IrStatement::BorrowField {
+                            object: obj_name.clone(),
+                            field: field.clone(),
+                            to: name.clone(),
+                            kind,
+                        });
+                    }
+                },
+
                 _ => return Ok(None),
             }
 
@@ -449,6 +494,26 @@ fn convert_statement(
                 // Other method calls on LHS are not supported for now
                 debug_println!("DEBUG IR: Unsupported function call on LHS");
                 return Ok(None);
+            }
+
+            // Check if LHS is a field access (e.g., this.value = 42)
+            if let crate::parser::Expression::MemberAccess { object, field } = lhs {
+                debug_println!("DEBUG IR: Field write assignment: {}.{} = ...",
+                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                    field);
+
+                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                    // Generate UseField statement for write operation
+                    return Ok(Some(vec![
+                        IrStatement::UseField {
+                            object: obj_name.clone(),
+                            field: field.clone(),
+                            operation: "write".to_string(),
+                        }
+                    ]));
+                } else {
+                    return Ok(None);
+                }
             }
 
             // Regular assignment (not a dereference)
@@ -585,6 +650,34 @@ fn convert_statement(
                                 }
                                 arg_names.push(var.clone());
                             }
+                            crate::parser::Expression::Move(inner) => {
+                                // Handle std::move in constructor/function arguments
+                                debug_println!("DEBUG IR: Processing Move in assignment RHS function call");
+                                match inner.as_ref() {
+                                    crate::parser::Expression::Variable(var) => {
+                                        debug_println!("DEBUG IR: Move(Variable) in assignment: {}", var);
+                                        statements.push(IrStatement::Move {
+                                            from: var.clone(),
+                                            to: format!("_moved_{}", var),
+                                        });
+                                        arg_names.push(var.clone());
+                                    }
+                                    crate::parser::Expression::MemberAccess { object, field } => {
+                                        debug_println!("DEBUG IR: Move(MemberAccess) in assignment: {}.{}",
+                                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                                            field);
+                                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                            statements.push(IrStatement::MoveField {
+                                                object: obj_name.clone(),
+                                                field: field.clone(),
+                                                to: lhs_var.clone(),  // Move to the LHS variable
+                                            });
+                                            arg_names.push(format!("{}.{}", obj_name, field));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                             crate::parser::Expression::FunctionCall { name: recv_name, args: recv_args } if is_method_call && i == 0 => {
                                 // Receiver is a method call itself (e.g., ptr->method() where ptr-> is operator->)
                                 debug_println!("DEBUG IR: Receiver is FunctionCall: {}", recv_name);
@@ -676,13 +769,30 @@ fn convert_statement(
                     }
                     crate::parser::Expression::Move(inner) => {
                         // Handle std::move in function arguments
-                        if let crate::parser::Expression::Variable(var) = inner.as_ref() {
-                            // First mark the variable as moved
-                            statements.push(IrStatement::Move {
-                                from: var.clone(),
-                                to: format!("_moved_{}", var), // Temporary marker
-                            });
-                            arg_names.push(var.clone());
+                        match inner.as_ref() {
+                            crate::parser::Expression::Variable(var) => {
+                                debug_println!("DEBUG IR: Move(Variable) as direct argument: {}", var);
+                                // First mark the variable as moved
+                                statements.push(IrStatement::Move {
+                                    from: var.clone(),
+                                    to: format!("_moved_{}", var), // Temporary marker
+                                });
+                                arg_names.push(var.clone());
+                            }
+                            crate::parser::Expression::MemberAccess { object, field } => {
+                                debug_println!("DEBUG IR: Move(MemberAccess) as direct argument: {}.{}",
+                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                                    field);
+                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                    statements.push(IrStatement::MoveField {
+                                        object: obj_name.clone(),
+                                        field: field.clone(),
+                                        to: format!("_moved_{}", field),
+                                    });
+                                    arg_names.push(format!("{}.{}", obj_name, field));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     crate::parser::Expression::FunctionCall { name: inner_name, args: inner_args } => {
@@ -708,12 +818,27 @@ fn convert_statement(
                         // Recursively check for moves in nested function call
                         for inner_arg in inner_args {
                             if let crate::parser::Expression::Move(move_inner) = inner_arg {
-                                if let crate::parser::Expression::Variable(var) = move_inner.as_ref() {
-                                    debug_println!("DEBUG IR: Found Move in nested call: {}", var);
-                                    statements.push(IrStatement::Move {
-                                        from: var.clone(),
-                                        to: format!("_moved_{}", var),
-                                    });
+                                match move_inner.as_ref() {
+                                    crate::parser::Expression::Variable(var) => {
+                                        debug_println!("DEBUG IR: Found Move(Variable) in nested call: {}", var);
+                                        statements.push(IrStatement::Move {
+                                            from: var.clone(),
+                                            to: format!("_moved_{}", var),
+                                        });
+                                    }
+                                    crate::parser::Expression::MemberAccess { object, field } => {
+                                        debug_println!("DEBUG IR: Found Move(MemberAccess) in nested call: {}.{}",
+                                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                                            field);
+                                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                            statements.push(IrStatement::MoveField {
+                                                object: obj_name.clone(),
+                                                field: field.clone(),
+                                                to: format!("_moved_{}", field),
+                                            });
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -748,10 +873,44 @@ fn convert_statement(
             Ok(Some(statements))
         }
         Statement::Return(expr) => {
+            let mut statements = Vec::new();
+
             let value = expr.as_ref().and_then(|e| {
                 match e {
                     crate::parser::Expression::Variable(var) => {
                         Some(var.clone())
+                    }
+                    crate::parser::Expression::Move(inner) => {
+                        // Handle return std::move(...)
+                        debug_println!("DEBUG IR: Processing Move in return statement");
+                        match inner.as_ref() {
+                            crate::parser::Expression::Variable(var) => {
+                                debug_println!("DEBUG IR: Return Move(Variable): {}", var);
+                                // Generate Move statement
+                                statements.push(IrStatement::Move {
+                                    from: var.clone(),
+                                    to: format!("_returned_{}", var),
+                                });
+                                Some(var.clone())
+                            }
+                            crate::parser::Expression::MemberAccess { object, field } => {
+                                debug_println!("DEBUG IR: Return Move(MemberAccess): {}.{}",
+                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                                    field);
+                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                    // Generate MoveField statement
+                                    statements.push(IrStatement::MoveField {
+                                        object: obj_name.clone(),
+                                        field: field.clone(),
+                                        to: format!("_returned_{}", field),
+                                    });
+                                    Some(format!("{}.{}", obj_name, field))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None
+                        }
                     }
                     crate::parser::Expression::FunctionCall { name: _, args } => {
                         // For return statements with implicit constructor calls (e.g., return ptr;)
@@ -766,7 +925,8 @@ fn convert_statement(
                 }
             });
 
-            Ok(Some(vec![IrStatement::Return { value }]))
+            statements.push(IrStatement::Return { value });
+            Ok(Some(statements))
         }
         Statement::EnterScope => {
             Ok(Some(vec![IrStatement::EnterScope]))
@@ -852,7 +1012,7 @@ fn convert_statement(
             Ok(Some(result))
         }
         Statement::ExpressionStatement { expr, .. } => {
-            // Handle expression statements (dereference, method calls, etc.)
+            // Handle expression statements (dereference, method calls, assignments, etc.)
             match expr {
                 crate::parser::Expression::Dereference(inner) => {
                     // Extract the variable being dereferenced
@@ -867,6 +1027,31 @@ fn convert_statement(
                 }
                 crate::parser::Expression::AddressOf(inner) => {
                     // Address-of doesn't use the value, so no moved-state check needed
+                    Ok(None)
+                }
+                // Handle assignment expressions (e.g., value = 42;)
+                crate::parser::Expression::BinaryOp { left, op, right } if op == "=" => {
+                    debug_println!("DEBUG IR: ExpressionStatement assignment: op={}", op);
+
+                    // Check if LHS is a field access (e.g., this.value = 42)
+                    if let crate::parser::Expression::MemberAccess { object, field } = left.as_ref() {
+                        debug_println!("DEBUG IR: ExpressionStatement field write: {}.{} = ...",
+                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                            field);
+
+                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                            // Generate UseField statement for write operation
+                            return Ok(Some(vec![
+                                IrStatement::UseField {
+                                    object: obj_name.clone(),
+                                    field: field.clone(),
+                                    operation: "write".to_string(),
+                                }
+                            ]));
+                        }
+                    }
+
+                    // For other assignments, fall through
                     Ok(None)
                 }
                 _ => Ok(None),
@@ -892,6 +1077,9 @@ mod tests {
                 line: 1,
                 column: 1,
             },
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
         }
     }
 

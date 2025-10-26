@@ -8,7 +8,7 @@ pub mod safety_annotations;
 pub mod type_annotations;
 pub mod external_annotations;
 
-pub use ast_visitor::{CppAst, Function, Statement, Expression};
+pub use ast_visitor::{CppAst, Function, Statement, Expression, MethodQualifier};
 pub use header_cache::HeaderCache;
 #[allow(unused_imports)]
 pub use ast_visitor::{Variable, SourceLocation};

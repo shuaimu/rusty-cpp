@@ -13,6 +13,10 @@ categories = ["development-tools", "development-tools::build-utils"]
 license = "MIT OR Apache-2.0"
 exclude = ["tests/*", "examples/*", ".git/*", ".github/*", "*.bak"]
 
+[lib]
+name = "rusty_cpp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rusty-cpp-checker"
 path = "src/main.rs"
