@@ -22,8 +22,9 @@ private:
     
 public:
     // Constructors
-    Box() : ptr(nullptr) {}
-    
+    // No default constructor - Box must always own a value (non-nullable)
+    Box() = delete;
+
     // @lifetime: owned
     explicit Box(T* p) : ptr(p) {}
     
@@ -112,12 +113,10 @@ public:
     T* get() const {
         return ptr;
     }
-    
-    // Reset with new value
-    void reset(T* p = nullptr) {
-        delete ptr;
-        ptr = p;
-    }
+
+    // Note: No reset() method - Box is non-nullable like Rust's Box<T>
+    // To replace the value, use assignment: box = Box::make(new_value)
+    // To destroy, let it go out of scope or use std::move
 };
 
 // Factory function following C++ make_* convention

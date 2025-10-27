@@ -394,6 +394,21 @@ fn process_statement(
                 }
             }
 
+            // REASSIGNMENT TRACKING: Check if 'to' has active borrows
+            // In Rust, assignment drops the old value first, so we can't assign if borrowed
+            // Example: box1 = std::move(box2); drops old value of box1
+            if let Some(borrows) = ownership_tracker.get_active_borrows(to) {
+                if !borrows.is_empty() {
+                    let borrower_names: Vec<String> = borrows.iter().map(|b| b.borrower.clone()).collect();
+                    errors.push(format!(
+                        "Cannot assign to '{}' because it is borrowed by: {} (assignment would drop the old value)",
+                        to,
+                        borrower_names.join(", ")
+                    ));
+                    return;
+                }
+            }
+
             if from_state == Some(&OwnershipState::Moved) {
                 errors.push(format!(
                     "Use after move: variable '{}' has already been moved",

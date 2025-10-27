@@ -393,21 +393,53 @@ fn convert_statement(
                         }
                     }
 
-                    // Create CallExpr with result bound to the reference variable
-                    statements.push(IrStatement::CallExpr {
-                        func: func_name.clone(),
-                        args: arg_names,
-                        result: Some(name.clone()),
-                    });
+                    // Special handling for operator* (dereference)
+                    // When we have: int& r = *box;
+                    // This creates a reference that borrows from the box
+                    if func_name.contains("::operator*") || func_name == "operator*" {
+                        if let Some(first_arg) = arg_names.first() {
+                            let kind = if *is_mutable {
+                                BorrowKind::Mutable
+                            } else {
+                                BorrowKind::Immutable
+                            };
 
-                    // Update the reference variable's ownership state
-                    if let Some(var_info) = variables.get_mut(name) {
-                        let kind = if *is_mutable {
-                            BorrowKind::Mutable
+                            debug_println!("DEBUG IR: ReferenceBinding via operator* creates borrow from '{}'", first_arg);
+
+                            // Create a Borrow from the object being dereferenced
+                            statements.push(IrStatement::Borrow {
+                                from: first_arg.clone(),
+                                to: name.clone(),
+                                kind: kind.clone(),
+                            });
+
+                            // Update the reference variable's ownership state
+                            if let Some(var_info) = variables.get_mut(name) {
+                                var_info.ownership = OwnershipState::Borrowed(kind);
+                            }
+
+                            // Don't create CallExpr for operator* - Borrow is sufficient
                         } else {
-                            BorrowKind::Immutable
-                        };
-                        var_info.ownership = OwnershipState::Borrowed(kind);
+                            // No arguments - shouldn't happen for operator*
+                            debug_println!("DEBUG IR: operator* with no arguments");
+                        }
+                    } else {
+                        // For other function calls, create CallExpr
+                        statements.push(IrStatement::CallExpr {
+                            func: func_name.clone(),
+                            args: arg_names,
+                            result: Some(name.clone()),
+                        });
+
+                        // Update the reference variable's ownership state
+                        if let Some(var_info) = variables.get_mut(name) {
+                            let kind = if *is_mutable {
+                                BorrowKind::Mutable
+                            } else {
+                                BorrowKind::Immutable
+                            };
+                            var_info.ownership = OwnershipState::Borrowed(kind);
+                        }
                     }
                 },
 
@@ -746,6 +778,26 @@ fn convert_statement(
             // Check if this is a method call (has :: or is an operator)
             // Methods can be: qualified (Class::method), operators (operator*, operator bool), or have :: in name
             let is_method_call = name.contains("::") || name.starts_with("operator");
+
+            // Special handling for operator= (assignment operators)
+            // box1 = std::move(box2) becomes operator=(box1, Move(box2))
+            // We need to treat this as: Move { from: box2, to: box1 }
+            if name.contains("::operator=") || name == "operator=" {
+                debug_println!("DEBUG IR: Detected operator= call");
+                if args.len() == 2 {
+                    // First arg is LHS (destination), second is RHS (source)
+                    if let (crate::parser::Expression::Variable(lhs), crate::parser::Expression::Move(rhs_inner)) = (&args[0], &args[1]) {
+                        debug_println!("DEBUG IR: operator= with Move: {} = Move(...)", lhs);
+                        if let crate::parser::Expression::Variable(rhs) = rhs_inner.as_ref() {
+                            debug_println!("DEBUG IR: Creating Move from '{}' to '{}' for operator=", rhs, lhs);
+                            return Ok(Some(vec![IrStatement::Move {
+                                from: rhs.clone(),
+                                to: lhs.clone(),
+                            }]));
+                        }
+                    }
+                }
+            }
 
             // Process arguments, looking for std::move
             for (i, arg) in args.iter().enumerate() {
