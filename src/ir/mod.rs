@@ -34,6 +34,9 @@ pub struct VariableInfo {
     pub lifetime: Option<Lifetime>,
     pub is_parameter: bool,  // True if this is a function parameter
     pub is_static: bool,     // True if this is a static variable
+    pub scope_level: usize,  // Scope depth where variable was declared (0 = function level)
+    pub has_destructor: bool, // True if this is an RAII type (Box, Rc, Arc, etc.)
+    pub declaration_index: usize, // Order of declaration within scope (for drop order)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +146,12 @@ pub enum IrStatement {
         to: String,
         kind: BorrowKind,
     },
+    // Implicit drop at scope end (for RAII types)
+    ImplicitDrop {
+        var: String,
+        scope_level: usize,
+        has_destructor: bool,  // True if variable is RAII type (should be marked as moved)
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +181,54 @@ pub enum OwnershipEdge {
     Owns,
     Borrows,
     MutBorrows,
+}
+
+/// Detect if a type has a non-trivial destructor (RAII type)
+/// These types need implicit drop tracking at scope end
+fn is_raii_type(type_name: &str) -> bool {
+    // Check for Rusty RAII types (with or without namespace prefix)
+    if type_name.starts_with("rusty::Box<") ||
+       type_name.starts_with("Box<") ||  // Without namespace
+       type_name.starts_with("rusty::Rc<") ||
+       type_name.starts_with("Rc<") ||
+       type_name.starts_with("rusty::Arc<") ||
+       type_name.starts_with("Arc<") ||
+       type_name.starts_with("rusty::RefCell<") ||
+       type_name.starts_with("RefCell<") ||
+       type_name.starts_with("rusty::Cell<") ||
+       type_name.starts_with("Cell<") {
+        return true;
+    }
+
+    // Check for standard library RAII types
+    if type_name.starts_with("std::unique_ptr<") ||
+       type_name.starts_with("unique_ptr<") ||  // Without namespace
+       type_name.starts_with("std::shared_ptr<") ||
+       type_name.starts_with("shared_ptr<") ||
+       type_name.starts_with("std::weak_ptr<") ||
+       type_name.starts_with("weak_ptr<") ||
+       type_name.starts_with("std::vector<") ||
+       type_name.starts_with("vector<") ||
+       type_name.starts_with("std::string") ||
+       type_name.starts_with("string") ||
+       type_name.starts_with("std::fstream") ||
+       type_name.starts_with("fstream") ||
+       type_name.starts_with("std::ifstream") ||
+       type_name.starts_with("ifstream") ||
+       type_name.starts_with("std::ofstream") ||
+       type_name.starts_with("ofstream") ||
+       type_name.starts_with("std::mutex") ||
+       type_name.starts_with("mutex") ||
+       type_name.starts_with("std::lock_guard<") ||
+       type_name.starts_with("lock_guard<") ||
+       type_name.starts_with("std::unique_lock<") ||
+       type_name.starts_with("unique_lock<") {
+        return true;
+    }
+
+    // Conservative: assume user-defined classes might have destructors
+    // In the future, we could parse class definitions to check
+    false
 }
 
 #[allow(dead_code)]
@@ -211,13 +268,14 @@ pub fn build_ir_with_safety_context(
 fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String> {
     let mut cfg = DiGraph::new();
     let mut variables = HashMap::new();
-    
+    let mut current_scope_level = 0; // Track scope depth (0 = function level)
+
     // Create entry block and convert statements
     let mut statements = Vec::new();
-    
+
     for stmt in &func.body {
         // Convert the statement
-        if let Some(ir_stmts) = convert_statement(stmt, &mut variables)? {
+        if let Some(ir_stmts) = convert_statement(stmt, &mut variables, &mut current_scope_level)? {
             statements.extend(ir_stmts);
         }
     }
@@ -246,6 +304,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
             (VariableType::Owned(param.type_name.clone()), OwnershipState::Owned)
         };
         
+        let declaration_index = variables.len();  // Parameters declared in order
         variables.insert(
             param.name.clone(),
             VariableInfo {
@@ -255,6 +314,9 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
                 lifetime: None,
                 is_parameter: true,  // This is a parameter
                 is_static: false,    // Parameters are not static
+                scope_level: 0,      // Parameters are at function scope
+                has_destructor: is_raii_type(&param.type_name),
+                declaration_index,   // NEW: Track declaration order
             },
         );
     }
@@ -287,6 +349,7 @@ fn get_statement_line(stmt: &crate::parser::Statement) -> Option<u32> {
 fn convert_statement(
     stmt: &crate::parser::Statement,
     variables: &mut HashMap<String, VariableInfo>,
+    current_scope_level: &mut usize,
 ) -> Result<Option<Vec<IrStatement>>, String> {
     use crate::parser::Statement;
 
@@ -323,6 +386,11 @@ fn convert_statement(
                 (VariableType::Owned(var.type_name.clone()), OwnershipState::Owned)
             };
             
+            let has_destructor_value = is_raii_type(&var.type_name);
+            let declaration_index = variables.len();  // Current count = declaration order
+            debug_println!("DEBUG IR: VariableDecl '{}': type='{}', has_destructor={}, declaration_index={}",
+                var.name, var.type_name, has_destructor_value, declaration_index);
+
             variables.insert(
                 var.name.clone(),
                 VariableInfo {
@@ -332,6 +400,9 @@ fn convert_statement(
                     lifetime: None,
                     is_parameter: false,  // This is a local variable
                     is_static: var.is_static,  // Propagate static status from parser
+                    scope_level: *current_scope_level,  // Track scope depth
+                    has_destructor: has_destructor_value,
+                    declaration_index,  // NEW: Track declaration order
                 },
             );
             Ok(None)
@@ -554,7 +625,57 @@ fn convert_statement(
                 _ => return Ok(None), // Skip complex lhs for now
             };
 
-            match rhs {
+            // SPECIAL CASE: Check if LHS is an RAII type (Box, Rc, Arc, etc.)
+            // For RAII types, assignment is operator= which:
+            // 1. Drops the old value (checked if borrowed)
+            // 2. Moves new value in
+            // This applies when RHS is Move or creates a new object
+            let lhs_is_raii = if let Some(lhs_info) = variables.get(lhs_var) {
+                match &lhs_info.ty {
+                    VariableType::Owned(type_name) => is_raii_type(type_name),
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            // Track if we need to prepend a Drop check for RAII reassignment
+            let mut prepend_drop = false;
+
+            if lhs_is_raii {
+                debug_println!("DEBUG IR: Assignment to RAII type '{}', this is operator= (drops old value)", lhs_var);
+
+                // For RAII types, assignment is operator= which drops the old value.
+                // We need to check if LHS is borrowed before allowing this.
+
+                // Handle Move expression: box = std::move(other)
+                if let crate::parser::Expression::Move(inner) = rhs {
+                    match inner.as_ref() {
+                        crate::parser::Expression::Variable(from_var) => {
+                            debug_println!("DEBUG IR: RAII assignment with std::move: generating Move from '{}' to '{}'", from_var, lhs_var);
+
+                            // Generate Move statement - this will check if LHS is borrowed!
+                            // Move already handles the drop implicitly
+                            return Ok(Some(vec![IrStatement::Move {
+                                from: from_var.clone(),
+                                to: lhs_var.clone(),
+                            }]));
+                        }
+                        _ => {
+                            // Move of complex expression - continue to regular handling
+                            debug_println!("DEBUG IR: Move of complex expression");
+                        }
+                    }
+                }
+
+                // For other cases (constructor calls like Box::make), we need to:
+                // 1. Generate a Drop check (to verify not borrowed)
+                // 2. Generate the actual assignment IR
+                debug_println!("DEBUG IR: Will prepend Drop check for RAII assignment");
+                prepend_drop = true;
+            }
+
+            let assignment_ir = match rhs {
                 crate::parser::Expression::Dereference(ptr_expr) => {
                     // Dereference read: lhs = *ptr
                     if let crate::parser::Expression::Variable(ptr_var) = ptr_expr.as_ref() {
@@ -767,6 +888,25 @@ fn convert_statement(
                     Ok(Some(statements))
                 }
                 _ => Ok(None)
+            };
+
+            // If we need to prepend a Drop check for RAII reassignment, do it now
+            if prepend_drop {
+                debug_println!("DEBUG IR: Prepending Drop check to assignment IR");
+                match assignment_ir {
+                    Ok(Some(mut stmts)) => {
+                        // Prepend Drop to the existing statements
+                        stmts.insert(0, IrStatement::Drop(lhs_var.clone()));
+                        Ok(Some(stmts))
+                    }
+                    Ok(None) => {
+                        // No assignment IR generated, just return Drop
+                        Ok(Some(vec![IrStatement::Drop(lhs_var.clone())]))
+                    }
+                    Err(e) => Err(e)
+                }
+            } else {
+                assignment_ir
             }
         }
         Statement::FunctionCall { name, args, .. } => {
@@ -786,14 +926,34 @@ fn convert_statement(
                 debug_println!("DEBUG IR: Detected operator= call");
                 if args.len() == 2 {
                     // First arg is LHS (destination), second is RHS (source)
-                    if let (crate::parser::Expression::Variable(lhs), crate::parser::Expression::Move(rhs_inner)) = (&args[0], &args[1]) {
-                        debug_println!("DEBUG IR: operator= with Move: {} = Move(...)", lhs);
-                        if let crate::parser::Expression::Variable(rhs) = rhs_inner.as_ref() {
-                            debug_println!("DEBUG IR: Creating Move from '{}' to '{}' for operator=", rhs, lhs);
-                            return Ok(Some(vec![IrStatement::Move {
-                                from: rhs.clone(),
-                                to: lhs.clone(),
-                            }]));
+                    if let crate::parser::Expression::Variable(lhs) = &args[0] {
+                        // Check if LHS is an RAII type
+                        let lhs_is_raii = if let Some(lhs_info) = variables.get(lhs) {
+                            match &lhs_info.ty {
+                                VariableType::Owned(type_name) => is_raii_type(type_name),
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        // Handle Move RHS
+                        if let crate::parser::Expression::Move(rhs_inner) = &args[1] {
+                            debug_println!("DEBUG IR: operator= with Move: {} = Move(...)", lhs);
+                            if let crate::parser::Expression::Variable(rhs) = rhs_inner.as_ref() {
+                                debug_println!("DEBUG IR: Creating Move from '{}' to '{}' for operator=", rhs, lhs);
+                                return Ok(Some(vec![IrStatement::Move {
+                                    from: rhs.clone(),
+                                    to: lhs.clone(),
+                                }]));
+                            }
+                        }
+
+                        // For RAII types with non-move RHS, we need to check borrows before drop
+                        if lhs_is_raii {
+                            debug_println!("DEBUG IR: operator= on RAII type '{}' - generating Drop check", lhs);
+                            // Generate Drop check - the FunctionCall itself will be processed below
+                            statements.push(IrStatement::Drop(lhs.clone()));
                         }
                     }
                 }
@@ -981,10 +1141,56 @@ fn convert_statement(
             Ok(Some(statements))
         }
         Statement::EnterScope => {
+            *current_scope_level += 1;
+            debug_println!("DEBUG IR: EnterScope - now at level {}", current_scope_level);
             Ok(Some(vec![IrStatement::EnterScope]))
         }
         Statement::ExitScope => {
-            Ok(Some(vec![IrStatement::ExitScope]))
+            debug_println!("DEBUG IR: ExitScope - leaving level {}", current_scope_level);
+            debug_println!("DEBUG IR: Total variables: {}", variables.len());
+            for (name, info) in variables.iter() {
+                debug_println!("DEBUG IR:   Variable '{}': scope_level={}, has_destructor={}, is_static={}",
+                    name, info.scope_level, info.has_destructor, info.is_static);
+            }
+
+            // Find ALL variables declared at this scope level (including references)
+            // We need to clear borrows for all variables, not just RAII types
+            let mut vars_to_drop: Vec<(String, usize, bool)> = variables
+                .iter()
+                .filter(|(_, info)| {
+                    info.scope_level == *current_scope_level &&
+                    !info.is_static  // Static variables are never dropped
+                })
+                .map(|(name, info)| (name.clone(), info.declaration_index, info.has_destructor))
+                .collect();
+
+            // Sort by reverse declaration order (highest index first)
+            // This ensures variables drop in reverse order of declaration
+            vars_to_drop.sort_by(|a, b| b.1.cmp(&a.1));
+
+            debug_println!("DROP ORDER: Processing {} variables at scope end in reverse declaration order", vars_to_drop.len());
+            for (name, decl_idx, has_dest) in &vars_to_drop {
+                debug_println!("DROP ORDER:   '{}' (declaration_index={}, has_destructor={})", name, decl_idx, has_dest);
+            }
+
+            // Create ImplicitDrop statements in reverse declaration order
+            // This clears borrows for ALL variables, and marks RAII types as moved
+            let mut statements = Vec::new();
+            for (var, _, has_dest) in vars_to_drop {
+                debug_println!("DEBUG IR: Inserting ImplicitDrop for '{}' at scope level {} (has_destructor={})",
+                    var, current_scope_level, has_dest);
+                statements.push(IrStatement::ImplicitDrop {
+                    var,
+                    scope_level: *current_scope_level,
+                    has_destructor: has_dest,
+                });
+            }
+
+            // Add the ExitScope marker after the drops
+            statements.push(IrStatement::ExitScope);
+
+            *current_scope_level = current_scope_level.saturating_sub(1);
+            Ok(Some(statements))
         }
         Statement::EnterLoop => {
             Ok(Some(vec![IrStatement::EnterLoop]))
@@ -1037,7 +1243,7 @@ fn convert_statement(
             // Convert then branch
             let mut then_ir = Vec::new();
             for stmt in then_branch {
-                if let Some(ir_stmts) = convert_statement(stmt, variables)? {
+                if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level)? {
                     then_ir.extend(ir_stmts);
                 }
             }
@@ -1046,7 +1252,7 @@ fn convert_statement(
             let else_ir = if let Some(else_stmts) = else_branch {
                 let mut else_ir = Vec::new();
                 for stmt in else_stmts {
-                    if let Some(ir_stmts) = convert_statement(stmt, variables)? {
+                    if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level)? {
                         else_ir.extend(ir_stmts);
                     }
                 }

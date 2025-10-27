@@ -12,6 +12,7 @@ pub mod lifetime_inference;
 pub mod pointer_safety;
 pub mod unsafe_propagation;
 pub mod this_tracking;
+pub mod liveness;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -220,7 +221,13 @@ pub fn check_borrows_with_annotations(program: IrProgram, header_cache: HeaderCa
 
 fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
-    let mut ownership_tracker = OwnershipTracker::new();
+
+    // NEW: Run liveness analysis first
+    let mut liveness_analyzer = liveness::LivenessAnalyzer::new();
+    let last_uses = liveness_analyzer.analyze(function);
+
+    // Create ownership tracker with liveness information
+    let mut ownership_tracker = OwnershipTracker::with_liveness(last_uses);
 
     // Create this pointer tracker if this is a method
     let mut this_tracker = if function.is_method {
@@ -277,12 +284,16 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
                 // Track variables declared in the loop
                 let mut loop_local_vars = HashSet::new();
                 
-                for loop_stmt in loop_body {
+                for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
                     // Track variable declarations in the loop
                     if let crate::ir::IrStatement::Borrow { to, .. } = loop_stmt {
                         loop_local_vars.insert(to.clone());
                     }
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors);
+
+                    // NEW: Check for last uses (after processing statement)
+                    // Statement index is i+1+loop_idx (i is EnterLoop, +1 for first statement)
+                    ownership_tracker.check_and_clear_last_uses(i + 1 + loop_idx);
                 }
                 
                 // Save state after first iteration (but only for non-loop-local variables)
@@ -292,11 +303,14 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
                 ownership_tracker.clear_loop_locals(&loop_local_vars);
                 
                 // Second iteration - check for use-after-move
-                for loop_stmt in loop_body {
+                for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
                     // Before processing each statement in second iteration,
                     // check if it would cause use-after-move (but only for non-loop-local vars)
                     check_statement_for_loop_errors(loop_stmt, &state_after_first, &mut errors);
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors);
+
+                    // NEW: Check for last uses (after processing statement)
+                    ownership_tracker.check_and_clear_last_uses(i + 1 + loop_idx);
                 }
                 
                 // Clear loop-local borrows at end of second iteration
@@ -309,6 +323,10 @@ fn check_function(function: &IrFunction) -> Result<Vec<String>, String> {
             } else {
                 // Normal statement processing
                 process_statement(statement, &mut ownership_tracker, &mut this_tracker, &mut errors);
+
+                // NEW: Check for last uses (after processing statement)
+                ownership_tracker.check_and_clear_last_uses(i);
+
                 i += 1;
             }
         }
@@ -685,11 +703,107 @@ fn process_statement(
             }
         }
         
+        crate::ir::IrStatement::Drop(var) => {
+            debug_println!("DEBUG ANALYSIS: Processing explicit Drop for '{}'", var);
+            // Skip checks if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                // Don't mark as moved - the subsequent assignment will handle ownership
+                return;
+            }
+
+            // Check if the variable has active borrows
+            // Explicit Drop (e.g., from reassignment of RAII type) checks borrows
+            if let Some(borrows) = ownership_tracker.get_active_borrows(var) {
+                if !borrows.is_empty() {
+                    let borrower_names: Vec<String> = borrows.iter().map(|b| b.borrower.clone()).collect();
+                    errors.push(format!(
+                        "Cannot assign to '{}' because it is borrowed by: {} (assignment would drop the old value)",
+                        var,
+                        borrower_names.join(", ")
+                    ));
+                    return;
+                }
+            }
+
+            // Check if variable is already moved
+            let state = ownership_tracker.get_ownership(var);
+            if state == Some(&OwnershipState::Moved) {
+                debug_println!("DEBUG ANALYSIS: Skipping drop check for '{}' - already moved", var);
+                // Still allow the drop check, but subsequent assignment will fail
+            }
+
+            // For explicit Drop (reassignment), we only check borrows.
+            // We do NOT mark the variable as moved here!
+            // The subsequent assignment IR statement (CallExpr, Assign, Move) will
+            // handle the actual ownership transfer.
+            debug_println!("DEBUG ANALYSIS: Drop check passed for '{}' - subsequent assignment will transfer ownership", var);
+        }
+
+        crate::ir::IrStatement::ImplicitDrop { var, has_destructor, .. } => {
+            debug_println!("DEBUG ANALYSIS: Processing ImplicitDrop for '{}' (has_destructor={})", var, has_destructor);
+            // Skip checks if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                // Still update ownership state for consistency (only for RAII types)
+                if *has_destructor {
+                    ownership_tracker.set_ownership(var.clone(), OwnershipState::Moved);
+                }
+                // Always clear borrows from the variable (references and RAII types)
+                ownership_tracker.clear_borrows_from(var);
+                return;
+            }
+
+            // Only check active borrows for RAII types (which actually drop)
+            // References just clear their borrows without error checking
+            if *has_destructor {
+                // Check if the variable has active borrows
+                // In Rust, implicit drop (scope end) is a move/consume operation
+                if let Some(borrows) = ownership_tracker.get_active_borrows(var) {
+                    if !borrows.is_empty() {
+                        let borrower_names: Vec<String> = borrows.iter().map(|b| b.borrower.clone()).collect();
+                        errors.push(format!(
+                            "Cannot drop '{}' because it is borrowed by: {} (implicit drop at scope end)",
+                            var,
+                            borrower_names.join(", ")
+                        ));
+                        return;
+                    }
+                }
+
+                // Check if variable is already moved
+                let state = ownership_tracker.get_ownership(var);
+                if state == Some(&OwnershipState::Moved) {
+                    debug_println!("DEBUG ANALYSIS: Skipping implicit drop for '{}' - already moved", var);
+                    return;  // Don't drop if already moved
+                }
+
+                // Mark as dropped (moved/consumed) - only for RAII types
+                debug_println!("DEBUG ANALYSIS: Marking '{}' as dropped (implicit drop)", var);
+                ownership_tracker.set_ownership(var.clone(), OwnershipState::Moved);
+            }
+
+            // NEW: Always clear borrows FROM this variable (for both RAII and non-RAII)
+            // When a variable goes out of scope, any references it made become invalid
+            // In C++, variables drop in reverse declaration order, so clearing borrows
+            // after each "drop" simulates this correctly
+            debug_println!("DEBUG ANALYSIS: Clearing borrows from '{}'", var);
+            ownership_tracker.clear_borrows_from(var);
+        }
+
         crate::ir::IrStatement::EnterScope => {
             ownership_tracker.enter_scope();
         }
         
         crate::ir::IrStatement::ExitScope => {
+            // Before exiting scope, clear borrows from ALL variables at this scope
+            // This handles references that don't have ImplicitDrop (they're not RAII types)
+            // but still need their borrows cleared when they go out of scope
+            let current_scope = ownership_tracker.scope_stack.len();
+
+            // Get all variables at this scope level (from the function's variables)
+            // Note: We can't easily access function variables here, so we'll rely on
+            // ImplicitDrop to clear borrows for RAII types.
+            // For references, they should be handled by liveness analysis or have zero borrows at scope end
+
             ownership_tracker.exit_scope();
         }
         
@@ -808,6 +922,9 @@ struct OwnershipTracker {
     field_ownership: HashMap<String, HashMap<String, OwnershipState>>,
     // NEW: Track method context (are we in a method? is 'this' owned or borrowed?)
     this_context: Option<ThisContext>,
+    // NEW: Liveness analysis - track last use of variables
+    // Key: variable name, Value: statement index of last use
+    last_use_map: HashMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -867,6 +984,10 @@ enum ThisContext {
 
 impl OwnershipTracker {
     fn new() -> Self {
+        Self::with_liveness(HashMap::new())
+    }
+
+    fn with_liveness(last_use_map: HashMap<String, usize>) -> Self {
         let mut tracker = Self {
             ownership: HashMap::new(),
             borrows: HashMap::new(),
@@ -878,6 +999,7 @@ impl OwnershipTracker {
             active_borrows: HashMap::new(),
             field_ownership: HashMap::new(),  // NEW
             this_context: None,                // NEW
+            last_use_map,                      // NEW: Liveness analysis
         };
         // Start with a root scope
         tracker.scope_stack.push(ScopeInfo::default());
@@ -928,6 +1050,41 @@ impl OwnershipTracker {
     // NEW: Get active borrows for a variable
     fn get_active_borrows(&self, var: &str) -> Option<&Vec<ActiveBorrow>> {
         self.active_borrows.get(var)
+    }
+
+    // NEW: Clear all borrows FROM a variable (for liveness analysis)
+    // This clears borrows where 'var' is the borrower (e.g., a reference that's now dead)
+    fn clear_borrows_from(&mut self, var: &str) {
+        debug_println!("LIVENESS: Clearing borrows from '{}'", var);
+
+        // Remove all borrows where this variable is the borrower
+        for (_borrowed_var, borrows) in &mut self.active_borrows {
+            borrows.retain(|b| {
+                if b.borrower == var {
+                    debug_println!("LIVENESS: Removing borrow: '{}' → '{}'", var, _borrowed_var);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        // Clean up empty borrow lists
+        self.active_borrows.retain(|_, borrows| !borrows.is_empty());
+    }
+
+    // NEW: Check if any variable reached its last use at this statement index
+    // If so, clear its borrows (the variable is now dead)
+    fn check_and_clear_last_uses(&mut self, statement_idx: usize) {
+        let vars_to_clear: Vec<String> = self.last_use_map.iter()
+            .filter(|(_, &last_use_idx)| last_use_idx == statement_idx)
+            .map(|(var, _)| var.clone())
+            .collect();
+
+        for var in vars_to_clear {
+            debug_println!("LIVENESS: Variable '{}' reached its last use at statement {}", var, statement_idx);
+            self.clear_borrows_from(&var);
+        }
     }
 
     // NEW: Helper methods for field-level ownership tracking
@@ -1366,6 +1523,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1378,6 +1538,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1418,6 +1581,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1457,6 +1623,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1502,6 +1671,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1514,6 +1686,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1558,6 +1733,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1570,6 +1748,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1612,6 +1793,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1624,6 +1808,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1660,6 +1847,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1707,6 +1897,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1750,6 +1943,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1776,6 +1972,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1817,6 +2016,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         
@@ -1829,6 +2031,9 @@ mod tests {
                 lifetime: None,
                 is_parameter: false,
                 is_static: false,
+                scope_level: 0,
+                has_destructor: false,
+                declaration_index: 0,
             },
         );
         

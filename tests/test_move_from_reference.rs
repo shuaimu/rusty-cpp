@@ -326,8 +326,9 @@ fn test_move_reference_in_conditional() {
     );
 }
 
-/// Test 9: Verify original can be moved (not the reference)
-/// Moving the original ptr (not through reference) should work
+/// Test 9: Verify we detect moving while borrowed (Rust semantics)
+/// In Rust, you cannot move a value while it has active borrows
+/// This is stricter than C++ but prevents dangling references
 #[test]
 fn test_can_move_original_not_reference() {
     let code = r#"
@@ -343,22 +344,24 @@ fn test_can_move_original_not_reference() {
         std::unique_ptr<int> ptr(new int(42));
         std::unique_ptr<int>& ref = ptr;
 
-        // Move the original, not through the reference
-        take_ownership(std::move(ptr));  // This should be OK
+        // Try to move the original while it's borrowed by ref
+        take_ownership(std::move(ptr));  // Should error: cannot move while borrowed
 
-        // Now ptr is moved, but we didn't move "through" ref
-        // (though ref is now dangling - different issue)
+        // In C++ this would compile but ref would dangle
+        // In Rust this is prevented - we follow Rust semantics
     }
     "#;
 
     let temp_file = create_temp_cpp_file(code);
-    let (success, output) = run_analyzer(temp_file.path());
+    let (_success, output) = run_analyzer(temp_file.path());
 
-    // Should NOT error on moving ptr (moving original is OK)
-    // May error on other things, but not "cannot move from reference"
-    if output.contains("Cannot move") && output.contains("'ref'") {
-        panic!("Should allow moving original ptr, not ref. Output: {}", output);
-    }
+    // Should error because ptr is borrowed by ref
+    // This prevents creating a dangling reference (Rust-style safety)
+    assert!(
+        output.contains("borrowed"),
+        "Expected error about moving borrowed value. Output: {}",
+        output
+    );
 
     println!("Test output: {}", output);
 }
