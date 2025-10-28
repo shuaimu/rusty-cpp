@@ -1440,6 +1440,7 @@ mod tests {
             is_method: false,
             method_qualifier: None,
             class_name: None,
+        template_parameters: vec![],
         }
     }
 
@@ -2100,6 +2101,7 @@ mod scope_tests {
             is_method: false,
             method_qualifier: None,
             class_name: None,
+        template_parameters: vec![],
         }
     }
 

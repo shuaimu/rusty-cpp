@@ -17,10 +17,12 @@ pub struct IrFunction {
     pub cfg: ControlFlowGraph,
     pub variables: HashMap<String, VariableInfo>,
     pub return_type: String,  // Return type from AST
-    // NEW: Method information for tracking 'this' pointer
+    // Method information for tracking 'this' pointer
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
     pub class_name: Option<String>,
+    // Template information
+    pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +331,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
         is_method: func.is_method,
         method_qualifier: func.method_qualifier.clone(),
         class_name: func.class_name.clone(),
+        template_parameters: func.template_parameters.clone(),
     })
 }
 
@@ -1338,6 +1341,7 @@ mod tests {
             is_method: false,
             method_qualifier: None,
             class_name: None,
+        template_parameters: vec![],
         }
     }
 

@@ -350,6 +350,7 @@ mod tests {
             is_method: false,
             method_qualifier: None,
             class_name: None,
+        template_parameters: vec![],
         };
         
         let lifetimes = inferencer.infer_function_lifetimes(&function);

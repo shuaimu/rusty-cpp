@@ -5,11 +5,13 @@ pub mod ast_visitor;
 pub mod annotations;
 pub mod header_cache;
 pub mod safety_annotations;
+pub mod template_context;
 pub mod type_annotations;
 pub mod external_annotations;
 
 pub use ast_visitor::{CppAst, Function, Statement, Expression, MethodQualifier};
 pub use header_cache::HeaderCache;
+pub use template_context::TemplateContext;
 #[allow(unused_imports)]
 pub use ast_visitor::{Variable, SourceLocation};
 

@@ -4,11 +4,11 @@ use crate::debug_println;
 /// Get the qualified name of an entity (including namespace/class context)
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
-    
+
     // Try to build qualified name by walking up the semantic parents
     let mut parts = vec![simple_name.clone()];
     let mut current = entity.get_semantic_parent();
-    
+
     while let Some(parent) = current {
         match parent.get_kind() {
             EntityKind::Namespace | EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate => {
@@ -22,16 +22,42 @@ pub fn get_qualified_name(entity: &Entity) -> String {
         }
         current = parent.get_semantic_parent();
     }
-    
+
     // Reverse to get the correct order (namespace::class::method)
     parts.reverse();
-    
+
     // Join with :: but skip if we only have the simple name
     if parts.len() > 1 {
         parts.join("::")
     } else {
         simple_name
     }
+}
+
+/// Extract template type parameters from a template entity
+///
+/// For `template<typename T, typename U>`, this returns ["T", "U"]
+/// Works with ClassTemplateDecl and FunctionTemplateDecl
+pub fn extract_template_parameters(entity: &Entity) -> Vec<String> {
+    use clang::EntityVisitResult;
+
+    let mut params = Vec::new();
+
+    // Visit direct children to find TemplateTypeParameter or NonTypeTemplateParameter
+    entity.visit_children(|child, _| {
+        match child.get_kind() {
+            EntityKind::TemplateTypeParameter | EntityKind::NonTypeTemplateParameter => {
+                if let Some(name) = child.get_name() {
+                    debug_println!("TEMPLATE: Found type parameter: {}", name);
+                    params.push(name);
+                }
+            }
+            _ => {}
+        }
+        EntityVisitResult::Continue
+    });
+
+    params
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +92,12 @@ pub struct Function {
     pub body: Vec<Statement>,
     #[allow(dead_code)]
     pub location: SourceLocation,
-    // NEW: Method information
+    // Method information
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
     pub class_name: Option<String>,
+    // Template information
+    pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +222,7 @@ pub fn extract_function(entity: &Entity) -> Function {
 
     let body = extract_function_body(entity);
 
-    // NEW: Detect method qualifier and class name
+    // Detect method qualifier and class name
     let (method_qualifier, class_name) = if is_method {
         let qualifier = detect_method_qualifier(entity);
         let class_name = entity.get_semantic_parent()
@@ -202,6 +230,25 @@ pub fn extract_function(entity: &Entity) -> Function {
         (Some(qualifier), class_name)
     } else {
         (None, None)
+    };
+
+    // Extract template parameters from parent if this is a template class method
+    let template_parameters = if is_method {
+        // Check if parent is a ClassTemplate
+        if let Some(parent) = entity.get_semantic_parent() {
+            if parent.get_kind() == EntityKind::ClassTemplate {
+                debug_println!("TEMPLATE: Method in template class, extracting parameters");
+                extract_template_parameters(&parent)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        // For free functions, template params would come from FunctionTemplate parent
+        // We'll handle this in Phase 2
+        Vec::new()
     };
 
     Function {
@@ -213,6 +260,7 @@ pub fn extract_function(entity: &Entity) -> Function {
         is_method,
         method_qualifier,
         class_name,
+        template_parameters,
     }
 }
 
@@ -408,7 +456,11 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 }
                 
                 // Try to extract the function name from children
-                for c in &children {
+                for (idx, c) in children.iter().enumerate() {
+                    debug_println!("DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
+                        idx, c.get_kind(), c.get_name(), c.get_display_name(),
+                        c.get_reference().map(|r| (r.get_kind(), r.get_name())));
+
                     if c.get_kind() == EntityKind::UnexposedExpr || c.get_kind() == EntityKind::DeclRefExpr {
                         if let Some(n) = c.get_name() {
                             if name == "unknown" {
@@ -698,9 +750,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             
             // Debug: print all child entity kinds
-            for c in &children {
-                debug_println!("DEBUG AST: CallExpr child kind: {:?}, name: {:?}, display_name: {:?}", 
-                    c.get_kind(), c.get_name(), c.get_display_name());
+            for (idx, c) in children.iter().enumerate() {
+                debug_println!("DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
+                    idx, c.get_kind(), c.get_name(), c.get_display_name(),
+                    c.get_reference().map(|r| (r.get_kind(), r.get_name())));
                     
                 // For member function calls, check for MemberRefExpr first
                 if c.get_kind() == EntityKind::MemberRefExpr {
@@ -777,7 +830,21 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     for (i, c) in children.iter().enumerate() {
                         match c.get_kind() {
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                                // CRITICAL FIX: Check reference FIRST before name
+                                // For template-dependent functions (like std::move in templates),
+                                // the function name is in the reference, not the name field
+                                if let Some(ref_entity) = c.get_reference() {
+                                    if let Some(n) = ref_entity.get_name() {
+                                        debug_println!("DEBUG AST: Got function name '{}' from reference (kind: {:?})", n, ref_entity.get_kind());
+                                        name = n;
+                                        name_providing_child_idx = Some(i);
+                                        break;
+                                    }
+                                }
+
+                                // Fallback: check name field (for non-template cases)
                                 if let Some(n) = c.get_name() {
+                                    debug_println!("DEBUG AST: Got function name '{}' from name field", n);
                                     name = n;
                                     name_providing_child_idx = Some(i);
                                     break;

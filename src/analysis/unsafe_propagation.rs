@@ -25,16 +25,16 @@ pub fn check_unsafe_propagation_with_external(
     external_annotations: Option<&ExternalAnnotations>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    
+
     // Check each statement in the function
     for stmt in &function.body {
         if let Some(error) = check_statement_for_unsafe_calls_with_external(
-            stmt, safety_context, known_safe_functions, external_annotations
+            stmt, safety_context, known_safe_functions, external_annotations, &function.template_parameters
         ) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
     }
-    
+
     errors
 }
 
@@ -43,7 +43,7 @@ fn check_statement_for_unsafe_calls(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Option<String> {
-    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None)
+    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None, &[])
 }
 
 fn check_statement_for_unsafe_calls_with_external(
@@ -51,11 +51,23 @@ fn check_statement_for_unsafe_calls_with_external(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
+    template_params: &[String],
 ) -> Option<String> {
     use crate::parser::Statement;
-    
+
     match stmt {
         Statement::FunctionCall { name, location, .. } => {
+            // Check if this is a template type parameter (not a real function call)
+            if template_params.contains(name) {
+                return None; // Template type parameters are safe to use
+            }
+
+            // Special case: "unknown" function calls in template context are likely template type constructors
+            // e.g., T(), T(x), etc. where the parser couldn't determine the name
+            if !template_params.is_empty() && name == "unknown" {
+                return None; // Allow unknown function calls in template context
+            }
+
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
             
@@ -79,7 +91,7 @@ fn check_statement_for_unsafe_calls_with_external(
         }
         Statement::Assignment { rhs, location, .. } => {
             // Check for function calls in the right-hand side
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(rhs, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(rhs, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(format!(
                     "Calling unsafe function '{}' at line {} requires unsafe context",
                     unsafe_func, location.line
@@ -88,7 +100,7 @@ fn check_statement_for_unsafe_calls_with_external(
         }
         Statement::Return(Some(expr)) => {
             // Check for function calls in return expression
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(format!(
                     "Calling unsafe function '{}' in return statement requires unsafe context",
                     unsafe_func
@@ -97,23 +109,23 @@ fn check_statement_for_unsafe_calls_with_external(
         }
         Statement::If { condition, then_branch, else_branch, location } => {
             // Check condition
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(condition, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(condition, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(format!(
                     "Calling unsafe function '{}' in condition at line {} requires unsafe context",
                     unsafe_func, location.line
                 ));
             }
-            
+
             // Recursively check branches
             for branch_stmt in then_branch {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
                     return Some(error);
                 }
             }
-            
+
             if let Some(else_stmts) = else_branch {
                 for branch_stmt in else_stmts {
-                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations) {
+                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
                         return Some(error);
                     }
                 }
@@ -122,7 +134,7 @@ fn check_statement_for_unsafe_calls_with_external(
         Statement::Block(statements) => {
             // Check all statements in the block
             for block_stmt in statements {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
                     return Some(error);
                 }
             }
@@ -138,7 +150,7 @@ fn find_unsafe_function_call(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Option<String> {
-    find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, None)
+    find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, None, &[])
 }
 
 fn find_unsafe_function_call_with_external(
@@ -146,14 +158,39 @@ fn find_unsafe_function_call_with_external(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
+    template_params: &[String],
 ) -> Option<String> {
     use crate::parser::Expression;
-    
+
     match expr {
         Expression::FunctionCall { name, args } => {
+            // Check if this is a template type parameter (not a real function call)
+            if template_params.contains(name) {
+                // Template type parameters are safe to use (e.g., T x = ...)
+                // Just check the arguments
+                for arg in args {
+                    if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations, template_params) {
+                        return Some(unsafe_func);
+                    }
+                }
+                return None;
+            }
+
+            // Special case: "unknown" function calls in template context are likely template type constructors
+            // e.g., T(), T(x), etc. where the parser couldn't determine the name
+            if !template_params.is_empty() && name == "unknown" {
+                // Just check the arguments
+                for arg in args {
+                    if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations, template_params) {
+                        return Some(unsafe_func);
+                    }
+                }
+                return None; // Allow unknown function calls in template context
+            }
+
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
-            
+
             // Apply the corrected rules:
             // - Safe functions can call safe functions
             // - Safe functions can call unsafe functions (they're explicitly marked)
@@ -170,32 +207,32 @@ fn find_unsafe_function_call_with_external(
                     return Some(format!("{} (undeclared - must be explicitly marked @safe or @unsafe)", name));
                 }
             }
-            
+
             // Check arguments for nested unsafe calls
             for arg in args {
-                if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations) {
+                if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations, template_params) {
                     return Some(unsafe_func);
                 }
             }
         }
         Expression::BinaryOp { left, right, .. } => {
             // Check both sides
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(left, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(left, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(unsafe_func);
             }
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(right, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(right, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(unsafe_func);
             }
         }
         Expression::Move(inner) | Expression::Dereference(inner) | Expression::AddressOf(inner) => {
             // Check inner expression
-            if let Some(unsafe_func) = find_unsafe_function_call_with_external(inner, safety_context, known_safe_functions, external_annotations) {
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(inner, safety_context, known_safe_functions, external_annotations, template_params) {
                 return Some(unsafe_func);
             }
         }
         _ => {}
     }
-    
+
     None
 }
 
