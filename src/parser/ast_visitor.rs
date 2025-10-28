@@ -757,7 +757,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     
                 // For member function calls, check for MemberRefExpr first
                 if c.get_kind() == EntityKind::MemberRefExpr {
-                    // This is definitely a member function call
+                    // MemberRefExpr can be either a method call OR a field access
+                    // We need to distinguish between them
                     if let Some(ref_entity) = c.get_reference() {
                         debug_println!("DEBUG AST: MemberRefExpr references: {:?}", ref_entity.get_name());
                         if let Some(n) = ref_entity.get_name() {
@@ -765,6 +766,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 // Build qualified name for member functions and constructors
                                 if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
                                     name = get_qualified_name(&ref_entity);
+                                } else if ref_entity.get_kind() == EntityKind::FieldDecl {
+                                    // This is a field access, not a function call
+                                    // Don't use it as the function name - it will be extracted as MemberAccess
+                                    debug_println!("DEBUG AST: MemberRefExpr is field access, not function name");
                                 } else {
                                     name = n;
                                 }

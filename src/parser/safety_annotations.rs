@@ -205,11 +205,26 @@ fn is_function_declaration(line: &str) -> bool {
     // Simple heuristic - contains parentheses and common return types
     // This is simplified and could be improved
     let has_parens = line.contains('(') && line.contains(')');
-    let has_type = line.contains("void") || line.contains("int") || 
+    let has_type = line.contains("void") || line.contains("int") ||
                    line.contains("bool") || line.contains("auto") ||
                    line.contains("const") || line.contains("static");
-    
-    has_parens && (has_type || line.contains("::"))
+
+    // Also recognize template functions: they start with a template parameter like "T " or "U "
+    // or contain template syntax
+    let is_template_function = {
+        // Check if line starts with a single capital letter followed by space (template param)
+        let trimmed = line.trim_start();
+        let starts_with_template_param = trimmed.len() >= 2 &&
+            trimmed.chars().next().map_or(false, |c| c.is_uppercase()) &&
+            trimmed.chars().nth(1) == Some(' ');
+
+        // Or contains template-related keywords/syntax
+        let has_template_syntax = line.contains("template") || line.contains('<') || line.contains('>');
+
+        starts_with_template_param || (has_template_syntax && has_parens)
+    };
+
+    has_parens && (has_type || line.contains("::") || is_template_function)
 }
 
 /// Extract function name from a declaration line (including qualified names)

@@ -98,14 +98,29 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
 }
 
 fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::collections::HashSet<String>) {
+    use crate::debug_println;
+    // Only debug function-related entities
+    if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
+        // Check if this is a template specialization
+        let template_kind = entity.get_template_kind();
+        let template_args = entity.get_template_arguments();
+        debug_println!("DEBUG PARSE: Visiting entity: kind={:?}, name={:?}, is_definition={}, template_kind={:?}, has_template_args={}",
+            entity.get_kind(), entity.get_name(), entity.is_definition(), template_kind, template_args.is_some());
+    }
+
     // Check location and filter files
     if let Some(location) = entity.get_location() {
         if let Some(file) = location.get_file_location().file {
             let path = file.get_path();
             let path_str = path.to_string_lossy().to_string();
-            
+
+            // Debug: show why function entities are being filtered
+            if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
+                debug_println!("DEBUG PARSE: Function entity location: {:?}", path_str);
+            }
+
             // Skip system headers and standard library
-            if path_str.starts_with("/usr/include") || 
+            if path_str.starts_with("/usr/include") ||
                path_str.starts_with("/usr/lib") ||
                path_str.starts_with("/usr/local/include") ||
                path_str.starts_with("/System") ||
@@ -120,6 +135,9 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
                path_str.contains("/linux/") ||
                path_str.contains("/asm/") ||
                path_str.contains("/gnu/") {
+                if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
+                    debug_println!("DEBUG PARSE: Skipping system header function: {:?}", entity.get_name());
+                }
                 return; // Skip system headers
             }
             
@@ -149,10 +167,33 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
     
     match entity.get_kind() {
         EntityKind::FunctionDecl | EntityKind::Method => {
+            debug_println!("DEBUG PARSE: Found FunctionDecl: name={:?}, is_definition={}, kind={:?}",
+                entity.get_name(), entity.is_definition(), entity.get_kind());
             if entity.is_definition() {
                 let func = ast_visitor::extract_function(entity);
                 ast.functions.push(func);
             }
+        }
+        EntityKind::FunctionTemplate => {
+            // Template free functions: extract the template declaration to analyze with generic types
+            // We don't need instantiations - our borrow/move checking works on generic types!
+            debug_println!("DEBUG PARSE: Found FunctionTemplate: {:?}, is_definition={}",
+                entity.get_name(), entity.is_definition());
+
+            // The FunctionTemplateDecl IS the function entity in LibClang
+            // Its children are: TemplateTypeParameter, ParmDecl, CompoundStmt
+            // We extract the function directly from this entity
+            if entity.is_definition() {
+                debug_println!("DEBUG PARSE: Extracting template function from FunctionTemplate entity");
+                let func = ast_visitor::extract_function(entity);
+                debug_println!("DEBUG PARSE: Extracted template function: {}", func.name);
+                ast.functions.push(func);
+            }
+        }
+        EntityKind::CallExpr => {
+            // Note: We don't need to handle template instantiations here.
+            // Template functions are analyzed via their declarations (with generic types).
+            // CallExpr references to instantiations don't have bodies in LibClang anyway.
         }
         EntityKind::VarDecl => {
             let var = ast_visitor::extract_variable(entity);
