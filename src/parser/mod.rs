@@ -37,7 +37,7 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     
     // Build arguments with include paths and defines
     let mut args = vec![
-        "-std=c++17".to_string(), 
+        "-std=c++20".to_string(),
         "-xc++".to_string(),
         // Add flags to make parsing more lenient
         "-fno-delayed-template-parsing".to_string(),
