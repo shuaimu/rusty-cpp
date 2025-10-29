@@ -93,7 +93,17 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     let mut header_cache = parser::HeaderCache::new();
     header_cache.set_include_paths(all_include_paths.clone());
     header_cache.parse_includes_from_source(path)?;
-    
+
+    // Also parse external annotations from the source file itself (not just headers)
+    // This allows annotations like @external: { function: [unsafe, ...] } in .cc/.cpp files
+    if let Ok(source_content) = std::fs::read_to_string(path) {
+        if let Err(e) = header_cache.external_annotations.parse_content(&source_content) {
+            debug_println!("DEBUG: Failed to parse external annotations from source file: {}", e);
+        } else {
+            debug_println!("DEBUG: Parsed external annotations from source file");
+        }
+    }
+
     // Parse the C++ file with include paths and defines
     let ast = parser::parse_cpp_file_with_includes_and_defines(path, &all_include_paths, defines)?;
     
