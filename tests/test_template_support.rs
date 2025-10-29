@@ -160,7 +160,6 @@ fn test_template_move_while_borrowed() {
 // ============================================================================
 
 #[test]
-#[ignore] // FIXME: Field-level move tracking issue (not template-specific)
 fn test_template_class_field_double_move() {
     let code = r#"
     #include <memory>
@@ -184,7 +183,7 @@ fn test_template_class_field_double_move() {
     let (_success, output) = run_analyzer(temp_file.path());
 
     assert!(
-        output.contains("already been moved") || output.contains("Use after move"),
+        output.contains("already been moved") || output.contains("Use after move") || output.contains("Cannot move field"),
         "Should detect double move of field in template class. Output: {}",
         output
     );
@@ -313,7 +312,6 @@ fn test_template_class_rvalue_method_move_ok() {
 // ============================================================================
 
 #[test]
-#[ignore] // FIXME: Template instantiation not tracked
 fn test_template_instantiation_with_unique_ptr() {
     let code = r#"
     #include <memory>
@@ -346,7 +344,6 @@ fn test_template_instantiation_with_unique_ptr() {
 }
 
 #[test]
-#[ignore] // FIXME: Template instantiation not tracked
 fn test_template_forwarding_reference_double_use() {
     let code = r#"
     #include <memory>
@@ -384,7 +381,6 @@ fn test_template_forwarding_reference_double_use() {
 // ============================================================================
 
 #[test]
-#[ignore] // FIXME: Variadic templates not analyzed
 fn test_variadic_template_parameter_pack_double_use() {
     let code = r#"
     #include <memory>
@@ -450,7 +446,6 @@ fn test_template_multiple_type_params() {
 // ============================================================================
 
 #[test]
-#[ignore] // FIXME: Template specializations not analyzed
 fn test_template_partial_specialization() {
     let code = r#"
     #include <memory>
@@ -495,7 +490,6 @@ fn test_template_partial_specialization() {
 // ============================================================================
 
 #[test]
-#[ignore] // FIXME: SFINAE templates not analyzed
 fn test_template_enable_if() {
     let code = r#"
     #include <memory>

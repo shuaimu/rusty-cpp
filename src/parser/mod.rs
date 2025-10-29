@@ -99,8 +99,8 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
 
 fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::collections::HashSet<String>) {
     use crate::debug_println;
-    // Only debug function-related entities
-    if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
+    // Only debug function and class-related entities
+    if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
         // Check if this is a template specialization
         let template_kind = entity.get_template_kind();
         let template_args = entity.get_template_arguments();
@@ -114,9 +114,9 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
             let path = file.get_path();
             let path_str = path.to_string_lossy().to_string();
 
-            // Debug: show why function entities are being filtered
-            if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
-                debug_println!("DEBUG PARSE: Function entity location: {:?}", path_str);
+            // Debug: show why function/class entities are being filtered
+            if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
+                debug_println!("DEBUG PARSE: Entity location: {:?}", path_str);
             }
 
             // Skip system headers and standard library
@@ -188,6 +188,21 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
                 let func = ast_visitor::extract_function(entity);
                 debug_println!("DEBUG PARSE: Extracted template function: {}", func.name);
                 ast.functions.push(func);
+            }
+        }
+        EntityKind::ClassTemplate => {
+            // Phase 3: Template classes
+            debug_println!("DEBUG PARSE: Found ClassTemplate: {:?}, is_definition={}",
+                entity.get_name(), entity.is_definition());
+
+            // ClassTemplateDecl works similarly to FunctionTemplateDecl
+            // Its children are: TemplateTypeParameter, CXXRecordDecl
+            // Extract the class directly from this entity
+            if entity.is_definition() {
+                debug_println!("DEBUG PARSE: Extracting template class from ClassTemplate entity");
+                let class = ast_visitor::extract_class(entity);
+                debug_println!("DEBUG PARSE: Extracted template class: {}", class.name);
+                ast.classes.push(class);
             }
         }
         EntityKind::CallExpr => {

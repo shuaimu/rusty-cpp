@@ -213,6 +213,8 @@ mod tests {
                 line: 5,
                 column: 5,
             },
+            is_pack: false,
+            pack_element_type: None,
         });
         
         let error = check_parsed_statement_for_pointers(&stmt);

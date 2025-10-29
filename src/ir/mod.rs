@@ -126,6 +126,11 @@ pub enum IrStatement {
     // Safety markers
     EnterUnsafe,
     ExitUnsafe,
+    // Phase 4: Pack expansion tracking
+    PackExpansion {
+        pack_name: String,
+        operation: String,  // "forward", "move", or "use"
+    },
     // Variable usage (for checking moved state)
     UseVariable {
         var: String,
@@ -1318,6 +1323,14 @@ fn convert_statement(
                 _ => Ok(None),
             }
         }
+        Statement::PackExpansion { pack_name, operation, .. } => {
+            // Phase 4: Convert pack expansion to IR
+            debug_println!("DEBUG IR: PackExpansion: pack='{}', operation='{}'", pack_name, operation);
+            Ok(Some(vec![IrStatement::PackExpansion {
+                pack_name: pack_name.clone(),
+                operation: operation.clone(),
+            }]))
+        }
         _ => Ok(None),
     }
 }
@@ -1360,6 +1373,8 @@ mod tests {
                 line: 1,
                 column: 1,
             },
+            is_pack: false,
+            pack_element_type: None,
         }
     }
 

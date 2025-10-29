@@ -196,6 +196,16 @@ impl LivenessAnalyzer {
                 self.in_conditional_depth -= 1;
             }
 
+            IrStatement::PackExpansion { pack_name, operation } => {
+                // Phase 4: Pack expansion uses the pack variable
+                let use_type = if operation == "move" || operation == "forward" {
+                    UseType::Read  // Moving/forwarding reads the pack
+                } else {
+                    UseType::Read  // Regular use also reads
+                };
+                self.record_use(pack_name, use_type);
+            }
+
             // These don't use variables
             IrStatement::EnterScope |
             IrStatement::ExitScope |

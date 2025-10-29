@@ -60,10 +60,23 @@ pub fn extract_template_parameters(entity: &Entity) -> Vec<String> {
     params
 }
 
+// Phase 3: Class template representation
+#[derive(Debug, Clone)]
+pub struct Class {
+    pub name: String,
+    pub template_parameters: Vec<String>,  // e.g., ["T", "Args"] for template<typename T, typename... Args>
+    pub is_template: bool,
+    pub members: Vec<Variable>,            // Member fields
+    pub methods: Vec<Function>,            // Member methods
+    pub base_classes: Vec<String>,         // Base class names (may contain packs like "Bases...")
+    pub location: SourceLocation,
+}
+
 #[derive(Debug, Clone)]
 pub struct CppAst {
     pub functions: Vec<Function>,
     pub global_variables: Vec<Variable>,
+    pub classes: Vec<Class>,  // Phase 3: Track template classes
 }
 
 impl CppAst {
@@ -71,6 +84,7 @@ impl CppAst {
         Self {
             functions: Vec::new(),
             global_variables: Vec::new(),
+            classes: Vec::new(),  // Phase 3
         }
     }
 }
@@ -114,6 +128,9 @@ pub struct Variable {
     pub is_static: bool,
     #[allow(dead_code)]
     pub location: SourceLocation,
+    // Variadic template support (Phase 1)
+    pub is_pack: bool,                         // Is this a parameter pack (e.g., Args... args)?
+    pub pack_element_type: Option<String>,     // Type of pack elements (e.g., "Args&&" from "Args&&...")
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +174,12 @@ pub enum Statement {
     // Expression statements (e.g., standalone dereference, method calls)
     ExpressionStatement {
         expr: Expression,
+        location: SourceLocation,
+    },
+    // Phase 2: Pack expansion statement (fold expressions, pack usage)
+    PackExpansion {
+        pack_name: String,           // Name of the pack being expanded (e.g., "args")
+        operation: String,           // Type of operation: "forward", "move", "use"
         location: SourceLocation,
     },
 }
@@ -211,7 +234,29 @@ pub fn extract_function(entity: &Entity) -> Function {
     let mut parameters = Vec::new();
     for child in entity.get_children() {
         if child.get_kind() == EntityKind::ParmDecl {
-            parameters.push(extract_variable(&child));
+            let mut param = extract_variable(&child);
+
+            // Phase 1: Detect variadic parameter packs
+            // Check if this is a parameter pack by examining the type
+            if let Some(param_type) = child.get_type() {
+                let type_str = type_to_string(&param_type);
+
+                // Check if type contains "..." (e.g., "Args...", "Args &&...", "const T &...")
+                let is_pack = type_str.contains("...") || child.is_variadic();
+
+                if is_pack {
+                    param.is_pack = true;
+
+                    // Extract element type by removing "..." from the type string
+                    let element_type = type_str.trim_end_matches("...").trim().to_string();
+                    param.pack_element_type = Some(element_type.clone());
+
+                    debug_println!("DEBUG PARSE: Found parameter pack '{}' with element type '{}'",
+                        param.name, element_type);
+                }
+            }
+
+            parameters.push(param);
         }
     }
 
@@ -261,6 +306,90 @@ pub fn extract_function(entity: &Entity) -> Function {
         method_qualifier,
         class_name,
         template_parameters,
+    }
+}
+
+// Phase 3: Extract class template information
+pub fn extract_class(entity: &Entity) -> Class {
+    use crate::debug_println;
+
+    let name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
+    let location = extract_location(entity);
+    let is_template = entity.get_kind() == EntityKind::ClassTemplate;
+
+    debug_println!("DEBUG PARSE: Extracting class '{}', is_template={}", name, is_template);
+
+    // Extract template parameters from ClassTemplate
+    let template_parameters = if is_template {
+        extract_template_parameters(entity)
+    } else {
+        Vec::new()
+    };
+
+    debug_println!("DEBUG PARSE: Class '{}' has {} template parameters: {:?}",
+        name, template_parameters.len(), template_parameters);
+
+    let mut members = Vec::new();
+    let mut methods = Vec::new();
+    let mut base_classes = Vec::new();
+
+    // LibClang's get_children() flattens the hierarchy and returns class members directly
+    // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
+    for child in entity.get_children() {
+        debug_println!("DEBUG PARSE: ClassTemplate child kind: {:?}", child.get_kind());
+        match child.get_kind() {
+            EntityKind::FieldDecl => {
+                // Member field
+                let mut member = extract_variable(&child);
+
+                // Phase 3: Check if member type contains pack expansion
+                if let Some(field_type) = child.get_type() {
+                    let type_str = type_to_string(&field_type);
+                    if type_str.contains("...") {
+                        debug_println!("DEBUG PARSE: Found member field with pack expansion: '{}' of type '{}'",
+                            member.name, type_str);
+                        member.is_pack = true;
+                        member.pack_element_type = Some(type_str.clone());
+                    }
+                }
+
+                members.push(member);
+            }
+            EntityKind::Method | EntityKind::Constructor | EntityKind::Destructor => {
+                // Member method
+                let method = extract_function(&child);
+                methods.push(method);
+            }
+            EntityKind::FunctionTemplate => {
+                // Template method
+                if child.is_definition() {
+                    let method = extract_function(&child);
+                    methods.push(method);
+                }
+            }
+            EntityKind::BaseSpecifier => {
+                // Base class
+                if let Some(base_type) = child.get_type() {
+                    let base_name = type_to_string(&base_type);
+                    debug_println!("DEBUG PARSE: Found base class: '{}'", base_name);
+                    base_classes.push(base_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes",
+        name, members.len(), methods.len(), base_classes.len());
+
+    Class {
+        name,
+        template_parameters,
+        is_template,
+        members,
+        methods,
+        base_classes,
+        location,
     }
 }
 
@@ -333,6 +462,8 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         is_shared_ptr,
         is_static,
         location,
+        is_pack: false,              // Will be set properly for function parameters
+        pack_element_type: None,     // Will be set properly for function parameters
     }
 }
 
@@ -346,6 +477,31 @@ fn extract_function_body(entity: &Entity) -> Vec<Statement> {
     }
     
     statements
+}
+
+/// Helper function to extract function name from a CallExpr
+/// Returns None if the function name cannot be determined
+fn extract_function_name(call_expr: &Entity) -> Option<String> {
+    debug_println!("DEBUG: Extracting function name from CallExpr");
+
+    // Try to get name from the first child (usually the callee)
+    for child in call_expr.get_children() {
+        // Check DeclRefExpr or UnexposedExpr for function name
+        if matches!(child.get_kind(), EntityKind::DeclRefExpr | EntityKind::UnexposedExpr) {
+            if let Some(ref_entity) = child.get_reference() {
+                if let Some(name) = ref_entity.get_name() {
+                    debug_println!("DEBUG: Found function name '{}' from reference", name);
+                    return Some(name);
+                }
+            }
+            if let Some(name) = child.get_name() {
+                debug_println!("DEBUG: Found function name '{}' from child name", name);
+                return Some(name);
+            }
+        }
+    }
+
+    None
 }
 
 fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
@@ -597,8 +753,71 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         continue;  // Skip the MemberRefExpr itself
                     }
 
-                    // Extract as argument
-                    if let Some(expr) = extract_expression(&c) {
+                    // Phase 2: Check if this argument is a PackExpansionExpr
+                    if c.get_kind() == EntityKind::PackExpansionExpr {
+                        debug_println!("DEBUG STMT: Found PackExpansionExpr as function argument");
+
+                        let mut pack_name = String::new();
+                        let mut operation = "use".to_string();
+
+                        // Look for the pack name and operation type
+                        for pack_child in c.get_children() {
+                            // Check if it's a CallExpr (could be std::forward or std::move)
+                            if pack_child.get_kind() == EntityKind::CallExpr {
+                                if let Some(callee_name) = extract_function_name(&pack_child) {
+                                    debug_println!("DEBUG STMT: PackExpansion contains call to: {}", callee_name);
+                                    if callee_name.contains("forward") {
+                                        operation = "forward".to_string();
+                                    } else if callee_name.contains("move") {
+                                        operation = "move".to_string();
+                                    }
+                                }
+
+                                // Find pack name inside the call
+                                // Skip the first child (function name) and look for parameter references
+                                debug_println!("DEBUG STMT: Searching for pack name in CallExpr children (count: {})",
+                                    pack_child.get_children().len());
+                                for call_child in pack_child.get_children() {
+                                    debug_println!("DEBUG STMT: CallExpr child kind: {:?}", call_child.get_kind());
+                                    if call_child.get_kind() == EntityKind::DeclRefExpr {
+                                        if let Some(ref_entity) = call_child.get_reference() {
+                                            debug_println!("DEBUG STMT: DeclRefExpr references entity kind: {:?}", ref_entity.get_kind());
+                                            // Only accept if it references a parameter (ParmDecl), not a function
+                                            if ref_entity.get_kind() == EntityKind::ParmDecl {
+                                                if let Some(name) = ref_entity.get_name() {
+                                                    debug_println!("DEBUG STMT: Found pack name '{}' inside CallExpr", name);
+                                                    pack_name = name;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Direct DeclRefExpr (pack used without forward/move)
+                            else if pack_child.get_kind() == EntityKind::DeclRefExpr {
+                                debug_println!("DEBUG STMT: Found direct DeclRefExpr in PackExpansionExpr");
+                                if let Some(ref_entity) = pack_child.get_reference() {
+                                    if let Some(name) = ref_entity.get_name() {
+                                        debug_println!("DEBUG STMT: Pack name from direct DeclRefExpr: '{}'", name);
+                                        pack_name = name;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !pack_name.is_empty() {
+                            debug_println!("DEBUG STMT: Pack expansion detected: pack='{}', operation='{}'",
+                                pack_name, operation);
+                            statements.push(Statement::PackExpansion {
+                                pack_name,
+                                operation,
+                                location: extract_location(&c),
+                            });
+                        }
+                    }
+                    // Regular argument extraction
+                    else if let Some(expr) = extract_expression(&c) {
                         args.push(expr);
                     }
                 }
@@ -686,22 +905,40 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             }
             EntityKind::UnexposedExpr => {
                 // UnexposedExpr can contain function calls or other expressions
-                // Try to extract it as an expression and create appropriate statement
-                if let Some(expr) = extract_expression(&child) {
-                    match expr {
-                        Expression::FunctionCall { name, args } => {
-                            statements.push(Statement::FunctionCall {
-                                name,
-                                args,
-                                location: extract_location(&child),
-                            });
+                // Also check if this contains a PackExpansionExpr (fold expression)
+
+                // First check for pack expansions in children
+                let has_pack_expansion = child.get_children().iter()
+                    .any(|c| c.get_kind() == EntityKind::PackExpansionExpr);
+
+                if has_pack_expansion {
+                    debug_println!("DEBUG STMT: UnexposedExpr contains PackExpansionExpr (fold expression)");
+                    // Process PackExpansionExpr children
+                    for ue_child in child.get_children() {
+                        if ue_child.get_kind() == EntityKind::PackExpansionExpr {
+                            // Recursively process the pack expansion
+                            let pack_stmts = extract_compound_statement(&ue_child);
+                            statements.extend(pack_stmts);
                         }
-                        _ => {
-                            // Other expression types - add as expression statement
-                            statements.push(Statement::ExpressionStatement {
-                                expr,
-                                location: extract_location(&child),
-                            });
+                    }
+                } else {
+                    // Regular UnexposedExpr handling
+                    if let Some(expr) = extract_expression(&child) {
+                        match expr {
+                            Expression::FunctionCall { name, args } => {
+                                statements.push(Statement::FunctionCall {
+                                    name,
+                                    args,
+                                    location: extract_location(&child),
+                                });
+                            }
+                            _ => {
+                                // Other expression types - add as expression statement
+                                statements.push(Statement::ExpressionStatement {
+                                    expr,
+                                    location: extract_location(&child),
+                                });
+                            }
                         }
                     }
                 }

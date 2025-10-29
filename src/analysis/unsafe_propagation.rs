@@ -46,6 +46,50 @@ fn check_statement_for_unsafe_calls(
     check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None, &[])
 }
 
+/// Check if a name looks like a template type parameter (including variadic pack parameters)
+/// This includes:
+/// - Exact matches: "T", "Args"
+/// - Pack patterns: "Args...", "Rest..."
+/// - Element types: "T&&", "Args&&" (forwarding references in packs)
+/// - Generic names: short uppercase-starting names that look like template params
+fn is_template_parameter_like(name: &str, template_params: &[String]) -> bool {
+    // Exact match
+    if template_params.contains(&name.to_string()) {
+        return true;
+    }
+
+    // Phase 1: Recognize pack-related patterns
+    // Pattern 1: Name ends with "..." (pack expansion)
+    if name.ends_with("...") {
+        let base_name = name.trim_end_matches("...").trim();
+        if template_params.contains(&base_name.to_string()) {
+            return true;
+        }
+    }
+
+    // Pattern 2: Name with && (forwarding reference, common in pack element types)
+    // e.g., "Args&&" where "Args" is a template parameter
+    if name.ends_with("&&") || name.ends_with("&") {
+        let base_name = name.trim_end_matches('&').trim();
+        if template_params.contains(&base_name.to_string()) {
+            return true;
+        }
+    }
+
+    // Pattern 3: Generic template-like names (short, uppercase start)
+    // This catches variations that the parser might produce
+    if name.len() <= 8 && name.len() > 0 {
+        if let Some(first_char) = name.chars().next() {
+            if first_char.is_uppercase() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                // Looks like a template parameter name
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn check_statement_for_unsafe_calls_with_external(
     stmt: &Statement,
     safety_context: &SafetyContext,
@@ -58,7 +102,8 @@ fn check_statement_for_unsafe_calls_with_external(
     match stmt {
         Statement::FunctionCall { name, location, .. } => {
             // Check if this is a template type parameter (not a real function call)
-            if template_params.contains(name) {
+            // Phase 1: Enhanced check for variadic pack parameters
+            if is_template_parameter_like(name, template_params) {
                 return None; // Template type parameters are safe to use
             }
 
@@ -165,7 +210,8 @@ fn find_unsafe_function_call_with_external(
     match expr {
         Expression::FunctionCall { name, args } => {
             // Check if this is a template type parameter (not a real function call)
-            if template_params.contains(name) {
+            // Phase 1: Enhanced check for variadic pack parameters
+            if is_template_parameter_like(name, template_params) {
                 // Template type parameters are safe to use (e.g., T x = ...)
                 // Just check the arguments
                 for arg in args {

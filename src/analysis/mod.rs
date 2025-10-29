@@ -898,6 +898,47 @@ fn process_statement(
             }
         }
 
+        crate::ir::IrStatement::PackExpansion { pack_name, operation } => {
+            // Phase 4: Handle pack expansion semantics
+            debug_println!("DEBUG ANALYSIS: PackExpansion pack='{}', operation='{}'", pack_name, operation);
+
+            // Skip checking if we're in an unsafe block
+            if ownership_tracker.is_in_unsafe_block() {
+                debug_println!("DEBUG ANALYSIS: Skipping pack check - in unsafe block");
+                return;
+            }
+
+            // Check if the pack has been moved
+            let pack_state = ownership_tracker.get_ownership(pack_name);
+            debug_println!("DEBUG ANALYSIS: pack_state for '{}' = {:?}", pack_name, pack_state);
+
+            if pack_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Use after move: cannot use pack '{}' because it has been moved",
+                    pack_name
+                ));
+                return;
+            }
+
+            // Apply operation-specific semantics
+            match operation.as_str() {
+                "move" | "forward" => {
+                    // Move or forward consumes the pack
+                    debug_println!("DEBUG ANALYSIS: Pack '{}' is being moved/forwarded", pack_name);
+                    ownership_tracker.set_ownership(pack_name.clone(), OwnershipState::Moved);
+                }
+                "use" => {
+                    // Regular use creates implicit immutable borrows
+                    // (packs are pass-by-value, so this doesn't create lasting borrows)
+                    debug_println!("DEBUG ANALYSIS: Pack '{}' is being used (immutable)", pack_name);
+                    // No state change needed for use
+                }
+                _ => {
+                    debug_println!("DEBUG ANALYSIS: Unknown pack operation '{}'", operation);
+                }
+            }
+        }
+
         _ => {}
     }
 }

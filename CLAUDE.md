@@ -4,6 +4,8 @@
 
 This is a Rust-based static analyzer that applies Rust's ownership and borrowing rules to C++ code. The goal is to catch memory safety issues at compile-time without runtime overhead.
 
+**Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
+
 ## Current State (Updated: Full template support + Three-state safety system)
 
 ### What's Fully Implemented ✅
@@ -196,10 +198,11 @@ To implement similar analysis in our checker:
 ## Key Technical Decisions
 
 1. **Language Choice**: Rust for memory safety and performance
-2. **Parser**: LibClang for accurate C++ parsing
+2. **Parser**: LibClang for accurate C++ parsing (C++20 standard)
 3. **Solver**: Z3 for lifetime constraint solving
 4. **IR Design**: Ownership-aware representation with CFG
 5. **Analysis Strategy**: Per-translation-unit with header annotations (no .cpp-to-.cpp needed)
+6. **C++ Standard**: C++20 support with modern features (concepts, ranges, coroutines, etc.)
 
 ## Project Structure
 
@@ -247,7 +250,7 @@ export CPATH=/usr/include
 
 ### Basic Usage
 ```bash
-# Basic usage
+# Basic usage (C++20 standard by default)
 cargo run -- file.cpp
 
 # With include paths
@@ -260,6 +263,8 @@ cargo run -- file.cpp --compile-commands build/compile_commands.json
 export CPLUS_INCLUDE_PATH=/project/include:/third_party/include
 cargo run -- src/main.cpp
 ```
+
+**Note**: The analyzer uses C++20 standard (`-std=c++20`) for parsing, supporting modern C++ features like concepts, ranges, coroutines, and three-way comparison.
 
 ### Using Rusty Structures (Recommended)
 ```cpp
