@@ -178,30 +178,32 @@ impl HeaderCache {
         }
         
         match entity.get_kind() {
-            EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor => {
+            EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor | EntityKind::FunctionTemplate => {
                 // Extract lifetime annotations
                 if let Some(sig) = extract_annotations(entity) {
                     self.signatures.insert(sig.name.clone(), sig);
                 }
-                
+
                 // Extract safety annotations from the entity itself
                 let mut safety = parse_entity_safety(entity);
-                
+
                 // If no explicit safety annotation, inherit from namespace
                 if safety.is_none() {
                     safety = current_namespace_safety;
                 }
-                
+
                 // if let Some(name) = entity.get_name() {
                 //     debug_println!("DEBUG HEADER: Processing function '{}'", name);
                 //     if let Some(comment) = entity.get_comment() {
                 //         debug_println!("DEBUG HEADER:   Comment: {}", comment);
                 //     }
                 // }
-                
+
                 if let Some(safety_mode) = safety {
-                    // Use qualified name for methods and constructors to avoid collisions
-                    let name = if entity.get_kind() == EntityKind::Method || entity.get_kind() == EntityKind::Constructor {
+                    // Use qualified name for methods, constructors, and template functions to avoid collisions
+                    let name = if entity.get_kind() == EntityKind::Method
+                                || entity.get_kind() == EntityKind::Constructor
+                                || entity.get_kind() == EntityKind::FunctionTemplate {
                         crate::parser::ast_visitor::get_qualified_name(entity)
                     } else {
                         entity.get_name().unwrap_or_else(|| "anonymous".to_string())
