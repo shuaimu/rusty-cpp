@@ -1,6 +1,16 @@
 use clang::{Entity, EntityKind, Type, TypeKind};
 use crate::debug_println;
 
+/// Check if a function name is std::move or a namespace-qualified move
+fn is_move_function(name: &str) -> bool {
+    name == "move" || name == "std::move" || name.ends_with("::move")
+}
+
+/// Check if a function name is std::forward or a namespace-qualified forward
+fn is_forward_function(name: &str) -> bool {
+    name == "forward" || name == "std::forward" || name.ends_with("::forward")
+}
+
 /// Get the qualified name of an entity (including namespace/class context)
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
@@ -766,9 +776,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             if pack_child.get_kind() == EntityKind::CallExpr {
                                 if let Some(callee_name) = extract_function_name(&pack_child) {
                                     debug_println!("DEBUG STMT: PackExpansion contains call to: {}", callee_name);
-                                    if callee_name.contains("forward") {
+                                    if is_forward_function(&callee_name) {
                                         operation = "forward".to_string();
-                                    } else if callee_name.contains("move") {
+                                    } else if is_move_function(&callee_name) {
                                         operation = "move".to_string();
                                     }
                                 }
@@ -1145,7 +1155,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             for (i, arg) in args.iter().enumerate() {
                 debug_println!("  DEBUG: arg[{}] = {:?}", i, arg);
             }
-            if name == "move" || name == "std::move" || name.ends_with("::move") || name.contains("move") {
+            if is_move_function(&name) {
                 debug_println!("DEBUG: Detected move function!");
                 // std::move takes one argument and we treat it as a Move expression
                 if args.len() == 1 {

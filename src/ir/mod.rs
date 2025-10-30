@@ -3,6 +3,46 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use crate::debug_println;
 
+/// Parse operator name from a function name
+/// Returns the operator symbol (e.g., "*", "=", "==") or None
+fn parse_operator_name(func_name: &str) -> Option<&str> {
+    // Find the last occurrence of "operator" keyword
+    if let Some(pos) = func_name.rfind("operator") {
+        let op = &func_name[pos + "operator".len()..];
+        if !op.is_empty() {
+            return Some(op);
+        }
+    }
+    None
+}
+
+/// Check if function is operator* (dereference), not operator*= or operator*
+fn is_dereference_operator(func_name: &str) -> bool {
+    if let Some(op) = parse_operator_name(func_name) {
+        op == "*"
+    } else {
+        false
+    }
+}
+
+/// Check if function is operator= (assignment), not operator==, !=, <=, >=
+fn is_assignment_operator(func_name: &str) -> bool {
+    if let Some(op) = parse_operator_name(func_name) {
+        op == "="
+    } else {
+        false
+    }
+}
+
+/// Check if function is operator-> (member access)
+fn is_member_access_operator(func_name: &str) -> bool {
+    if let Some(op) = parse_operator_name(func_name) {
+        op == "->"
+    } else {
+        false
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IrProgram {
     pub functions: Vec<IrFunction>,
@@ -475,7 +515,7 @@ fn convert_statement(
                     // Special handling for operator* (dereference)
                     // When we have: int& r = *box;
                     // This creates a reference that borrows from the box
-                    if func_name.contains("::operator*") || func_name == "operator*" {
+                    if is_dereference_operator(&func_name) {
                         if let Some(first_arg) = arg_names.first() {
                             let kind = if *is_mutable {
                                 BorrowKind::Mutable
@@ -589,7 +629,7 @@ fn convert_statement(
             if let crate::parser::Expression::FunctionCall { name, args } = lhs {
                 debug_println!("DEBUG IR: Assignment LHS is function call: {}", name);
                 // Check if this is operator* (dereference for smart pointers)
-                if name.contains("::operator*") || name == "operator*" {
+                if is_dereference_operator(&name) {
                     debug_println!("DEBUG IR: Detected operator* on LHS, args: {:?}", args);
                     // This is a dereference assignment via operator*
                     // The first argument is the object being dereferenced
@@ -796,7 +836,7 @@ fn convert_statement(
                                 // For method calls, the first arg is the receiver object
                                 if is_method_call && i == 0 {
                                     // Check if this is operator* (dereference)
-                                    if name.contains("::operator*") || name == "operator*" {
+                                    if is_dereference_operator(&name) {
                                         statements.push(IrStatement::UseVariable {
                                             var: var.clone(),
                                             operation: "dereference_read (via operator*)".to_string(),
@@ -844,7 +884,7 @@ fn convert_statement(
                                 debug_println!("DEBUG IR: Receiver is FunctionCall: {}", recv_name);
 
                                 // Check if this is operator-> (pointer dereference for method call)
-                                if recv_name.contains("::operator->") || recv_name == "operator->" {
+                                if is_member_access_operator(&recv_name) {
                                     // Extract the actual pointer variable from operator-> args
                                     for recv_arg in recv_args {
                                         if let crate::parser::Expression::Variable(var) = recv_arg {
@@ -930,7 +970,7 @@ fn convert_statement(
             // Special handling for operator= (assignment operators)
             // box1 = std::move(box2) becomes operator=(box1, Move(box2))
             // We need to treat this as: Move { from: box2, to: box1 }
-            if name.contains("::operator=") || name == "operator=" {
+            if is_assignment_operator(&name) {
                 debug_println!("DEBUG IR: Detected operator= call");
                 if args.len() == 2 {
                     // First arg is LHS (destination), second is RHS (source)
@@ -974,7 +1014,7 @@ fn convert_statement(
                         // For method calls, the first arg is the receiver object
                         if is_method_call && i == 0 {
                             // Check if this is operator* (dereference)
-                            let operation = if name.contains("::operator*") || name == "operator*" {
+                            let operation = if is_dereference_operator(&name) {
                                 "dereference (via operator*)".to_string()
                             } else {
                                 format!("call method '{}'", name)
@@ -1021,7 +1061,7 @@ fn convert_statement(
                         // Check if this is the receiver of a method call (i == 0)
                         if is_method_call && i == 0 {
                             // Check if this is operator-> (pointer dereference for method call)
-                            if inner_name.contains("::operator->") || inner_name == "operator->" {
+                            if is_member_access_operator(&inner_name) {
                                 // Extract the actual pointer variable from operator-> args
                                 for inner_arg in inner_args {
                                     if let crate::parser::Expression::Variable(var) = inner_arg {

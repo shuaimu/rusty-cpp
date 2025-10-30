@@ -338,76 +338,50 @@ fn is_function_safe_with_external(
     get_called_function_safety(func_name, safety_context, known_safe_functions, external_annotations) == SafetyMode::Safe
 }
 
-fn is_standard_safe_function(func_name: &str) -> bool {
-    // Whitelist of standard functions considered safe
-    // This includes common std:: functions that users will encounter
-    matches!(func_name,
-        // C I/O
-        "printf" | "scanf" | "puts" | "gets" |
-        "malloc" | "free" | "new" | "delete" |
-        "memcpy" | "memset" | "strcpy" |
+/// Strip std:: prefix from function name for matching
+fn strip_std_prefix(func_name: &str) -> &str {
+    func_name.strip_prefix("std::").unwrap_or(func_name)
+}
 
-        // Math functions
-        "sin" | "cos" | "sqrt" | "pow" | "abs" | "floor" | "ceil" | "round" |
-
-        // C++ utility functions
-        "move" | "std::move" | "std::forward" | "forward" |
-        "std::swap" | "swap" | "std::exchange" | "exchange" |
-
-        // C++ streams
+/// Check if function is a safe C++ stream operation
+fn is_safe_stream_function(name: &str) -> bool {
+    matches!(name,
         "cout" | "cin" | "cerr" | "clog" |
-        "operator<<" | "operator>>" |
-        "endl" | "flush" | "getline" |
+        "endl" | "flush" | "getline"
+    )
+}
 
-        // Smart pointers (only operations that don't expose raw pointers)
-        "make_unique" | "std::make_unique" |
-        "make_shared" | "std::make_shared" |
-        "reset" |  // Replaces pointer, safe if given smart pointer
-        "use_count" | "unique" |  // Query operations, return integers
-        // NOTE: get() and release() return raw pointers → UNSAFE
+/// Check if function is a safe algorithm
+fn is_safe_algorithm(name: &str) -> bool {
+    matches!(name,
+        // Searching
+        "find" | "find_if" | "find_if_not" |
+        "count" | "count_if" |
+        "all_of" | "any_of" | "none_of" |
+        "for_each" |
+        // Modifying
+        "copy" | "copy_if" | "copy_n" |
+        "fill" | "fill_n" |
+        "transform" | "generate" |
+        "remove" | "remove_if" |  // Note: these are NOT moves!
+        "replace" | "replace_if" |
+        "reverse" | "rotate" | "unique" |
+        // Sorting
+        "sort" | "stable_sort" | "partial_sort" |
+        "is_sorted" | "nth_element" |
+        // Binary search
+        "binary_search" | "lower_bound" | "upper_bound" | "equal_range" |
+        // Min/max
+        "min" | "max" | "minmax" |
+        "min_element" | "max_element" |
+        // Numeric
+        "accumulate" | "inner_product" | "adjacent_difference" | "partial_sum"
+    )
+}
 
-        // Type Utilities (only truly safe ones)
-        "as_const" | "std::as_const" |  // Just adds const, no pointers involved
-        "to_underlying" | "std::to_underlying" |  // Safe enum to int conversion
-
-        // Algorithms - non-modifying
-        "find" | "find_if" | "find_if_not" | "std::find" | "std::find_if" | "std::find_if_not" |
-        "count" | "count_if" | "std::count" | "std::count_if" |
-        "all_of" | "any_of" | "none_of" | "std::all_of" | "std::any_of" | "std::none_of" |
-        "for_each" | "std::for_each" |
-
-        // Algorithms - modifying
-        "copy" | "copy_if" | "copy_n" | "std::copy" | "std::copy_if" | "std::copy_n" |
-        "fill" | "fill_n" | "std::fill" | "std::fill_n" |
-        "transform" | "std::transform" |
-        "generate" | "std::generate" |
-        "remove" | "remove_if" | "std::remove" | "std::remove_if" |
-        "replace" | "replace_if" | "std::replace" | "std::replace_if" |
-        "reverse" | "std::reverse" |
-        "rotate" | "std::rotate" |
-        "unique" | "std::unique" |
-
-        // Algorithms - sorting
-        "sort" | "stable_sort" | "partial_sort" | "std::sort" | "std::stable_sort" | "std::partial_sort" |
-        "is_sorted" | "std::is_sorted" |
-        "nth_element" | "std::nth_element" |
-
-        // Algorithms - binary search
-        "binary_search" | "std::binary_search" |
-        "lower_bound" | "upper_bound" | "equal_range" |
-        "std::lower_bound" | "std::upper_bound" | "std::equal_range" |
-
-        // Algorithms - min/max
-        "min" | "max" | "minmax" | "std::min" | "std::max" | "std::minmax" |
-        "min_element" | "max_element" | "std::min_element" | "std::max_element" |
-
-        // Algorithms - numeric
-        "accumulate" | "std::accumulate" |
-        "inner_product" | "std::inner_product" |
-        "adjacent_difference" | "std::adjacent_difference" |
-        "partial_sum" | "std::partial_sum" |
-
-        // Container common methods
+/// Check if function is a safe container method
+fn is_safe_container_method(name: &str) -> bool {
+    matches!(name,
         "push_back" | "pop_back" | "emplace_back" |
         "push_front" | "pop_front" | "emplace_front" |
         "insert" | "emplace" | "erase" | "clear" |
@@ -415,30 +389,14 @@ fn is_standard_safe_function(func_name: &str) -> bool {
         "at" | "front" | "back" | "data" |
         "begin" | "end" | "rbegin" | "rend" |
         "cbegin" | "cend" | "crbegin" | "crend" |
+        // Map/set specific
+        "count" | "contains"
+    )
+}
 
-        // String methods
-        "length" | "c_str" | "substr" | "append" |
-        "compare" | "find" | "rfind" | "find_first_of" | "find_last_of" |
-
-        // Map/set methods
-        "count" | "contains" |
-
-        // Utility
-        "make_pair" | "std::make_pair" |
-        "make_tuple" | "std::make_tuple" |
-        "get" | "std::get" |
-
-        // Optional/variant (C++17)
-        "make_optional" | "std::make_optional" |
-        "value" | "value_or" | "has_value" |
-        "holds_alternative" | "std::holds_alternative" |
-        "visit" | "std::visit" |
-
-        // String conversion
-        "to_string" | "std::to_string" |
-        "stoi" | "stol" | "stod" | "std::stoi" | "std::stol" | "std::stod" |
-
-        // Operators (commonly used in safe contexts)
+/// Check if function is a safe operator
+fn is_safe_operator(name: &str) -> bool {
+    matches!(name,
         "operator+" | "operator-" | "operator*" | "operator/" | "operator%" |
         "operator++" | "operator--" |
         "operator==" | "operator!=" | "operator<" | "operator>" | "operator<=" | "operator>=" |
@@ -449,10 +407,64 @@ fn is_standard_safe_function(func_name: &str) -> bool {
         "operator&" | "operator|" | "operator^" | "operator~" |
         "operator," | "operator->*" | "operator.*"
     )
-    // Note: This list allows common std:: functions to be used in @safe code
-    // without requiring explicit @unsafe blocks or external annotations.
-    // Functions are included here if they are commonly used and their
-    // safety can be verified by the borrow checker's other rules.
+}
+
+fn is_standard_safe_function(func_name: &str) -> bool {
+    // Strip std:: prefix for more general matching
+    let stripped = strip_std_prefix(func_name);
+
+    // Check operators first (they don't have std:: prefix)
+    if is_safe_operator(func_name) {
+        return true;
+    }
+
+    // Check categorized functions
+    if is_safe_stream_function(stripped) ||
+       is_safe_algorithm(stripped) ||
+       is_safe_container_method(stripped) {
+        return true;
+    }
+
+    // Remaining specific functions (not categorized above)
+    matches!(stripped,
+        // C I/O
+        "printf" | "scanf" | "puts" | "gets" |
+        "malloc" | "free" | "new" | "delete" |
+        "memcpy" | "memset" | "strcpy" |
+
+        // Math functions
+        "sin" | "cos" | "sqrt" | "pow" | "abs" | "floor" | "ceil" | "round" |
+
+        // C++ utility functions
+        "move" | "forward" | "swap" | "exchange" |
+
+        // Smart pointers (only operations that don't expose raw pointers)
+        "make_unique" | "make_shared" |
+        "reset" |  // Replaces pointer, safe if given smart pointer
+        "use_count" | "unique" |  // Query operations, return integers
+        // NOTE: get() and release() return raw pointers → UNSAFE
+
+        // Type Utilities (only truly safe ones)
+        "as_const" | "to_underlying" |
+
+        // String methods
+        "length" | "c_str" | "substr" | "append" |
+        "compare" | "rfind" | "find_first_of" | "find_last_of" |
+
+        // Utility
+        "make_pair" | "make_tuple" | "get" |
+
+        // Optional/variant (C++17)
+        "make_optional" | "value" | "value_or" | "has_value" |
+        "holds_alternative" | "visit" |
+
+        // String conversion
+        "to_string" | "stoi" | "stol" | "stod"
+    )
+    // Note: This whitelist allows common std:: functions to be used in @safe code
+    // without requiring explicit @unsafe blocks. The strip_std_prefix() function
+    // handles matching both "func" and "std::func" automatically.
+    // Functions are included only if their safety can be verified by the borrow checker.
 }
 
 #[cfg(test)]
