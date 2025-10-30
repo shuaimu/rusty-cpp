@@ -52,7 +52,7 @@ class Derived : public Base {};
 //   dynamic_pointer_cast: [unsafe, template<T, U>(const std::shared_ptr<U>& ptr) -> std::shared_ptr<T>]
 // }
 
-// @safe
+// @unsafe - calling unsafe function dynamic_pointer_cast
 void test_function() {
     std::shared_ptr<Base> base = std::make_shared<Derived>();
     auto derived = std::dynamic_pointer_cast<Derived>(base);
@@ -106,7 +106,7 @@ class Derived : public Base {};
   dynamic_pointer_cast: [unsafe, template<T, U>(const std::shared_ptr<U>&) -> std::shared_ptr<T>]
 }
 
-// @safe
+// @unsafe - calling unsafe function dynamic_pointer_cast
 void test_function() {
     std::shared_ptr<Base> base = std::make_shared<Derived>();
     auto derived = std::dynamic_pointer_cast<Derived>(base);

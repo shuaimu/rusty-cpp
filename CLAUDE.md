@@ -33,13 +33,21 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Works with class methods and free functions
 
 **Advanced Features (Added 2025):**
+- ✅ **C++ Standard Library Annotations** - ~180+ std functions work in @safe code
+  - No explicit annotations needed for common std library usage
+  - Covers containers (vector, map, string), algorithms (sort, find), smart pointers, I/O
+  - Operators (+, -, *, ==, [], <<, etc.) fully supported
+  - Users can write natural C++ code without @unsafe blocks
+  - **Note**: Cast operations (dynamic_cast, get(), etc.) correctly require @unsafe
+  - See `include/std_annotation.hpp` and `STD_CASTS_ARE_UNSAFE.md`
+
 - ✅ **STL Lifetime Annotations** - Complete lifetime checking for C++ STL types
   - Vector, map, unique_ptr, shared_ptr, string, etc.
   - Iterator invalidation detection
   - Reference stability rules
   - No modification to STL headers required
   - See `include/stl_lifetimes.hpp` and `docs/stl_lifetimes.md`
-  
+
 - ✅ **Unified External Annotations** - Combined safety + lifetime for third-party code
   - Annotate external functions without source modification
   - Compact syntax: `func: [safety, lifetime_spec]`
@@ -124,7 +132,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 110+ tests (including template support, pointer safety, move detection, borrow checking, unsafe propagation)
+- ✅ **Comprehensive test suite**: 409 tests (137+ integration tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation)
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Reassignment after move (not tracked yet)

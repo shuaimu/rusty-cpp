@@ -52,7 +52,7 @@ class Derived : public Base {};
 //   dynamic_pointer_cast: [unsafe, template<T, U>(const std::shared_ptr<U>&) -> std::shared_ptr<T>]
 // }
 
-// @safe
+// @unsafe - calling unsafe cast function
 void test_function() {
     std::shared_ptr<Base> base = std::make_shared<Derived>();
     // This calls std::dynamic_pointer_cast (with std:: prefix)
@@ -106,7 +106,7 @@ class Derived : public Base {};
 //   std::dynamic_pointer_cast: [unsafe, template<T, U>(const std::shared_ptr<U>&) -> std::shared_ptr<T>]
 // }
 
-// @safe
+// @unsafe - calling unsafe cast function
 void test_function() {
     std::shared_ptr<Base> base = std::make_shared<Derived>();
     auto derived = std::dynamic_pointer_cast<Derived>(base);
@@ -158,7 +158,7 @@ class Derived : public Base {};
 //   std::dynamic_pointer_cast: [unsafe, template<T, U>(const shared_ptr<U>&) -> shared_ptr<T>]
 // }
 
-// @safe
+// @unsafe - calling unsafe cast function
 void test_function() {
     shared_ptr<Base> base = make_shared<Derived>();
     // Unqualified call (no std:: prefix)
@@ -210,7 +210,7 @@ class Derived : public Base {};
 //   "*::dynamic_pointer_cast": [unsafe, template<T, U>(const std::shared_ptr<U>&) -> std::shared_ptr<T>]
 // }
 
-// @safe
+// @unsafe - calling unsafe cast function
 void test_function() {
     std::shared_ptr<Base> base = std::make_shared<Derived>();
     auto derived = std::dynamic_pointer_cast<Derived>(base);
