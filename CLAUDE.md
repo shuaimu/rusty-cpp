@@ -6,11 +6,19 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: Full template support + Three-state safety system)
+## Current State (Updated: January 2025 - @unsafe blocks now working)
 
 ### What's Fully Implemented ✅
 
 **Latest Features (January 2025):**
+- ✅ **@unsafe Block Support** - Fine-grained safety escapes (**newly implemented!**)
+  - Use `// @unsafe { ... }` to mark specific code blocks as unsafe
+  - Allows calling undeclared functions within the block
+  - Proper scope tracking with depth counter for nested blocks
+  - All safety checks skipped inside @unsafe blocks
+  - Works with both qualified (`std::`) and unqualified names
+  - See `UNSAFE_BLOCK_NOT_IMPLEMENTED.md` for implementation details
+
 - ✅ **Full Template Support** - Complete analysis of C++ template code
   - Template free functions analyzed with generic types
   - Template class methods fully supported (all qualifiers: const, non-const, &&)
@@ -132,7 +140,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 409 tests (137+ integration tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation)
+- ✅ **Comprehensive test suite**: 456 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation, and @unsafe blocks
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Reassignment after move (not tracked yet)

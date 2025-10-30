@@ -25,11 +25,30 @@ pub fn check_unsafe_propagation_with_external(
     external_annotations: Option<&ExternalAnnotations>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
+    let mut unsafe_depth = 0;
 
     // Check each statement in the function
     for stmt in &function.body {
+        // Track unsafe scope depth
+        match stmt {
+            Statement::EnterUnsafe => {
+                unsafe_depth += 1;
+                continue;
+            }
+            Statement::ExitUnsafe => {
+                if unsafe_depth > 0 {
+                    unsafe_depth -= 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Skip checking if we're in an unsafe block
+        let in_unsafe_scope = unsafe_depth > 0;
+
         if let Some(error) = check_statement_for_unsafe_calls_with_external(
-            stmt, safety_context, known_safe_functions, external_annotations, &function.template_parameters
+            stmt, safety_context, known_safe_functions, external_annotations, &function.template_parameters, in_unsafe_scope
         ) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
@@ -43,7 +62,7 @@ fn check_statement_for_unsafe_calls(
     safety_context: &SafetyContext,
     known_safe_functions: &HashSet<String>,
 ) -> Option<String> {
-    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None, &[])
+    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None, &[], false)
 }
 
 /// Check if a name looks like a template type parameter (including variadic pack parameters)
@@ -96,8 +115,14 @@ fn check_statement_for_unsafe_calls_with_external(
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
     template_params: &[String],
+    in_unsafe_scope: bool,
 ) -> Option<String> {
     use crate::parser::Statement;
+
+    // Skip all checks if we're in an unsafe block
+    if in_unsafe_scope {
+        return None;
+    }
 
     match stmt {
         Statement::FunctionCall { name, location, .. } => {
@@ -163,14 +188,14 @@ fn check_statement_for_unsafe_calls_with_external(
 
             // Recursively check branches
             for branch_stmt in then_branch {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
                     return Some(error);
                 }
             }
 
             if let Some(else_stmts) = else_branch {
                 for branch_stmt in else_stmts {
-                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
+                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
                         return Some(error);
                     }
                 }
@@ -179,7 +204,7 @@ fn check_statement_for_unsafe_calls_with_external(
         Statement::Block(statements) => {
             // Check all statements in the block
             for block_stmt in statements {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations, template_params) {
+                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
                     return Some(error);
                 }
             }

@@ -11,6 +11,72 @@ fn is_forward_function(name: &str) -> bool {
     name == "forward" || name == "std::forward" || name.ends_with("::forward")
 }
 
+/// Check if an entity has an @unsafe annotation by reading source file
+fn check_for_unsafe_annotation(entity: &Entity) -> bool {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    // Try get_comment() first (works for some entity types)
+    if let Some(comment) = entity.get_comment() {
+        if comment.contains("@unsafe") {
+            return true;
+        }
+    }
+
+    // For CompoundStmt and other entities, check the source file directly
+    let location = match entity.get_location() {
+        Some(loc) => loc,
+        None => return false,
+    };
+
+    let file_location = location.get_file_location();
+    let file = match file_location.file {
+        Some(f) => f,
+        None => return false,
+    };
+
+    let file_path = file.get_path();
+    let block_line = file_location.line as usize;
+
+    // Read the source file and check the line before the block
+    let file_handle = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let reader = BufReader::new(file_handle);
+    let mut current_line = 0;
+    let mut prev_line = String::new();
+
+    for line_result in reader.lines() {
+        current_line += 1;
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        // Check if we're at the block's line
+        if current_line == block_line {
+            // Check the previous line for @unsafe annotation
+            let trimmed = prev_line.trim();
+            if trimmed.starts_with("//") && trimmed.contains("@unsafe") {
+                debug_println!("DEBUG UNSAFE: Found @unsafe annotation for block at line {}", block_line);
+                return true;
+            }
+            // Also check for /* @unsafe */ style comments
+            if trimmed.contains("/*") && trimmed.contains("@unsafe") && trimmed.contains("*/") {
+                debug_println!("DEBUG UNSAFE: Found @unsafe annotation for block at line {}", block_line);
+                return true;
+            }
+            return false;
+        }
+
+        prev_line = line;
+    }
+
+    false
+}
+
 /// Get the qualified name of an entity (including namespace/class context)
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
@@ -849,7 +915,20 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             EntityKind::CompoundStmt => {
                 // Regular nested block scope - add scope markers
                 statements.push(Statement::EnterScope);
+
+                // Check if this block is preceded by @unsafe comment
+                let is_unsafe = check_for_unsafe_annotation(&child);
+                if is_unsafe {
+                    debug_println!("DEBUG UNSAFE: Found @unsafe block");
+                    statements.push(Statement::EnterUnsafe);
+                }
+
                 statements.extend(extract_compound_statement(&child));
+
+                if is_unsafe {
+                    statements.push(Statement::ExitUnsafe);
+                }
+
                 statements.push(Statement::ExitScope);
             }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
@@ -1337,12 +1416,4 @@ fn extract_location(entity: &Entity) -> SourceLocation {
 
 fn type_to_string(ty: &Type) -> String {
     ty.get_display_name()
-}
-
-#[allow(dead_code)]
-fn check_for_unsafe_annotation(_entity: &Entity) -> bool {
-    // This function is no longer used since we handle unsafe regions
-    // differently using comment annotations that are scanned separately
-    // Always return false
-    false
 }
