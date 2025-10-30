@@ -91,13 +91,12 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     // Visit the AST
     let mut ast = CppAst::new();
     let root = tu.get_entity();
-    let mut visited_files = std::collections::HashSet::new();
-    visit_entity(&root, &mut ast, &mut visited_files);
-    
+    visit_entity(&root, &mut ast);
+
     Ok(ast)
 }
 
-fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::collections::HashSet<String>) {
+fn visit_entity(entity: &Entity, ast: &mut CppAst) {
     use crate::debug_println;
     // Only debug function and class-related entities
     if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
@@ -142,24 +141,11 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
             }
             
             // Skip third-party libraries (except rustycpp for testing)
-            if path_str.contains("/third-party/") && 
+            if path_str.contains("/third-party/") &&
                !path_str.contains("/third-party/rustycpp") {
                 // But allow certain important third-party headers
                 if !path_str.contains("/third-party/erpc/src/rpc.h") {
                     return;
-                }
-            }
-            
-            // Track processed files to avoid infinite recursion
-            if !location.is_in_main_file() {
-                if visited_files.contains(&path_str) {
-                    return; // Already processed this file
-                }
-                visited_files.insert(path_str.clone());
-                
-                // Limit the number of files we process
-                if visited_files.len() > 100 {
-                    return; // Too many files, stop processing
                 }
             }
         }
@@ -219,7 +205,7 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, visited_files: &mut std::coll
     
     // Recursively visit children
     for child in entity.get_children() {
-        visit_entity(&child, ast, visited_files);
+        visit_entity(&child, ast);
     }
 }
 
