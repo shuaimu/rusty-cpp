@@ -347,10 +347,11 @@ mod tests {
             cfg,
             variables: HashMap::new(),
             return_type: "void".to_string(),
+            source_file: "test.cpp".to_string(),
             is_method: false,
             method_qualifier: None,
             class_name: None,
-        template_parameters: vec![],
+            template_parameters: vec![],
         };
         
         let lifetimes = inferencer.infer_function_lifetimes(&function);

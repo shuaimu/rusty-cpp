@@ -57,6 +57,7 @@ pub struct IrFunction {
     pub cfg: ControlFlowGraph,
     pub variables: HashMap<String, VariableInfo>,
     pub return_type: String,  // Return type from AST
+    pub source_file: String,  // Source file path for distinguishing user code from system headers
     // Method information for tracking 'this' pointer
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
@@ -373,6 +374,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
         cfg,
         variables,
         return_type: func.return_type.clone(),
+        source_file: func.location.file.clone(),
         is_method: func.is_method,
         method_qualifier: func.method_qualifier.clone(),
         class_name: func.class_name.clone(),

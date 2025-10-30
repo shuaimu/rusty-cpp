@@ -121,17 +121,58 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
         }
     }
     
+    // Helper function to check if a file or function is from a system header
+    fn is_system_header_or_std(file_path: &str, _function_name: &str) -> bool {
+        // Common system header paths (absolute)
+        let system_paths = [
+            "/usr/include",
+            "/usr/local/include",
+            "/opt/homebrew/include",
+            "/Library/Developer",
+            "C:\\Program Files",
+            "/Applications/Xcode.app",
+        ];
+
+        for path in &system_paths {
+            if file_path.starts_with(path) {
+                return true;
+            }
+        }
+
+        // STL and system library patterns (works for relative paths too)
+        if file_path.contains("/include/c++/") ||
+           file_path.contains("/bits/") ||
+           file_path.contains("/ext/") ||
+           file_path.contains("stl_") ||
+           file_path.contains("/lib/gcc/") {
+            return true;
+        }
+
+        // Also skip the project's include/ directory (third-party headers like rusty::Box)
+        if file_path.contains("/include/rusty/") || file_path.contains("/include/unified_") {
+            return true;
+        }
+
+        false
+    }
+
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
     debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
     for function in &ast.functions {
-        debug_println!("DEBUG: Processing function '{}' with {} statements", function.name, function.body.len());
+        // Skip system header functions - they shouldn't be analyzed internally
+        if is_system_header_or_std(&function.location.file, &function.name) {
+            debug_println!("DEBUG: Skipping system header function '{}' from {}", function.name, function.location.file);
+            continue;
+        }
+
+        debug_println!("DEBUG: Processing function '{}' from '{}' with {} statements", function.name, function.location.file, function.body.len());
         if safety_context.should_check_function(&function.name) {
             debug_println!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
             // Check for pointer operations
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function);
             violations.extend(pointer_errors);
-            
+
             // Check for calls to unsafe functions with external annotations from headers
             let propagation_errors = analysis::unsafe_propagation::check_unsafe_propagation_with_external(
                 function,

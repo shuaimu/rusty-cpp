@@ -91,12 +91,13 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     // Visit the AST
     let mut ast = CppAst::new();
     let root = tu.get_entity();
-    visit_entity(&root, &mut ast);
+    let main_file_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    visit_entity(&root, &mut ast, &main_file_path);
 
     Ok(ast)
 }
 
-fn visit_entity(entity: &Entity, ast: &mut CppAst) {
+fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
     use crate::debug_println;
     // Only debug function and class-related entities
     if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
@@ -107,31 +108,17 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst) {
             entity.get_kind(), entity.get_name(), entity.is_definition(), template_kind, template_args.is_some());
     }
 
-    // Filter only STL implementation details (not third-party code)
-    // STL internals are compiler-provided and platform-specific
-    // Third-party code will be "undeclared" by default
-    if let Some(location) = entity.get_location() {
-        if let Some(file) = location.get_file_location().file {
-            let path = file.get_path();
-            let path_str = path.to_string_lossy();
-
-            // Skip STL implementation headers only
-            if path_str.starts_with("/usr/include/c++/") ||
-               path_str.starts_with("/usr/lib/gcc") ||
-               path_str.contains("/bits/") ||
-               path_str.contains("/__") ||
-               path_str.starts_with("/opt/homebrew/Cellar") ||
-               path_str.starts_with("/Library/Developer") ||
-               path_str.starts_with("/Applications/Xcode") {
-                return; // Skip STL internals
-            }
-        }
-    }
+    // Extract entities from all files (main file and headers)
+    // The analysis phase will distinguish between system headers and user code
+    // System headers: track for safety status, but skip borrow checking
+    // User code: full borrow checking and safety analysis
+    let _main_file = main_file; // Keep parameter for future use
 
     match entity.get_kind() {
         EntityKind::FunctionDecl | EntityKind::Method => {
             debug_println!("DEBUG PARSE: Found FunctionDecl: name={:?}, is_definition={}, kind={:?}",
                 entity.get_name(), entity.is_definition(), entity.get_kind());
+            // Extract all function definitions (from main file and headers)
             if entity.is_definition() {
                 let func = ast_visitor::extract_function(entity);
                 ast.functions.push(func);
@@ -174,15 +161,16 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst) {
             // CallExpr references to instantiations don't have bodies in LibClang anyway.
         }
         EntityKind::VarDecl => {
+            // Extract all global variables (from main file and headers)
             let var = ast_visitor::extract_variable(entity);
             ast.global_variables.push(var);
         }
         _ => {}
     }
-    
+
     // Recursively visit children
     for child in entity.get_children() {
-        visit_entity(&child, ast);
+        visit_entity(&child, ast, main_file);
     }
 }
 

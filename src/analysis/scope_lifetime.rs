@@ -410,17 +410,56 @@ fn is_parameter(var_name: &str, function: &IrFunction) -> bool {
 }
 
 /// Check lifetimes for the entire program with scope tracking
+/// Check if a file path is from a system header (not user code)
+fn is_system_header(file_path: &str) -> bool {
+    let system_paths = [
+        "/usr/include",
+        "/usr/local/include",
+        "/opt/homebrew/include",
+        "/Library/Developer",
+        "C:\\Program Files",
+        "/Applications/Xcode.app",
+    ];
+
+    for path in &system_paths {
+        if file_path.starts_with(path) {
+            return true;
+        }
+    }
+
+    // STL and system library patterns (works for relative paths too)
+    if file_path.contains("/include/c++/") ||
+       file_path.contains("/bits/") ||
+       file_path.contains("/ext/") ||
+       file_path.contains("stl_") ||
+       file_path.contains("/lib/gcc/") {
+        return true;
+    }
+
+    // Also skip project include directory
+    if file_path.contains("/include/rusty/") || file_path.contains("/include/unified_") {
+        return true;
+    }
+
+    false
+}
+
 pub fn check_scoped_lifetimes(
     program: &IrProgram,
     header_cache: &HeaderCache,
 ) -> Result<Vec<String>, String> {
     let mut all_errors = Vec::new();
-    
+
     for function in &program.functions {
+        // Skip system header functions
+        if is_system_header(&function.source_file) {
+            continue;
+        }
+
         let errors = analyze_function_scopes(function, header_cache)?;
         all_errors.extend(errors);
     }
-    
+
     Ok(all_errors)
 }
 

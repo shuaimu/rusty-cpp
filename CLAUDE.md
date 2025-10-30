@@ -140,7 +140,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 456 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation, and @unsafe blocks
+- ✅ **Comprehensive test suite**: 498 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation, and @unsafe blocks
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Reassignment after move (not tracked yet)
@@ -495,10 +495,22 @@ The tool correctly follows C++'s compilation model:
 
 ### Analysis Approach
 
-1. **Parse headers** → Extract lifetime-annotated signatures
-2. **Analyze .cpp** → Check implementation against contracts
-3. **Validate calls** → Ensure lifetime constraints are met
-4. **Report errors** → With clear messages and locations
+1. **Parse all files** → Extract ALL functions from main file + headers (no filtering)
+   - Includes STL, system headers, and third-party libraries
+   - Functions tracked with their source file path
+2. **Classify functions** → Distinguish user code from system libraries
+   - **System headers**: Detected by file path patterns (`/include/c++/`, `/bits/`, `stl_`, etc.)
+   - **User code**: Functions from main source file
+3. **Analyze user code** → Full borrow checking, pointer safety, and lifetime validation
+   - Borrow checking (ownership, moves, borrows)
+   - Pointer safety (address-of, dereference in @safe code)
+   - Lifetime inference and validation
+4. **Track system functions** → Safety annotation checking only (no internal analysis)
+   - System header functions are NOT analyzed for borrow violations
+   - They ARE checked for safety annotations (safe/unsafe/undeclared)
+   - Allows detecting when @safe code calls undeclared system functions
+5. **Validate calls** → Ensure safety rules and lifetime constraints are met
+6. **Report errors** → With clear messages and locations
 
 ## Code Patterns to Follow
 
@@ -540,7 +552,22 @@ Use after move: variable 'x' has been moved
 
 ## Recent Achievements
 
-**Latest (January 2025): Full Template Support Implementation**
+**Latest (January 2025): System Header Handling and Universal Parsing**
+1. ✅ **Universal parsing** - Extract ALL functions from ALL files (main + headers)
+   - Parser no longer filters by file - extracts from STL, system headers, third-party libraries
+   - Functions tracked with source file path for classification
+2. ✅ **System header detection** - Intelligent classification of user code vs. system libraries
+   - Path-based detection: `/include/c++/`, `/bits/`, `stl_`, `/lib/gcc/`, etc.
+   - Works with both absolute and relative paths
+3. ✅ **Selective analysis** - System headers skipped during internal analysis
+   - System header functions NOT analyzed for borrow violations
+   - System header functions ARE tracked for safety annotation checking
+   - Enables detecting when @safe code calls undeclared system functions
+4. ✅ **Source file tracking** - Added `source_file` field to `IrFunction`
+   - Analysis modules use file path to distinguish user code from system code
+   - Applied across all analysis phases (borrow checking, pointer safety, lifetime inference)
+
+**Previous (January 2025): Full Template Support Implementation**
 1. ✅ **Template free functions** - Analyzes template declarations with generic types (T, U, etc.)
 2. ✅ **Template class methods** - All method qualifiers supported (const, non-const, &&)
 3. ✅ **Multiple type parameters** - Handles `template<typename T, typename U>`
@@ -550,7 +577,7 @@ Use after move: variable 'x' has been moved
 5. ✅ **100% test pass rate** - All 11 template tests passing (up from 4)
 6. ✅ **Safety annotation support** - Template functions recognized in @safe annotation parser
 
-Previous achievements:
+Earlier achievements:
 - ✅ **Unsafe propagation checking** - Safe functions cannot call unmarked/unsafe functions
 - ✅ **Pointer safety checking** - Raw pointer operations require unsafe context
 - ✅ **Type-based operator detection** - Distinguish & from * using type analysis

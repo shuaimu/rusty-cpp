@@ -3,6 +3,43 @@ use crate::parser::HeaderCache;
 use std::collections::{HashMap, HashSet};
 use crate::debug_println;
 
+/// Check if a file path is from a system header (not user code)
+/// System headers are from standard library or third-party installations
+fn is_system_header(file_path: &str) -> bool {
+    // Common system header paths (absolute)
+    let system_paths = [
+        "/usr/include",
+        "/usr/local/include",
+        "/opt/homebrew/include",
+        "/Library/Developer",
+        "C:\\Program Files",
+        "/Applications/Xcode.app",
+    ];
+
+    for path in &system_paths {
+        if file_path.starts_with(path) {
+            return true;
+        }
+    }
+
+    // STL and system library patterns (works for relative paths too)
+    if file_path.contains("/include/c++/") ||
+       file_path.contains("/bits/") ||
+       file_path.contains("/ext/") ||
+       file_path.contains("stl_") ||
+       file_path.contains("/lib/gcc/") {
+        return true;
+    }
+
+    // Also skip the project's include/ directory (third-party headers like rusty::Box)
+    // These are library headers that shouldn't be analyzed internally
+    if file_path.contains("/include/rusty/") || file_path.contains("/include/unified_") {
+        return true;
+    }
+
+    false
+}
+
 pub mod ownership;
 pub mod borrows;
 pub mod lifetimes;
@@ -81,6 +118,14 @@ pub fn check_borrows_with_safety_context(
     // Check each function based on its safety mode
     for function in &program.functions {
         debug_println!("DEBUG: Checking function '{}'", function.name);
+
+        // Skip borrow checking for system header functions
+        // They are tracked for safety status but not analyzed internally
+        if is_system_header(&function.source_file) {
+            debug_println!("DEBUG: Skipping system header function '{}' from {}", function.name, function.source_file);
+            continue;
+        }
+
         // Check if this function should be checked
         if !safety_context.should_check_function(&function.name) {
             debug_println!("DEBUG: Skipping unsafe function '{}'", function.name);
@@ -91,9 +136,14 @@ pub fn check_borrows_with_safety_context(
         let function_errors = check_function(function)?;
         errors.extend(function_errors);
     }
-    
+
     // Run lifetime inference and validation for safe functions
     for function in &program.functions {
+        // Skip system headers
+        if is_system_header(&function.source_file) {
+            continue;
+        }
+
         if safety_context.should_check_function(&function.name) {
             let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
             errors.extend(inference_errors);
@@ -142,6 +192,11 @@ fn check_lifetime_annotation_requirements(
     let mut errors = Vec::new();
 
     for function in &program.functions {
+        // Skip system header functions
+        if is_system_header(&function.source_file) {
+            continue;
+        }
+
         // Only check safe functions
         if !safety_context.should_check_function(&function.name) {
             continue;
@@ -1478,10 +1533,11 @@ mod tests {
             cfg,
             variables: HashMap::new(),
             return_type: "void".to_string(),
+            source_file: "test.cpp".to_string(),
             is_method: false,
             method_qualifier: None,
             class_name: None,
-        template_parameters: vec![],
+            template_parameters: vec![],
         }
     }
 
@@ -2139,10 +2195,11 @@ mod scope_tests {
             cfg,
             variables: HashMap::new(),
             return_type: "void".to_string(),
+            source_file: "test.cpp".to_string(),
             is_method: false,
             method_qualifier: None,
             class_name: None,
-        template_parameters: vec![],
+            template_parameters: vec![],
         }
     }
 
