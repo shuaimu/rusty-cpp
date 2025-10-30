@@ -27,11 +27,15 @@ public:
 
     // @lifetime: owned
     explicit Box(T* p) : ptr(p) {}
-    
+
     // Factory method - Box::make()
     // @lifetime: owned
     static Box<T> make(T value) {
-        return Box<T>(new T(std::move(value)));
+        // @unsafe
+        {
+            // new and std::move are unsafe operations
+            return Box<T>(new T(std::move(value)));
+        }
     }
     
     // No copy constructor - Box cannot be copied
@@ -47,37 +51,49 @@ public:
     // Move assignment - transfers ownership
     // @lifetime: owned
     Box& operator=(Box&& other) noexcept {
-        if (this != &other) {
-            delete ptr;
-            ptr = other.ptr;
-            other.ptr = nullptr;
+        // @unsafe
+        {
+            if (this != &other) {
+                delete ptr;
+                ptr = other.ptr;
+                other.ptr = nullptr;
+            }
+            return *this;
         }
-        return *this;
     }
-    
+
     // Destructor - automatic cleanup
     ~Box() {
-        delete ptr;
+        // @unsafe
+        {
+            delete ptr;
+        }
     }
     
     // Dereference - borrow the value
     // @lifetime: (&'a) -> &'a
     T& operator*() {
-        // In debug mode, could assert(ptr != nullptr)
-        return *ptr;
+        // @unsafe
+        {
+            // Pointer dereference is unsafe, but Box guarantees ptr is valid
+            return *ptr;
+        }
     }
-    
+
     // @lifetime: (&'a) -> &'a
     const T& operator*() const {
-        return *ptr;
+        // @unsafe
+        {
+            return *ptr;
+        }
     }
-    
+
     // Arrow operator - access members
     // @lifetime: (&'a) -> &'a
     T* operator->() {
         return ptr;
     }
-    
+
     // @lifetime: (&'a) -> &'a
     const T* operator->() const {
         return ptr;
@@ -123,7 +139,11 @@ public:
 template<typename T, typename... Args>
 // @lifetime: owned
 Box<T> make_box(Args&&... args) {
-    return Box<T>(new T(std::forward<Args>(args)...));
+    // @unsafe
+    {
+        // new and std::forward are unsafe operations
+        return Box<T>(new T(std::forward<Args>(args)...));
+    }
 }
 
 } // namespace rusty

@@ -107,50 +107,27 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst) {
             entity.get_kind(), entity.get_name(), entity.is_definition(), template_kind, template_args.is_some());
     }
 
-    // Check location and filter files
+    // Filter only STL implementation details (not third-party code)
+    // STL internals are compiler-provided and platform-specific
+    // Third-party code will be "undeclared" by default
     if let Some(location) = entity.get_location() {
         if let Some(file) = location.get_file_location().file {
             let path = file.get_path();
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = path.to_string_lossy();
 
-            // Debug: show why function/class entities are being filtered
-            if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
-                debug_println!("DEBUG PARSE: Entity location: {:?}", path_str);
-            }
-
-            // Skip system headers and standard library
-            if path_str.starts_with("/usr/include") ||
-               path_str.starts_with("/usr/lib") ||
-               path_str.starts_with("/usr/local/include") ||
-               path_str.starts_with("/System") ||
-               path_str.starts_with("/Library/Developer") ||
-               path_str.starts_with("/Applications/Xcode") ||
-               path_str.starts_with("/opt/") ||
+            // Skip STL implementation headers only
+            if path_str.starts_with("/usr/include/c++/") ||
+               path_str.starts_with("/usr/lib/gcc") ||
                path_str.contains("/bits/") ||
-               path_str.contains("/c++/") ||
                path_str.contains("/__") ||
-               path_str.contains("/stdlib") ||
-               path_str.contains("/sys/") ||
-               path_str.contains("/linux/") ||
-               path_str.contains("/asm/") ||
-               path_str.contains("/gnu/") {
-                if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate) {
-                    debug_println!("DEBUG PARSE: Skipping system header function: {:?}", entity.get_name());
-                }
-                return; // Skip system headers
-            }
-            
-            // Skip third-party libraries (except rustycpp for testing)
-            if path_str.contains("/third-party/") &&
-               !path_str.contains("/third-party/rustycpp") {
-                // But allow certain important third-party headers
-                if !path_str.contains("/third-party/erpc/src/rpc.h") {
-                    return;
-                }
+               path_str.starts_with("/opt/homebrew/Cellar") ||
+               path_str.starts_with("/Library/Developer") ||
+               path_str.starts_with("/Applications/Xcode") {
+                return; // Skip STL internals
             }
         }
     }
-    
+
     match entity.get_kind() {
         EntityKind::FunctionDecl | EntityKind::Method => {
             debug_println!("DEBUG PARSE: Found FunctionDecl: name={:?}, is_definition={}, kind={:?}",

@@ -1044,6 +1044,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         EntityKind::DeclRefExpr => {
             entity.get_name().map(Expression::Variable)
         }
+        EntityKind::ThisExpr => {
+            // The 'this' pointer in C++ methods
+            Some(Expression::Variable("this".to_string()))
+        }
         EntityKind::CallExpr => {
             // Extract function call as expression
             let children: Vec<Entity> = entity.get_children().into_iter().collect();

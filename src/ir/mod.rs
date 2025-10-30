@@ -394,6 +394,109 @@ fn get_statement_line(stmt: &crate::parser::Statement) -> Option<u32> {
     }
 }
 
+/// Extract the source variable from a return expression, handling all expression types.
+/// For complex expressions, this recursively finds the ultimate source variable.
+/// Returns None for literals, function calls, and other expressions with no source variable.
+fn extract_return_source(
+    expr: &crate::parser::Expression,
+    statements: &mut Vec<IrStatement>
+) -> Option<String> {
+    use crate::parser::Expression;
+
+    match expr {
+        Expression::Variable(var) => {
+            // Simple case: return x;
+            Some(var.clone())
+        }
+
+        Expression::Dereference(inner) => {
+            // Dereference: return *ptr;
+            // The source is whatever 'ptr' points to, so recursively extract
+            debug_println!("DEBUG IR: Return dereference expression");
+            extract_return_source(inner, statements)
+        }
+
+        Expression::MemberAccess { object, field } => {
+            // Member access: return obj.field; or return this->ptr;
+            // The source is the object being accessed
+            debug_println!("DEBUG IR: Return member access: {}.{}",
+                if let Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                field);
+            extract_return_source(object, statements)
+        }
+
+        Expression::AddressOf(inner) => {
+            // Address-of: return &x;
+            // The source is the variable whose address we're taking
+            debug_println!("DEBUG IR: Return address-of expression");
+            extract_return_source(inner, statements)
+        }
+
+        Expression::Move(inner) => {
+            // Move: return std::move(x);
+            debug_println!("DEBUG IR: Processing Move in return statement");
+            match inner.as_ref() {
+                Expression::Variable(var) => {
+                    debug_println!("DEBUG IR: Return Move(Variable): {}", var);
+                    // Generate Move statement
+                    statements.push(IrStatement::Move {
+                        from: var.clone(),
+                        to: format!("_returned_{}", var),
+                    });
+                    Some(var.clone())
+                }
+                Expression::MemberAccess { object, field } => {
+                    debug_println!("DEBUG IR: Return Move(MemberAccess): {}.{}",
+                        if let Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
+                        field);
+                    if let Expression::Variable(obj_name) = object.as_ref() {
+                        // Generate MoveField statement
+                        statements.push(IrStatement::MoveField {
+                            object: obj_name.clone(),
+                            field: field.clone(),
+                            to: format!("_returned_{}", field),
+                        });
+                        Some(format!("{}.{}", obj_name, field))
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    // Move of complex expression - try to extract source
+                    extract_return_source(inner, statements)
+                }
+            }
+        }
+
+        Expression::FunctionCall { name, args } => {
+            // Function call: return foo();
+            // This creates a temporary, but for implicit constructors (e.g., return ptr;)
+            // the variable might be in the arguments
+            debug_println!("DEBUG IR: Return function call: {}", name);
+            if let Some(Expression::Variable(var)) = args.first() {
+                Some(var.clone())
+            } else {
+                None  // Function calls generally create temporaries
+            }
+        }
+
+        Expression::BinaryOp { left, right, op } => {
+            // Binary operation: return a + b;
+            // These create temporaries, but we could track both operands
+            debug_println!("DEBUG IR: Return binary operation: {:?}", op);
+            // For now, return None as these are complex temporaries
+            // Future: could track both left and right as sources
+            None
+        }
+
+        Expression::Literal(_) => {
+            // Literal: return 42;
+            // Literals have no source variable
+            None
+        }
+    }
+}
+
 fn convert_statement(
     stmt: &crate::parser::Statement,
     variables: &mut HashMap<String, VariableInfo>,
@@ -1136,53 +1239,7 @@ fn convert_statement(
             let mut statements = Vec::new();
 
             let value = expr.as_ref().and_then(|e| {
-                match e {
-                    crate::parser::Expression::Variable(var) => {
-                        Some(var.clone())
-                    }
-                    crate::parser::Expression::Move(inner) => {
-                        // Handle return std::move(...)
-                        debug_println!("DEBUG IR: Processing Move in return statement");
-                        match inner.as_ref() {
-                            crate::parser::Expression::Variable(var) => {
-                                debug_println!("DEBUG IR: Return Move(Variable): {}", var);
-                                // Generate Move statement
-                                statements.push(IrStatement::Move {
-                                    from: var.clone(),
-                                    to: format!("_returned_{}", var),
-                                });
-                                Some(var.clone())
-                            }
-                            crate::parser::Expression::MemberAccess { object, field } => {
-                                debug_println!("DEBUG IR: Return Move(MemberAccess): {}.{}",
-                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                                    field);
-                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
-                                    // Generate MoveField statement
-                                    statements.push(IrStatement::MoveField {
-                                        object: obj_name.clone(),
-                                        field: field.clone(),
-                                        to: format!("_returned_{}", field),
-                                    });
-                                    Some(format!("{}.{}", obj_name, field))
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None
-                        }
-                    }
-                    crate::parser::Expression::FunctionCall { name: _, args } => {
-                        // For return statements with implicit constructor calls (e.g., return ptr;)
-                        // the variable might be in the arguments
-                        if let Some(crate::parser::Expression::Variable(var)) = args.first() {
-                            Some(var.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None
-                }
+                extract_return_source(e, &mut statements)
             });
 
             statements.push(IrStatement::Return { value });

@@ -179,9 +179,22 @@ impl HeaderCache {
         
         match entity.get_kind() {
             EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor | EntityKind::FunctionTemplate => {
+
                 // Extract lifetime annotations
-                if let Some(sig) = extract_annotations(entity) {
-                    self.signatures.insert(sig.name.clone(), sig);
+                if let Some(mut sig) = extract_annotations(entity) {
+                    // Use qualified name for methods, constructors, and template functions to avoid collisions
+                    // This ensures lifetime signatures match safety annotations
+                    let qualified_name = if entity.get_kind() == EntityKind::Method
+                                || entity.get_kind() == EntityKind::Constructor
+                                || entity.get_kind() == EntityKind::FunctionTemplate {
+                        crate::parser::ast_visitor::get_qualified_name(entity)
+                    } else {
+                        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
+                    };
+
+                    // Update the signature name to use qualified name
+                    sig.name = qualified_name.clone();
+                    self.signatures.insert(qualified_name, sig);
                 }
 
                 // Extract safety annotations from the entity itself

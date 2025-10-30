@@ -11,20 +11,44 @@ pub fn check_function_for_pointers(_function: &crate::ir::IrFunction) -> Result<
 /// Check for unsafe pointer operations in a parsed function
 pub fn check_parsed_function_for_pointers(function: &Function) -> Vec<String> {
     let mut errors = Vec::new();
-    
+    let mut unsafe_depth = 0;
+
     for stmt in &function.body {
-        if let Some(error) = check_parsed_statement_for_pointers(stmt) {
+        // Track unsafe scope depth
+        match stmt {
+            Statement::EnterUnsafe => {
+                unsafe_depth += 1;
+                continue;
+            }
+            Statement::ExitUnsafe => {
+                if unsafe_depth > 0 {
+                    unsafe_depth -= 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Skip checking if we're in an unsafe block
+        let in_unsafe_scope = unsafe_depth > 0;
+
+        if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
     }
-    
+
     errors
 }
 
 /// Check if a parsed statement contains pointer operations
-pub fn check_parsed_statement_for_pointers(stmt: &Statement) -> Option<String> {
+pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bool) -> Option<String> {
     use crate::parser::Statement;
-    
+
+    // Skip all checks if we're in an unsafe block
+    if in_unsafe_scope {
+        return None;
+    }
+
     match stmt {
         Statement::Assignment { rhs, location, .. } => {
             if let Some(op) = contains_pointer_operation(rhs) {
@@ -134,11 +158,11 @@ mod tests {
             },
         };
         
-        let error = check_parsed_statement_for_pointers(&stmt);
+        let error = check_parsed_statement_for_pointers(&stmt, false);
         assert!(error.is_some());
         assert!(error.unwrap().contains("dereference"));
     }
-    
+
     #[test]
     fn test_address_of_in_assignment() {
         let stmt = Statement::Assignment {
@@ -150,12 +174,12 @@ mod tests {
                 column: 5,
             },
         };
-        
-        let error = check_parsed_statement_for_pointers(&stmt);
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
         assert!(error.is_some());
         assert!(error.unwrap().contains("address-of"));
     }
-    
+
     #[test]
     fn test_pointer_in_function_call() {
         let stmt = Statement::FunctionCall {
@@ -169,8 +193,8 @@ mod tests {
                 column: 5,
             },
         };
-        
-        let error = check_parsed_statement_for_pointers(&stmt);
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
         assert!(error.is_some());
         let error_msg = error.unwrap();
         assert!(error_msg.contains("function call"));
@@ -216,8 +240,8 @@ mod tests {
             is_pack: false,
             pack_element_type: None,
         });
-        
-        let error = check_parsed_statement_for_pointers(&stmt);
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
         assert!(error.is_none(), "Pointer declaration should be allowed");
     }
 }
