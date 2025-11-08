@@ -114,22 +114,24 @@ const Data& process(const Data& input) {
 
 ### Unified Annotations (Safety + Lifetime)
 
+**IMPORTANT**: All external functions must be marked `[unsafe]` because RustyCpp doesn't analyze external code.
+
 ```cpp
 // Compact syntax
 // @external: {
-//   function_name: [safety, lifetime_spec]
+//   function_name: [unsafe, lifetime_spec]
 // }
 
 // Examples:
 // @external: {
 //   malloc: [unsafe, (size_t) -> owned void*]
-//   strlen: [safe, (const char*) -> size_t]
+//   strlen: [unsafe, (const char*) -> size_t]
 //   strcpy: [unsafe, (char* dest, const char* src) -> char* where dest: 'a, return: 'a]
 // }
 
-// Detailed syntax
+// Note: The detailed syntax below is deprecated and not fully implemented
 // @external_function: function_name {
-//   safety: safe/unsafe
+//   safety: unsafe  // Only 'unsafe' is allowed for external functions
 //   lifetime: (params) -> return
 //   where: constraints
 // }
@@ -161,8 +163,8 @@ const Data& process(const Data& input) {
 // With annotations
 // @external_profile: boost {
 //   annotations: {
-//     boost::format: [safe, (const string&) -> owned format]
-//     boost::shared_ptr::get: [safe, () -> T* where this: 'a, return: 'a]
+//     boost::format: [unsafe, (const string&) -> owned format]
+//     boost::shared_ptr::get: [unsafe, () -> T* where this: 'a, return: 'a]
 //   }
 // }
 ```

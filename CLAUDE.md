@@ -334,22 +334,28 @@ void better_example() {
 ```cpp
 #include <unified_external_annotations.hpp>
 
+// IMPORTANT: All external functions must be marked [unsafe] because RustyCpp
+// doesn't analyze external code. The programmer takes responsibility for auditing.
+//
 // @external: {
-//   third_party::process: [safe, (const Data& d) -> Result]
+//   third_party::process: [unsafe, (const Data& d) -> Result]
 //   third_party::allocate: [unsafe, (size_t) -> owned void*]
-//   sqlite3_column_text: [safe, (stmt* s, int col) -> const char* where s: 'a, return: 'a]
+//   sqlite3_column_text: [unsafe, (stmt* s, int col) -> const char* where s: 'a, return: 'a]
 // }
 
 // @safe
 void external_example() {
     // C stdlib with lifetime checking
     const char* str = "hello";
-    const char* found = strchr(str, 'e');  // Lifetime tied to str
+    const char* found = strchr(str, 'e');  // Lifetime tied to str (strchr is in std whitelist)
 
-    // Third-party functions checked
-    Data d;
-    Result r = third_party::process(d);  // OK: safe function
-    // void* buf = third_party::allocate(100);  // ERROR: unsafe in safe context
+    // Third-party functions are unsafe (must be called from unsafe context)
+    // @unsafe
+    {
+        Data d;
+        Result r = third_party::process(d);  // OK: called from unsafe block
+        void* buf = third_party::allocate(100);  // OK: called from unsafe block
+    }
 }
 ```
 

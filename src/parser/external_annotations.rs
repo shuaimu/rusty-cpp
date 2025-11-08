@@ -1,15 +1,22 @@
 // External annotations parser - handles safety and lifetime annotations
 // for third-party functions that can't be modified
+//
+// IMPORTANT: All external functions must be marked [unsafe] because:
+// - External code is not analyzed by RustyCpp
+// - Programmer takes responsibility for auditing external code
+// - "safe" implies RustyCpp verification, which doesn't happen for external code
+// - "unsafe" correctly indicates programmer-audited code
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
 use regex::Regex;
 
+// External functions are always unsafe because RustyCpp doesn't verify them.
+// The programmer audits external code and takes responsibility.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalSafety {
-    Safe,
-    Unsafe,
+    Unsafe,  // Only option: external code is always programmer-audited, not tool-verified
 }
 
 #[derive(Debug, Clone)]
@@ -175,38 +182,47 @@ impl ExternalAnnotations {
             if line.is_empty() || line.starts_with("//") {
                 continue;
             }
-            
+
             // Parse entries like: function_name: [safety, lifetime_spec]
             if let Some(colon_pos) = line.find(':') {
                 let func_name = line[..colon_pos].trim().to_string();
                 let spec_str = line[colon_pos + 1..].trim();
-                
+
                 // Parse [safety, lifetime] array
                 if spec_str.starts_with('[') && spec_str.ends_with(']') {
                     let inner = &spec_str[1..spec_str.len()-1];
                     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                    
+
                     if parts.len() >= 1 {
                         let safety = match parts[0] {
-                            "safe" => ExternalSafety::Safe,
+                            "safe" => {
+                                return Err(format!(
+                                    "ERROR: External function '{}' marked [safe] - this is not allowed!\n\
+                                     External functions must be [unsafe] because:\n\
+                                     - RustyCpp does not verify external code\n\
+                                     - 'safe' implies tool verification, 'unsafe' means programmer audited\n\
+                                     - Change to: {}: [unsafe, ...]",
+                                    func_name, func_name
+                                ));
+                            }
                             "unsafe" => ExternalSafety::Unsafe,
                             _ => continue,
                         };
-                        
+
                         let lifetime_spec = if parts.len() >= 2 {
                             Some(parts[1..].join(","))
                         } else {
                             None
                         };
-                        
-                        let (param_lifetimes, return_lifetime, constraints) = 
+
+                        let (param_lifetimes, return_lifetime, constraints) =
                             if let Some(ref spec) = lifetime_spec {
                                 self.parse_lifetime_specification(spec)
                             } else {
                                 (Vec::new(), None, Vec::new())
                             };
-                        
-                        
+
+
                         self.functions.insert(func_name.clone(), ExternalFunctionAnnotation {
                             name: func_name,
                             safety,
@@ -219,26 +235,34 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         Ok(())
     }
     
     fn parse_external_function_blocks(&mut self, content: &str) -> Result<(), String> {
         // Parse @external_function: name { safety: ..., lifetime: ..., where: ... }
         let func_re = Regex::new(r"@external_function:\s*(\w+)\s*\{([^}]+)\}").unwrap();
-        
+
         for cap in func_re.captures_iter(content) {
             if let (Some(name), Some(block)) = (cap.get(1), cap.get(2)) {
                 let func_name = name.as_str().to_string();
                 let block_content = block.as_str();
-                
-                // Parse safety field
+
+                // Parse safety field - only unsafe is allowed for external functions
                 let safety = if block_content.contains("safety: unsafe") {
                     ExternalSafety::Unsafe
                 } else if block_content.contains("safety: safe") {
-                    ExternalSafety::Safe
+                    return Err(format!(
+                        "ERROR: External function '{}' marked 'safety: safe' - this is not allowed!\n\
+                         External functions must be 'safety: unsafe' because:\n\
+                         - RustyCpp does not verify external code\n\
+                         - 'safe' implies tool verification, 'unsafe' means programmer audited\n\
+                         - Change to: @external_function: {} {{ safety: unsafe, ... }}",
+                        func_name, func_name
+                    ));
                 } else {
-                    ExternalSafety::Safe // Default to safe
+                    // Default to unsafe (was safe before, but external code should be explicit)
+                    ExternalSafety::Unsafe
                 };
                 
                 // Parse lifetime field
@@ -422,11 +446,10 @@ impl ExternalAnnotations {
     fn load_defaults(&mut self) {
         // Load common C standard library functions
         self.add_c_stdlib_defaults();
-        
+
         // Load common patterns
+        // NOTE: Removed "std::*" wildcard - std functions must be explicitly declared
         self.whitelist_patterns.extend(vec![
-            "std::*".to_string(),
-            "rusty::*".to_string(),
             "*::size".to_string(),
             "*::length".to_string(),
             "*::empty".to_string(),
@@ -443,20 +466,25 @@ impl ExternalAnnotations {
     }
     
     fn add_c_stdlib_defaults(&mut self) {
-        // Safe C functions
-        for func in &["printf", "fprintf", "snprintf", "puts", "fputs", "fgets", 
+        // All C standard library functions are marked [unsafe] because:
+        // - They are external code not verified by RustyCpp
+        // - Programmer takes responsibility for auditing their usage
+        // - This is the correct semantic: unsafe = programmer-audited, safe = tool-verified
+
+        // Common C I/O functions
+        for func in &["printf", "fprintf", "snprintf", "puts", "fputs", "fgets",
                       "strcmp", "strncmp", "strlen", "atoi", "atof", "exit"] {
             self.functions.insert(func.to_string(), ExternalFunctionAnnotation {
                 name: func.to_string(),
-                safety: ExternalSafety::Safe,
+                safety: ExternalSafety::Unsafe,  // All external functions are unsafe
                 lifetime_spec: None,
                 param_lifetimes: Vec::new(),
                 return_lifetime: None,
                 lifetime_constraints: Vec::new(),
             });
         }
-        
-        // Unsafe C functions with lifetimes
+
+        // Memory management with lifetimes
         self.functions.insert("malloc".to_string(), ExternalFunctionAnnotation {
             name: "malloc".to_string(),
             safety: ExternalSafety::Unsafe,
@@ -465,7 +493,7 @@ impl ExternalAnnotations {
             return_lifetime: Some("owned void*".to_string()),
             lifetime_constraints: Vec::new(),
         });
-        
+
         self.functions.insert("free".to_string(), ExternalFunctionAnnotation {
             name: "free".to_string(),
             safety: ExternalSafety::Unsafe,
@@ -474,7 +502,7 @@ impl ExternalAnnotations {
             return_lifetime: Some("void".to_string()),
             lifetime_constraints: Vec::new(),
         });
-        
+
         self.functions.insert("strcpy".to_string(), ExternalFunctionAnnotation {
             name: "strcpy".to_string(),
             safety: ExternalSafety::Unsafe,
@@ -483,9 +511,9 @@ impl ExternalAnnotations {
             return_lifetime: Some("char*".to_string()),
             lifetime_constraints: vec!["dest: 'a, return: 'a".to_string()],
         });
-        
-        // Add other unsafe functions with simple defaults
-        for func in &["calloc", "realloc", "memcpy", "memmove", 
+
+        // Other memory/string functions
+        for func in &["calloc", "realloc", "memcpy", "memmove",
                       "memset", "strcat", "sprintf", "gets"] {
             self.functions.insert(func.to_string(), ExternalFunctionAnnotation {
                 name: func.to_string(),
@@ -505,11 +533,11 @@ impl ExternalAnnotations {
                 return Some(false);  // Entire scope is unsafe
             }
         }
-        
+
         // Then check explicit function annotations
-        if let Some(annotation) = self.functions.get(func_name) {
-            let is_safe = annotation.safety == ExternalSafety::Safe;
-            return Some(is_safe);
+        // NOTE: All external functions are Unsafe by design (programmer-audited, not tool-verified)
+        if let Some(_annotation) = self.functions.get(func_name) {
+            return Some(false);  // External functions are always unsafe
         }
         
         // Then check active profile

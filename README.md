@@ -435,22 +435,28 @@ See [Complete Annotations Guide](docs/annotations.md) for all annotation feature
 
 #### External Function Annotations
 
-Annotate third-party functions with both safety and lifetime information without modifying their source:
+Annotate third-party functions with both safety and lifetime information without modifying their source.
+
+**IMPORTANT**: All external functions must be marked `[unsafe]` because RustyCpp doesn't analyze external code. The programmer takes responsibility for auditing.
 
 ```cpp
 #include <unified_external_annotations.hpp>
 
 // @external: {
-//   strchr: [safe, (const char* str, int c) -> const char* where str: 'a, return: 'a]
+//   strchr: [unsafe, (const char* str, int c) -> const char* where str: 'a, return: 'a]
 //   malloc: [unsafe, (size_t size) -> owned void*]
-//   sqlite3_column_text: [safe, (sqlite3_stmt* stmt, int col) -> const char* where stmt: 'a, return: 'a]
+//   sqlite3_column_text: [unsafe, (sqlite3_stmt* stmt, int col) -> const char* where stmt: 'a, return: 'a]
 // }
 
 // @safe
 void use_third_party() {
-    const char* text = "hello";
-    const char* found = strchr(text, 'e');  // OK: safe with lifetime checking
-    // void* buf = malloc(100);  // ERROR: unsafe function in safe context
+    // External functions are always unsafe - must use unsafe block
+    // @unsafe
+    {
+        const char* text = "hello";
+        const char* found = strchr(text, 'e');  // OK: called from unsafe block
+        void* buf = malloc(100);  // OK: called from unsafe block
+    }
 }
 ```
 

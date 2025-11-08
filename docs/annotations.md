@@ -351,6 +351,8 @@ External annotations allow you to annotate third-party code without modifying th
 
 ### C Standard Library
 
+**IMPORTANT**: All external functions must be marked `[unsafe]` because RustyCpp doesn't analyze external code. The programmer takes responsibility for auditing external functions.
+
 ```cpp
 // @external: {
 //   // Memory management
@@ -358,16 +360,16 @@ External annotations allow you to annotate third-party code without modifying th
 //   calloc: [unsafe, (size_t n, size_t size) -> owned void*]
 //   free: [unsafe, (void* ptr) -> void]
 //
-//   // String operations
-//   strlen: [safe, (const char* str) -> size_t]
-//   strchr: [safe, (const char* str, int c) -> const char* where str: 'a, return: 'a]
+//   // String operations (marked unsafe even if they're "safe" - external code is always unsafe)
+//   strlen: [unsafe, (const char* str) -> size_t]
+//   strchr: [unsafe, (const char* str, int c) -> const char* where str: 'a, return: 'a]
 //   strcpy: [unsafe, (char* dest, const char* src) -> char* where dest: 'a, return: 'a]
-//   strcmp: [safe, (const char* s1, const char* s2) -> int]
+//   strcmp: [unsafe, (const char* s1, const char* s2) -> int]
 //
 //   // I/O operations
 //   fopen: [unsafe, (const char* path, const char* mode) -> owned FILE*]
 //   fclose: [unsafe, (FILE* file) -> int]
-//   fgets: [safe, (char* buffer, int size, FILE* file) -> char* where buffer: 'a, return: 'a]
+//   fgets: [unsafe, (char* buffer, int size, FILE* file) -> char* where buffer: 'a, return: 'a]
 // }
 ```
 
@@ -377,9 +379,9 @@ External annotations allow you to annotate third-party code without modifying th
 // @external: {
 //   sqlite3_open: [unsafe, (const char* filename, sqlite3** db) -> int]
 //   sqlite3_close: [unsafe, (sqlite3* db) -> int]
-//   sqlite3_prepare_v2: [safe, (sqlite3* db, const char* sql, int nbyte, sqlite3_stmt** stmt, const char** tail) -> int]
-//   sqlite3_column_text: [safe, (sqlite3_stmt* stmt, int col) -> const unsigned char* where stmt: 'a, return: 'a]
-//   sqlite3_errmsg: [safe, (sqlite3* db) -> const char* where db: 'a, return: 'a]
+//   sqlite3_prepare_v2: [unsafe, (sqlite3* db, const char* sql, int nbyte, sqlite3_stmt** stmt, const char** tail) -> int]
+//   sqlite3_column_text: [unsafe, (sqlite3_stmt* stmt, int col) -> const unsigned char* where stmt: 'a, return: 'a]
+//   sqlite3_errmsg: [unsafe, (sqlite3* db) -> const char* where db: 'a, return: 'a]
 //   sqlite3_finalize: [unsafe, (sqlite3_stmt* stmt) -> int]
 // }
 ```
@@ -551,15 +553,19 @@ namespace low_level {
 #include <unified_external_annotations.hpp>
 
 // @external: {
-//   json::parse: [safe, (const string& s) -> owned json]
-//   json::dump: [safe, (const json& j) -> owned string]
+//   json::parse: [unsafe, (const string& s) -> owned json]
+//   json::dump: [unsafe, (const json& j) -> owned string]
 // }
 
 // @safe
 void process_json() {
-    std::string input = "{\"key\": \"value\"}";
-    auto data = json::parse(input);  // OK: marked as safe
-    std::string output = json::dump(data);  // OK: marked as safe
+    // External functions are always unsafe - must use unsafe block
+    // @unsafe
+    {
+        std::string input = "{\"key\": \"value\"}";
+        auto data = json::parse(input);  // OK: called from unsafe block
+        std::string output = json::dump(data);  // OK: called from unsafe block
+    }
 }
 ```
 
