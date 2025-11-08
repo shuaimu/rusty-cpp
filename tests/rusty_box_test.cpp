@@ -30,13 +30,13 @@ void test_box_move() {
     {
         auto box1 = Box<int>::make(42);
         assert(box1.is_valid());
-        
+
         auto box2 = std::move(box1);
         assert(!box1.is_valid());  // box1 should be empty after move
         assert(box2.is_valid());
         assert(*box2 == 42);
-        
-        Box<int> box3;
+
+        auto box3 = Box<int>::make(0);  // Create with initial value
         box3 = std::move(box2);
         assert(!box2.is_valid());  // box2 should be empty after move
         assert(box3.is_valid());
@@ -64,19 +64,24 @@ void test_box_raw_pointer() {
     printf("PASS\n");
 }
 
-// Test reset
-void test_box_reset() {
-    printf("test_box_reset: ");
+// Test replacement via move assignment
+void test_box_replacement() {
+    printf("test_box_replacement: ");
     {
         auto box1 = Box<int>::make(42);
         assert(box1.is_valid());
-        
-        box1.reset(new int(100));
+        assert(*box1 == 42);
+
+        // Replace the value by move assignment
+        box1 = Box<int>::make(100);
         assert(box1.is_valid());
         assert(*box1 == 100);
-        
-        box1.reset();  // Reset to nullptr
+
+        // Move to another box to empty box1
+        auto box2 = std::move(box1);
         assert(!box1.is_valid());
+        assert(box2.is_valid());
+        assert(*box2 == 100);
     }
     printf("PASS\n");
 }
@@ -115,29 +120,34 @@ void test_box_arrow() {
     printf("PASS\n");
 }
 
-// Test empty box
-void test_box_empty() {
-    printf("test_box_empty: ");
+// Test moved-from box (empty state)
+void test_box_moved_from() {
+    printf("test_box_moved_from: ");
     {
-        Box<int> box;
-        assert(!box.is_valid());
-        assert(!box);  // Test explicit bool conversion
-        assert(box.get() == nullptr);
+        auto box1 = Box<int>::make(42);
+        auto box2 = std::move(box1);  // box1 is now empty
+
+        assert(!box1.is_valid());
+        assert(!box1);  // Test explicit bool conversion
+        assert(box1.get() == nullptr);
+
+        assert(box2.is_valid());
+        assert(*box2 == 42);
     }
     printf("PASS\n");
 }
 
 int main() {
     printf("=== Testing rusty::Box<T> ===\n");
-    
+
     test_box_construction();
     test_box_move();
     test_box_raw_pointer();
-    test_box_reset();
+    test_box_replacement();
     test_box_destructor();
     test_box_arrow();
-    test_box_empty();
-    
+    test_box_moved_from();
+
     printf("\nAll Box tests passed!\n");
     return 0;
 }

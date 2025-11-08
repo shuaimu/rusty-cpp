@@ -16,7 +16,7 @@ TOTAL=0
 
 # Compile flags
 CXX="clang++"
-CXXFLAGS="-std=c++11 -Wall -Wextra -I../include"
+CXXFLAGS="-std=c++17 -Wall -Wextra -I../include"
 
 # List of test files
 TESTS=(
@@ -26,6 +26,10 @@ TESTS=(
     "rusty_vec_test"
     "rusty_option_test"
     "rusty_result_test"
+    "rusty_rwlock_test"
+    "rusty_condvar_test"
+    "rusty_barrier_test"
+    "rusty_once_test"
 )
 
 # Create build directory if it doesn't exist

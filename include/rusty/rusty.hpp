@@ -31,6 +31,13 @@
 #include "rusty/btreemap.hpp"
 #include "rusty/btreeset.hpp"
 
+// Synchronization primitives (std::sync equivalent)
+#include "rusty/mutex.hpp"
+#include "rusty/rwlock.hpp"
+#include "rusty/condvar.hpp"
+#include "rusty/barrier.hpp"
+#include "rusty/once.hpp"
+
 // Convenience aliases in rusty namespace
 // @safe
 namespace rusty {
