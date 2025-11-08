@@ -522,25 +522,139 @@ RustyCpp implements key Rust design patterns for safer concurrent programming:
 
 ### Thread Safety Traits
 
-#### Send and Sync
-Compile-time markers for thread safety:
-- **`Send`** - Types safe to transfer between threads
-- **`Sync`** - Types safe to share references between threads
+#### Send Trait (Explicit Opt-In System)
+
+RustyCpp implements Rust's `Send` trait using an **explicit opt-in** system that prevents accidental data races at compile-time:
+
+```cpp
+#include <rusty/sync/mpsc.hpp>
+
+// ✅ Primitives are pre-marked as Send
+auto [tx, rx] = rusty::sync::mpsc::channel<int>();
+
+// ✅ Rusty types are Send if their content is Send
+auto [tx, rx] = rusty::sync::mpsc::channel<rusty::Arc<int>>();
+
+// ❌ Rc is NOT Send (non-atomic reference counting)
+auto [tx, rx] = rusty::sync::mpsc::channel<rusty::Rc<int>>();  // Compile error!
+
+// ❌ Unmarked user types are NOT Send (must explicitly mark)
+struct MyType { int value; };
+auto [tx, rx] = rusty::sync::mpsc::channel<MyType>();  // Compile error!
+```
+
+**How to mark your types as Send:**
+
+```cpp
+// Method 1: Static marker (recommended for your types)
+class ThreadSafe {
+public:
+    static constexpr bool is_send = true;  // Explicitly mark as Send
+    // ... your thread-safe implementation
+};
+
+// Method 2: External specialization (for third-party types)
+namespace rusty {
+    template<>
+    struct is_explicitly_send<ThirdPartyType> : std::true_type {};
+}
+```
+
+**Key Features:**
+- **Safe by default**: Types are NOT Send unless explicitly marked
+- **Compositional safety**: `struct { Rc<T> }` is automatically rejected (no Send marker)
+- **Clear errors**: Compiler tells you exactly how to fix the issue
+- **No deep analysis needed**: Simple marker check at compile-time
+
+**Example - Compositional Safety:**
+
+```cpp
+// Without marker, this is NOT Send (safe!)
+struct ContainsRc {
+    rusty::Rc<int> data;  // Non-thread-safe
+};
+
+auto [tx, rx] = channel<ContainsRc>();  // ✗ Compile error!
+// Error: ContainsRc must be Send (marked explicitly)
+
+// Arc is thread-safe, so use it instead
+struct ThreadSafeVersion {
+    static constexpr bool is_send = true;
+    rusty::Arc<int> data;  // Thread-safe
+};
+
+auto [tx, rx] = channel<ThreadSafeVersion>();  // ✓ Works!
+```
+
+#### MPSC Channel (Multi-Producer Single-Consumer)
+
+Thread-safe message passing channel, identical to Rust's `std::sync::mpsc`:
+
+```cpp
+#include <rusty/sync/mpsc_lockfree.hpp>  // Lock-free (recommended)
+// or
+#include <rusty/sync/mpsc.hpp>  // Mutex-based
+#include <thread>
+
+using namespace rusty::sync::mpsc::lockfree;  // or ::mutex
+
+void example() {
+    // Create channel
+    auto [tx, rx] = channel<int>();
+
+    // Clone sender for multiple producers
+    auto tx2 = tx.clone();
+
+    // Producer threads
+    std::thread t1([tx = std::move(tx)]() mutable {
+        tx.send(42);
+    });
+
+    std::thread t2([tx2 = std::move(tx2)]() mutable {
+        tx2.send(100);
+    });
+
+    // Consumer receives from both
+    for (int i = 0; i < 2; i++) {
+        auto result = rx.recv();
+        if (result.is_ok()) {
+            int value = result.unwrap();
+            std::cout << "Received: " << value << "\n";
+        }
+    }
+
+    t1.join();
+    t2.join();
+}
+```
+
+**Two Implementations Available:**
+
+1. **Lock-Free** (`mpsc_lockfree.hpp`) - **Recommended**
+   - 28 M msg/s throughput, 3.3 μs p50 latency
+   - Batch operations (4x faster under contention)
+   - Wait-free consumer, lock-free producers
+   - See [User Guide](docs/mpsc_lockfree_user_guide.md) and [Developer Guide](docs/mpsc_lockfree_developer_guide.md)
+
+2. **Mutex-Based** (`mpsc.hpp`)
+   - Simple, straightforward implementation
+   - Lower throughput but easier to understand
+   - Good for low-frequency communication
+
+**Common Features:**
+- Blocking operations: `send()`, `recv()`
+- Non-blocking operations: `try_send()`, `try_recv()`
+- Disconnection detection
+- Type-safe with Send constraint
+- Rust-compatible API
+
+#### Sync Trait
+
+Compile-time marker for types safe to share references between threads:
 
 ```cpp
 template<typename T>
-concept Send = /* implementation */;
-
-template<typename T>
 concept Sync = /* implementation */;
-
-// Use in function signatures
-template<Send T>
-void process_in_thread(T data) {
-    std::thread([data = std::move(data)]() {
-        // OK: T is Send, can be moved to another thread
-    }).detach();
-}
 ```
 
 ### RAII Guards

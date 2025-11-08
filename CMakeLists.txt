@@ -20,6 +20,7 @@ set(TEST_SOURCES
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp
+    tests/test_channel.cpp
 
     # Annotation system tests - WORKING (fixed missing includes)
     tests/test_external_annotations.cpp

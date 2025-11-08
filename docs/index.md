@@ -42,6 +42,20 @@ Complete implementation summaries for major features:
 - **[fixing_control_flow.md](fixing_control_flow.md)** - Detailed control flow implementation
 - **[submodule_integration.md](submodule_integration.md)** - Git submodule integration guide
 
+### Lock-Free MPSC Channel Documentation
+
+- **[mpsc_lockfree_user_guide.md](mpsc_lockfree_user_guide.md)** - ⭐ User guide for the lock-free MPSC channel
+  - Quick start and API reference
+  - Common patterns and examples
+  - Performance guidelines
+  - Best practices and troubleshooting
+
+- **[mpsc_lockfree_developer_guide.md](mpsc_lockfree_developer_guide.md)** - Developer guide and implementation details
+  - Architecture and design decisions
+  - Memory ordering and concurrency
+  - Performance characteristics
+  - Testing strategy and benchmarks
+
 ## Quick Links
 
 - Main project documentation: [../CLAUDE.md](../CLAUDE.md)
