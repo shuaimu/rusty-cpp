@@ -5,6 +5,7 @@
 
 namespace rusty {
 
+// @safe
 template<typename T>
 class Mutex {
 private:
@@ -55,20 +56,20 @@ public:
         ~MutexGuard() = default;
     };
 
-    // Constructor
+    // @safe - Constructor initializes mutex and data
     explicit Mutex(T value) : data_(std::move(value)) {}
 
-    // Lock and return guard
+    // @safe - Acquires lock and returns RAII guard
     [[nodiscard]] MutexGuard lock() {
         return MutexGuard(std::unique_lock(mtx_), &data_);
     }
 
-    // Lock with const access
+    // @safe - Acquires lock with const access
     [[nodiscard]] MutexGuard lock() const {
         return MutexGuard(std::unique_lock(mtx_), const_cast<T*>(&data_));
     }
 
-    // Try-lock and return optional guard
+    // @safe - Attempts to acquire lock without blocking
     [[nodiscard]] Option<MutexGuard> try_lock() {
         std::unique_lock lock(mtx_, std::try_to_lock);
         if (lock.owns_lock()) {
@@ -77,7 +78,7 @@ public:
         return None;
     }
 
-    // Try-lock with const access
+    // @safe - Attempts to acquire lock with const access
     [[nodiscard]] Option<MutexGuard> try_lock() const {
         std::unique_lock lock(mtx_, std::try_to_lock);
         if (lock.owns_lock()) {
@@ -92,10 +93,11 @@ public:
     Mutex(Mutex&&) = delete;
     Mutex& operator=(Mutex&&) = delete;
 
+    // @safe - RAII destructor
     ~Mutex() = default;
 };
 
-// Helper function
+// @safe - Helper function to create Mutex
 template<typename T>
 auto make_mutex(T value) {
     return Mutex<T>(std::move(value));

@@ -29,6 +29,9 @@ template<typename T> sync::Weak<T> downgrade(const Arc<T>&);
 template<typename T>
 class Arc {
 private:
+    // Allow other Arc instantiations to access private members for conversion
+    template<typename U>
+    friend class Arc;
     template<typename U>
     friend class sync::Weak;
     template<typename U>
@@ -116,6 +119,13 @@ public:
 
     // Copy constructor - increases reference count
     Arc(const Arc& other) : ptr(other.ptr) {
+        increment();
+    }
+
+    // Conversion constructor for polymorphism (Arc<Derived> → Arc<Base>)
+    // Enables upcasting from derived to base types
+    template<typename U, typename = typename std::enable_if<std::is_convertible<U*, T*>::value>::type>
+    Arc(const Arc<U>& other) : ptr(reinterpret_cast<ControlBlock*>(other.ptr)) {
         increment();
     }
 
@@ -221,6 +231,37 @@ template<typename T, typename... Args>
 // @lifetime: owned
 Arc<T> make_arc(Args&&... args) {
     return Arc<T>::make(T(std::forward<Args>(args)...));
+}
+
+// Comparison operators for Arc<T> (needed for std::set and std::map)
+template<typename T>
+bool operator<(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return lhs.get() < rhs.get();
+}
+
+template<typename T>
+bool operator==(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return lhs.get() == rhs.get();
+}
+
+template<typename T>
+bool operator!=(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename T>
+bool operator<=(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return !(rhs < lhs);
+}
+
+template<typename T>
+bool operator>(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return rhs < lhs;
+}
+
+template<typename T>
+bool operator>=(const Arc<T>& lhs, const Arc<T>& rhs) {
+    return !(lhs < rhs);
 }
 
 } // namespace rusty

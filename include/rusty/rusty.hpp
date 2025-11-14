@@ -8,14 +8,14 @@
 //
 // All types follow Rust's ownership and borrowing principles:
 // - Single ownership (Box, Vec)
-// - Shared immutable access (Rc, Arc)
+// - Shared immutable access (Rc, Arc) with built-in polymorphism support
 // - Explicit nullability (Option)
 // - Explicit error handling (Result)
 
 // #include "rusty/std_minimal.hpp"  // Not needed with standard library
 #include "rusty/box.hpp"
-#include "rusty/arc.hpp"
-#include "rusty/rc.hpp"
+#include "rusty/arc.hpp"  // Unified Arc with polymorphism (like std::shared_ptr)
+#include "rusty/rc.hpp"   // Unified Rc with polymorphism (like std::shared_ptr)
 #include "rusty/weak.hpp"  // Compatibility aliases (Weak<T> for Rc, ArcWeak<T> for Arc)
 // TODO: Enable once namespace conflicts are resolved
 // #include "rusty/rc/weak.hpp"  // Namespace-organized: rusty::rc_impl::Weak<T>

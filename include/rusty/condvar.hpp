@@ -6,6 +6,7 @@
 
 namespace rusty {
 
+// @safe
 // Condvar - Condition variable for waiting and notification
 // Matches Rust's std::sync::Condvar behavior
 //
@@ -36,20 +37,21 @@ private:
     std::condition_variable cv_;
 
 public:
+    // @safe - Default constructor
     Condvar() = default;
 
-    // Wait on a unique_lock (automatically releases and reacquires lock)
+    // @safe - Wait on a unique_lock (automatically releases and reacquires lock)
     void wait(std::unique_lock<std::mutex>& lock) {
         cv_.wait(lock);
     }
 
-    // Wait with a predicate (avoids spurious wakeups)
+    // @safe - Wait with a predicate (avoids spurious wakeups)
     template<typename Predicate>
     void wait(std::unique_lock<std::mutex>& lock, Predicate pred) {
         cv_.wait(lock, pred);
     }
 
-    // Wait for a duration - returns true if notified, false if timeout
+    // @safe - Wait for a duration - returns true if notified, false if timeout
     template<typename Rep, typename Period>
     bool wait_for(
         std::unique_lock<std::mutex>& lock,
@@ -58,7 +60,7 @@ public:
         return cv_.wait_for(lock, duration) == std::cv_status::no_timeout;
     }
 
-    // Wait for a duration with predicate - returns value of predicate
+    // @safe - Wait for a duration with predicate - returns value of predicate
     template<typename Rep, typename Period, typename Predicate>
     bool wait_for(
         std::unique_lock<std::mutex>& lock,
@@ -68,7 +70,7 @@ public:
         return cv_.wait_for(lock, duration, pred);
     }
 
-    // Wait until a time point - returns true if notified, false if timeout
+    // @safe - Wait until a time point - returns true if notified, false if timeout
     template<typename Clock, typename Duration>
     bool wait_until(
         std::unique_lock<std::mutex>& lock,
@@ -77,7 +79,7 @@ public:
         return cv_.wait_until(lock, timeout_time) == std::cv_status::no_timeout;
     }
 
-    // Wait until a time point with predicate
+    // @safe - Wait until a time point with predicate
     template<typename Clock, typename Duration, typename Predicate>
     bool wait_until(
         std::unique_lock<std::mutex>& lock,
@@ -87,12 +89,12 @@ public:
         return cv_.wait_until(lock, timeout_time, pred);
     }
 
-    // Notify one waiting thread
+    // @safe - Notify one waiting thread
     void notify_one() {
         cv_.notify_one();
     }
 
-    // Notify all waiting threads
+    // @safe - Notify all waiting threads
     void notify_all() {
         cv_.notify_all();
     }
@@ -103,6 +105,7 @@ public:
     Condvar(Condvar&&) = delete;
     Condvar& operator=(Condvar&&) = delete;
 
+    // @safe - RAII destructor
     ~Condvar() = default;
 };
 
