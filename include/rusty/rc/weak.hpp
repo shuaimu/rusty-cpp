@@ -27,7 +27,7 @@ public:
     Weak() : ptr(nullptr) {}
 
     explicit Weak(const rusty::Rc<T>& rc)
-        : ptr(rc.ptr) {
+        : ptr(rc.control_) {
         if (ptr) {
             ++ptr->weak_count;
         }
@@ -71,7 +71,7 @@ public:
 
     Weak& operator=(const rusty::Rc<T>& rc) {
         reset();
-        ptr = rc.ptr;
+        ptr = rc.control_;
         if (ptr) {
             ++ptr->weak_count;
         }
@@ -89,7 +89,8 @@ public:
         if (!ptr || ptr->strong_count == 0) {
             return ::rusty::None;
         }
-        return ::rusty::Some(rusty::Rc<T>(ptr, true));
+        T* value_ptr = static_cast<T*>(ptr->get_value_ptr());
+        return ::rusty::Some(rusty::Rc<T>(value_ptr, ptr, true));
     }
 
     bool expired() const {

@@ -155,6 +155,18 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
                 ast.classes.push(class);
             }
         }
+        EntityKind::ClassDecl | EntityKind::StructDecl => {
+            // Regular (non-template) classes and structs
+            debug_println!("DEBUG PARSE: Found ClassDecl/StructDecl: {:?}, is_definition={}",
+                entity.get_name(), entity.is_definition());
+
+            if entity.is_definition() {
+                debug_println!("DEBUG PARSE: Extracting regular class from ClassDecl entity");
+                let class = ast_visitor::extract_class(entity);
+                debug_println!("DEBUG PARSE: Extracted class: {}", class.name);
+                ast.classes.push(class);
+            }
+        }
         EntityKind::CallExpr => {
             // Note: We don't need to handle template instantiations here.
             // Template functions are analyzed via their declarations (with generic types).

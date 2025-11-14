@@ -316,21 +316,59 @@ void unique_ptr_example() {
 
 #### Interior Mutability
 
+**IMPORTANT**: The C++ `mutable` keyword is **not allowed** in `@safe` functions. Instead, use `UnsafeCell<T>` with explicit `unsafe` blocks for interior mutability.
+
 ```cpp
-#include <rusty/cell.hpp>
+#include <rusty/unsafe_cell.hpp>
 
 class Counter {
-    mutable Cell<int> count_{0};  // Cell<int> for interior mutability
+    UnsafeCell<int> count_;  // UnsafeCell for interior mutability
 
 public:
+    Counter() : count_(0) {}
+
     // @safe
-    void increment() const {  // const method can mutate
-        count_.set(count_.get() + 1);
+    void increment() const {  // const method can mutate via unsafe
+        // @unsafe
+        {
+            int* ptr = count_.get();
+            (*ptr)++;
+        }
     }
 
     // @safe
     int get_count() const {
-        return count_.get();
+        // @unsafe
+        {
+            const int* ptr = count_.get();
+            return *ptr;
+        }
+    }
+};
+```
+
+For types that are trivially copyable (like `int`, `bool`, etc.), you can use `Cell<T>` which provides a safer API:
+
+```cpp
+#include <rusty/cell.hpp>
+
+class Counter {
+    Cell<int> count_;  // Cell for trivially copyable types
+
+public:
+    Counter() : count_(0) {}
+
+    // @safe - but requires unsafe block to access mutable state
+    void increment() const {
+        // @unsafe
+        {
+            count_.set(count_.get() + 1);
+        }
+    }
+
+    // @safe
+    int get_count() const {
+        return count_.get();  // Read-only, no unsafe needed
     }
 };
 ```

@@ -50,6 +50,7 @@ pub mod pointer_safety;
 pub mod unsafe_propagation;
 pub mod this_tracking;
 pub mod liveness;
+pub mod mutable_checker;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

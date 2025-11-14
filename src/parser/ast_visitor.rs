@@ -77,6 +77,61 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
     false
 }
 
+/// Check if a field declaration has the 'mutable' keyword
+/// Read the source code around the declaration to detect 'mutable'
+fn check_for_mutable_keyword(entity: &Entity) -> bool {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let location = match entity.get_location() {
+        Some(loc) => loc,
+        None => return false,
+    };
+
+    let file_location = location.get_file_location();
+    let file = match file_location.file {
+        Some(f) => f,
+        None => return false,
+    };
+
+    let file_path = file.get_path();
+    let decl_line = file_location.line as usize;
+
+    // Read the source file and check the line with the declaration
+    let file_handle = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let reader = BufReader::new(file_handle);
+    let mut current_line = 0;
+
+    for line_result in reader.lines() {
+        current_line += 1;
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        // Check if we're at the declaration line
+        if current_line == decl_line {
+            // Check if the line contains the 'mutable' keyword
+            // Look for word boundary to avoid matching "immutable" or similar
+            let trimmed = line.trim();
+            let has_mutable = trimmed.starts_with("mutable ") ||
+                             trimmed.contains(" mutable ") ||
+                             (trimmed == "mutable");
+
+            debug_println!("DEBUG MUTABLE: Line {}: '{}' -> has_mutable = {}",
+                decl_line, trimmed, has_mutable);
+
+            return has_mutable;
+        }
+    }
+
+    false
+}
+
 /// Get the qualified name of an entity (including namespace/class context)
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
@@ -202,6 +257,7 @@ pub struct Variable {
     #[allow(dead_code)]
     pub is_shared_ptr: bool,
     pub is_static: bool,
+    pub is_mutable: bool,                      // C++ mutable keyword (for interior mutability)
     #[allow(dead_code)]
     pub location: SourceLocation,
     // Variadic template support (Phase 1)
@@ -528,6 +584,12 @@ pub fn extract_variable(entity: &Entity) -> Variable {
     // In clang, static variables have StorageClass::Static
     let is_static = entity.get_storage_class() == Some(clang::StorageClass::Static);
 
+    // Check if this is a mutable field (C++ mutable keyword)
+    // We need to read the source code to check for the 'mutable' keyword
+    // because libclang doesn't expose mutable as a storage class
+    let is_mutable = check_for_mutable_keyword(entity);
+    debug_println!("DEBUG MUTABLE: Field '{}' is_mutable = {}", name, is_mutable);
+
     Variable {
         name,
         type_name,
@@ -537,6 +599,7 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         is_unique_ptr,
         is_shared_ptr,
         is_static,
+        is_mutable,
         location,
         is_pack: false,              // Will be set properly for function parameters
         pack_element_type: None,     // Will be set properly for function parameters

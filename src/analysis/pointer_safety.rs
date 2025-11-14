@@ -232,6 +232,7 @@ mod tests {
             is_unique_ptr: false,
             is_shared_ptr: false,
             is_static: false,
+            is_mutable: false,
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 5,

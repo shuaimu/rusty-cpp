@@ -4,6 +4,7 @@
 #include <memory>
 #include <stdexcept>
 #include <cassert>
+#include "unsafe_cell.hpp"
 
 // RefCell<T> - Interior mutability with runtime borrow checking
 // Provides interior mutability with dynamic borrow checking
@@ -37,38 +38,42 @@ enum class BorrowState : int {
 template<typename T>
 class RefCell {
 private:
-    mutable T value;
-    mutable int borrow_state;  // 0 = unborrowed, >0 = # readers, -1 = writing
+    UnsafeCell<T> value;
+    UnsafeCell<int> borrow_state;  // 0 = unborrowed, >0 = # readers, -1 = writing
     
     friend class Ref<T>;
     friend class RefMut<T>;
     
     void add_reader() const {
-        if (borrow_state < 0) {
+        int* state = borrow_state.get();
+        if (*state < 0) {
             throw std::runtime_error("RefCell<T>: already mutably borrowed");
         }
-        borrow_state++;
+        (*state)++;
     }
-    
+
     void remove_reader() const {
-        assert(borrow_state > 0);
-        borrow_state--;
+        int* state = borrow_state.get();
+        assert(*state > 0);
+        (*state)--;
     }
-    
+
     void add_writer() const {
-        if (borrow_state != 0) {
-            if (borrow_state > 0) {
+        int* state = borrow_state.get();
+        if (*state != 0) {
+            if (*state > 0) {
                 throw std::runtime_error("RefCell<T>: already immutably borrowed");
             } else {
                 throw std::runtime_error("RefCell<T>: already mutably borrowed");
             }
         }
-        borrow_state = -1;
+        *state = -1;
     }
-    
+
     void remove_writer() const {
-        assert(borrow_state == -1);
-        borrow_state = 0;
+        int* state = borrow_state.get();
+        assert(*state == -1);
+        *state = 0;
     }
     
 public:
@@ -84,57 +89,58 @@ public:
     // Destructor - checks for leaked borrows in debug mode
     ~RefCell() {
 #ifdef DEBUG
-        if (borrow_state != 0) {
+        if (*borrow_state.get_const() != 0) {
             // In Rust this would panic
             assert(false && "RefCell<T> dropped while borrowed");
         }
 #endif
     }
-    
+
     // Immutably borrow the value
     // @lifetime: (&'a) -> Ref<'a, T>
     Ref<T> borrow() const {
         add_reader();
         return Ref<T>(*this);
     }
-    
+
     // Mutably borrow the value
     // @lifetime: (&'a mut) -> RefMut<'a, T>
     RefMut<T> borrow_mut() const {
         add_writer();
         return RefMut<T>(*this);
     }
-    
+
     // Try to immutably borrow (returns true on success)
     // @lifetime: (&'a) -> bool
     bool can_borrow() const {
-        return borrow_state >= 0;
+        return *borrow_state.get_const() >= 0;
     }
-    
+
     // Try to mutably borrow (returns true on success)
     // @lifetime: (&'a mut) -> bool
     bool can_borrow_mut() const {
-        return borrow_state == 0;
+        return *borrow_state.get_const() == 0;
     }
-    
+
     // Replace the value
     // @lifetime: (&'a, T) -> T
     T replace(T new_value) const {
-        if (borrow_state != 0) {
+        if (*borrow_state.get_const() != 0) {
             throw std::runtime_error("RefCell<T>: cannot replace while borrowed");
         }
-        T old = std::move(value);
-        value = std::move(new_value);
+        T* val_ptr = value.get();
+        T old = std::move(*val_ptr);
+        *val_ptr = std::move(new_value);
         return old;
     }
-    
+
     // Swap values with another RefCell
     // @lifetime: (&'a, &'a) -> void
     void swap(RefCell& other) const {
-        if (borrow_state != 0 || other.borrow_state != 0) {
+        if (*borrow_state.get_const() != 0 || *other.borrow_state.get_const() != 0) {
             throw std::runtime_error("RefCell<T>: cannot swap while borrowed");
         }
-        std::swap(value, other.value);
+        std::swap(*value.get(), *other.value.get());
     }
     
     // Take the value, leaving default in its place
@@ -187,18 +193,18 @@ public:
     
     // Access the value
     const T& operator*() const {
-        return cell->value;
+        return *cell->value.get_const();
     }
-    
+
     const T* operator->() const {
-        return &cell->value;
+        return cell->value.get_const();
     }
-    
+
     // Clone the value (only for copyable types)
     template<typename U = T>
     typename std::enable_if_t<std::is_copy_constructible_v<U>, T>
     clone() const {
-        return cell->value;
+        return *cell->value.get_const();
     }
 };
 
@@ -231,18 +237,18 @@ public:
     
     // Access the value
     T& operator*() const {
-        return const_cast<T&>(cell->value);
+        return *cell->value.get();
     }
-    
+
     T* operator->() const {
-        return const_cast<T*>(&cell->value);
+        return cell->value.get();
     }
-    
+
     // Clone the value (only for copyable types)
     template<typename U = T>
     typename std::enable_if_t<std::is_copy_constructible_v<U>, T>
     clone() const {
-        return cell->value;
+        return *cell->value.get();
     }
 };
 

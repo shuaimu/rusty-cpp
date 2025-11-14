@@ -48,6 +48,9 @@ struct RcControlBlockBase {
 
     // Pure virtual - derived control block handles destruction
     virtual void destroy_value() = 0;
+
+    // Pure virtual - get value pointer for Weak::upgrade()
+    virtual void* get_value_ptr() const = 0;
 };
 
 // Typed control block - knows the actual allocated type
@@ -70,10 +73,18 @@ struct RcControlBlock : RcControlBlockBase {
             value = nullptr;
         }
     }
+
+    void* get_value_ptr() const override {
+        return static_cast<void*>(value);
+    }
 };
 
 template<typename T>
 class Rc {
+public:
+    // Expose ControlBlock type for Weak<T> compatibility
+    using ControlBlock = RcControlBlockBase;
+
 private:
     template<typename U>
     friend class Rc;  // Allow Rc<U> to access Rc<T> private members

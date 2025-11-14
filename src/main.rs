@@ -183,14 +183,18 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             violations.extend(propagation_errors);
         }
     }
-    
+
+    // Check for mutable fields in safe classes (before building IR)
+    let mutable_violations = analysis::mutable_checker::check_mutable_fields(&ast, &safety_context)?;
+    violations.extend(mutable_violations);
+
     // Build intermediate representation with safety context
     let ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
-    
+
     // Perform borrow checking analysis with header knowledge and safety context
     let borrow_violations = analysis::check_borrows_with_safety_context(ir, header_cache, safety_context)?;
     violations.extend(borrow_violations);
-    
+
     Ok(violations)
 }
 

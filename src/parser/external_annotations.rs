@@ -666,17 +666,18 @@ mod tests {
         let content = r#"
         // @external: {
         //   malloc: [unsafe]
-        //   printf: [safe]
-        //   custom_func: [safe]
+        //   printf: [unsafe]
+        //   custom_func: [unsafe]
         // }
         "#;
-        
+
         let mut annotations = ExternalAnnotations::new();
         annotations.parse_content(content).unwrap();
-        
+
+        // All external functions must be marked [unsafe]
         assert_eq!(annotations.is_function_safe("malloc"), Some(false));
-        assert_eq!(annotations.is_function_safe("printf"), Some(true));
-        assert_eq!(annotations.is_function_safe("custom_func"), Some(true));
+        assert_eq!(annotations.is_function_safe("printf"), Some(false));
+        assert_eq!(annotations.is_function_safe("custom_func"), Some(false));
     }
     
     #[test]
