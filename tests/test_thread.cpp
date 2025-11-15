@@ -41,7 +41,7 @@ void test_spawn_with_arguments() {
 void test_spawn_void() {
     std::cout << "Test: Spawn with void return... ";
 
-    auto flag = Arc<Mutex<bool>>::make_in_place(false);
+    auto flag = Arc<Mutex<bool>>::make(false);
 
     auto handle = thread::spawn(
         [](Arc<Mutex<bool>> flag) {
@@ -62,7 +62,7 @@ void test_spawn_void() {
 void test_detach_on_drop() {
     std::cout << "Test: Detach on drop (Rust semantics)... ";
 
-    auto flag = Arc<Mutex<bool>>::make_in_place(false);
+    auto flag = Arc<Mutex<bool>>::make(false);
 
     {
         auto handle = thread::spawn(
@@ -88,7 +88,7 @@ void test_detach_on_drop() {
 void test_explicit_detach() {
     std::cout << "Test: Explicit detach... ";
 
-    auto flag = Arc<Mutex<bool>>::make_in_place(false);
+    auto flag = Arc<Mutex<bool>>::make(false);
 
     auto handle = thread::spawn(
         [](Arc<Mutex<bool>> flag) {
@@ -158,7 +158,7 @@ void test_exception_propagation() {
 void test_multiple_threads() {
     std::cout << "Test: Multiple threads... ";
 
-    auto counter = Arc<Mutex<int>>::make_in_place(0);
+    auto counter = Arc<Mutex<int>>::make(0);
     Vec<thread::JoinHandle<void>> handles;
 
     for (int i = 0; i < 5; ++i) {
@@ -206,7 +206,7 @@ void test_scoped_threads() {
 void test_scoped_with_arc_mutex() {
     std::cout << "Test: Scoped threads with Arc<Mutex<T>>... ";
 
-    auto data = Arc<Mutex<Vec<int>>>::make_in_place(Vec<int>());
+    auto data = Arc<Mutex<Vec<int>>>::make(Vec<int>());
 
     thread::scope([&data](auto& s) {
         for (int i = 0; i < 10; ++i) {

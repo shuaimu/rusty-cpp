@@ -91,7 +91,7 @@ void test_arrow_operator() {
 void test_thread_safety() {
     std::cout << "Test: Thread safety (10 threads, 1000 increments each)... ";
 
-    auto counter = Arc<Mutex<int>>::make_in_place(0);
+    auto counter = Arc<Mutex<int>>::make(0);
     Vec<thread::JoinHandle<void>> handles;
 
     for (int i = 0; i < 10; ++i) {

@@ -85,7 +85,7 @@ private:
     }
 
 public:
-    // Default constructor - creates empty Arc
+    // @safe - Default constructor creates empty Arc
     Arc() : ptr(nullptr) {}
 
     // Rust-idiomatic factory method - Arc::new()
@@ -94,16 +94,11 @@ public:
         return Arc<T>(new ControlBlock(std::move(value)));
     }
 
-    // C++-friendly factory method (kept for compatibility)
-    // @lifetime: owned
-    static Arc<T> make(T value) {
-        return Arc<T>(new ControlBlock(std::move(value)));
-    }
-
     // Factory method for in-place construction with arguments
+    // @safe
     // @lifetime: owned
     template<typename... Args>
-    static Arc<T> make_in_place(Args&&... args) {
+    static Arc<T> make(Args&&... args) {
         return Arc<T>(new ControlBlock(std::forward<Args>(args)...));
     }
 
@@ -117,24 +112,24 @@ public:
         }
     }
 
-    // Copy constructor - increases reference count
+    // @safe - Copy constructor increases reference count
     Arc(const Arc& other) : ptr(other.ptr) {
         increment();
     }
 
-    // Conversion constructor for polymorphism (Arc<Derived> → Arc<Base>)
+    // @safe - Conversion constructor for polymorphism (Arc<Derived> → Arc<Base>)
     // Enables upcasting from derived to base types
     template<typename U, typename = typename std::enable_if<std::is_convertible<U*, T*>::value>::type>
     Arc(const Arc<U>& other) : ptr(reinterpret_cast<ControlBlock*>(other.ptr)) {
         increment();
     }
 
-    // Move constructor - no ref count change
+    // @safe - Move constructor with no ref count change
     Arc(Arc&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
 
-    // Copy assignment
+    // @safe - Copy assignment with proper ref counting
     Arc& operator=(const Arc& other) {
         if (this != &other) {
             decrement();
@@ -144,7 +139,7 @@ public:
         return *this;
     }
 
-    // Move assignment
+    // @safe - Move assignment with proper cleanup
     Arc& operator=(Arc&& other) noexcept {
         if (this != &other) {
             decrement();

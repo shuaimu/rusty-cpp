@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include "option.hpp"
+#include "unsafe_cell.hpp"
 
 namespace rusty {
 
@@ -9,7 +10,7 @@ namespace rusty {
 template<typename T>
 class Mutex {
 private:
-    mutable std::mutex mtx_;
+    UnsafeCell<std::mutex> mtx_;
     T data_;
 
 public:
@@ -61,17 +62,17 @@ public:
 
     // @safe - Acquires lock and returns RAII guard
     [[nodiscard]] MutexGuard lock() {
-        return MutexGuard(std::unique_lock(mtx_), &data_);
+        return MutexGuard(std::unique_lock(*mtx_.get()), &data_);
     }
 
     // @safe - Acquires lock with const access
     [[nodiscard]] MutexGuard lock() const {
-        return MutexGuard(std::unique_lock(mtx_), const_cast<T*>(&data_));
+        return MutexGuard(std::unique_lock(*mtx_.get()), const_cast<T*>(&data_));
     }
 
     // @safe - Attempts to acquire lock without blocking
     [[nodiscard]] Option<MutexGuard> try_lock() {
-        std::unique_lock lock(mtx_, std::try_to_lock);
+        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
         if (lock.owns_lock()) {
             return Some(MutexGuard(std::move(lock), &data_));
         }
@@ -80,7 +81,7 @@ public:
 
     // @safe - Attempts to acquire lock with const access
     [[nodiscard]] Option<MutexGuard> try_lock() const {
-        std::unique_lock lock(mtx_, std::try_to_lock);
+        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
         if (lock.owns_lock()) {
             return Some(MutexGuard(std::move(lock), const_cast<T*>(&data_)));
         }

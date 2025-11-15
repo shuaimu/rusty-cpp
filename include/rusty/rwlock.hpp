@@ -3,6 +3,7 @@
 #include <shared_mutex>
 #include <mutex>
 #include "option.hpp"
+#include "unsafe_cell.hpp"
 
 namespace rusty {
 
@@ -11,7 +12,7 @@ namespace rusty {
 template<typename T>
 class RwLock {
 private:
-    mutable std::shared_mutex mtx_;
+    UnsafeCell<std::shared_mutex> mtx_;
     T data_;
 
 public:
@@ -86,12 +87,12 @@ public:
 
     // Acquire read lock (shared)
     [[nodiscard]] ReadGuard read() const {
-        return ReadGuard(std::shared_lock(mtx_), &data_);
+        return ReadGuard(std::shared_lock(*mtx_.get()), &data_);
     }
 
     // Try to acquire read lock (non-blocking)
     [[nodiscard]] Option<ReadGuard> try_read() const {
-        std::shared_lock lock(mtx_, std::try_to_lock);
+        std::shared_lock lock(*mtx_.get(), std::try_to_lock);
         if (lock.owns_lock()) {
             return Some(ReadGuard(std::move(lock), &data_));
         }
@@ -100,17 +101,17 @@ public:
 
     // Acquire write lock (exclusive)
     [[nodiscard]] WriteGuard write() {
-        return WriteGuard(std::unique_lock(mtx_), &data_);
+        return WriteGuard(std::unique_lock(*mtx_.get()), &data_);
     }
 
     // Acquire write lock (exclusive) - const version
     [[nodiscard]] WriteGuard write() const {
-        return WriteGuard(std::unique_lock(mtx_), const_cast<T*>(&data_));
+        return WriteGuard(std::unique_lock(*mtx_.get()), const_cast<T*>(&data_));
     }
 
     // Try to acquire write lock (non-blocking)
     [[nodiscard]] Option<WriteGuard> try_write() {
-        std::unique_lock lock(mtx_, std::try_to_lock);
+        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
         if (lock.owns_lock()) {
             return Some(WriteGuard(std::move(lock), &data_));
         }
@@ -119,7 +120,7 @@ public:
 
     // Try to acquire write lock (const version)
     [[nodiscard]] Option<WriteGuard> try_write() const {
-        std::unique_lock lock(mtx_, std::try_to_lock);
+        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
         if (lock.owns_lock()) {
             return Some(WriteGuard(std::move(lock), const_cast<T*>(&data_)));
         }
