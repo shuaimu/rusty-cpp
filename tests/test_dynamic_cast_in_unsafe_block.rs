@@ -35,10 +35,9 @@ class Derived : public Base {};
 
 // @safe
 void test() {
-    std::shared_ptr<Base> base = std::make_shared<Derived>();
-
     // @unsafe
     {
+        std::shared_ptr<Base> base = std::make_shared<Derived>();
         auto derived = std::dynamic_pointer_cast<Derived>(base);
     }
 }
@@ -79,10 +78,9 @@ class Derived : public Base {};
 
 // @safe
 void test() {
-    shared_ptr<Base> base = make_shared<Derived>();
-
     // @unsafe
     {
+        shared_ptr<Base> base = make_shared<Derived>();
         auto derived = dynamic_pointer_cast<Derived>(base);  // Unqualified
     }
 }

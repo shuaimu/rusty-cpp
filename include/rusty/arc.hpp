@@ -26,6 +26,7 @@ namespace sync {
 }
 template<typename T> sync::Weak<T> downgrade(const Arc<T>&);
 
+// @unsafe - Raw pointer operations and atomic reference counting
 template<typename T>
 class Arc {
 private:
@@ -57,20 +58,28 @@ private:
 
     ControlBlock* ptr;
 
+    // @unsafe
     static void release_weak(ControlBlock* cb) {
+        // @unsafe {
         if (cb && cb->weak_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             std::atomic_thread_fence(std::memory_order_acquire);
             delete cb;
         }
+        // }
     }
 
+    // @unsafe
     void increment() {
+        // @unsafe {
         if (ptr) {
             ptr->strong_count.fetch_add(1, std::memory_order_relaxed);
         }
+        // }
     }
 
+    // @unsafe
     void decrement() {
+        // @unsafe {
         if (!ptr) {
             return;
         }
@@ -82,6 +91,7 @@ private:
             release_weak(current);
         }
         ptr = nullptr;
+        // }
     }
 
 public:
@@ -95,11 +105,13 @@ public:
     }
 
     // Factory method for in-place construction with arguments
-    // @safe
+    // @unsafe
     // @lifetime: owned
     template<typename... Args>
     static Arc<T> make(Args&&... args) {
+        // @unsafe {
         return Arc<T>(new ControlBlock(std::forward<Args>(args)...));
+        // }
     }
 
     // Private constructor from control block
@@ -129,24 +141,28 @@ public:
         other.ptr = nullptr;
     }
 
-    // @safe - Copy assignment with proper ref counting
+    // @unsafe - Copy assignment with proper ref counting
     Arc& operator=(const Arc& other) {
+        // @unsafe {
         if (this != &other) {
             decrement();
             ptr = other.ptr;
             increment();
         }
         return *this;
+        // }
     }
 
-    // @safe - Move assignment with proper cleanup
+    // @unsafe - Move assignment with proper cleanup
     Arc& operator=(Arc&& other) noexcept {
+        // @unsafe {
         if (this != &other) {
             decrement();
             ptr = other.ptr;
             other.ptr = nullptr;
         }
         return *this;
+        // }
     }
 
     // Destructor
@@ -155,23 +171,32 @@ public:
     }
 
     // Dereference - get immutable reference
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T& operator*() const {
+        // @unsafe {
         assert(ptr != nullptr && ptr->value != nullptr);
         return *ptr->value;
+        // }
     }
 
     // Arrow operator - access members
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T* operator->() const {
+        // @unsafe {
         assert(ptr != nullptr && ptr->value != nullptr);
         return ptr->value;
+        // }
     }
 
     // Get raw pointer
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T* get() const {
+        // @unsafe {
         return (ptr && ptr->value) ? ptr->value : nullptr;
+        // }
     }
 
     // Check if Arc contains a value
@@ -185,73 +210,106 @@ public:
     }
 
     // Get current reference count
+    // @unsafe
     size_t strong_count() const {
+        // @unsafe {
         return ptr ? ptr->strong_count.load(std::memory_order_relaxed) : 0;
+        // }
     }
 
     // Get weak count excluding implicit strong-held weak
+    // @unsafe
     size_t weak_count() const {
+        // @unsafe {
         if (!ptr) {
             return 0;
         }
         size_t count = ptr->weak_count.load(std::memory_order_relaxed);
         return count > 0 ? count - 1 : 0;
+        // }
     }
 
     // Clone - explicitly create a new Arc to the same value
+    // @unsafe
     Arc clone() const {
+        // @unsafe {
         return Arc(*this);
+        // }
     }
 
     // Try to get mutable reference if we're the only owner
     // Returns nullptr if there are other references
+    // @unsafe
     // @lifetime: (&'a mut) -> &'a mut
     T* get_mut() {
+        // @unsafe {
         if (ptr && ptr->value && ptr->strong_count.load(std::memory_order_relaxed) == 1) {
             return ptr->value;
         }
         return nullptr;
+        // }
     }
 };
 
 // Rust-idiomatic factory function
+// @unsafe
 template<typename T, typename... Args>
 // @lifetime: owned
 Arc<T> arc(Args&&... args) {
+    // @unsafe {
     return Arc<T>::new_(T(std::forward<Args>(args)...));
+    // }
 }
 
 // C++-friendly factory function (kept for compatibility)
+// @unsafe
 template<typename T, typename... Args>
 // @lifetime: owned
 Arc<T> make_arc(Args&&... args) {
+    // @unsafe {
     return Arc<T>::make(T(std::forward<Args>(args)...));
+    // }
 }
 
 // Comparison operators for Arc<T> (needed for std::set and std::map)
+// @unsafe
 template<typename T>
 bool operator<(const Arc<T>& lhs, const Arc<T>& rhs) {
+    // @unsafe {
     return lhs.get() < rhs.get();
+    // }
 }
 
+// @unsafe
 template<typename T>
 bool operator==(const Arc<T>& lhs, const Arc<T>& rhs) {
+    // @unsafe {
     return lhs.get() == rhs.get();
+    // }
 }
 
+// @unsafe
 template<typename T>
 bool operator!=(const Arc<T>& lhs, const Arc<T>& rhs) {
+    // @unsafe {
     return !(lhs == rhs);
+    // }
 }
 
+// @unsafe
 template<typename T>
 bool operator<=(const Arc<T>& lhs, const Arc<T>& rhs) {
+    // @unsafe {
     return !(rhs < lhs);
+    // }
 }
 
+// @unsafe
 template<typename T>
 bool operator>(const Arc<T>& lhs, const Arc<T>& rhs) {
+    // @unsafe {
     return rhs < lhs;
+    // }
 }
 
 template<typename T>

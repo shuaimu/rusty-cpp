@@ -54,7 +54,18 @@ pub fn check_mutable_fields(
 
 /// Check if a class is marked as safe (either via annotation or file-level safety)
 fn is_class_safe(class: &Class, safety_context: &SafetyContext) -> bool {
-    // Check if the class itself or any of its methods are marked as safe
+    use crate::parser::safety_annotations::SafetyMode;
+
+    // First check if the class itself is marked as @unsafe
+    // If so, skip checking (allow mutable fields in unsafe classes)
+    if safety_context.get_function_safety(&class.name) == SafetyMode::Unsafe {
+        return false; // Unsafe class - skip mutable field checking
+    }
+
+    // Check if the class itself is marked as @safe
+    if safety_context.get_function_safety(&class.name) == SafetyMode::Safe {
+        return true; // Safe class - check for mutable fields
+    }
 
     // Check if any method in the class is marked safe
     for method in &class.methods {

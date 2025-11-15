@@ -210,10 +210,13 @@ fn test_as_const() {
 
     // @safe
     void test_as_const() {
-        std::vector<int> vec = {1, 2, 3};
+        // @unsafe
+        {
+            std::vector<int> vec = {1, 2, 3};
 
-        // Get const reference without explicitly casting
-        auto const_ref = std::as_const(vec);
+            // Get const reference without explicitly casting
+            auto const_ref = std::as_const(vec);
+        }
     }
 
     int main() {
@@ -256,9 +259,12 @@ fn test_shared_from_this() {
 
     // @safe
     void test_shared_from_this() {
-        auto obj = std::make_shared<MyClass>();
-        auto shared = obj->get_shared();
-        auto weak = obj->get_weak();
+        // @unsafe
+        {
+            auto obj = std::make_shared<MyClass>();
+            auto shared = obj->get_shared();
+            auto weak = obj->get_weak();
+        }
     }
 
     int main() {

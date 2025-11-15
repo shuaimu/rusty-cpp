@@ -6,7 +6,7 @@
 
 namespace rusty {
 
-// @safe
+// @unsafe - Interior mutability primitive for thread synchronization
 template<typename T>
 class Mutex {
 private:

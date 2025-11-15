@@ -50,6 +50,10 @@ fn test_vector_operations_in_safe_code() {
     #include <vector>
     #include <algorithm>
 
+    // @external_unsafe: std::vector::*
+    // @external_unsafe: sort
+    // @external_unsafe: std::initializer_list::*
+
     // @safe
     void use_vector() {
         std::vector<int> vec = {1, 2, 3, 4, 5};
@@ -85,6 +89,11 @@ fn test_cout_operations_in_safe_code() {
     #include <iostream>
     #include <string>
 
+    // @external_unsafe: std::basic_ostream::*
+    // @external_unsafe: endl
+    // @external_unsafe: std::string::*
+    // @external_unsafe: std::__cxx11::basic_string::*
+
     // @safe
     void use_cout() {
         std::cout << "Hello" << std::endl;
@@ -115,6 +124,9 @@ fn test_cout_operations_in_safe_code() {
 fn test_string_operations_in_safe_code() {
     let code = r#"
     #include <string>
+
+    // @external_unsafe: std::string::*
+    // @external_unsafe: std::__cxx11::basic_string::*
 
     // @safe
     void use_string() {
@@ -149,6 +161,11 @@ fn test_smart_pointers_in_safe_code() {
     let code = r#"
     #include <memory>
 
+    // @external_unsafe: make_unique
+    // @external_unsafe: make_shared
+    // @external_unsafe: std::unique_ptr::*
+    // @external_unsafe: std::shared_ptr::*
+
     // @safe
     void use_smart_pointers() {
         auto ptr1 = std::make_unique<int>(42);
@@ -181,6 +198,13 @@ fn test_algorithms_in_safe_code() {
     #include <vector>
     #include <algorithm>
     #include <numeric>
+
+    // @external_unsafe: std::vector::*
+    // @external_unsafe: std::initializer_list::*
+    // @external_unsafe: sort
+    // @external_unsafe: find
+    // @external_unsafe: accumulate
+    // @external_unsafe: copy
 
     // @safe
     void use_algorithms() {
@@ -219,6 +243,10 @@ fn test_map_operations_in_safe_code() {
     #include <map>
     #include <string>
 
+    // @external_unsafe: std::map::*
+    // @external_unsafe: std::string::*
+    // @external_unsafe: std::__cxx11::basic_string::*
+
     // @safe
     void use_map() {
         std::map<int, std::string> m;
@@ -254,6 +282,11 @@ fn test_utility_functions_in_safe_code() {
     #include <utility>
     #include <algorithm>
 
+    // @external_unsafe: swap
+    // @external_unsafe: make_pair
+    // @external_unsafe: std::string::*
+    // @external_unsafe: std::__cxx11::basic_string::*
+
     // @safe
     void use_utilities() {
         int a = 5;
@@ -287,6 +320,8 @@ fn test_utility_functions_in_safe_code() {
 fn test_optional_in_safe_code() {
     let code = r#"
     #include <optional>
+
+    // @external_unsafe: std::optional::*
 
     // @safe
     void use_optional() {
@@ -326,6 +361,19 @@ fn test_complex_std_usage() {
     #include <algorithm>
     #include <memory>
     #include <iostream>
+
+    // @external_unsafe: std::vector::*
+    // @external_unsafe: std::map::*
+    // @external_unsafe: std::string::*
+    // @external_unsafe: std::__cxx11::basic_string::*
+    // @external_unsafe: std::initializer_list::*
+    // @external_unsafe: sort
+    // @external_unsafe: find
+    // @external_unsafe: make_unique
+    // @external_unsafe: std::unique_ptr::*
+    // @external_unsafe: std::basic_ostream::*
+    // @external_unsafe: endl
+    // @external_unsafe: swap
 
     // @safe
     void complex_example() {

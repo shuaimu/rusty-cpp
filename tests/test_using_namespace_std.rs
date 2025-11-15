@@ -169,6 +169,9 @@ fn test_using_namespace_std_containers() {
 
 using namespace std;
 
+// Mark all vector methods as unsafe using wildcard pattern
+// @external_unsafe: std::vector::*
+
 // @safe
 void test_vector() {
     vector<int> vec;

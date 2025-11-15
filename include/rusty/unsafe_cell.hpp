@@ -28,11 +28,11 @@ private:
 public:
     // Constructors
     UnsafeCell() : value() {}
-    explicit UnsafeCell(T val) : value(val) {}
+    explicit UnsafeCell(T val) : value(std::move(val)) {}
 
     // Factory method (Rust-style)
     static UnsafeCell<T> new_(T value) {
-        return UnsafeCell<T>(value);
+        return UnsafeCell<T>(std::move(value));
     }
 
     // Get a raw mutable pointer to the inner value

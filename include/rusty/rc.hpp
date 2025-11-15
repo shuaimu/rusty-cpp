@@ -79,6 +79,7 @@ struct RcControlBlock : RcControlBlockBase {
     }
 };
 
+// @unsafe - Raw pointer operations and manual reference counting
 template<typename T>
 class Rc {
 public:
@@ -104,19 +105,27 @@ private:
     T* ptr_;                        // Pointer to T (or Base)
     RcControlBlockBase* control_;   // Type-erased control block
 
+    // @unsafe
     static void release_weak(RcControlBlockBase* cb) {
+        // @unsafe {
         if (cb && --cb->weak_count == 0) {
             delete cb;
         }
+        // }
     }
 
+    // @unsafe
     void increment_strong() {
+        // @unsafe {
         if (control_) {
             ++control_->strong_count;
         }
+        // }
     }
 
+    // @unsafe
     void decrement_strong() {
+        // @unsafe {
         if (!control_) {
             return;
         }
@@ -127,6 +136,7 @@ private:
         }
         control_ = nullptr;
         ptr_ = nullptr;
+        // }
     }
 
     // Private constructor from typed control block
@@ -147,18 +157,24 @@ public:
     Rc() : ptr_(nullptr), control_(nullptr) {}
 
     // Primary factory method - constructs T with given arguments
+    // @unsafe
     // @lifetime: owned
     template<typename... Args>
     static Rc<T> make(Args&&... args) {
+        // @unsafe {
         auto* cb = new RcControlBlock<T>(std::forward<Args>(args)...);
         return Rc<T>(cb, cb->value);
+        // }
     }
 
     // Rust-idiomatic factory method - Rc::new()
+    // @unsafe
     // @lifetime: owned
     static Rc<T> new_(T value) {
+        // @unsafe {
         auto* cb = new RcControlBlock<T>(std::move(value));
         return Rc<T>(cb, cb->value);
+        // }
     }
 
     // Copy constructor - increases reference count
@@ -191,7 +207,9 @@ public:
     }
 
     // Copy assignment
+    // @unsafe
     Rc& operator=(const Rc& other) {
+        // @unsafe {
         if (this != &other) {
             decrement_strong();
             ptr_ = other.ptr_;
@@ -199,20 +217,26 @@ public:
             increment_strong();
         }
         return *this;
+        // }
     }
 
     // Converting copy assignment
+    // @unsafe
     template<typename U, typename = std::enable_if_t<std::is_convertible<U*, T*>::value>>
     Rc& operator=(const Rc<U>& other) {
+        // @unsafe {
         decrement_strong();
         ptr_ = other.ptr_;
         control_ = other.control_;
         increment_strong();
         return *this;
+        // }
     }
 
     // Move assignment
+    // @unsafe
     Rc& operator=(Rc&& other) noexcept {
+        // @unsafe {
         if (this != &other) {
             decrement_strong();
             ptr_ = other.ptr_;
@@ -221,17 +245,21 @@ public:
             other.control_ = nullptr;
         }
         return *this;
+        // }
     }
 
     // Converting move assignment
+    // @unsafe
     template<typename U, typename = std::enable_if_t<std::is_convertible<U*, T*>::value>>
     Rc& operator=(Rc<U>&& other) noexcept {
+        // @unsafe {
         decrement_strong();
         ptr_ = other.ptr_;
         control_ = other.control_;
         other.ptr_ = nullptr;
         other.control_ = nullptr;
         return *this;
+        // }
     }
 
     // Destructor
@@ -240,23 +268,32 @@ public:
     }
 
     // Dereference - get immutable reference
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T& operator*() const {
+        // @unsafe {
         assert(ptr_ != nullptr);
         return *ptr_;
+        // }
     }
 
     // Arrow operator - access members (supports virtual dispatch!)
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T* operator->() const {
+        // @unsafe {
         assert(ptr_ != nullptr);
         return ptr_;
+        // }
     }
 
     // Get raw pointer
+    // @unsafe
     // @lifetime: (&'a) -> &'a
     const T* get() const {
+        // @unsafe {
         return ptr_;
+        // }
     }
 
     // Check if Rc contains a value
@@ -280,8 +317,11 @@ public:
     }
 
     // Clone - explicitly create a new Rc to the same value
+    // @unsafe
     Rc clone() const {
+        // @unsafe {
         return Rc(*this);
+        // }
     }
 
     // Try to get mutable reference if we're the only owner
@@ -304,18 +344,23 @@ public:
     }
 
     // Static cast to derived type - unsafe, like std::static_pointer_cast
+    // @unsafe
     template<typename U>
     Rc<U> static_pointer_cast() const {
+        // @unsafe {
         Rc<U> result;
         result.ptr_ = static_cast<U*>(ptr_);
         result.control_ = control_;
         result.increment_strong();
         return result;
+        // }
     }
 
     // Dynamic cast to derived type - returns empty Rc on failure
+    // @unsafe
     template<typename U>
     Rc<U> dynamic_pointer_cast() const {
+        // @unsafe {
         U* casted = dynamic_cast<U*>(ptr_);
         if (casted) {
             Rc<U> result;
@@ -325,6 +370,7 @@ public:
             return result;
         }
         return Rc<U>();
+        // }
     }
 
     // Private constructor for weak upgrade (with increment flag)

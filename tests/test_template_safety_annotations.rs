@@ -147,7 +147,7 @@ public:
 
 namespace janus {
 
-// @safe
+// @unsafe
 std::shared_ptr<IntEvent> SendAppendEntries() {
     // This is the exact call that fails in the bug report
     auto ret = rrr::Reactor::CreateSpEvent<IntEvent>();

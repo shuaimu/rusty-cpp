@@ -13,7 +13,7 @@ fn create_temp_cpp_file(code: &str) -> NamedTempFile {
 /// Helper function to run the analyzer on a file
 fn run_analyzer(file_path: &std::path::Path) -> (bool, String) {
     let output = Command::new("cargo")
-        .args(&["run", "--", file_path.to_str().unwrap()])
+        .args(&["run", "--", file_path.to_str().unwrap(), "-Iinclude"])
         .output()
         .expect("Failed to run analyzer");
 
@@ -90,19 +90,19 @@ fn test_cannot_move_while_borrowed_mut_ref() {
 #[test]
 fn test_move_allowed_after_reference_scope_ends() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test() {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
 
         {
-            const std::unique_ptr<int>& ref = ptr;
+            const rusty::Box<int>& ref = ptr;
             int x = *ref;
         }  // ref goes out of scope here
 
@@ -158,20 +158,20 @@ fn test_cannot_move_with_multiple_borrowers() {
 #[test]
 fn test_nested_scope_borrow_cleanup() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test() {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
 
         {
             {
-                const std::unique_ptr<int>& ref = ptr;
+                const rusty::Box<int>& ref = ptr;
                 int x = *ref;
             }  // ref goes out of scope
         }
@@ -195,19 +195,19 @@ fn test_nested_scope_borrow_cleanup() {
 #[test]
 fn test_conditional_borrow_cleanup() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test(bool condition) {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
 
         if (condition) {
-            const std::unique_ptr<int>& ref = ptr;
+            const rusty::Box<int>& ref = ptr;
             int x = *ref;
         }
 
@@ -305,29 +305,29 @@ fn test_loop_borrow_prevents_move() {
 #[test]
 fn test_sequential_borrows_in_scopes() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void use_ref(const std::unique_ptr<int>& ref) {
+    void use_ref(const rusty::Box<int>& ref) {
         int x = *ref;
     }
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test() {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
 
         {
-            const std::unique_ptr<int>& ref1 = ptr;
+            const rusty::Box<int>& ref1 = ptr;
             use_ref(ref1);
         }  // ref1 dies
 
         {
-            const std::unique_ptr<int>& ref2 = ptr;
+            const rusty::Box<int>& ref2 = ptr;
             use_ref(ref2);
         }  // ref2 dies
 
@@ -385,16 +385,16 @@ fn test_borrow_in_outer_scope_prevents_move() {
 #[test]
 fn test_can_move_when_never_borrowed() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test() {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
         int x = *ptr;
 
         // OK: No references created
@@ -452,19 +452,19 @@ fn test_independent_borrows() {
 #[test]
 fn test_reference_lifetime_ends_same_scope() {
     let code = r#"
-    #include <memory>
+    #include <rusty/box.hpp>
 
     // @safe
-    void take_ownership(std::unique_ptr<int> ptr) {
+    void take_ownership(rusty::Box<int> ptr) {
         int x = *ptr;
     }
 
     // @safe
     void test() {
-        std::unique_ptr<int> ptr(new int(42));
+        rusty::Box<int> ptr = rusty::Box<int>::make(42);
 
         {
-            const std::unique_ptr<int>& ref = ptr;
+            const rusty::Box<int>& ref = ptr;
         }  // ref lifetime ends here
 
         // OK: ref is out of scope

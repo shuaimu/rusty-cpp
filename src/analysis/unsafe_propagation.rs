@@ -369,55 +369,6 @@ fn strip_std_prefix(func_name: &str) -> &str {
 }
 
 /// Check if function is a safe C++ stream operation
-fn is_safe_stream_function(name: &str) -> bool {
-    matches!(name,
-        "cout" | "cin" | "cerr" | "clog" |
-        "endl" | "flush" | "getline"
-    )
-}
-
-/// Check if function is a safe algorithm
-fn is_safe_algorithm(name: &str) -> bool {
-    matches!(name,
-        // Searching
-        "find" | "find_if" | "find_if_not" |
-        "count" | "count_if" |
-        "all_of" | "any_of" | "none_of" |
-        "for_each" |
-        // Modifying
-        "copy" | "copy_if" | "copy_n" |
-        "fill" | "fill_n" |
-        "transform" | "generate" |
-        "remove" | "remove_if" |  // Note: these are NOT moves!
-        "replace" | "replace_if" |
-        "reverse" | "rotate" | "unique" |
-        // Sorting
-        "sort" | "stable_sort" | "partial_sort" |
-        "is_sorted" | "nth_element" |
-        // Binary search
-        "binary_search" | "lower_bound" | "upper_bound" | "equal_range" |
-        // Min/max
-        "min" | "max" | "minmax" |
-        "min_element" | "max_element" |
-        // Numeric
-        "accumulate" | "inner_product" | "adjacent_difference" | "partial_sum"
-    )
-}
-
-/// Check if function is a safe container method
-fn is_safe_container_method(name: &str) -> bool {
-    matches!(name,
-        "push_back" | "pop_back" | "emplace_back" |
-        "push_front" | "pop_front" | "emplace_front" |
-        "insert" | "emplace" | "erase" | "clear" |
-        "size" | "empty" | "capacity" | "reserve" | "resize" |
-        "at" | "front" | "back" | "data" |
-        "begin" | "end" | "rbegin" | "rend" |
-        "cbegin" | "cend" | "crbegin" | "crend" |
-        // Map/set specific
-        "count" | "contains"
-    )
-}
 
 /// Check if function is a safe operator
 fn is_safe_operator(name: &str) -> bool {
@@ -438,58 +389,26 @@ fn is_standard_safe_function(func_name: &str) -> bool {
     // Strip std:: prefix for more general matching
     let stripped = strip_std_prefix(func_name);
 
+    // Also get just the method name (part after last ::) for matching class methods
+    let method_name = func_name.rfind("::").map(|pos| &func_name[pos + 2..]).unwrap_or(func_name);
+
     // Check operators first (they don't have std:: prefix)
+    // Also check if the function name ends with an operator (for std::function::operator=)
     if is_safe_operator(func_name) {
         return true;
     }
 
-    // Check categorized functions
-    if is_safe_stream_function(stripped) ||
-       is_safe_algorithm(stripped) ||
-       is_safe_container_method(stripped) {
-        return true;
+    // Handle qualified operator names like std::function::operator=
+    if let Some(op_pos) = func_name.rfind("::operator") {
+        let op_name = &func_name[op_pos + 2..]; // Get "operator..." part
+        if is_safe_operator(op_name) {
+            return true;
+        }
     }
 
-    // Remaining specific functions (not categorized above)
-    matches!(stripped,
-        // C I/O
-        "printf" | "scanf" | "puts" | "gets" |
-        "malloc" | "free" | "new" | "delete" |
-        "memcpy" | "memset" | "strcpy" |
-
-        // Math functions
-        "sin" | "cos" | "sqrt" | "pow" | "abs" | "floor" | "ceil" | "round" |
-
-        // C++ utility functions
-        "move" | "forward" | "swap" | "exchange" |
-
-        // Smart pointers (only operations that don't expose raw pointers)
-        "make_unique" | "make_shared" |
-        "reset" |  // Replaces pointer, safe if given smart pointer
-        "use_count" | "unique" |  // Query operations, return integers
-        // NOTE: get() and release() return raw pointers → UNSAFE
-
-        // Type Utilities (only truly safe ones)
-        "as_const" | "to_underlying" |
-
-        // String methods
-        "length" | "c_str" | "substr" | "append" |
-        "compare" | "rfind" | "find_first_of" | "find_last_of" |
-
-        // Utility
-        "make_pair" | "make_tuple" | "get" |
-
-        // Optional/variant (C++17)
-        "make_optional" | "value" | "value_or" | "has_value" |
-        "holds_alternative" | "visit" |
-
-        // String conversion
-        "to_string" | "stoi" | "stol" | "stod"
-    )
-    // Note: This whitelist allows common std:: functions to be used in @safe code
-    // without requiring explicit @unsafe blocks. The strip_std_prefix() function
-    // handles matching both "func" and "std::func" automatically.
-    // Functions are included only if their safety can be verified by the borrow checker.
+    // Keep ONLY std::move and std::forward whitelisted
+    // All other functions must be explicitly marked @safe or called from @unsafe blocks
+    matches!(stripped, "move" | "forward") || matches!(method_name, "move" | "forward")
 }
 
 #[cfg(test)]
@@ -520,22 +439,22 @@ mod tests {
     }
     
     #[test]
-    fn test_safe_function_allowed() {
+    fn test_move_function_allowed() {
         let stmt = Statement::FunctionCall {
-            name: "printf".to_string(),
-            args: vec![Expression::Literal("test".to_string())],
+            name: "std::move".to_string(),
+            args: vec![Expression::Variable("x".to_string())],
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 10,
                 column: 5,
             },
         };
-        
+
         let safety_context = SafetyContext::new();
         let known_safe = HashSet::new();
-        
+
         let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
-        assert!(error.is_none(), "printf should be considered safe");
+        assert!(error.is_none(), "std::move should be whitelisted in safe code");
     }
     
     #[test]

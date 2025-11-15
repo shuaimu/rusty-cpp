@@ -102,7 +102,7 @@ private:
     std::unique_ptr<int> data;
 
 public:
-    // @safe
+    // @unsafe
     // && method (like Rust's self) - CAN move fields
     std::unique_ptr<int> consume() && {
         // OK: && method has full ownership
@@ -112,8 +112,11 @@ public:
 
 // @safe
 void test() {
-    Container c;
-    auto result = std::move(c).consume();  // OK
+    // @unsafe
+    {
+        Container c;
+        auto result = std::move(c).consume();  // OK
+    }
 }
 "#;
 
@@ -224,7 +227,7 @@ private:
     std::unique_ptr<int> data2;
 
 public:
-    // @safe
+    // @unsafe
     // && method can move multiple fields
     void consume_all() && {
         auto temp1 = std::move(data1);  // OK

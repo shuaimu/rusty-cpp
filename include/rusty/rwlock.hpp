@@ -7,6 +7,7 @@
 
 namespace rusty {
 
+// @unsafe - Interior mutability primitive for thread synchronization
 // RwLock - Read-Write lock allowing multiple readers or single writer
 // Matches Rust's std::sync::RwLock behavior
 template<typename T>

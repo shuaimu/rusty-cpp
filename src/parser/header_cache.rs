@@ -53,14 +53,25 @@ impl HeaderCache {
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
         debug_println!("DEBUG HEADER: Parsing header file: {}", header_path.display());
-        
+
         // Skip if already processed
         if self.processed_headers.iter().any(|p| p == header_path) {
             debug_println!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
         }
         
-        // First, try to parse any external annotations from the header file
+        // Parse safety annotations directly from the header file (before libclang parsing)
+        // This ensures we get regular C++ comments (// and /* */) not just Doxygen comments
+        if let Ok(header_safety_context) = super::safety_annotations::parse_safety_annotations(header_path) {
+            // Merge the safety annotations from this header into our cache
+            for (func_sig, safety_mode) in &header_safety_context.function_overrides {
+                debug_println!("DEBUG HEADER: Adding safety annotation for '{}': {:?}", func_sig.name, safety_mode);
+                self.safety_annotations.insert(func_sig.name.clone(), *safety_mode);
+            }
+            debug_println!("DEBUG HEADER: Parsed {} safety annotations from header file", header_safety_context.function_overrides.len());
+        }
+
+        // Also parse external annotations from the header file
         if let Ok(content) = fs::read_to_string(header_path) {
             // Parse external annotations from the file content
             // These might be in comments or in the file directly
@@ -101,8 +112,31 @@ impl HeaderCache {
         for (name, mode) in &self.safety_annotations {
             debug_println!("DEBUG HEADER:   - {} : {:?}", name, mode);
         }
-        
+
+        // Mark as processed BEFORE parsing includes to avoid infinite recursion
         self.processed_headers.push(header_path.to_path_buf());
+
+        // Recursively parse includes from this header
+        if let Ok(content) = fs::read_to_string(header_path) {
+            let (quoted_includes, angle_includes) = extract_includes(&content);
+
+            // Process quoted includes (search relative to header file first)
+            for include_path in quoted_includes {
+                if let Some(resolved) = self.resolve_include(&include_path, header_path, true) {
+                    // Recursively parse the included header
+                    let _ = self.parse_header(&resolved);
+                }
+            }
+
+            // Process angle bracket includes (search include paths only)
+            for include_path in angle_includes {
+                if let Some(resolved) = self.resolve_include(&include_path, header_path, false) {
+                    // Recursively parse the included header
+                    let _ = self.parse_header(&resolved);
+                }
+            }
+        }
+
         Ok(())
     }
     

@@ -1,4 +1,5 @@
 use crate::parser::{Statement, Expression, Function};
+use crate::parser::safety_annotations::SafetyMode;
 
 /// Check for unsafe pointer operations in a function's AST
 #[allow(dead_code)]
@@ -9,9 +10,12 @@ pub fn check_function_for_pointers(_function: &crate::ir::IrFunction) -> Result<
 }
 
 /// Check for unsafe pointer operations in a parsed function
-pub fn check_parsed_function_for_pointers(function: &Function) -> Vec<String> {
+pub fn check_parsed_function_for_pointers(function: &Function, function_safety: SafetyMode) -> Vec<String> {
     let mut errors = Vec::new();
     let mut unsafe_depth = 0;
+
+    // If the function itself is marked @unsafe, the entire function body is in an unsafe context
+    let function_is_unsafe = function_safety == SafetyMode::Unsafe;
 
     for stmt in &function.body {
         // Track unsafe scope depth
@@ -29,8 +33,8 @@ pub fn check_parsed_function_for_pointers(function: &Function) -> Vec<String> {
             _ => {}
         }
 
-        // Skip checking if we're in an unsafe block
-        let in_unsafe_scope = unsafe_depth > 0;
+        // Skip checking if we're in an unsafe block OR the function itself is marked @unsafe
+        let in_unsafe_scope = unsafe_depth > 0 || function_is_unsafe;
 
         if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope) {
             errors.push(format!("In function '{}': {}", function.name, error));
