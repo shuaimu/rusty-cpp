@@ -880,12 +880,34 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     if Some(i) == name_providing_child_idx {
                         // For MemberRefExpr, extract the receiver from its children
                         if c.get_kind() == EntityKind::MemberRefExpr {
-                            debug_println!("DEBUG AST: Extracting receiver from MemberRefExpr children");
-                            for member_child in c.get_children() {
-                                if let Some(receiver_expr) = extract_expression(&member_child) {
-                                    debug_println!("DEBUG AST: Found receiver: {:?}", receiver_expr);
-                                    args.push(receiver_expr);
-                                    break; // Only take the first child (the receiver)
+                            debug_println!("DEBUG AST: Extracting receiver from MemberRefExpr");
+                            let member_children = c.get_children();
+                            if !member_children.is_empty() {
+                                // Has children - extract receiver from first child
+                                for member_child in member_children {
+                                    if let Some(receiver_expr) = extract_expression(&member_child) {
+                                        debug_println!("DEBUG AST: Found receiver from child: {:?}", receiver_expr);
+                                        args.push(receiver_expr);
+                                        break; // Only take the first child (the receiver)
+                                    }
+                                }
+                            } else {
+                                // No children - the receiver is a simple variable/parameter
+                                // Extract it from the MemberRefExpr's name or display name
+                                if let Some(member_name) = c.get_name() {
+                                    // The name might be like "m" for m.content_size()
+                                    // But we need to be careful - the name might be the method name
+                                    // Check if this is different from our extracted function name
+                                    if member_name != name && !name.ends_with(&member_name) {
+                                        debug_println!("DEBUG AST: Found receiver from MemberRefExpr name: {}", member_name);
+                                        args.push(Expression::Variable(member_name));
+                                    }
+                                } else if let Some(display) = c.get_display_name() {
+                                    // Try display name as fallback
+                                    if display != name && !name.ends_with(&display) && !display.is_empty() {
+                                        debug_println!("DEBUG AST: Found receiver from MemberRefExpr display: {}", display);
+                                        args.push(Expression::Variable(display));
+                                    }
                                 }
                             }
                         }
@@ -1284,6 +1306,12 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 debug_println!("DEBUG AST: Extracted receiver from MemberRefExpr: {:?}", recv_expr);
                                 args.push(recv_expr);
                             }
+                        } else {
+                            // No children - the receiver might be implicit or a simple variable
+                            // For a MemberRefExpr like m.content_size(), we need to extract "m"
+                            // Unfortunately libclang doesn't always give us this directly
+                            // We'll need to handle this case differently
+                            debug_println!("DEBUG AST: MemberRefExpr has no children, cannot extract receiver");
                         }
                     }
                     // Skip the name-providing child itself
