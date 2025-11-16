@@ -62,13 +62,15 @@ impl HeaderCache {
         
         // Parse safety annotations directly from the header file (before libclang parsing)
         // This ensures we get regular C++ comments (// and /* */) not just Doxygen comments
+        // Store temporarily - we'll qualify the names after LibClang parsing
+        let mut unqualified_annotations = HashMap::new();
         if let Ok(header_safety_context) = super::safety_annotations::parse_safety_annotations(header_path) {
-            // Merge the safety annotations from this header into our cache
+            // Store unqualified annotations temporarily
             for (func_sig, safety_mode) in &header_safety_context.function_overrides {
-                debug_println!("DEBUG HEADER: Adding safety annotation for '{}': {:?}", func_sig.name, safety_mode);
-                self.safety_annotations.insert(func_sig.name.clone(), *safety_mode);
+                debug_println!("DEBUG HEADER: Found unqualified annotation for '{}': {:?}", func_sig.name, safety_mode);
+                unqualified_annotations.insert(func_sig.name.clone(), *safety_mode);
             }
-            debug_println!("DEBUG HEADER: Parsed {} safety annotations from header file", header_safety_context.function_overrides.len());
+            debug_println!("DEBUG HEADER: Parsed {} unqualified safety annotations from header file", header_safety_context.function_overrides.len());
         }
 
         // Also parse external annotations from the header file
@@ -107,8 +109,41 @@ impl HeaderCache {
         // Extract function signatures with annotations
         let root = tu.get_entity();
         self.visit_entity_for_signatures(&root);
-        
-        debug_println!("DEBUG HEADER: Found {} safety annotations in header", self.safety_annotations.len());
+
+        // Now qualify the unqualified annotations using the qualified names from LibClang
+        // Build a map from simple method names to their qualified names
+        let mut simple_to_qualified: HashMap<String, Vec<String>> = HashMap::new();
+        for qualified_name in self.safety_annotations.keys() {
+            // Extract the simple name (last component after ::)
+            if let Some(simple_name) = qualified_name.split("::").last() {
+                simple_to_qualified
+                    .entry(simple_name.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(qualified_name.clone());
+            }
+        }
+
+        // Now qualify the unqualified annotations
+        for (simple_name, safety_mode) in &unqualified_annotations {
+            // Check if this simple name has qualified versions from LibClang
+            if let Some(qualified_names) = simple_to_qualified.get(simple_name) {
+                // This is a method - add annotation for all qualified versions
+                for qualified in qualified_names {
+                    debug_println!("DEBUG HEADER: Qualifying '{}' -> '{}': {:?}",
+                                 simple_name, qualified, safety_mode);
+                    // Update the annotation (LibClang may have found it too, but comment annotation takes precedence)
+                    self.safety_annotations.insert(qualified.clone(), *safety_mode);
+                }
+            } else {
+                // Not a method (no qualified name found), just a plain function
+                // Keep the simple name
+                debug_println!("DEBUG HEADER: Adding plain function annotation for '{}': {:?}",
+                             simple_name, safety_mode);
+                self.safety_annotations.insert(simple_name.clone(), *safety_mode);
+            }
+        }
+
+        debug_println!("DEBUG HEADER: Found {} safety annotations in header (after qualification)", self.safety_annotations.len());
         for (name, mode) in &self.safety_annotations {
             debug_println!("DEBUG HEADER:   - {} : {:?}", name, mode);
         }

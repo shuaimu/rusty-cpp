@@ -65,19 +65,12 @@ function(add_borrow_check SOURCE_FILE)
         list(APPEND INCLUDE_FLAGS "-I${DIR}")
     endforeach()
     
-    # Create custom command for borrow checking
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
+    # NOTE: We use add_custom_target with COMMAND instead of add_custom_command
+    # so that borrow checking always runs on every build (see note in add_borrow_check_target)
+    add_custom_target(${CHECK_NAME} ALL
         COMMAND ${CPP_BORROW_CHECKER} ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} ${INCLUDE_FLAGS}
-        COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
         COMMENT "Borrow checking ${SOURCE_FILE}"
         VERBATIM
-    )
-    
-    # Add to custom target
-    add_custom_target(${CHECK_NAME} ALL
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
     )
     
     # Make it fatal if requested
@@ -120,18 +113,16 @@ function(add_borrow_check_target TARGET_NAME)
             # Get absolute path for the source file
             get_filename_component(SOURCE_ABS ${SOURCE} ABSOLUTE)
             
-            add_custom_command(
-                OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
+            # NOTE: We use add_custom_target with COMMAND instead of add_custom_command
+            # so that borrow checking always runs on every build. This is necessary because:
+            # 1. Changes to header files (.hpp) need to trigger re-checking
+            # 2. CMake's automatic dependency tracking only works for compilation, not custom commands
+            # 3. Borrow checking is fast enough that running it every time is acceptable
+            # TODO: Implement proper dependency tracking using DEPFILE in the future
+            add_custom_target(${CHECK_NAME}
                 COMMAND ${CPP_BORROW_CHECKER} ${SOURCE_ABS} ${INCLUDE_FLAGS}
-                COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
-                DEPENDS ${SOURCE_ABS}
                 COMMENT "Borrow checking ${SOURCE} (from ${TARGET_NAME})"
                 VERBATIM
-            )
-            
-            # Add dependency to main target
-            add_custom_target(${CHECK_NAME}
-                DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${CHECK_NAME}.stamp
             )
             
             add_dependencies(${TARGET_NAME} ${CHECK_NAME})
