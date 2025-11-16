@@ -105,6 +105,28 @@ impl SafetyContext {
             }
         }
 
+        // If the function is a method (contains "::"), check if the class is annotated
+        // E.g., for "rrr::Alarm::add", check if "rrr::Alarm" or "Alarm" is annotated
+        if func_name.contains("::") {
+            // Try to extract the class name by removing the method name
+            if let Some(last_colon) = func_name.rfind("::") {
+                let class_name = &func_name[..last_colon];
+
+                // Check if the class has an annotation
+                let class_query = FunctionSignature::from_name_only(class_name.to_string());
+                for (sig, mode) in &self.function_overrides {
+                    if sig.matches(&class_query) {
+                        return *mode;
+                    }
+
+                    // Also check suffix matching for the class
+                    if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
+                        return *mode;
+                    }
+                }
+            }
+        }
+
         // Fall back to file default
         self.file_default
     }

@@ -94,6 +94,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     header_cache.set_include_paths(all_include_paths.clone());
     header_cache.parse_includes_from_source(path)?;
 
+    // IMPORTANT: Also parse the source file itself for lifetime annotations
+    // Without this, lifetime annotations in .cc/.cpp files are not recognized
+    header_cache.parse_header(path)?;
+
     // Also parse external annotations from the source file itself (not just headers)
     // This allows annotations like @external: { function: [unsafe, ...] } in .cc/.cpp files
     if let Ok(source_content) = std::fs::read_to_string(path) {
