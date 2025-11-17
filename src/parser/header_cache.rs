@@ -124,7 +124,9 @@ impl HeaderCache {
         }
 
         // Now qualify the unqualified annotations
+        debug_println!("DEBUG HEADER: Qualifying {} unqualified annotations", unqualified_annotations.len());
         for (simple_name, safety_mode) in &unqualified_annotations {
+            debug_println!("DEBUG HEADER: Processing unqualified '{}': {:?}", simple_name, safety_mode);
             // Check if this simple name has qualified versions from LibClang
             if let Some(qualified_names) = simple_to_qualified.get(simple_name) {
                 // This is a method - add annotation for all qualified versions

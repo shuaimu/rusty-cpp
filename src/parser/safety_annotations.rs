@@ -130,6 +130,41 @@ impl SafetyContext {
         // Fall back to file default
         self.file_default
     }
+
+    /// Get the safety mode of a specific class
+    /// This is similar to get_function_safety but specifically handles class-level annotations
+    pub fn get_class_safety(&self, class_name: &str) -> SafetyMode {
+        let query = FunctionSignature::from_name_only(class_name.to_string());
+
+        debug_println!("DEBUG SAFETY: Looking up class '{}'", class_name);
+        debug_println!("DEBUG SAFETY: Stored overrides ({} total):", self.function_overrides.len());
+        for (sig, mode) in &self.function_overrides {
+            debug_println!("DEBUG SAFETY:   - '{}' -> {:?}", sig.name, mode);
+        }
+
+        // Check for exact match
+        for (sig, mode) in &self.function_overrides {
+            if sig.matches(&query) {
+                debug_println!("DEBUG SAFETY: Exact match for class '{}' -> {:?}", class_name, mode);
+                return *mode;
+            }
+
+            // Check suffix matching (handles namespace::Class vs Class)
+            if sig.name.ends_with(&format!("::{}", class_name)) {
+                debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
+                return *mode;
+            }
+
+            if class_name.ends_with(&format!("::{}", sig.name)) {
+                debug_println!("DEBUG SAFETY: Prefix match for class '{}' (query has more qualifiers) -> {:?}", class_name, mode);
+                return *mode;
+            }
+        }
+
+        debug_println!("DEBUG SAFETY: No match for class '{}', using file default: {:?}", class_name, self.file_default);
+        // Fall back to file default
+        self.file_default
+    }
 }
 
 /// Parse safety annotations from a C++ file using the unified rule:
@@ -273,8 +308,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
 
 /// Check if a line looks like a class/struct declaration
 fn is_class_declaration(line: &str) -> bool {
-    // Check if line contains class/struct keyword
-    let has_class = line.contains(" class ") || line.contains(" struct ");
+    // Check if line contains class/struct keyword (at start or with space before)
+    let has_class = line.starts_with("class ") || line.starts_with("struct ") ||
+                    line.contains(" class ") || line.contains(" struct ");
     // Check if line contains opening brace (may be after newlines in accumulated_line)
     let has_brace = line.contains('{');
     has_class && has_brace
@@ -285,18 +321,32 @@ fn extract_class_name(line: &str) -> Option<String> {
     // Look for "class ClassName" or "struct StructName"
     // Handle multi-line declarations by replacing newlines with spaces
     let normalized = line.replace('\n', " ").replace('\r', " ");
-    let keyword = if normalized.contains(" class ") { " class " } else { " struct " };
 
-    if let Some(pos) = normalized.find(keyword) {
-        let after_keyword = &normalized[pos + keyword.len()..];
-        // Class name is the first word after "class" or "struct"
-        let parts: Vec<&str> = after_keyword.split_whitespace().collect();
-        if let Some(name) = parts.first() {
-            // Remove any template parameters or inheritance markers
-            let name = name.split('<').next().unwrap_or(name);
-            let name = name.split(':').next().unwrap_or(name);
-            let name = name.split('{').next().unwrap_or(name);
-            return Some(name.to_string());
+    // Try to find "class " or "struct " - prioritize start of line to avoid matching "friend class"
+    // Check patterns in priority order: start first, then middle
+    let class_patterns = [
+        ("class ", "class "),      // "class " at the start (highest priority)
+        ("struct ", "struct "),    // "struct " at the start
+        (" class ", " class "),    // " class " in the middle (lower priority)
+        (" struct ", " struct "),  // " struct " in the middle
+    ];
+
+    for (search_pattern, keyword) in &class_patterns {
+        if let Some(pos) = normalized.find(search_pattern) {
+            let after_keyword = &normalized[pos + keyword.len()..];
+            // Class name is the first word after "class" or "struct"
+            let parts: Vec<&str> = after_keyword.split_whitespace().collect();
+            if let Some(name) = parts.first() {
+                // Remove any template parameters or inheritance markers
+                let name = name.split('<').next().unwrap_or(name);
+                let name = name.split(':').next().unwrap_or(name);
+                let name = name.split('{').next().unwrap_or(name);
+                // Sanity check: the extracted name shouldn't be "rusty" (that's from "friend class rusty::Arc")
+                // This is a workaround for accumulated_line containing the full class body
+                if name != "rusty" && name != "Arc" && name != "std" && !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
         }
     }
     None

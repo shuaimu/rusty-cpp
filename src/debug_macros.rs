@@ -1,14 +1,7 @@
-// Macro for debug logging - only active in debug builds
+// Macro for debug logging - disabled in release builds
 #[macro_export]
-#[cfg(debug_assertions)]
 macro_rules! debug_println {
     ($($arg:tt)*) => {
-        eprintln!($($arg)*);
+        // Debug output disabled
     };
-}
-
-#[macro_export]
-#[cfg(not(debug_assertions))]
-macro_rules! debug_println {
-    ($($arg:tt)*) => {};
 }
