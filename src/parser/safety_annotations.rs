@@ -4,6 +4,33 @@ use std::io::{BufRead, BufReader};
 use clang::Entity;
 use crate::debug_println;
 
+/// Helper function to check if a string starts with a safety annotation
+/// Accepts annotations with any suffix: @safe, @safe-XXX, @safe: note, etc.
+/// But rejects partial matches like @safety or @safeguard
+/// The annotation MUST be at the start of the text (already trimmed)
+fn contains_annotation(text: &str, annotation: &str) -> bool {
+    // The annotation must be at the start of the (already trimmed) text
+    if !text.starts_with(annotation) {
+        return false;
+    }
+
+    // Check what comes AFTER the annotation
+    let after_annotation = annotation.len();
+    if after_annotation >= text.len() {
+        // End of string - exact match
+        return true;
+    }
+
+    // Check the next character - it should NOT be alphanumeric
+    // This prevents matching @safety when looking for @safe
+    let next_char = text.chars().nth(after_annotation);
+    if let Some(ch) = next_char {
+        !ch.is_alphanumeric()
+    } else {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SafetyMode {
     Safe,       // Enforce borrow checking, strict call rules
@@ -194,9 +221,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
             // Check for annotations in multi-line comments (must be on their own)
             let cleaned = trimmed.trim_start_matches('*').trim();
-            if cleaned == "@safe" {
+            if contains_annotation(cleaned, "@safe") {
                 pending_annotation = Some(SafetyMode::Safe);
-            } else if cleaned == "@unsafe" {
+            } else if contains_annotation(cleaned, "@unsafe") {
                 pending_annotation = Some(SafetyMode::Unsafe);
             }
             continue;
@@ -208,9 +235,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             // Check if it's a single-line /* @safe */ or /* @unsafe */ comment
             if let Some(end_pos) = trimmed.find("*/") {
                 let comment_content = trimmed[2..end_pos].trim();
-                if comment_content == "@safe" {
+                if contains_annotation(comment_content, "@safe") {
                     pending_annotation = Some(SafetyMode::Safe);
-                } else if comment_content == "@unsafe" {
+                } else if contains_annotation(comment_content, "@unsafe") {
                     pending_annotation = Some(SafetyMode::Unsafe);
                 }
                 in_comment_block = false;
@@ -222,9 +249,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         if trimmed.starts_with("//") {
             // Only look for annotations that are word boundaries (not part of other text)
             let comment_text = trimmed[2..].trim();
-            if comment_text == "@safe" || comment_text.starts_with("@safe ") {
+            if contains_annotation(comment_text, "@safe") {
                 pending_annotation = Some(SafetyMode::Safe);
-            } else if comment_text == "@unsafe" || comment_text.starts_with("@unsafe ") {
+            } else if contains_annotation(comment_text, "@unsafe") {
                 pending_annotation = Some(SafetyMode::Unsafe);
             }
             continue;
