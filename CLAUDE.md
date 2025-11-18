@@ -94,14 +94,21 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 - ✅ **Three-state safety annotation system**
   - **Three states**: `@safe`, `@unsafe`, and undeclared (default)
   - **Single rule**: Annotations only attach to the NEXT code element
+  - **Annotation suffixes**: Annotations support any suffix (`@safe-note`, `@unsafe: reason`, etc.)
   - C++ files are undeclared by default (not checked, but distinct from unsafe)
   - **Calling rules matrix**:
     - `@safe` → can call: @safe ✅, @unsafe ✅, undeclared ❌
     - `@unsafe` → can call: @safe ✅, @unsafe ✅, undeclared ✅
     - `undeclared` → can call: @safe ✅, @unsafe ✅, undeclared ✅
   - **Key insight**: Undeclared functions can call other undeclared functions, enabling gradual migration
-  - **Namespace-level**: `// @safe` before namespace applies to entire namespace contents
-  - **Function-level**: `// @safe` before function enables checking for that function only
+  - **Annotation hierarchy** (lower level overrides higher level):
+    1. **Function-level**: `// @safe` before function - highest priority
+    2. **Class-level**: `// @safe` before class - overrides namespace
+    3. **Namespace-level**: `// @safe` before namespace - lowest priority
+  - **Per-file scope**: Namespace annotations are **per-file**, not global
+    - Same namespace can have `@safe` in one file, `@unsafe` in another
+    - Each file's annotation only affects code in that file
+    - Enables gradual migration: annotate files independently
   - **Header propagation**: Annotations in headers automatically apply to implementations
   - STL and external libraries are undeclared by default (must be explicitly marked)
   - Creates "audit ratchet" - forces explicit safety decisions
@@ -394,6 +401,96 @@ void swap_types(T& a, U& b) {
     // Move analysis works with multiple type params
 }
 ```
+
+### Annotation Hierarchy and Per-File Scope
+
+The safety annotation system has three levels, with lower levels overriding higher levels:
+
+```cpp
+// ============================================================================
+// ANNOTATION HIERARCHY: Function > Class > Namespace
+// ============================================================================
+
+// @safe
+namespace myapp {
+
+// @unsafe - Class annotation overrides namespace
+class UnsafeClass {
+public:
+    // @safe - Function annotation overrides class
+    void safe_method() {
+        int x = 42;  // This is safe despite being in unsafe class
+    }
+
+    void unsafe_method() {
+        int* ptr = nullptr;  // OK - inherits unsafe from class
+    }
+};
+
+// @safe - Inherits from namespace
+class SafeClass {
+public:
+    void safe_method() {
+        int x = 42;  // Safe - inherits from class
+    }
+
+    // @unsafe - Function overrides class
+    void unsafe_method() {
+        int* ptr = nullptr;  // OK - function is unsafe
+    }
+};
+
+} // namespace myapp
+```
+
+**Annotation Suffixes** - Annotations support any suffix for documentation:
+```cpp
+// @safe-verified on 2025-01-17
+void audited_function() { }
+
+// @unsafe: uses raw pointers for performance
+void performance_critical() { }
+
+// @safe, reviewed by security team
+void reviewed_function() { }
+```
+
+**Per-File Namespace Annotations** - Namespace annotations are file-scoped:
+
+```cpp
+// ============================================================================
+// File: legacy_code.cpp
+// ============================================================================
+// @unsafe
+namespace myapp {
+
+void old_unsafe_code() {
+    int* ptr = nullptr;
+    *ptr = 42;  // OK - this file marks namespace as unsafe
+}
+
+} // namespace myapp
+
+
+// ============================================================================
+// File: new_code.cpp (same namespace, different file)
+// ============================================================================
+// @safe
+namespace myapp {
+
+void new_safe_code() {
+    int x = 42;  // This file marks namespace as safe
+    // Cannot use raw pointers here
+}
+
+} // namespace myapp
+```
+
+**Key Insights:**
+- Each `.cpp` file can annotate the same namespace differently
+- Enables **gradual migration**: migrate files one at a time
+- Namespace annotations only affect code in that specific file
+- Different modules of the same namespace can have different safety levels
 
 ## Lifetime Annotation Syntax
 
