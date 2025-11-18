@@ -93,7 +93,7 @@ void demo_option() {
     
     // Check if value exists
     if (some_value.is_some()) {
-        printf("Has value: %d\n", some_value.unwrap_ref());
+        printf("Has value: %d\n", some_value.as_ref().unwrap());
     }
     
     if (no_value.is_none()) {
