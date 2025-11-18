@@ -4,7 +4,7 @@ use std::path::Path;
 fn main() {
     // Get the target OS
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    
+
     // Platform-specific configuration
     match target_os.as_str() {
         "macos" => {
@@ -14,18 +14,18 @@ fn main() {
                 "/opt/homebrew/lib",
                 "/usr/local/lib",
             ];
-            
+
             for path in &llvm_paths {
                 if Path::new(path).exists() {
                     println!("cargo:rustc-link-search=native={}", path);
-                    
+
                     // Use @rpath for macOS to make binaries relocatable
                     println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
                     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path);
                     break;
                 }
             }
-            
+
             // Link against libclang dynamically with fallback paths
             println!("cargo:rustc-link-lib=dylib=clang");
         }
@@ -38,7 +38,7 @@ fn main() {
                 "/usr/lib/x86_64-linux-gnu",
                 "/usr/local/lib",
             ];
-            
+
             for path in &llvm_paths {
                 if Path::new(path).exists() {
                     println!("cargo:rustc-link-search=native={}", path);
@@ -56,7 +56,7 @@ fn main() {
         }
         _ => {}
     }
-    
+
     // Rerun if environment changes
     println!("cargo:rerun-if-env-changed=LLVM_PATH");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");

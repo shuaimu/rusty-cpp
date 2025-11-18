@@ -1002,11 +1002,24 @@ fn convert_statement(
                                 match inner.as_ref() {
                                     crate::parser::Expression::Variable(var) => {
                                         debug_println!("DEBUG IR: Move(Variable) in assignment: {}", var);
+
+                                        // CRITICAL FIX: When Move is the receiver of a method call (first argument),
+                                        // use the temporary as the receiver instead of the original variable.
+                                        // This allows calling && methods on rvalue expressions like std::move(c).consume()
+                                        let temp_name = format!("_moved_{}", var);
                                         statements.push(IrStatement::Move {
                                             from: var.clone(),
-                                            to: format!("_moved_{}", var),
+                                            to: temp_name.clone(),
                                         });
-                                        arg_names.push(var.clone());
+
+                                        if is_method_call && i == 0 {
+                                            // Use the temporary as the receiver for rvalue method calls
+                                            debug_println!("DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'", temp_name, var);
+                                            arg_names.push(temp_name);
+                                        } else {
+                                            // For non-receiver arguments, use the original variable name
+                                            arg_names.push(var.clone());
+                                        }
                                     }
                                     crate::parser::Expression::MemberAccess { object, field } => {
                                         debug_println!("DEBUG IR: Move(MemberAccess) in assignment: {}.{}",
@@ -1177,12 +1190,24 @@ fn convert_statement(
                         match inner.as_ref() {
                             crate::parser::Expression::Variable(var) => {
                                 debug_println!("DEBUG IR: Move(Variable) as direct argument: {}", var);
-                                // First mark the variable as moved
+
+                                // CRITICAL FIX: When Move is the receiver of a method call (first argument),
+                                // use the temporary as the receiver instead of the original variable.
+                                // This allows calling && methods on rvalue expressions like std::move(c).consume()
+                                let temp_name = format!("_moved_{}", var);
                                 statements.push(IrStatement::Move {
                                     from: var.clone(),
-                                    to: format!("_moved_{}", var), // Temporary marker
+                                    to: temp_name.clone(),
                                 });
-                                arg_names.push(var.clone());
+
+                                if is_method_call && i == 0 {
+                                    // Use the temporary as the receiver for rvalue method calls
+                                    debug_println!("DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'", temp_name, var);
+                                    arg_names.push(temp_name);
+                                } else {
+                                    // For non-receiver arguments, use the original variable name
+                                    arg_names.push(var.clone());
+                                }
                             }
                             crate::parser::Expression::MemberAccess { object, field } => {
                                 debug_println!("DEBUG IR: Move(MemberAccess) as direct argument: {}.{}",

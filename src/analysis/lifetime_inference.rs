@@ -229,9 +229,9 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     }
                 }
                 
-                IrStatement::Move { from, .. } => {
+                IrStatement::Move { from, to } => {
                     // Check that 'from' is alive when moved
-                    if !inferencer.is_alive_at(from, statement_index) {
+                    if inferencer.lifetimes.contains_key(from) && !inferencer.is_alive_at(from, statement_index) {
                         errors.push(format!(
                             "Cannot move '{}': variable is not alive at this point",
                             from
