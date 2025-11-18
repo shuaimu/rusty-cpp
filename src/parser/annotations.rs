@@ -13,6 +13,12 @@ pub enum LifetimeAnnotation {
     Owned,
 }
 
+impl LifetimeAnnotation {
+    pub fn is_owned(&self) -> bool {
+        matches!(self, LifetimeAnnotation::Owned)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SafetyAnnotation {
     Safe,    // @safe - enforce borrow checking
@@ -195,7 +201,7 @@ fn parse_param_lifetimes(params_str: &str) -> Vec<Option<LifetimeAnnotation>> {
 
 fn parse_single_lifetime(lifetime_str: &str) -> Option<LifetimeAnnotation> {
     let trimmed = lifetime_str.trim();
-    
+
     if trimmed == "owned" {
         Some(LifetimeAnnotation::Owned)
     } else if trimmed.starts_with("&'") && trimmed.contains("mut") {
@@ -209,6 +215,16 @@ fn parse_single_lifetime(lifetime_str: &str) -> Option<LifetimeAnnotation> {
     } else if trimmed.starts_with('\'') {
         // Just 'a
         Some(LifetimeAnnotation::Lifetime(trimmed.to_string()))
+    } else if trimmed.contains("<&'") {
+        // CRITICAL FIX: Handle complex types like Option<&'a T> or Result<&'a T, E>
+        // Extract lifetime from inside template parameters
+        if trimmed.contains("mut") {
+            let lifetime_name = extract_lifetime_name(trimmed);
+            lifetime_name.map(|name| LifetimeAnnotation::MutRef(name))
+        } else {
+            let lifetime_name = extract_lifetime_name(trimmed);
+            lifetime_name.map(|name| LifetimeAnnotation::Ref(name))
+        }
     } else {
         None
     }

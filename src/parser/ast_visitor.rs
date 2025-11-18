@@ -1144,23 +1144,26 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // The pattern is: CallExpr with 0 children that references a type name
             
             // First check if the CallExpr itself has a reference
+            let mut method_name_from_callexpr = false;
             if let Some(ref_entity) = entity.get_reference() {
                 debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
-                
+
                 if let Some(n) = ref_entity.get_name() {
                     name = n;
                 }
-                
+
                 // Check if it references a type (struct/class/typedef)
                 // BUT: A CallExpr with 0 children is likely a constructor/declaration
                 if children.is_empty() {
                     debug_println!("DEBUG AST: CallExpr with 0 children referencing '{}' - likely a variable declaration", name);
                     return None;  // Not a function call, it's a variable declaration
                 }
-                
+
                 // Build qualified name for member functions and constructors
                 if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
                     name = get_qualified_name(&ref_entity);
+                    method_name_from_callexpr = true;
+                    debug_println!("DEBUG AST: Method name extracted from CallExpr reference: {}", name);
                 }
             }
             
@@ -1243,6 +1246,23 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // Pass 2: Extract arguments, handling MemberRefExpr specially if it's the name provider
 
             let mut name_providing_child_idx: Option<usize> = None;
+
+            // CRITICAL FIX: If the method name was extracted from CallExpr's own reference
+            // (common for template class methods), we need to find the MemberRefExpr child
+            // and mark it as the name provider so the receiver can be extracted
+            if method_name_from_callexpr {
+                for (i, c) in children.iter().enumerate() {
+                    if c.get_kind() == EntityKind::MemberRefExpr {
+                        if let Some(ref_entity) = c.get_reference() {
+                            if ref_entity.get_kind() == EntityKind::Method {
+                                debug_println!("DEBUG AST: Found MemberRefExpr at index {} for method call", i);
+                                name_providing_child_idx = Some(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Pass 1: Find the name-providing child
             if name_providing_child_idx.is_none() {

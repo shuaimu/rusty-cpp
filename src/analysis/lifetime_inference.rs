@@ -352,6 +352,10 @@ mod tests {
             method_qualifier: None,
             class_name: None,
             template_parameters: vec![],
+            lifetime_params: HashMap::new(),
+            param_lifetimes: Vec::new(),
+            return_lifetime: None,
+            lifetime_constraints: Vec::new(),
         };
         
         let lifetimes = inferencer.infer_function_lifetimes(&function);

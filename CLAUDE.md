@@ -6,12 +6,28 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: January 2025 - @unsafe blocks now working)
+## Current State (Updated: January 2025 - Advanced Borrow Checking Complete!)
 
 ### What's Fully Implemented ✅
 
 **Latest Features (January 2025):**
-- ✅ **@unsafe Block Support** - Fine-grained safety escapes (**newly implemented!**)
+- ✅ **Phase 3: Conflict Detection** - Prevents multiple mutable borrows (**newly implemented!**)
+  - Detects when the same variable is borrowed mutably twice
+  - Prevents mutable borrow when immutable borrows exist
+  - Allows multiple immutable borrows (Rust-style rules)
+  - Enhanced complex type detection (`Option<T&>`, custom types)
+  - 7 comprehensive integration tests
+  - See `docs/PHASE3_COMPLETE.md` for details
+
+- ✅ **Phase 4: Transitive Borrow Tracking** - Tracks borrow chains (**newly implemented!**)
+  - Detects transitive borrows: `ref3 -> ref2 -> ref1 -> value`
+  - Recursive algorithm handles chains of any depth
+  - Prevents moves anywhere in the borrow chain
+  - Error messages show complete borrow chain
+  - 6 comprehensive integration tests
+  - See `docs/PHASE4_COMPLETE.md` for details
+
+- ✅ **@unsafe Block Support** - Fine-grained safety escapes
   - Use `// @unsafe { ... }` to mark specific code blocks as unsafe
   - Allows calling undeclared functions within the block
   - Proper scope tracking with depth counter for nested blocks
@@ -26,7 +42,6 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Move detection and borrow checking in templates
   - Analyzes template declarations (no instantiation needed!)
   - 100% test pass rate on template test suite
-  - See `PHASE3_COMPLETE.md` for details
 
 - ✅ **Three-State Safety System** - Safe/Unsafe/Undeclared distinction
   - Safe functions have strict calling rules
@@ -147,7 +162,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 498 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking, unsafe propagation, and @unsafe blocks
+- ✅ **Comprehensive test suite**: 522 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Reassignment after move (not tracked yet)
@@ -655,7 +670,29 @@ Use after move: variable 'x' has been moved
 
 ## Recent Achievements
 
-**Latest (January 2025): System Header Handling and Universal Parsing**
+**Latest (January 2025): Advanced Borrow Checking - Phases 3 & 4 Complete**
+1. ✅ **Phase 3: Conflict Detection** (~2 hours implementation)
+   - Multiple mutable borrow detection
+   - Mutable/immutable borrow conflict detection
+   - Multiple immutable borrows allowed (Rust-style)
+   - Enhanced type detection for complex types (Option<T&>, etc.)
+   - 7 comprehensive integration tests
+   - Test count: 509 tests passing
+
+2. ✅ **Phase 4: Transitive Borrow Tracking** (~1 hour implementation)
+   - Recursive transitive borrow detection
+   - Handles borrow chains of any depth
+   - Prevents moves anywhere in chain
+   - Error messages show complete chain
+   - 6 comprehensive integration tests
+   - Test count: 515 tests passing
+
+3. ✅ **Integration Testing** - Comprehensive end-to-end tests
+   - 7 integration tests exercising all phases together
+   - Tests complex borrow graphs, scope cleanup, mixed mutability
+   - **Final test count: 522 tests, all passing**
+
+**Previous (January 2025): System Header Handling and Universal Parsing**
 1. ✅ **Universal parsing** - Extract ALL functions from ALL files (main + headers)
    - Parser no longer filters by file - extracts from STL, system headers, third-party libraries
    - Functions tracked with source file path for classification

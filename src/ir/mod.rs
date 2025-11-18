@@ -64,6 +64,41 @@ pub struct IrFunction {
     pub class_name: Option<String>,
     // Template information
     pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
+    // Phase 1: Lifetime information from annotations
+    pub lifetime_params: HashMap<String, LifetimeParam>,  // e.g., {"a" -> LifetimeParam, "b" -> LifetimeParam}
+    pub param_lifetimes: Vec<Option<ParameterLifetime>>,  // Lifetime for each parameter (indexed by param position)
+    pub return_lifetime: Option<ReturnLifetime>,          // Lifetime of return value
+    pub lifetime_constraints: Vec<LifetimeConstraint>,    // e.g., 'a: 'b (a outlives b)
+}
+
+/// Represents a lifetime parameter declared in the function signature
+/// Example: In `@lifetime: (&'a, &'b) -> &'a where 'a: 'b`, we have lifetime params 'a and 'b
+#[derive(Debug, Clone, PartialEq)]
+pub struct LifetimeParam {
+    pub name: String,  // e.g., "a" (without the apostrophe)
+}
+
+/// Represents the lifetime annotation of a parameter
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParameterLifetime {
+    pub lifetime_name: String,  // e.g., "a" for &'a T
+    pub is_mutable: bool,       // true for &'a mut T, false for &'a T
+    pub is_owned: bool,         // true for "owned" annotation
+}
+
+/// Represents the lifetime annotation of the return value
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturnLifetime {
+    pub lifetime_name: String,  // e.g., "a" for &'a T
+    pub is_mutable: bool,       // true for &'a mut T, false for &'a T
+    pub is_owned: bool,         // true for "owned" annotation
+}
+
+/// Represents a lifetime constraint (e.g., 'a: 'b means 'a outlives 'b)
+#[derive(Debug, Clone, PartialEq)]
+pub struct LifetimeConstraint {
+    pub longer: String,   // e.g., "a" in 'a: 'b
+    pub shorter: String,  // e.g., "b" in 'a: 'b
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +414,11 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
         method_qualifier: func.method_qualifier.clone(),
         class_name: func.class_name.clone(),
         template_parameters: func.template_parameters.clone(),
+        // Phase 1: Initialize lifetime fields (will be populated from annotations)
+        lifetime_params: HashMap::new(),
+        param_lifetimes: Vec::new(),
+        return_lifetime: None,
+        lifetime_constraints: Vec::new(),
     })
 }
 
@@ -1540,9 +1580,165 @@ mod tests {
             scope_start: 0,
             scope_end: 10,
         };
-        
+
         assert_eq!(lifetime.name, "a");
         assert_eq!(lifetime.scope_start, 0);
         assert_eq!(lifetime.scope_end, 10);
+    }
+}
+
+// Phase 1: Conversion functions from parsed annotations to IR lifetime types
+
+/// Convert LifetimeAnnotation to ParameterLifetime for IR
+fn convert_param_lifetime(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<ParameterLifetime> {
+    use crate::parser::annotations::LifetimeAnnotation;
+
+    match annotation {
+        LifetimeAnnotation::Ref(lifetime_name) => {
+            Some(ParameterLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: false,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::MutRef(lifetime_name) => {
+            Some(ParameterLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: true,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::Owned => {
+            Some(ParameterLifetime {
+                lifetime_name: String::new(),  // No specific lifetime for owned
+                is_mutable: false,
+                is_owned: true,
+            })
+        }
+        LifetimeAnnotation::Lifetime(_) => {
+            // Bare lifetime parameter like 'a - not applicable to parameter type
+            None
+        }
+    }
+}
+
+/// Convert LifetimeAnnotation to ReturnLifetime for IR
+fn convert_return_lifetime(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<ReturnLifetime> {
+    use crate::parser::annotations::LifetimeAnnotation;
+
+    match annotation {
+        LifetimeAnnotation::Ref(lifetime_name) => {
+            Some(ReturnLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: false,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::MutRef(lifetime_name) => {
+            Some(ReturnLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: true,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::Owned => {
+            Some(ReturnLifetime {
+                lifetime_name: String::new(),  // No specific lifetime for owned
+                is_mutable: false,
+                is_owned: true,
+            })
+        }
+        LifetimeAnnotation::Lifetime(_) => {
+            // Bare lifetime parameter like 'a - not applicable to return type
+            None
+        }
+    }
+}
+
+/// Populate IrFunction lifetime fields from FunctionSignature annotations
+pub fn populate_lifetime_info(
+    ir_func: &mut IrFunction,
+    signature: &crate::parser::annotations::FunctionSignature
+) {
+    debug_println!("DEBUG IR LIFETIME: Populating lifetime info for function '{}'", ir_func.name);
+
+    // Extract all unique lifetime names from parameters and return type
+    let mut lifetime_names = std::collections::HashSet::new();
+
+    // Collect lifetime names from parameters
+    for param_lifetime_opt in &signature.param_lifetimes {
+        if let Some(param_lifetime) = param_lifetime_opt {
+            if let Some(name) = extract_lifetime_name_from_annotation(param_lifetime) {
+                lifetime_names.insert(name);
+            }
+        }
+    }
+
+    // Collect lifetime name from return type
+    if let Some(return_lifetime) = &signature.return_lifetime {
+        if let Some(name) = extract_lifetime_name_from_annotation(return_lifetime) {
+            lifetime_names.insert(name);
+        }
+    }
+
+    // Collect lifetime names from bounds
+    for bound in &signature.lifetime_bounds {
+        lifetime_names.insert(bound.longer.clone());
+        lifetime_names.insert(bound.shorter.clone());
+    }
+
+    // Create LifetimeParam entries
+    for name in lifetime_names {
+        debug_println!("DEBUG IR LIFETIME:   Lifetime parameter: '{}'", name);
+        ir_func.lifetime_params.insert(
+            name.clone(),
+            LifetimeParam { name }
+        );
+    }
+
+    // Convert parameter lifetimes
+    for param_lifetime_opt in &signature.param_lifetimes {
+        let converted = param_lifetime_opt.as_ref()
+            .and_then(|lt| convert_param_lifetime(lt));
+
+        if let Some(ref param_lt) = converted {
+            debug_println!("DEBUG IR LIFETIME:   Parameter lifetime: '{}' (mutable={}, owned={})",
+                param_lt.lifetime_name, param_lt.is_mutable, param_lt.is_owned);
+        }
+
+        ir_func.param_lifetimes.push(converted);
+    }
+
+    // Convert return lifetime
+    ir_func.return_lifetime = signature.return_lifetime.as_ref()
+        .and_then(|lt| convert_return_lifetime(lt));
+
+    if let Some(ref ret_lt) = ir_func.return_lifetime {
+        debug_println!("DEBUG IR LIFETIME:   Return lifetime: '{}' (mutable={}, owned={})",
+            ret_lt.lifetime_name, ret_lt.is_mutable, ret_lt.is_owned);
+    }
+
+    // Convert lifetime constraints
+    for bound in &signature.lifetime_bounds {
+        debug_println!("DEBUG IR LIFETIME:   Lifetime constraint: '{}': '{}'", bound.longer, bound.shorter);
+        ir_func.lifetime_constraints.push(LifetimeConstraint {
+            longer: bound.longer.clone(),
+            shorter: bound.shorter.clone(),
+        });
+    }
+
+    debug_println!("DEBUG IR LIFETIME: Populated {} lifetime params, {} param lifetimes, {} constraints",
+        ir_func.lifetime_params.len(), ir_func.param_lifetimes.len(), ir_func.lifetime_constraints.len());
+}
+
+/// Extract lifetime name from a LifetimeAnnotation
+fn extract_lifetime_name_from_annotation(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<String> {
+    use crate::parser::annotations::LifetimeAnnotation;
+
+    match annotation {
+        LifetimeAnnotation::Ref(name) => Some(name.clone()),
+        LifetimeAnnotation::MutRef(name) => Some(name.clone()),
+        LifetimeAnnotation::Lifetime(name) => Some(name.trim_start_matches('\'').to_string()),
+        LifetimeAnnotation::Owned => None,
     }
 }

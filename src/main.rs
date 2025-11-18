@@ -207,7 +207,16 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     violations.extend(mutable_violations);
 
     // Build intermediate representation with safety context
-    let ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
+    let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
+
+    // Phase 1: Populate lifetime information from annotations in HeaderCache
+    for ir_func in &mut ir.functions {
+        // Try to get the function signature from the header cache
+        if let Some(signature) = header_cache.get_signature(&ir_func.name) {
+            debug_println!("DEBUG MAIN: Found lifetime annotations for function '{}'", ir_func.name);
+            ir::populate_lifetime_info(ir_func, signature);
+        }
+    }
 
     // Perform borrow checking analysis with header knowledge and safety context
     let borrow_violations = analysis::check_borrows_with_safety_context(ir, header_cache, safety_context)?;

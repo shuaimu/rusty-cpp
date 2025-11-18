@@ -4,5 +4,6 @@
 *.swp
 tests/build/
 build/*
+*.lock
 
 build-tests/
