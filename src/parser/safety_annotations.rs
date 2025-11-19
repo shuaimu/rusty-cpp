@@ -288,7 +288,24 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                 accumulated_line.contains('(') &&
                 (accumulated_line.contains(')') || accumulated_line.contains('{'))
             };
-            
+
+            // CRITICAL FIX: Check if this is a forward declaration
+            // Forward declarations (class Foo;) should consume the annotation without applying it
+            // This prevents the annotation from carrying over to the next declaration
+            let is_forward_decl = is_forward_declaration(&accumulated_line);
+
+            if is_forward_decl && pending_annotation.is_some() {
+                // Forward declarations should NOT have annotations (they have no body)
+                // Consume the annotation without applying it to prevent it from affecting
+                // subsequent declarations (especially the full class definition)
+                debug_println!("DEBUG SAFETY: Ignoring annotation on forward declaration: {}",
+                               &accumulated_line);
+                pending_annotation.take();  // Consume the annotation
+                accumulated_line.clear();
+                accumulating_for_annotation = false;
+                continue;  // Skip to next line
+            }
+
             // If we have a pending annotation and a complete declaration, apply it
             if should_check_annotation {
                 if let Some(annotation) = pending_annotation.take() {
@@ -343,6 +360,18 @@ fn is_class_declaration(line: &str) -> bool {
     // Check if line contains opening brace (may be after newlines in accumulated_line)
     let has_brace = line.contains('{');
     has_class && has_brace
+}
+
+/// Check if a line is a forward declaration (class/struct with ; but no {)
+/// Forward declarations should not have annotations applied to them
+fn is_forward_declaration(line: &str) -> bool {
+    let has_class_or_struct = line.starts_with("class ") || line.starts_with("struct ") ||
+                              line.contains(" class ") || line.contains(" struct ");
+    let has_semicolon = line.trim_end().ends_with(';');
+    let has_brace = line.contains('{');
+
+    // Must have class/struct keyword, must end with semicolon, must NOT have opening brace
+    has_class_or_struct && has_semicolon && !has_brace
 }
 
 /// Extract class name from a class/struct declaration
