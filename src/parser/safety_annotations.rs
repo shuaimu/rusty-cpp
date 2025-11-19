@@ -277,10 +277,12 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             
             // Check if we have a complete declaration to apply annotation to
             // For namespaces: just needs to start with "namespace" and have opening brace
+            // For classes: needs "class"/"struct" keyword and opening brace
             // For functions: needs parentheses
             let is_namespace_decl = accumulated_line.starts_with("namespace") ||
                                    (accumulated_line.contains("namespace") && !accumulated_line.contains("using"));
-            let should_check_annotation = if is_namespace_decl {
+            let is_class_decl = is_class_declaration(&accumulated_line);
+            let should_check_annotation = if is_namespace_decl || is_class_decl {
                 accumulated_line.contains('{')
             } else {
                 accumulated_line.contains('(') &&
