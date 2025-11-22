@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <utility>
 #include <type_traits>
+#include "option.hpp"  // For Option<Rc<T>> return types
 
 // Rc<T> - Reference Counted pointer with polymorphism support (single-threaded)
 // Equivalent to Rust's Rc<T> with std::shared_ptr-like type conversions
@@ -153,8 +154,9 @@ private:
     }
 
 public:
-    // Default constructor - creates empty Rc
-    Rc() : ptr_(nullptr), control_(nullptr) {}
+    // No default constructor - Rc must always own a value (Rust-idiomatic)
+    // Use Option<Rc<T>> for nullable Rc
+    Rc() = delete;
 
     // Primary factory method - constructs T with given arguments
     // @unsafe
@@ -336,11 +338,12 @@ public:
 
     // Create a new Rc with the same value (deep copy)
     // Requires T to be copyable
-    Rc<T> make_unique() const {
+    // Returns None if Rc is invalid
+    Option<Rc<T>> make_unique() const {
         if (ptr_ && control_) {
-            return Rc<T>::new_(*ptr_);
+            return Some(Rc<T>::new_(*ptr_));
         }
-        return Rc<T>();
+        return None;
     }
 
     // Static cast to derived type - unsafe, like std::static_pointer_cast
@@ -348,28 +351,21 @@ public:
     template<typename U>
     Rc<U> static_pointer_cast() const {
         // @unsafe {
-        Rc<U> result;
-        result.ptr_ = static_cast<U*>(ptr_);
-        result.control_ = control_;
-        result.increment_strong();
-        return result;
+        U* casted = static_cast<U*>(ptr_);
+        return Rc<U>(casted, control_, true);  // Use private constructor with increment
         // }
     }
 
-    // Dynamic cast to derived type - returns empty Rc on failure
+    // Dynamic cast to derived type - returns None on failure
     // @unsafe
     template<typename U>
-    Rc<U> dynamic_pointer_cast() const {
+    Option<Rc<U>> dynamic_pointer_cast() const {
         // @unsafe {
         U* casted = dynamic_cast<U*>(ptr_);
         if (casted) {
-            Rc<U> result;
-            result.ptr_ = casted;
-            result.control_ = control_;
-            result.increment_strong();
-            return result;
+            return Some(Rc<U>(casted, control_, true));  // Use private constructor with increment
         }
-        return Rc<U>();
+        return None;
         // }
     }
 
@@ -387,6 +383,52 @@ template<typename T, typename... Args>
 // @lifetime: owned
 Rc<T> make_rc(Args&&... args) {
     return Rc<T>::make(std::forward<Args>(args)...);
+}
+
+// Comparison operators for Rc<T> (needed for std::set and std::map)
+// @unsafe
+template<typename T>
+bool operator<(const Rc<T>& lhs, const Rc<T>& rhs) {
+    // @unsafe {
+    return lhs.get() < rhs.get();
+    // }
+}
+
+// @unsafe
+template<typename T>
+bool operator==(const Rc<T>& lhs, const Rc<T>& rhs) {
+    // @unsafe {
+    return lhs.get() == rhs.get();
+    // }
+}
+
+// @unsafe
+template<typename T>
+bool operator!=(const Rc<T>& lhs, const Rc<T>& rhs) {
+    // @unsafe {
+    return !(lhs == rhs);
+    // }
+}
+
+// @unsafe
+template<typename T>
+bool operator<=(const Rc<T>& lhs, const Rc<T>& rhs) {
+    // @unsafe {
+    return !(rhs < lhs);
+    // }
+}
+
+// @unsafe
+template<typename T>
+bool operator>(const Rc<T>& lhs, const Rc<T>& rhs) {
+    // @unsafe {
+    return rhs < lhs;
+    // }
+}
+
+template<typename T>
+bool operator>=(const Rc<T>& lhs, const Rc<T>& rhs) {
+    return !(lhs < rhs);
 }
 
 } // namespace rusty

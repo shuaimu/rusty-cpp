@@ -196,19 +196,6 @@ void test_arc_weak() {
     printf("PASS\n");
 }
 
-// Test empty Arc
-void test_arc_empty() {
-    printf("test_arc_empty: ");
-    {
-        Arc<int> arc;
-        assert(!arc.is_valid());
-        assert(!arc);
-        assert(arc.get() == nullptr);
-        assert(arc.strong_count() == 0);
-    }
-    printf("PASS\n");
-}
-
 // Test assignment operators
 void test_arc_assignment() {
     printf("test_arc_assignment: ");
@@ -238,7 +225,6 @@ int main() {
     test_arc_destructor();
     test_arc_thread_safety();
     test_arc_weak();
-    test_arc_empty();
     test_arc_assignment();
     
     printf("\nAll Arc tests passed!\n");

@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(TEST_SOURCES
     # Basic Rusty types - ALL WORKING
     tests/rusty_arc_test.cpp
+    tests/rusty_arc_mt_test.cpp
     tests/rusty_box_test.cpp
     tests/rusty_cell_test.cpp
     tests/rusty_option_test.cpp

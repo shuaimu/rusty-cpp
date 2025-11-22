@@ -91,8 +91,10 @@ void test_rc_make_unique() {
         auto rc1 = Rc<int>::make(42);
         auto rc2 = rc1.clone();
         assert(rc1.strong_count() == 2);
-        
-        auto rc3 = rc1.make_unique();  // Deep copy
+
+        auto maybe_rc3 = rc1.make_unique();  // Deep copy, returns Option
+        assert(maybe_rc3.is_some());
+        auto rc3 = maybe_rc3.unwrap();
         assert(rc3.strong_count() == 1);  // New independent Rc
         assert(*rc3 == 42);
         assert(rc1.strong_count() == 2);  // Original unchanged
@@ -171,19 +173,6 @@ void test_rc_weak() {
     printf("PASS\n");
 }
 
-// Test empty Rc
-void test_rc_empty() {
-    printf("test_rc_empty: ");
-    {
-        Rc<int> rc;
-        assert(!rc.is_valid());
-        assert(!rc);
-        assert(rc.get() == nullptr);
-        assert(rc.strong_count() == 0);
-    }
-    printf("PASS\n");
-}
-
 // Test assignment operators
 void test_rc_assignment() {
     printf("test_rc_assignment: ");
@@ -227,7 +216,6 @@ int main() {
     test_rc_make_unique();
     test_rc_destructor();
     test_rc_weak();
-    test_rc_empty();
     test_rc_assignment();
     test_rc_arrow();
     

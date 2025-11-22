@@ -95,8 +95,9 @@ private:
     }
 
 public:
-    // @safe - Default constructor creates empty Arc
-    Arc() : ptr(nullptr) {}
+    // No default constructor - Arc must always own a value (Rust-idiomatic)
+    // Use Option<Arc<T>> for nullable Arc
+    Arc() = delete;
 
     // Rust-idiomatic factory method - Arc::new()
     // @lifetime: owned
