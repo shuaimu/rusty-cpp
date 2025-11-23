@@ -20,6 +20,15 @@ template<typename T>
 struct is_sync;
 
 // ============================================================================
+// Explicit Opt-in Send Trait System (for user-defined types)
+// ============================================================================
+
+// Explicit opt-in via specialization
+// Usage: template<> struct rusty::is_explicitly_send<MyType> : std::true_type {};
+template<typename T>
+struct is_explicitly_send : std::false_type {};
+
+// ============================================================================
 // Send Trait - Can transfer ownership across thread boundaries
 // ============================================================================
 

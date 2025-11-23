@@ -28,6 +28,7 @@
 // @safe
 namespace rusty {
 namespace sync {
+// @unsafe - mpsc channel uses mutable mutex for thread-safe interior mutability
 namespace mpsc {
 
 // Forward declarations
@@ -58,6 +59,7 @@ enum class TryRecvError {
 };
 
 // Shared state between Sender and Receiver
+// @unsafe - Uses mutable mutex for thread-safe interior mutability
 template<typename T>
 class ChannelState {
 private:
@@ -342,4 +344,13 @@ std::pair<Sender<T>, Receiver<T>> channel() {
 
 } // namespace mpsc
 } // namespace sync
+
+// Mark Sender<T> and Receiver<T> as Send if T is Send
+// This mirrors Rust's behavior where channel endpoints are thread-safe
+template<typename T>
+struct is_send<sync::mpsc::Sender<T>> : is_send<T> {};
+
+template<typename T>
+struct is_send<sync::mpsc::Receiver<T>> : is_send<T> {};
+
 } // namespace rusty

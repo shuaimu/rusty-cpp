@@ -15,28 +15,21 @@ template<typename T> class Vec;
 template<typename T> class Option;
 template<typename T, typename E> class Result;
 
-// Box<T> is Send if T is Send
-template<typename T>
-struct is_explicitly_send<Box<T>> : is_send<T> {};
-
-// Arc<T> is Send if T is Send (uses atomic reference counting)
-template<typename T>
-struct is_explicitly_send<Arc<T>> : is_send<T> {};
-
-// Rc<T> is NEVER Send (non-atomic reference counting)
-// No specialization needed - defaults to false
+// Note: Most rusty types (Box, Arc, Rc, Mutex, Cell, RefCell) are already
+// handled in traits.hpp. This file provides additional specializations
+// for container types.
 
 // Vec<T> is Send if T is Send
 template<typename T>
-struct is_explicitly_send<Vec<T>> : is_send<T> {};
+struct is_send<Vec<T>> : is_send<T> {};
 
 // Option<T> is Send if T is Send
 template<typename T>
-struct is_explicitly_send<Option<T>> : is_send<T> {};
+struct is_send<Option<T>> : is_send<T> {};
 
 // Result<T, E> is Send if both T and E are Send
 template<typename T, typename E>
-struct is_explicitly_send<Result<T, E>> : std::bool_constant<
+struct is_send<Result<T, E>> : std::bool_constant<
     is_send<T>::value && is_send<E>::value
 > {};
 
