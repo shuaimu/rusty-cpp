@@ -558,3 +558,49 @@ int main() { return 0; }
         output
     );
 }
+
+// =============================================================================
+// Tests for external annotations from headers
+// =============================================================================
+
+#[test]
+fn test_external_annotation_qualified_name_matching() {
+    // Test that qualified names (std::swap) match unqualified calls (swap)
+    // All external annotations are [unsafe], so they require @unsafe context
+    let source = r#"
+// @external: {
+//   std::swap: [unsafe, (T& a, T& b) -> void]
+//   ns::helper: [unsafe, () -> int]
+// }
+
+namespace std {
+    template<typename T>
+    void swap(T& a, T& b);
+}
+
+namespace ns {
+    int helper();
+}
+
+// @unsafe - external functions require unsafe context
+void test() {
+    int x = 1, y = 2;
+    std::swap(x, y);  // Call is reported as "swap", should match "std::swap"
+    ns::helper();     // Call is reported as "helper", should match "ns::helper"
+}
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = compile_and_check(source);
+    println!("=== test_external_annotation_qualified_name_matching ===");
+    println!("{}", output);
+
+    // Should NOT have "undeclared" errors - qualified annotations should match unqualified calls
+    // (but they ARE unsafe, so calling from @safe would fail)
+    assert!(
+        !output.contains("undeclared") || !output.contains("swap"),
+        "std::swap annotation should match swap call. Output: {}",
+        output
+    );
+}

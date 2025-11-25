@@ -667,8 +667,22 @@ impl ExternalAnnotations {
 
         // Then check explicit function annotations
         // NOTE: All external functions are Unsafe by design (programmer-audited, not tool-verified)
-        if let Some(_annotation) = self.functions.get(func_name) {
+        // Try exact match first
+        if self.functions.contains_key(func_name) {
             return Some(false);  // External functions are always unsafe
+        }
+
+        // Try to match against stored qualified names
+        // e.g., if func_name is "swap", check if any "xxx::swap" exists
+        for (annotated_name, _annotation) in &self.functions {
+            // Check if annotated_name ends with "::func_name"
+            if annotated_name.ends_with(&format!("::{}", func_name)) {
+                return Some(false);  // External functions are always unsafe
+            }
+            // Also check if func_name is qualified and annotated_name is just the suffix
+            if func_name.ends_with(&format!("::{}", annotated_name)) {
+                return Some(false);  // External functions are always unsafe
+            }
         }
         
         // Then check active profile
@@ -792,6 +806,26 @@ impl ExternalAnnotations {
 mod tests {
     use super::*;
     
+    #[test]
+    fn test_qualified_name_matching() {
+        // Test that unqualified names match qualified annotations
+        let content = r#"
+        // @external: {
+        //   std::swap: [unsafe, (T& a, T& b) -> void]
+        //   my_namespace::helper: [unsafe, () -> void]
+        // }
+        "#;
+
+        let mut annotations = ExternalAnnotations::new();
+        annotations.parse_content(content).unwrap();
+
+        // Unqualified name should match qualified annotation (all external = unsafe)
+        assert_eq!(annotations.is_function_safe("swap"), Some(false));
+        assert_eq!(annotations.is_function_safe("helper"), Some(false));
+        // Qualified name should still work
+        assert_eq!(annotations.is_function_safe("std::swap"), Some(false));
+    }
+
     #[test]
     fn test_parse_safety_block() {
         let content = r#"
