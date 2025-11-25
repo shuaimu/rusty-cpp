@@ -179,13 +179,22 @@ impl ScopedLifetimeTracker {
                     }
                 }
                 ConstraintKind::BorrowedFrom { reference, source } => {
-                    // Check that the source is alive where the reference is used
-                    if let Some(ref_scope) = self.variable_scope.get(reference) {
-                        if !self.is_alive_in_scope(source, *ref_scope) {
-                            errors.push(format!(
-                                "Reference '{}' borrows from '{}' which is not alive at {}",
-                                reference, source, constraint.location
-                            ));
+                    // Skip alive check for function call results (temporaries)
+                    // These include operator* (dereference), operator-> (member access), etc.
+                    let is_function_call_result = source.starts_with("operator") ||
+                        source.contains("::") ||  // Qualified function calls
+                        source.starts_with("__") || // Compiler-generated temporaries
+                        source.starts_with("temp_"); // Explicit temporaries
+
+                    // Check that the source is alive where the reference is used (skip for temporaries)
+                    if !is_function_call_result {
+                        if let Some(ref_scope) = self.variable_scope.get(reference) {
+                            if !self.is_alive_in_scope(source, *ref_scope) {
+                                errors.push(format!(
+                                    "Reference '{}' borrows from '{}' which is not alive at {}",
+                                    reference, source, constraint.location
+                                ));
+                            }
                         }
                     }
                 }
@@ -286,8 +295,16 @@ fn analyze_block(
     for statement in &block.statements {
         match statement {
             IrStatement::Borrow { from, to, .. } => {
-                // Check that 'from' is alive in this scope
-                if !tracker.is_alive_in_scope(from, scope_id) {
+                // Skip alive check for function call results (temporaries)
+                // These include operator* (dereference), operator-> (member access), etc.
+                // Temporaries are alive for the duration of the full expression
+                let is_function_call_result = from.starts_with("operator") ||
+                    from.contains("::") ||  // Qualified function calls
+                    from.starts_with("__") || // Compiler-generated temporaries
+                    from.starts_with("temp_"); // Explicit temporaries
+
+                // Check that 'from' is alive in this scope (skip for temporaries)
+                if !is_function_call_result && !tracker.is_alive_in_scope(from, scope_id) {
                     errors.push(format!(
                         "Cannot borrow from '{}': variable is not alive in current scope",
                         from

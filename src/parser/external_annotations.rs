@@ -182,17 +182,24 @@ impl ExternalAnnotations {
     }
     
     fn parse_unified_entries(&mut self, block: &str) -> Result<(), String> {
-        for line in block.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("//") {
+        // First, split block into individual entries
+        // Entries can be on separate lines OR separated by commas on the same line
+        // But we need to be careful not to split inside brackets [...]
+        let entries = self.split_entries(block);
+
+        for entry in entries {
+            let entry = entry.trim();
+            if entry.is_empty() || entry.starts_with("//") {
                 continue;
             }
 
             // Parse entries like: function_name: [safety, lifetime_spec]
             // or: type_name: [unsafe_type]
-            if let Some(colon_pos) = line.find(':') {
-                let name = line[..colon_pos].trim().to_string();
-                let spec_str = line[colon_pos + 1..].trim();
+            // Note: function names can contain :: (e.g., rusty::Option::is_none)
+            // So we look for ": [" which is the separator between name and spec
+            if let Some(sep_pos) = entry.find(": [") {
+                let name = entry[..sep_pos].trim().to_string();
+                let spec_str = entry[sep_pos + 2..].trim();  // Skip ": " to get "[...]"
 
                 // Parse [safety, lifetime] or [unsafe_type] array
                 if spec_str.starts_with('[') && spec_str.ends_with(']') {
@@ -250,7 +257,65 @@ impl ExternalAnnotations {
 
         Ok(())
     }
-    
+
+    /// Split a block into individual entries, handling:
+    /// - Entries on separate lines
+    /// - Entries separated by commas on the same line
+    /// - Not splitting inside brackets [...]
+    fn split_entries(&self, block: &str) -> Vec<String> {
+        let mut entries = Vec::new();
+        let mut current_entry = String::new();
+        let mut bracket_depth = 0;
+
+        for ch in block.chars() {
+            match ch {
+                '[' => {
+                    bracket_depth += 1;
+                    current_entry.push(ch);
+                }
+                ']' => {
+                    bracket_depth -= 1;
+                    current_entry.push(ch);
+                    // If we've closed a bracket and we're at depth 0, this entry might be complete
+                    if bracket_depth == 0 {
+                        // Check if next non-whitespace char is comma or newline
+                        // For now, just mark that we've completed a bracketed section
+                    }
+                }
+                ',' if bracket_depth == 0 => {
+                    // Entry separator (outside brackets)
+                    let trimmed = current_entry.trim();
+                    if !trimmed.is_empty() {
+                        entries.push(trimmed.to_string());
+                    }
+                    current_entry.clear();
+                }
+                '\n' => {
+                    // Newline can also be an entry separator
+                    let trimmed = current_entry.trim();
+                    if !trimmed.is_empty() && trimmed.contains(": [") && trimmed.contains(']') {
+                        entries.push(trimmed.to_string());
+                        current_entry.clear();
+                    } else {
+                        // Continue building current entry (might be multi-line)
+                        current_entry.push(' ');
+                    }
+                }
+                _ => {
+                    current_entry.push(ch);
+                }
+            }
+        }
+
+        // Don't forget the last entry
+        let trimmed = current_entry.trim();
+        if !trimmed.is_empty() {
+            entries.push(trimmed.to_string());
+        }
+
+        entries
+    }
+
     fn parse_external_function_blocks(&mut self, content: &str) -> Result<(), String> {
         // Parse @external_function: name { safety: ..., lifetime: ..., where: ... }
         let func_re = Regex::new(r"@external_function:\s*(\w+)\s*\{([^}]+)\}").unwrap();
