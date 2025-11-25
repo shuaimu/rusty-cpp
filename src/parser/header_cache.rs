@@ -373,4 +373,42 @@ mod tests {
         assert_eq!(angle[0], "iostream");
         assert_eq!(angle[1], "vector");
     }
+
+    #[test]
+    fn test_strip_template_params_simple() {
+        // Simple template class name
+        assert_eq!(strip_template_params("Option<T>"), "Option");
+        assert_eq!(strip_template_params("Vector<int>"), "Vector");
+        assert_eq!(strip_template_params("Map<K, V>"), "Map");
+    }
+
+    #[test]
+    fn test_strip_template_params_nested() {
+        // Nested template parameters
+        assert_eq!(strip_template_params("Option<Vector<int>>"), "Option");
+        assert_eq!(strip_template_params("Map<string, Vector<int>>"), "Map");
+    }
+
+    #[test]
+    fn test_strip_template_params_qualified() {
+        // Qualified names with templates
+        assert_eq!(strip_template_params("rusty::Option<T>"), "rusty::Option");
+        assert_eq!(strip_template_params("std::vector<int>"), "std::vector");
+        assert_eq!(strip_template_params("ns::inner::Class<T, U>"), "ns::inner::Class");
+    }
+
+    #[test]
+    fn test_strip_template_params_no_template() {
+        // Names without template parameters should be unchanged
+        assert_eq!(strip_template_params("Option"), "Option");
+        assert_eq!(strip_template_params("rusty::Option"), "rusty::Option");
+        assert_eq!(strip_template_params("some_function"), "some_function");
+    }
+
+    #[test]
+    fn test_strip_template_params_constructor() {
+        // Constructor names like "Option<T>::Option<T>" -> "Option::Option"
+        // Note: This tests the function itself, not the full qualified name handling
+        assert_eq!(strip_template_params("Option<T>::Option"), "Option");
+    }
 }

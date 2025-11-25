@@ -904,4 +904,60 @@ mod tests {
         assert!(!annotations.is_type_unsafe("MyClass"));
         assert!(!annotations.is_type_unsafe("UserDefinedMap"));
     }
+
+    #[test]
+    fn test_split_entries_multiline() {
+        // Test that split_entries handles entries on separate lines
+        let annotations = ExternalAnnotations::new();
+        let block = r#"
+            rusty::Option::is_none: [unsafe, (&self) -> bool]
+            rusty::Option::is_some: [unsafe, (&self) -> bool]
+        "#;
+
+        let entries = annotations.split_entries(block);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("rusty::Option::is_none"));
+        assert!(entries[1].contains("rusty::Option::is_some"));
+    }
+
+    #[test]
+    fn test_split_entries_comma_separated() {
+        // Test that split_entries handles comma-separated entries on the same line
+        let annotations = ExternalAnnotations::new();
+        let block = r#"foo: [unsafe, () -> void], bar: [unsafe, () -> int]"#;
+
+        let entries = annotations.split_entries(block);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("foo"));
+        assert!(entries[1].contains("bar"));
+    }
+
+    #[test]
+    fn test_split_entries_preserves_brackets() {
+        // Test that split_entries doesn't split inside brackets
+        let annotations = ExternalAnnotations::new();
+        let block = r#"func: [unsafe, (int, float) -> void]"#;
+
+        let entries = annotations.split_entries(block);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("(int, float)"));
+    }
+
+    #[test]
+    fn test_qualified_function_name_parsing() {
+        // Test that function names with :: are parsed correctly (not split on first :)
+        let content = r#"
+        // @external: {
+        //   rusty::Option::is_none: [unsafe, (&self) -> bool]
+        //   std::vector::push_back: [unsafe, (&mut self, T) -> void]
+        // }
+        "#;
+
+        let mut annotations = ExternalAnnotations::new();
+        annotations.parse_content(content).unwrap();
+
+        // Check that the fully qualified names are stored correctly
+        assert!(annotations.functions.contains_key("rusty::Option::is_none"));
+        assert!(annotations.functions.contains_key("std::vector::push_back"));
+    }
 }
