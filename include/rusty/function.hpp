@@ -144,6 +144,7 @@ struct FunctionTraits<R(Args...) const> {
 } // namespace detail
 
 // Main Function class template
+// @safe - Move-only type-erased callable wrapper
 template<typename R, typename... Args>
 class Function<R(Args...)> {
 public:
@@ -175,13 +176,13 @@ private:
     }
 
 public:
-    // Default constructor - creates empty Function
+    // @safe - Default constructor - creates empty Function
     Function() noexcept = default;
 
-    // Nullptr constructor - creates empty Function
+    // @safe - Nullptr constructor - creates empty Function
     Function(std::nullptr_t) noexcept : Function() {}
 
-    // Construct from callable
+    // @safe - Construct from callable
     template<typename Callable,
              typename = std::enable_if_t<
                  !std::is_same_v<std::decay_t<Callable>, Function> &&
@@ -197,7 +198,7 @@ public:
         }
     }
 
-    // Move constructor
+    // @safe - Move constructor
     Function(Function&& other) noexcept {
         if (other.vtable_) {
             other.vtable_->move(&storage_, &other.storage_);
@@ -209,14 +210,14 @@ public:
     // No copy constructor
     Function(const Function&) = delete;
 
-    // Destructor
+    // @safe - Destructor
     ~Function() {
         if (vtable_) {
             vtable_->destroy(&storage_);
         }
     }
 
-    // Move assignment
+    // @safe - Move assignment
     Function& operator=(Function&& other) noexcept {
         if (this != &other) {
             // Destroy current callable
@@ -238,7 +239,7 @@ public:
     // No copy assignment
     Function& operator=(const Function&) = delete;
 
-    // Assign nullptr (clear)
+    // @safe - Assign nullptr (clear)
     Function& operator=(std::nullptr_t) noexcept {
         if (vtable_) {
             vtable_->destroy(&storage_);
@@ -247,7 +248,7 @@ public:
         return *this;
     }
 
-    // Assign callable
+    // @safe - Assign callable
     template<typename Callable,
              typename = std::enable_if_t<
                  !std::is_same_v<std::decay_t<Callable>, Function> &&
@@ -259,7 +260,7 @@ public:
         return *this;
     }
 
-    // Invoke the stored callable
+    // @safe - Invoke the stored callable
     R operator()(Args... args) {
         if (!vtable_) {
             // Undefined behavior to call empty Function, but we'll assert
@@ -268,30 +269,31 @@ public:
         return vtable_->invoke(&storage_, std::forward<Args>(args)...);
     }
 
-    // Check if Function contains a callable
+    // @safe - Check if Function contains a callable
     explicit operator bool() const noexcept {
         return vtable_ != nullptr;
     }
 
-    // Check if Function is empty
+    // @safe - Check if Function is empty
     bool is_empty() const noexcept {
         return vtable_ == nullptr;
     }
 
-    // Swap with another Function
+    // @safe - Swap with another Function
     void swap(Function& other) noexcept {
         Function tmp(std::move(other));
         other = std::move(*this);
         *this = std::move(tmp);
     }
 
-    // Check if using inline storage (SBO)
+    // @safe - Check if using inline storage (SBO)
     bool is_inline() const noexcept {
         return vtable_ && vtable_->is_inline;
     }
 };
 
 // Const-qualified function signature specialization
+// @safe - Move-only type-erased callable wrapper (const version)
 template<typename R, typename... Args>
 class Function<R(Args...) const> {
 public:
@@ -321,9 +323,12 @@ private:
     }
 
 public:
+    // @safe - Default constructor
     Function() noexcept = default;
+    // @safe - Nullptr constructor
     Function(std::nullptr_t) noexcept : Function() {}
 
+    // @safe - Construct from callable
     template<typename Callable,
              typename = std::enable_if_t<
                  !std::is_same_v<std::decay_t<Callable>, Function> &&
@@ -339,6 +344,7 @@ public:
         }
     }
 
+    // @safe - Move constructor
     Function(Function&& other) noexcept {
         if (other.vtable_) {
             other.vtable_->move(&storage_, &other.storage_);
@@ -349,12 +355,14 @@ public:
 
     Function(const Function&) = delete;
 
+    // @safe - Destructor
     ~Function() {
         if (vtable_) {
             vtable_->destroy(&storage_);
         }
     }
 
+    // @safe - Move assignment
     Function& operator=(Function&& other) noexcept {
         if (this != &other) {
             if (vtable_) {
@@ -372,6 +380,7 @@ public:
 
     Function& operator=(const Function&) = delete;
 
+    // @safe - Assign nullptr
     Function& operator=(std::nullptr_t) noexcept {
         if (vtable_) {
             vtable_->destroy(&storage_);
@@ -380,6 +389,7 @@ public:
         return *this;
     }
 
+    // @safe - Assign callable
     template<typename Callable,
              typename = std::enable_if_t<
                  !std::is_same_v<std::decay_t<Callable>, Function> &&
@@ -391,7 +401,7 @@ public:
         return *this;
     }
 
-    // Const invoke - callable must be const-invocable
+    // @safe - Const invoke - callable must be const-invocable
     R operator()(Args... args) const {
         if (!vtable_) {
             std::abort();
@@ -400,20 +410,24 @@ public:
                                std::forward<Args>(args)...);
     }
 
+    // @safe - Check if Function contains a callable
     explicit operator bool() const noexcept {
         return vtable_ != nullptr;
     }
 
+    // @safe - Check if Function is empty
     bool is_empty() const noexcept {
         return vtable_ == nullptr;
     }
 
+    // @safe - Swap with another Function
     void swap(Function& other) noexcept {
         Function tmp(std::move(other));
         other = std::move(*this);
         *this = std::move(tmp);
     }
 
+    // @safe - Check if using inline storage (SBO)
     bool is_inline() const noexcept {
         return vtable_ && vtable_->is_inline;
     }

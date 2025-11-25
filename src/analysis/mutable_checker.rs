@@ -1,6 +1,7 @@
 use crate::parser::CppAst;
 use crate::parser::ast_visitor::Class;
 use crate::parser::safety_annotations::SafetyContext;
+use crate::parser::external_annotations::ExternalAnnotations;
 
 /// Check for mutable fields in safe functions and classes
 ///
@@ -10,6 +11,7 @@ use crate::parser::safety_annotations::SafetyContext;
 pub fn check_mutable_fields(
     ast: &CppAst,
     safety_context: &SafetyContext,
+    external_annotations: Option<&ExternalAnnotations>,
 ) -> Result<Vec<String>, String> {
     use crate::debug_println;
 
@@ -20,6 +22,15 @@ pub fn check_mutable_fields(
     // Check all classes for mutable fields
     for class in &ast.classes {
         debug_println!("MUTABLE: Checking class '{}' with {} members", class.name, class.members.len());
+
+        // First, check if this class is an unsafe_type (e.g., STL container internal)
+        // If so, skip analyzing its internal structure entirely
+        if let Some(ext_annot) = external_annotations {
+            if ext_annot.is_type_unsafe(&class.name) {
+                debug_println!("MUTABLE: Class '{}' is an unsafe_type - skipping internal analysis", class.name);
+                continue;
+            }
+        }
 
         // Determine if this class or any of its methods are in safe context
         let class_safe = is_class_safe(class, safety_context);

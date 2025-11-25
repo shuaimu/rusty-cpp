@@ -203,7 +203,12 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     }
 
     // Check for mutable fields in safe classes (before building IR)
-    let mutable_violations = analysis::mutable_checker::check_mutable_fields(&ast, &safety_context)?;
+    // Pass external annotations to skip STL internal types marked as unsafe_type
+    let mutable_violations = analysis::mutable_checker::check_mutable_fields(
+        &ast,
+        &safety_context,
+        Some(&header_cache.external_annotations)
+    )?;
     violations.extend(mutable_violations);
 
     // Build intermediate representation with safety context

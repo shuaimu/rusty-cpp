@@ -40,19 +40,23 @@ pub struct ExternalProfile {
 pub struct ExternalAnnotations {
     // Explicit function annotations
     pub functions: HashMap<String, ExternalFunctionAnnotation>,
-    
+
     // Pattern-based whitelists and blacklists
     pub whitelist_patterns: Vec<String>,
     pub blacklist_patterns: Vec<String>,
-    
+
     // Named profiles for different libraries
     pub profiles: HashMap<String, ExternalProfile>,
-    
+
     // Currently active profile
     pub active_profile: Option<String>,
-    
+
     // Unsafe scopes (classes/namespaces marked as entirely unsafe)
     pub unsafe_scopes: Vec<String>,
+
+    // Unsafe types - types whose internal structure should not be analyzed
+    // A @safe class can have unsafe_type fields without triggering internal analysis
+    pub unsafe_types: Vec<String>,
 }
 
 impl ExternalAnnotations {
@@ -64,8 +68,9 @@ impl ExternalAnnotations {
             profiles: HashMap::new(),
             active_profile: None,
             unsafe_scopes: Vec::new(),
+            unsafe_types: Vec::new(),
         };
-        
+
         // Load default annotations
         annotations.load_defaults();
         annotations
@@ -184,16 +189,23 @@ impl ExternalAnnotations {
             }
 
             // Parse entries like: function_name: [safety, lifetime_spec]
+            // or: type_name: [unsafe_type]
             if let Some(colon_pos) = line.find(':') {
-                let func_name = line[..colon_pos].trim().to_string();
+                let name = line[..colon_pos].trim().to_string();
                 let spec_str = line[colon_pos + 1..].trim();
 
-                // Parse [safety, lifetime] array
+                // Parse [safety, lifetime] or [unsafe_type] array
                 if spec_str.starts_with('[') && spec_str.ends_with(']') {
                     let inner = &spec_str[1..spec_str.len()-1];
                     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
 
                     if parts.len() >= 1 {
+                        // Check for unsafe_type annotation
+                        if parts[0] == "unsafe_type" {
+                            self.unsafe_types.push(name);
+                            continue;
+                        }
+
                         let safety = match parts[0] {
                             "safe" => {
                                 return Err(format!(
@@ -202,7 +214,7 @@ impl ExternalAnnotations {
                                      - RustyCpp does not verify external code\n\
                                      - 'safe' implies tool verification, 'unsafe' means programmer audited\n\
                                      - Change to: {}: [unsafe, ...]",
-                                    func_name, func_name
+                                    name, name
                                 ));
                             }
                             "unsafe" => ExternalSafety::Unsafe,
@@ -223,8 +235,8 @@ impl ExternalAnnotations {
                             };
 
 
-                        self.functions.insert(func_name.clone(), ExternalFunctionAnnotation {
-                            name: func_name,
+                        self.functions.insert(name.clone(), ExternalFunctionAnnotation {
+                            name,
                             safety,
                             lifetime_spec,
                             param_lifetimes,
@@ -447,6 +459,10 @@ impl ExternalAnnotations {
         // Load common C standard library functions
         self.add_c_stdlib_defaults();
 
+        // Load default unsafe types - STL containers whose internal structure should not be analyzed
+        // These types have internal classes with mutable fields that would trigger false positives
+        self.add_stl_unsafe_types();
+
         // Load common patterns
         // NOTE: Removed "std::*" wildcard - std functions must be explicitly declared
         self.whitelist_patterns.extend(vec![
@@ -454,7 +470,7 @@ impl ExternalAnnotations {
             "*::length".to_string(),
             "*::empty".to_string(),
         ]);
-        
+
         self.blacklist_patterns.extend(vec![
             "*::operator new*".to_string(),
             "*::operator delete*".to_string(),
@@ -462,6 +478,46 @@ impl ExternalAnnotations {
             "*::free".to_string(),
             "*::memcpy".to_string(),
             "*::memmove".to_string(),
+        ]);
+    }
+
+    fn add_stl_unsafe_types(&mut self) {
+        // STL containers and their internal classes have mutable fields (e.g., _ReuseOrAllocNode)
+        // that would trigger false positives when analyzing @safe classes that use them.
+        // Mark these as unsafe_type so their internal structure is not analyzed.
+        self.unsafe_types.extend(vec![
+            // Hash containers and their internals
+            "std::unordered_map*".to_string(),
+            "std::unordered_set*".to_string(),
+            "std::unordered_multimap*".to_string(),
+            "std::unordered_multiset*".to_string(),
+            "_Hashtable*".to_string(),
+            "_Hash_node*".to_string(),
+            "_ReuseOrAllocNode*".to_string(),
+
+            // Other STL containers with complex internals
+            "std::map*".to_string(),
+            "std::set*".to_string(),
+            "std::multimap*".to_string(),
+            "std::multiset*".to_string(),
+            "std::list*".to_string(),
+            "std::forward_list*".to_string(),
+            "std::deque*".to_string(),
+
+            // Smart pointers
+            "std::shared_ptr*".to_string(),
+            "std::weak_ptr*".to_string(),
+            "std::unique_ptr*".to_string(),
+
+            // Function wrappers
+            "std::function*".to_string(),
+            "std::move_only_function*".to_string(),
+
+            // Other STL internals that may have mutable fields
+            "_Rb_tree*".to_string(),
+            "_List_node*".to_string(),
+            "__shared_ptr*".to_string(),
+            "__weak_ptr*".to_string(),
         ]);
     }
     
@@ -526,6 +582,16 @@ impl ExternalAnnotations {
         }
     }
     
+    /// Check if a type is marked as unsafe_type (internal structure should not be analyzed)
+    pub fn is_type_unsafe(&self, type_name: &str) -> bool {
+        for pattern in &self.unsafe_types {
+            if Self::matches_pattern(type_name, pattern) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn is_function_safe(&self, func_name: &str) -> Option<bool> {
         // First check if function is in an unsafe scope
         for scope in &self.unsafe_scopes {
@@ -736,7 +802,41 @@ mod tests {
         let pattern = "Q*::*";
         let name = "QWidget::show";
         println!("Testing if '{}' matches pattern '{}'", name, pattern);
-        assert!(ExternalAnnotations::matches_pattern(name, pattern), 
+        assert!(ExternalAnnotations::matches_pattern(name, pattern),
             "Pattern '{}' should match '{}'", pattern, name);
+    }
+
+    #[test]
+    fn test_unsafe_type_annotation() {
+        let content = r#"
+        // @external: {
+        //   std::unordered_map: [unsafe_type]
+        //   MyCustomContainer: [unsafe_type]
+        // }
+        "#;
+
+        let mut annotations = ExternalAnnotations::new();
+        annotations.parse_content(content).unwrap();
+
+        // Check that the types are marked as unsafe
+        assert!(annotations.is_type_unsafe("std::unordered_map"));
+        assert!(annotations.is_type_unsafe("MyCustomContainer"));
+        // Non-annotated type should not be unsafe (unless it matches default patterns)
+        assert!(!annotations.is_type_unsafe("MyOtherClass"));
+    }
+
+    #[test]
+    fn test_default_stl_unsafe_types() {
+        let annotations = ExternalAnnotations::new();
+
+        // STL containers should be marked as unsafe_type by default
+        assert!(annotations.is_type_unsafe("std::unordered_map<int, int>"));
+        assert!(annotations.is_type_unsafe("std::unordered_set<std::string>"));
+        assert!(annotations.is_type_unsafe("_ReuseOrAllocNode"));
+        assert!(annotations.is_type_unsafe("std::function<void()>"));
+
+        // Regular user classes should not be unsafe
+        assert!(!annotations.is_type_unsafe("MyClass"));
+        assert!(!annotations.is_type_unsafe("UserDefinedMap"));
     }
 }
