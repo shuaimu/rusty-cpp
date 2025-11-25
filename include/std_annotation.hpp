@@ -159,6 +159,7 @@
 //   std::unordered_map::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
 //   std::unordered_map::erase: [unsafe, (const Key& key) -> size_t]
 //   std::unordered_map::find: [unsafe, (const Key& key) -> iterator where this: 'a, return: 'a]
+//   std::unordered_map::insert_or_assign: [unsafe, (const Key& key, M&& obj) -> pair<iterator,bool>]
 //   std::unordered_map::size: [unsafe, () const -> size_t]
 //   std::unordered_map::empty: [unsafe, () const -> bool]
 //   std::unordered_map::clear: [unsafe, () -> void]
@@ -168,6 +169,7 @@
 
 // std::set operations
 // @external: {
+//   std::set::set: [unsafe, () -> void]
 //   std::set::insert: [unsafe, (const T& value) -> pair<iterator,bool>]
 //   std::set::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
 //   std::set::erase: [unsafe, (const T& value) -> size_t]
@@ -182,6 +184,7 @@
 
 // std::unordered_set operations
 // @external: {
+//   std::unordered_set::unordered_set: [unsafe, () -> void]
 //   std::unordered_set::insert: [unsafe, (const T& value) -> pair<iterator,bool>]
 //   std::unordered_set::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
 //   std::unordered_set::erase: [unsafe, (const T& value) -> size_t]
@@ -190,6 +193,7 @@
 //   std::unordered_set::size: [unsafe, () const -> size_t]
 //   std::unordered_set::empty: [unsafe, () const -> bool]
 //   std::unordered_set::clear: [unsafe, () -> void]
+//   std::unordered_set::swap: [unsafe, (unordered_set& other) -> void]
 // }
 
 // std::pair operations
