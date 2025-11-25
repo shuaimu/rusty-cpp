@@ -16,13 +16,17 @@
 namespace rusty {
 
 // Tag types for Option variants
-struct None_t {};
+// @safe
+struct None_t {
+    constexpr None_t() noexcept = default;
+};
 #if __cplusplus >= 201703L
 inline constexpr None_t None{};
 #else
 static const None_t None{};
 #endif
 
+// @safe
 template<typename T>
 class Option {
 private:
@@ -203,7 +207,7 @@ public:
 
 // Template specialization for Option<T&> (reference types)
 // This allows holding references without storing them in a union
-// @unsafe-uses raw pointers for reference storage
+// @unsafe - uses raw pointers for reference storage
 template<typename T>
 class Option<T&> {
 private:
@@ -329,7 +333,7 @@ public:
 };
 
 // Template specialization for Option<const T&> (const reference types)
-// @unsafe-uses raw pointers for reference storage
+// @unsafe - uses raw pointers for reference storage
 template<typename T>
 class Option<const T&> {
 private:
@@ -428,6 +432,7 @@ public:
 };
 
 // Helper function to create Some variant
+// @safe
 template<typename T>
 // @lifetime: owned
 Option<T> Some(T value) {

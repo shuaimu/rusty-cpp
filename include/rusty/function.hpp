@@ -25,6 +25,7 @@
 //   rusty::Function<int()> fn = [p = std::move(ptr)]() { return *p; };
 //   int value = fn();
 
+// @safe
 namespace rusty {
 
 // Forward declaration

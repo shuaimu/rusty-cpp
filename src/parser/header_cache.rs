@@ -24,6 +24,15 @@ pub struct HeaderCache {
     pub external_annotations: ExternalAnnotations,
 }
 
+/// Strip template parameters from a name (e.g., "Option<T>" -> "Option")
+fn strip_template_params(name: &str) -> String {
+    if let Some(pos) = name.find('<') {
+        name[..pos].to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 impl HeaderCache {
     pub fn new() -> Self {
         Self {
@@ -285,13 +294,17 @@ impl HeaderCache {
 
                 if let Some(safety_mode) = safety {
                     // Use qualified name for methods, constructors, and template functions to avoid collisions
-                    let name = if entity.get_kind() == EntityKind::Method
+                    let raw_name = if entity.get_kind() == EntityKind::Method
                                 || entity.get_kind() == EntityKind::Constructor
                                 || entity.get_kind() == EntityKind::FunctionTemplate {
                         crate::parser::ast_visitor::get_qualified_name(entity)
                     } else {
                         entity.get_name().unwrap_or_else(|| "anonymous".to_string())
                     };
+
+                    // For template constructors, the name may include template params like "Option<T>"
+                    // Strip template params so lookups match (call sites use "Option", not "Option<T>")
+                    let name = strip_template_params(&raw_name);
 
                     self.safety_annotations.insert(name.clone(), safety_mode);
                     debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation in header", name, safety_mode);
