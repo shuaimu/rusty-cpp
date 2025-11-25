@@ -1,6 +1,6 @@
 use crate::parser::annotations::{LifetimeAnnotation, FunctionSignature, LifetimeBound};
 use crate::parser::HeaderCache;
-use crate::ir::{IrProgram, IrStatement, IrFunction};
+use crate::ir::{IrProgram, IrStatement, IrFunction, VariableType};
 use std::collections::{HashMap, HashSet};
 use crate::debug_println;
 
@@ -407,20 +407,31 @@ fn check_return_lifetime(
     scope: &LifetimeScope
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    
-    // Check if we're returning a reference to a local variable
-    if let Some(lifetime) = scope.get_lifetime(value) {
-        // Check if this lifetime is tied to a local variable
-        for (var_name, _) in &function.variables {
-            if lifetime.contains(var_name) && !is_parameter(var_name, function) {
-                errors.push(format!(
-                    "Returning reference to local variable '{}' - this will create a dangling reference",
-                    var_name
-                ));
+
+    // First, check if the returned value is actually a reference type
+    // Returning pointer values (Raw, Owned) is safe - only references are dangerous
+    if let Some(var_info) = function.variables.get(value) {
+        match &var_info.ty {
+            VariableType::Reference(_) | VariableType::MutableReference(_) => {
+                // This is a reference type - check for dangling reference
+                if let Some(lifetime) = scope.get_lifetime(value) {
+                    // Check if this lifetime is tied to a local variable
+                    for (var_name, _) in &function.variables {
+                        if lifetime.contains(var_name) && !is_parameter(var_name, function) {
+                            errors.push(format!(
+                                "Returning reference to local variable '{}' - this will create a dangling reference",
+                                var_name
+                            ));
+                        }
+                    }
+                }
             }
+            // Pointer types (Raw, Owned, UniquePtr, SharedPtr) are safe to return
+            // The pointer value is copied, heap memory persists after function return
+            _ => {}
         }
     }
-    
+
     errors
 }
 
@@ -460,14 +471,156 @@ mod tests {
     #[test]
     fn test_outlives_checking() {
         let mut scope = LifetimeScope::new();
-        
+
         scope.add_constraint(LifetimeBound {
             longer: "a".to_string(),
             shorter: "b".to_string(),
         });
-        
+
         assert!(scope.check_outlives("a", "b"));
         assert!(scope.check_outlives("a", "a")); // Self outlives
         assert!(!scope.check_outlives("b", "a")); // Not declared
+    }
+
+    #[test]
+    fn test_check_return_lifetime_pointer_is_safe() {
+        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use std::collections::HashMap;
+
+        // Create a function with a pointer variable (Raw type)
+        let mut variables = HashMap::new();
+        variables.insert("p".to_string(), VariableInfo {
+            name: "p".to_string(),
+            ty: VariableType::Raw("void*".to_string()),
+            ownership: OwnershipState::Owned,
+            lifetime: None,
+            is_parameter: false,
+            is_static: false,
+            scope_level: 1,
+            has_destructor: false,
+            declaration_index: 0,
+        });
+
+        let function = IrFunction {
+            name: "allocate".to_string(),
+            cfg: ControlFlowGraph::new(),
+            variables,
+            return_type: "void*".to_string(),
+            source_file: "test.cpp".to_string(),
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
+            template_parameters: vec![],
+            lifetime_params: HashMap::new(),
+            param_lifetimes: vec![],
+            return_lifetime: None,
+            lifetime_constraints: vec![],
+        };
+
+        let mut scope = LifetimeScope::new();
+        scope.set_lifetime("p".to_string(), "'p".to_string());
+
+        // Returning a pointer should NOT produce any errors
+        let errors = check_return_lifetime("p", &function, &scope);
+        assert!(errors.is_empty(), "Returning pointer value should be safe, got: {:?}", errors);
+    }
+
+    #[test]
+    fn test_check_return_lifetime_reference_is_unsafe() {
+        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use std::collections::HashMap;
+
+        // Create a function with a reference variable
+        let mut variables = HashMap::new();
+        variables.insert("local".to_string(), VariableInfo {
+            name: "local".to_string(),
+            ty: VariableType::Owned("int".to_string()),
+            ownership: OwnershipState::Owned,
+            lifetime: None,
+            is_parameter: false,
+            is_static: false,
+            scope_level: 1,
+            has_destructor: false,
+            declaration_index: 0,
+        });
+        variables.insert("ref".to_string(), VariableInfo {
+            name: "ref".to_string(),
+            ty: VariableType::Reference("int".to_string()),
+            ownership: OwnershipState::Owned,
+            lifetime: None,
+            is_parameter: false,
+            is_static: false,
+            scope_level: 1,
+            has_destructor: false,
+            declaration_index: 1,
+        });
+
+        let function = IrFunction {
+            name: "bad_return".to_string(),
+            cfg: ControlFlowGraph::new(),
+            variables,
+            return_type: "int&".to_string(),
+            source_file: "test.cpp".to_string(),
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
+            template_parameters: vec![],
+            lifetime_params: HashMap::new(),
+            param_lifetimes: vec![],
+            return_lifetime: None,
+            lifetime_constraints: vec![],
+        };
+
+        let mut scope = LifetimeScope::new();
+        // The reference's lifetime is tied to the local variable
+        scope.set_lifetime("ref".to_string(), "'local".to_string());
+
+        // Returning a reference to local should produce an error
+        let errors = check_return_lifetime("ref", &function, &scope);
+        assert!(!errors.is_empty(), "Returning reference to local should be flagged as unsafe");
+        assert!(errors[0].contains("local"), "Error should mention the local variable");
+    }
+
+    #[test]
+    fn test_check_return_lifetime_owned_is_safe() {
+        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use std::collections::HashMap;
+
+        // Create a function with an owned variable (like unique_ptr)
+        let mut variables = HashMap::new();
+        variables.insert("ptr".to_string(), VariableInfo {
+            name: "ptr".to_string(),
+            ty: VariableType::UniquePtr("int".to_string()),
+            ownership: OwnershipState::Owned,
+            lifetime: None,
+            is_parameter: false,
+            is_static: false,
+            scope_level: 1,
+            has_destructor: true,
+            declaration_index: 0,
+        });
+
+        let function = IrFunction {
+            name: "create".to_string(),
+            cfg: ControlFlowGraph::new(),
+            variables,
+            return_type: "std::unique_ptr<int>".to_string(),
+            source_file: "test.cpp".to_string(),
+            is_method: false,
+            method_qualifier: None,
+            class_name: None,
+            template_parameters: vec![],
+            lifetime_params: HashMap::new(),
+            param_lifetimes: vec![],
+            return_lifetime: None,
+            lifetime_constraints: vec![],
+        };
+
+        let mut scope = LifetimeScope::new();
+        scope.set_lifetime("ptr".to_string(), "'ptr".to_string());
+
+        // Returning owned value should NOT produce any errors
+        let errors = check_return_lifetime("ptr", &function, &scope);
+        assert!(errors.is_empty(), "Returning owned value should be safe, got: {:?}", errors);
     }
 }
