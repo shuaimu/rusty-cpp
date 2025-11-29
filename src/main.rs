@@ -191,6 +191,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function, function_safety);
             violations.extend(pointer_errors);
 
+            // Check for lambda capture safety (reference captures forbidden in @safe)
+            let lambda_errors = analysis::lambda_capture_safety::check_lambda_capture_safety(function, function_safety);
+            violations.extend(lambda_errors);
+
             // Check for calls to unsafe functions with external annotations from headers
             let propagation_errors = analysis::unsafe_propagation::check_unsafe_propagation_with_external(
                 function,

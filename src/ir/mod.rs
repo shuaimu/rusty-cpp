@@ -235,6 +235,18 @@ pub enum IrStatement {
         scope_level: usize,
         has_destructor: bool,  // True if variable is RAII type (should be marked as moved)
     },
+    // Lambda expression with captures (for safety checking)
+    LambdaCapture {
+        captures: Vec<LambdaCaptureInfo>,
+    },
+}
+
+/// Information about a lambda capture
+#[derive(Debug, Clone)]
+pub struct LambdaCaptureInfo {
+    pub name: String,
+    pub is_ref: bool,  // true = reference capture, false = copy capture
+    pub is_this: bool, // true if capturing 'this'
 }
 
 #[derive(Debug, Clone)]
@@ -535,6 +547,12 @@ fn extract_return_source(
         Expression::Literal(_) => {
             // Literal: return 42;
             // Literals have no source variable
+            None
+        }
+
+        Expression::Lambda { .. } => {
+            // Lambda: return [captures]() { ... };
+            // Lambdas are self-contained closures, no direct source variable
             None
         }
     }
@@ -1101,6 +1119,54 @@ fn convert_statement(
                     Ok(Some(vec![IrStatement::Assign {
                         lhs: lhs_var.clone(),
                         rhs: IrExpression::Literal(value.clone()),
+                    }]))
+                }
+                // Lambda expression: generate LambdaCapture statement for safety checking
+                crate::parser::Expression::Lambda { captures } => {
+                    debug_println!("DEBUG IR: Lambda assignment: {} = [captures]", lhs_var);
+                    let capture_infos: Vec<LambdaCaptureInfo> = captures.iter().map(|c| {
+                        use crate::parser::ast_visitor::LambdaCaptureKind;
+                        match c {
+                            LambdaCaptureKind::DefaultRef => LambdaCaptureInfo {
+                                name: "<default>".to_string(),
+                                is_ref: true,
+                                is_this: false,
+                            },
+                            LambdaCaptureKind::DefaultCopy => LambdaCaptureInfo {
+                                name: "<default>".to_string(),
+                                is_ref: false,
+                                is_this: false,
+                            },
+                            LambdaCaptureKind::ByRef(name) => LambdaCaptureInfo {
+                                name: name.clone(),
+                                is_ref: true,
+                                is_this: false,
+                            },
+                            LambdaCaptureKind::ByCopy(name) => LambdaCaptureInfo {
+                                name: name.clone(),
+                                is_ref: false,
+                                is_this: false,
+                            },
+                            LambdaCaptureKind::Init { name, is_move } => LambdaCaptureInfo {
+                                name: name.clone(),
+                                is_ref: false, // Init captures are by value
+                                is_this: false,
+                            },
+                            LambdaCaptureKind::This => LambdaCaptureInfo {
+                                name: "this".to_string(),
+                                is_ref: true, // 'this' capture is a pointer, essentially by-ref
+                                is_this: true,
+                            },
+                            LambdaCaptureKind::ThisCopy => LambdaCaptureInfo {
+                                name: "this".to_string(),
+                                is_ref: false, // *this capture is by value
+                                is_this: true,
+                            },
+                        }
+                    }).collect();
+
+                    Ok(Some(vec![IrStatement::LambdaCapture {
+                        captures: capture_infos,
                     }]))
                 }
                 _ => Ok(None)

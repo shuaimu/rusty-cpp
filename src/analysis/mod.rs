@@ -67,6 +67,7 @@ pub mod unsafe_propagation;
 pub mod this_tracking;
 pub mod liveness;
 pub mod mutable_checker;
+pub mod lambda_capture_safety;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

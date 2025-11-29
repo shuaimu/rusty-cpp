@@ -314,6 +314,30 @@ pub enum Statement {
         operation: String,           // Type of operation: "forward", "move", "use"
         location: SourceLocation,
     },
+    // Lambda expression with captures (for safety checking)
+    LambdaExpr {
+        captures: Vec<LambdaCaptureKind>,
+        location: SourceLocation,
+    },
+}
+
+/// Represents a lambda capture
+#[derive(Debug, Clone)]
+pub enum LambdaCaptureKind {
+    /// [&] - default reference capture
+    DefaultRef,
+    /// [=] - default copy capture
+    DefaultCopy,
+    /// [&x] - explicit reference capture
+    ByRef(String),
+    /// [x] - explicit copy capture
+    ByCopy(String),
+    /// [x = expr] - init capture (includes move captures)
+    Init { name: String, is_move: bool },
+    /// [this] - captures this pointer
+    This,
+    /// [*this] - captures this by copy (C++17)
+    ThisCopy,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +361,10 @@ pub enum Expression {
     MemberAccess {
         object: Box<Expression>,
         field: String,
+    },
+    // Lambda expression with captures
+    Lambda {
+        captures: Vec<LambdaCaptureKind>,
     },
 }
 
@@ -1510,6 +1538,175 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 });
             }
             None
+        }
+        EntityKind::LambdaExpr => {
+            // Extract lambda captures by analyzing the AST structure
+            // In libclang, lambda captures appear as:
+            // - Reference capture: VariableRef only (no DeclRefExpr for that variable)
+            // - Copy capture: VariableRef + DeclRefExpr for the same variable
+            // - Default capture ([&] or [=]): No VariableRef/DeclRefExpr, must check type fields
+            // - The body is a CompoundStmt
+            debug_println!("DEBUG LAMBDA PARSER: Found LambdaExpr!");
+
+            let mut captures = Vec::new();
+
+            // Collect all VariableRef entries (these are the captured variables)
+            let mut var_refs: Vec<String> = Vec::new();
+            // Collect all DeclRefExpr entries (these indicate copy captures)
+            let mut decl_refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Track if we found any explicit captures
+            let mut has_explicit_captures = false;
+            // Track if we found a move call (indicates move capture)
+            let mut has_move_call = false;
+
+            for child in entity.get_children() {
+                debug_println!("DEBUG LAMBDA child: kind={:?} name={:?}", child.get_kind(), child.get_name());
+                match child.get_kind() {
+                    EntityKind::VariableRef => {
+                        has_explicit_captures = true;
+                        if let Some(var_name) = child.get_name() {
+                            var_refs.push(var_name);
+                        }
+                    }
+                    EntityKind::DeclRefExpr => {
+                        // DeclRefExpr indicates a copy capture (part of copy init expr)
+                        if let Some(var_name) = child.get_name() {
+                            decl_refs.insert(var_name);
+                        }
+                    }
+                    EntityKind::CallExpr => {
+                        // CallExpr with 'move' indicates a move capture [y = std::move(x)]
+                        if let Some(name) = child.get_name() {
+                            if name == "move" {
+                                has_move_call = true;
+                            }
+                        }
+                    }
+                    EntityKind::ThisExpr => {
+                        // Capturing 'this'
+                        has_explicit_captures = true;
+                        captures.push(LambdaCaptureKind::This);
+                    }
+                    _ => {}
+                }
+            }
+
+            // If no explicit captures found, check if lambda uses default capture
+            // by looking at the source code range
+            debug_println!("DEBUG LAMBDA: has_explicit_captures={}", has_explicit_captures);
+            if !has_explicit_captures {
+                // Try to get the source range and parse the capture specifier
+                if let Some(range) = entity.get_range() {
+                    if let Some(file) = range.get_start().get_file_location().file {
+                        if let Ok(content) = std::fs::read_to_string(file.get_path()) {
+                            let start_line = range.get_start().get_file_location().line as usize;
+                            let start_col = range.get_start().get_file_location().column as usize;
+                            debug_println!("DEBUG LAMBDA: Source parsing at line={} col={}", start_line, start_col);
+
+                            if let Some(line) = content.lines().nth(start_line.saturating_sub(1)) {
+                                debug_println!("DEBUG LAMBDA: Line content: '{}'", line);
+                                // Find the capture list: [...]
+                                if let Some(bracket_start) = line.get(start_col.saturating_sub(1)..).and_then(|s| s.find('[')) {
+                                    let search_start = start_col.saturating_sub(1) + bracket_start;
+                                    if let Some(rest) = line.get(search_start..) {
+                                        if let Some(bracket_end) = rest.find(']') {
+                                            let capture_list = &rest[1..bracket_end];
+                                            debug_println!("DEBUG LAMBDA: Capture list from source: '{}'", capture_list);
+
+                                            // Check for default reference capture [&]
+                                            if capture_list.trim() == "&" {
+                                                debug_println!("DEBUG LAMBDA: Default reference capture [&] detected");
+                                                captures.push(LambdaCaptureKind::DefaultRef);
+                                            }
+                                            // Check for default copy capture [=]
+                                            else if capture_list.trim() == "=" {
+                                                debug_println!("DEBUG LAMBDA: Default copy capture [=] detected");
+                                                captures.push(LambdaCaptureKind::DefaultCopy);
+                                            }
+                                            // Check for 'this' capture [this]
+                                            else if capture_list.trim() == "this" {
+                                                debug_println!("DEBUG LAMBDA: 'this' capture [this] detected");
+                                                captures.push(LambdaCaptureKind::This);
+                                            }
+                                            // Check for '*this' capture [*this]
+                                            else if capture_list.trim() == "*this" {
+                                                debug_println!("DEBUG LAMBDA: '*this' capture [*this] detected");
+                                                captures.push(LambdaCaptureKind::ThisCopy);
+                                            }
+                                            // Check for init captures [x = expr] or [x = std::move(y)]
+                                            else if capture_list.contains('=') && !capture_list.starts_with('&') {
+                                                // This is an init capture - safe (copy or move)
+                                                debug_println!("DEBUG LAMBDA: Init capture detected");
+                                                // Extract variable name before the '='
+                                                if let Some(eq_pos) = capture_list.find('=') {
+                                                    let var_name = capture_list[..eq_pos].trim().to_string();
+                                                    let is_move = capture_list.contains("std::move") ||
+                                                                 capture_list.contains("move(");
+                                                    captures.push(LambdaCaptureKind::Init {
+                                                        name: var_name,
+                                                        is_move,
+                                                    });
+                                                }
+                                            }
+                                            // Check for explicit reference captures [&x, &y, ...]
+                                            else if capture_list.starts_with('&') && !capture_list.contains(',') {
+                                                // [&x] - single explicit reference capture
+                                                // Already handled by VariableRef detection above
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Determine capture type for each VariableRef (explicit captures)
+            // Key insight from libclang patterns:
+            // - Reference capture [&x]: VariableRef 'x' only (no DeclRefExpr, no CallExpr)
+            // - Copy capture [x]: VariableRef 'x' + DeclRefExpr 'x' (same name)
+            // - Init copy capture [y = x]: VariableRef 'y' + DeclRefExpr 'x' (different names, NO overlap!)
+            // - Init move capture [y = std::move(x)]: VariableRef 'y' + CallExpr 'move'
+            // - Mixed capture [x, &y]: VariableRef 'x' & 'y', DeclRefExpr 'x' only (partial overlap)
+
+            // Check if this is an init capture situation:
+            // For init captures [y = x], var_refs and decl_refs have NO overlapping names
+            let var_ref_set: std::collections::HashSet<_> = var_refs.iter().cloned().collect();
+            let has_any_overlap = var_ref_set.intersection(&decl_refs).next().is_some();
+            let is_init_capture_pattern = !decl_refs.is_empty() && !has_any_overlap;
+
+            for var_name in var_refs {
+                if decl_refs.contains(&var_name) {
+                    // Has corresponding DeclRefExpr with SAME name = copy capture
+                    debug_println!("DEBUG LAMBDA: Copy capture of '{}'", var_name);
+                    captures.push(LambdaCaptureKind::ByCopy(var_name));
+                } else if has_move_call {
+                    // Has move() call = init move capture [y = std::move(x)]
+                    debug_println!("DEBUG LAMBDA: Init move capture '{}'", var_name);
+                    captures.push(LambdaCaptureKind::Init {
+                        name: var_name,
+                        is_move: true,
+                    });
+                } else if is_init_capture_pattern {
+                    // Has DeclRefExpr with entirely DIFFERENT names = init capture [y = x]
+                    // The VariableRef is the new capture name, DeclRefExpr is the source
+                    debug_println!("DEBUG LAMBDA: Init copy capture '{}'", var_name);
+                    captures.push(LambdaCaptureKind::Init {
+                        name: var_name,
+                        is_move: false,
+                    });
+                } else {
+                    // No matching DeclRefExpr = reference capture
+                    debug_println!("DEBUG LAMBDA: Reference capture of '{}'", var_name);
+                    captures.push(LambdaCaptureKind::ByRef(var_name));
+                }
+            }
+
+            debug_println!("DEBUG LAMBDA: Found lambda with {} captures: {:?}",
+                captures.len(), captures);
+
+            Some(Expression::Lambda { captures })
         }
         _ => None
     }

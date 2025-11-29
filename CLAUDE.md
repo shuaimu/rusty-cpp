@@ -162,11 +162,11 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 522 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 605 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
-- ⚠️ Reassignment after move (not tracked yet)
 - ⚠️ Virtual function calls (basic method calls work)
+- ⚠️ Loop counter variables declared in `for(int i=...)` not tracked in variables map
 
 ### What's Not Implemented Yet ❌
 
@@ -190,9 +190,11 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - RAII patterns not understood
 
 #### Nice to Have
-- ❌ **Reassignment after move**
-  - Can't track when moved variable becomes valid again
-  - `x = std::move(y); x = 42;` - x valid again but not tracked
+- ✅ **Reassignment after move** (Implemented November 2025!)
+  - Moved variable becomes valid after reassignment
+  - `x = std::move(y); x = 42; use(x);` - x valid again and tracked
+  - Works with literals, variables, and move assignments
+  - 12 comprehensive tests
 
 - ❌ **Exception handling**
   - Try/catch blocks ignored
@@ -729,14 +731,14 @@ Earlier achievements:
 ## Next Priority Tasks
 
 ### High Priority
-1. **Constructor/Destructor tracking** - RAII patterns
-2. **Reassignment tracking** - Variable becomes valid after reassignment
-3. **Better error messages** - Code snippets and fix suggestions
+1. **Constructor/Destructor tracking** - RAII patterns, object lifetime
+2. **Better error messages** - Code snippets and fix suggestions
+3. **Lambda captures** - Closure lifetime tracking
 
 ### Medium Priority
 4. **Advanced template features** - Variadic templates, SFINAE, partial specialization
 5. **Switch/case statements** - Common control flow
-6. **Lambda captures** - Closure lifetime tracking
+6. **Loop counter variable tracking** - Variables in `for(int i=...)`
 
 ### Low Priority
 7. **Circular reference detection** - Complex whole-program analysis

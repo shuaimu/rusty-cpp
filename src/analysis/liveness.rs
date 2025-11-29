@@ -215,7 +215,8 @@ impl LivenessAnalyzer {
             IrStatement::EnterUnsafe |
             IrStatement::ExitUnsafe |
             IrStatement::Drop(_) |
-            IrStatement::ImplicitDrop { .. } => {}
+            IrStatement::ImplicitDrop { .. } |
+            IrStatement::LambdaCapture { .. } => {}
         }
     }
 
