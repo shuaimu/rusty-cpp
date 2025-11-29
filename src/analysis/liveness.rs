@@ -115,6 +115,9 @@ impl LivenessAnalyzer {
                     crate::ir::IrExpression::New(_) => {
                         // Allocation, no variable read
                     }
+                    crate::ir::IrExpression::Literal(_) => {
+                        // Literal value, no variable read
+                    }
                 }
                 // LHS is being assigned to
                 self.record_use(lhs, UseType::Write);

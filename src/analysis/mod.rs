@@ -797,8 +797,15 @@ fn process_statement(
                     ));
                 }
             }
+
+            // REASSIGNMENT FIX: After assignment, lhs becomes Owned again
+            // This handles the case where a moved variable is reassigned a new value
+            // Example: x = std::move(y); x = 42;  // x is valid again after reassignment
+            if !ownership_tracker.is_reference(lhs) {
+                ownership_tracker.set_ownership(lhs.clone(), OwnershipState::Owned);
+            }
         }
-        
+
         crate::ir::IrStatement::Drop(var) => {
             debug_println!("DEBUG ANALYSIS: Processing explicit Drop for '{}'", var);
             // Skip checks if we're in an unsafe block

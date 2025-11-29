@@ -244,6 +244,7 @@ pub enum IrExpression {
     Move(String),
     Borrow(String, BorrowKind),
     New(String),  // Allocation
+    Literal(String),  // Literal value assignment (restores ownership)
 }
 
 #[derive(Debug, Clone)]
@@ -1092,6 +1093,15 @@ fn convert_statement(
                     });
 
                     Ok(Some(statements))
+                }
+                // REASSIGNMENT FIX: Handle literal assignments (e.g., x = 42)
+                // This generates IR so that ownership can be properly restored
+                crate::parser::Expression::Literal(value) => {
+                    debug_println!("DEBUG IR: Literal assignment: {} = {}", lhs_var, value);
+                    Ok(Some(vec![IrStatement::Assign {
+                        lhs: lhs_var.clone(),
+                        rhs: IrExpression::Literal(value.clone()),
+                    }]))
                 }
                 _ => Ok(None)
             };

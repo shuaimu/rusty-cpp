@@ -51,12 +51,20 @@ impl LifetimeInferencer {
     
     /// Infer lifetimes for all variables in a function
     pub fn infer_function_lifetimes(&mut self, function: &IrFunction) -> HashMap<String, InferredLifetime> {
-        // First pass: collect all variable definitions and uses
+        // REASSIGNMENT FIX: Initialize all declared variables with first_def = 0
+        // This ensures variables exist in the lifetime tracking even if their
+        // declaration doesn't generate IR (e.g., int x = 42 with literal)
+        for (var_name, _var_info) in &function.variables {
+            self.first_def.entry(var_name.clone()).or_insert(0);
+            self.last_use.entry(var_name.clone()).or_insert(0);
+        }
+
+        // First pass: collect all variable definitions and uses from IR statements
         let mut statement_index = 0;
-        
+
         for node_idx in function.cfg.node_indices() {
             let block = &function.cfg[node_idx];
-            
+
             for statement in &block.statements {
                 self.process_statement(statement, statement_index);
                 statement_index += 1;
@@ -95,9 +103,14 @@ impl LifetimeInferencer {
     /// Process a statement to track variable definitions and uses
     fn process_statement(&mut self, statement: &IrStatement, index: usize) {
         match statement {
-            IrStatement::Assign { lhs, .. } => {
+            IrStatement::Assign { lhs, rhs } => {
                 self.first_def.entry(lhs.clone()).or_insert(index);
                 self.last_use.insert(lhs.clone(), index);
+                // REASSIGNMENT FIX: Also track usage of RHS variable
+                // This extends the lifetime of variables used on the right side
+                if let crate::ir::IrExpression::Variable(rhs_var) = rhs {
+                    self.last_use.insert(rhs_var.clone(), index);
+                }
             }
             
             IrStatement::Move { from, to } => {
