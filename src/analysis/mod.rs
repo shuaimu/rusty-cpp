@@ -898,15 +898,30 @@ fn process_statement(
         }
         
         crate::ir::IrStatement::ExitScope => {
-            // Before exiting scope, clear borrows from ALL variables at this scope
-            // This handles references that don't have ImplicitDrop (they're not RAII types)
-            // but still need their borrows cleared when they go out of scope
+            // Before exiting scope, check for dangling references
+            // A dangling reference occurs when:
+            // 1. A variable x is defined in the current scope (will die)
+            // 2. A reference ref from an outer scope borrows from x
+            // 3. ref will outlive x, becoming a dangling reference
             let current_scope = ownership_tracker.scope_stack.len();
 
-            // Get all variables at this scope level (from the function's variables)
-            // Note: We can't easily access function variables here, so we'll rely on
-            // ImplicitDrop to clear borrows for RAII types.
-            // For references, they should be handled by liveness analysis or have zero borrows at scope end
+            // Find all variables defined at the current scope level
+            for (var_name, var_info) in &function.variables {
+                if var_info.scope_level == current_scope {
+                    // This variable is dying - check if any outer-scope references borrow from it
+                    if let Some(active_borrows) = ownership_tracker.active_borrows.get(var_name) {
+                        for borrow in active_borrows {
+                            // Check if the borrower (reference) is from an outer scope
+                            if borrow.scope < current_scope {
+                                errors.push(format!(
+                                    "Dangling reference: '{}' borrows from '{}' which goes out of scope",
+                                    borrow.borrower, var_name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
 
             ownership_tracker.exit_scope();
         }
@@ -1102,10 +1117,35 @@ fn process_statement(
                                         debug_println!("DEBUG ANALYSIS PHASE2: Return value '{}' borrows from parameter '{}'",
                                             result_var, borrowed_var);
 
-                                        // Determine borrow kind from annotation
-                                        let borrow_kind = match param_lifetime {
+                                        // CROSS-FUNCTION LIFETIME CHECK: Detect temporaries
+                                        // If the borrowed variable is a temporary (literal or expression),
+                                        // the return value would be a dangling reference
+                                        if borrowed_var.starts_with("_temp_literal_") || borrowed_var.starts_with("_temp_expr_") {
+                                            debug_println!("DEBUG ANALYSIS: Detected dangling reference from temporary argument");
+                                            errors.push(format!(
+                                                "Dangling reference: function '{}' returns reference tied to temporary argument",
+                                                func
+                                            ));
+                                            break;  // Don't process further
+                                        }
+
+                                        // Determine borrow kind from RETURN annotation (not param)
+                                        // If return annotation is &'a mut -> mutable, otherwise immutable
+                                        // Also check the actual C++ variable type as fallback
+                                        let borrow_kind = match ret_lifetime {
                                             crate::parser::annotations::LifetimeAnnotation::MutRef(_) => BorrowKind::Mutable,
-                                            _ => BorrowKind::Immutable,
+                                            _ => {
+                                                // Fallback: check the actual C++ variable type
+                                                if let Some(var_info) = function.variables.get(result_var) {
+                                                    if matches!(var_info.ty, crate::ir::VariableType::MutableReference(_)) {
+                                                        BorrowKind::Mutable
+                                                    } else {
+                                                        BorrowKind::Immutable
+                                                    }
+                                                } else {
+                                                    BorrowKind::Immutable
+                                                }
+                                            }
                                         };
 
                                         // Record the borrow with MethodReturnValue source

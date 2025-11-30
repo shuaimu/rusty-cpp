@@ -656,6 +656,7 @@ fn convert_statement(
                 // Reference to function call result: create CallExpr with result
                 crate::parser::Expression::FunctionCall { name: func_name, args } => {
                     let mut arg_names = Vec::new();
+                    let mut temp_counter = 0;
 
                     // Process arguments
                     for arg in args {
@@ -671,6 +672,18 @@ fn convert_statement(
                                     });
                                     arg_names.push(var.clone());
                                 }
+                            }
+                            // Track literals as temporaries for lifetime analysis
+                            crate::parser::Expression::Literal(lit) => {
+                                let temp_name = format!("_temp_literal_{}_{}", temp_counter, lit);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
+                            // Track binary expressions as temporaries (e.g., a + b)
+                            crate::parser::Expression::BinaryOp { .. } => {
+                                let temp_name = format!("_temp_expr_{}", temp_counter);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
                             }
                             _ => {}
                         }
@@ -989,6 +1002,7 @@ fn convert_statement(
                     // Convert function call arguments, handling moves
                     let mut statements = Vec::new();
                     let mut arg_names = Vec::new();
+                    let mut temp_counter = 0;
 
                     // Check if this is a method call (operator* or other methods)
                     // Methods can be: qualified (Class::method), operators (operator*, operator bool), or have :: in name
@@ -996,6 +1010,18 @@ fn convert_statement(
 
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
+                            // Track literals as temporaries for lifetime analysis
+                            crate::parser::Expression::Literal(lit) => {
+                                let temp_name = format!("_temp_literal_{}_{}", temp_counter, lit);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
+                            // Track binary expressions as temporaries (e.g., a + b)
+                            crate::parser::Expression::BinaryOp { .. } => {
+                                let temp_name = format!("_temp_expr_{}", temp_counter);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
                             crate::parser::Expression::Variable(var) => {
                                 // For method calls, the first arg is the receiver object
                                 if is_method_call && i == 0 {
@@ -1196,6 +1222,7 @@ fn convert_statement(
             // Standalone function call (no assignment)
             let mut statements = Vec::new();
             let mut arg_names = Vec::new();
+            let mut temp_counter = 0;
 
             // Check if this is a method call (has :: or is an operator)
             // Methods can be: qualified (Class::method), operators (operator*, operator bool), or have :: in name
@@ -1365,6 +1392,18 @@ fn convert_statement(
                             });
                             arg_names.push(format!("{}.{}", obj_name, field));
                         }
+                    }
+                    // Track literals as temporaries for lifetime analysis
+                    crate::parser::Expression::Literal(lit) => {
+                        let temp_name = format!("_temp_literal_{}_{}", temp_counter, lit);
+                        temp_counter += 1;
+                        arg_names.push(temp_name);
+                    }
+                    // Track binary expressions as temporaries (e.g., a + b)
+                    crate::parser::Expression::BinaryOp { .. } => {
+                        let temp_name = format!("_temp_expr_{}", temp_counter);
+                        temp_counter += 1;
+                        arg_names.push(temp_name);
                     }
                     _ => {}
                 }

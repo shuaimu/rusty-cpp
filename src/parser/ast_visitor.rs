@@ -1708,6 +1708,22 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
             Some(Expression::Lambda { captures })
         }
+        EntityKind::ArraySubscriptExpr => {
+            // Array subscript: arr[i], data[idx], etc.
+            // The first child is the array/pointer, second is the index
+            // For lifetime purposes, the source is the array (first child)
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if !children.is_empty() {
+                // First child is the array or pointer being indexed
+                if let Some(array_expr) = extract_expression(&children[0]) {
+                    debug_println!("DEBUG: ArraySubscriptExpr - array/pointer source: {:?}", array_expr);
+                    // Return the array expression as the source
+                    // This handles cases like data[i] returning reference to member data
+                    return Some(array_expr);
+                }
+            }
+            None
+        }
         _ => None
     }
 }

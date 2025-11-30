@@ -136,6 +136,13 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Dangling reference detection
   - Transitive outlives checking ('a: 'b: 'c)
   - Automatic lifetime inference for local variables
+  - **Cross-function lifetime enforcement** (NEW!)
+    - Detects when function returns reference tied to temporary argument
+    - Uses `@lifetime` annotations to track parameter-return relationships
+    - Example: `identity(42)` correctly flagged as dangling when assigned to reference
+  - **Array subscript return value tracking** (NEW!)
+    - Methods returning `data[i]` correctly track member lifetime
+    - Fixes false positive for container `at()` methods
 - ✅ **Include path support**
   - CLI flags (-I)
   - Environment variables (CPLUS_INCLUDE_PATH, CPATH, etc.)
@@ -162,7 +169,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 605 tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 630+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Virtual function calls (basic method calls work)
@@ -200,9 +207,12 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Try/catch blocks ignored
   - Stack unwinding not modeled
   
-- ❌ **Lambdas and closures**
-  - Capture semantics not analyzed
-  - Closure lifetime not tracked
+- ✅ **Lambda capture safety** (Implemented November 2025!)
+  - Reference captures ([&], [&x]) forbidden in @safe code
+  - Copy captures ([x], [=]) allowed
+  - Move captures ([y = std::move(x)]) allowed
+  - 'this' capture forbidden (raw pointer)
+  - 13 comprehensive tests
   
 - ❌ **Better diagnostics**
   - No code snippets in errors
@@ -733,12 +743,12 @@ Earlier achievements:
 ### High Priority
 1. **Constructor/Destructor tracking** - RAII patterns, object lifetime
 2. **Better error messages** - Code snippets and fix suggestions
-3. **Lambda captures** - Closure lifetime tracking
 
 ### Medium Priority
-4. **Advanced template features** - Variadic templates, SFINAE, partial specialization
-5. **Switch/case statements** - Common control flow
-6. **Loop counter variable tracking** - Variables in `for(int i=...)`
+3. **Advanced template features** - Variadic templates, SFINAE, partial specialization
+4. **Switch/case statements** - Common control flow
+5. **Loop counter variable tracking** - Variables in `for(int i=...)`
+6. **Closure lifetime tracking** - Lambda escaping its scope
 
 ### Low Priority
 7. **Circular reference detection** - Complex whole-program analysis
