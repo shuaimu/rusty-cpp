@@ -168,17 +168,18 @@ pub fn check_borrows_with_safety_context(
             errors.extend(inference_errors);
         }
     }
-    
+
     // If we have header annotations, also check lifetime constraints
     if header_cache.has_signatures() {
-        let lifetime_errors = lifetime_checker::check_lifetimes_with_annotations(&program, &header_cache)?;
+        // Bug #9 fix: pass safety_context to filter by @safe functions only
+        let lifetime_errors = lifetime_checker::check_lifetimes_with_annotations(&program, &header_cache, &safety_context)?;
         errors.extend(lifetime_errors);
-        
+
         // Also run scope-based lifetime checking
-        let scope_errors = scope_lifetime::check_scoped_lifetimes(&program, &header_cache)?;
+        let scope_errors = scope_lifetime::check_scoped_lifetimes(&program, &header_cache, &safety_context)?;
         errors.extend(scope_errors);
     }
-    
+
     Ok(errors)
 }
 
@@ -256,8 +257,13 @@ fn check_if_function_returns_reference(function: &IrFunction) -> bool {
 #[allow(dead_code)]
 pub fn check_borrows_with_annotations(program: IrProgram, header_cache: HeaderCache) -> Result<Vec<String>, String> {
     use crate::parser::annotations::SafetyAnnotation;
+    use crate::parser::safety_annotations::SafetyContext;
     let mut errors = Vec::new();
-    
+
+    // Create a SafetyContext from header annotations (Bug #9 fix)
+    let mut safety_context = SafetyContext::new();
+    safety_context.merge_header_annotations(&header_cache);
+
     // Run regular borrow checking, but skip unsafe functions
     for function in &program.functions {
         // Check if this function is marked as unsafe
@@ -266,30 +272,31 @@ pub fn check_borrows_with_annotations(program: IrProgram, header_cache: HeaderCa
         } else {
             false
         };
-        
+
         // Skip checking if function is marked unsafe
         if !is_unsafe {
             let function_errors = check_function(function)?;
             errors.extend(function_errors);
         }
     }
-    
+
     // Run lifetime inference and validation
     for function in &program.functions {
         let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
         errors.extend(inference_errors);
     }
-    
+
     // If we have header annotations, also check lifetime constraints
     if header_cache.has_signatures() {
-        let lifetime_errors = lifetime_checker::check_lifetimes_with_annotations(&program, &header_cache)?;
+        // Bug #9 fix: pass safety_context to filter by @safe functions only
+        let lifetime_errors = lifetime_checker::check_lifetimes_with_annotations(&program, &header_cache, &safety_context)?;
         errors.extend(lifetime_errors);
-        
+
         // Also run scope-based lifetime checking
-        let scope_errors = scope_lifetime::check_scoped_lifetimes(&program, &header_cache)?;
+        let scope_errors = scope_lifetime::check_scoped_lifetimes(&program, &header_cache, &safety_context)?;
         errors.extend(scope_errors);
     }
-    
+
     Ok(errors)
 }
 

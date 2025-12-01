@@ -632,16 +632,35 @@ fn extract_qualified_function_name(before_paren: &str) -> Option<String> {
 }
 
 /// Parse safety annotation from entity comment (for clang AST)
+/// Bug fix: Only match @safe/@unsafe at the START of comment lines (or after prefix like //, /*, *)
+/// This prevents false matches like "No @safe annotation" being treated as @safe
 #[allow(dead_code)]
 pub fn parse_entity_safety(entity: &Entity) -> Option<SafetyMode> {
     if let Some(comment) = entity.get_comment() {
-        if comment.contains("@safe") {
-            Some(SafetyMode::Safe)
-        } else if comment.contains("@unsafe") {
-            Some(SafetyMode::Unsafe)
-        } else {
-            None
+        // Parse each line of the comment and check for annotations at the start
+        for line in comment.lines() {
+            let trimmed = line.trim();
+            // Remove common comment prefixes
+            let content = if trimmed.starts_with("///") {
+                trimmed[3..].trim()
+            } else if trimmed.starts_with("//") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("/*") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("*") {
+                trimmed[1..].trim()
+            } else {
+                trimmed
+            };
+
+            // Use contains_annotation to properly check for annotations at start of line
+            if contains_annotation(content, "@safe") {
+                return Some(SafetyMode::Safe);
+            } else if contains_annotation(content, "@unsafe") {
+                return Some(SafetyMode::Unsafe);
+            }
         }
+        None
     } else {
         None
     }

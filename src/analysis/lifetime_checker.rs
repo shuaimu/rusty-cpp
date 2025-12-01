@@ -1,5 +1,6 @@
 use crate::parser::annotations::{LifetimeAnnotation, FunctionSignature, LifetimeBound};
 use crate::parser::HeaderCache;
+use crate::parser::safety_annotations::SafetyContext;
 use crate::ir::{IrProgram, IrStatement, IrFunction, VariableType};
 use std::collections::{HashMap, HashSet};
 use crate::debug_println;
@@ -147,13 +148,20 @@ fn is_system_header(file_path: &str) -> bool {
 
 pub fn check_lifetimes_with_annotations(
     program: &IrProgram,
-    header_cache: &HeaderCache
+    header_cache: &HeaderCache,
+    safety_context: &SafetyContext
 ) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
 
     for function in &program.functions {
         // Skip system header functions
         if is_system_header(&function.source_file) {
+            continue;
+        }
+
+        // Only check functions that should be analyzed (i.e., @safe functions)
+        // Bug #9 fix: undeclared functions should NOT be analyzed
+        if !safety_context.should_check_function(&function.name) {
             continue;
         }
 

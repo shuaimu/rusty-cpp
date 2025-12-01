@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::ir::{IrFunction, IrStatement, IrProgram, BasicBlock};
 use crate::parser::HeaderCache;
 use crate::parser::annotations::{FunctionSignature, LifetimeAnnotation};
+use crate::parser::safety_annotations::SafetyContext;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 
@@ -464,12 +465,19 @@ fn is_system_header(file_path: &str) -> bool {
 pub fn check_scoped_lifetimes(
     program: &IrProgram,
     header_cache: &HeaderCache,
+    safety_context: &SafetyContext,
 ) -> Result<Vec<String>, String> {
     let mut all_errors = Vec::new();
 
     for function in &program.functions {
         // Skip system header functions
         if is_system_header(&function.source_file) {
+            continue;
+        }
+
+        // Only check functions that should be analyzed (i.e., @safe functions)
+        // Bug #9 fix: undeclared functions should NOT be analyzed
+        if !safety_context.should_check_function(&function.name) {
             continue;
         }
 
