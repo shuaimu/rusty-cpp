@@ -473,7 +473,9 @@ pub fn extract_function(entity: &Entity) -> Function {
 pub fn extract_class(entity: &Entity) -> Class {
     use crate::debug_println;
 
-    let name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
+    // Bug #8 fix: Use qualified name for classes to prevent namespace collision
+    // e.g., "yaml::Node" instead of just "Node"
+    let name = get_qualified_name(entity);
     let location = extract_location(entity);
     let is_template = entity.get_kind() == EntityKind::ClassTemplate;
 
@@ -1302,12 +1304,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 // For template-dependent functions (like std::move in templates),
                                 // the function name is in the reference, not the name field
                                 if let Some(ref_entity) = c.get_reference() {
-                                    if let Some(n) = ref_entity.get_name() {
-                                        debug_println!("DEBUG AST: Got function name '{}' from reference (kind: {:?})", n, ref_entity.get_kind());
-                                        name = n;
-                                        name_providing_child_idx = Some(i);
-                                        break;
-                                    }
+                                    // Bug #8 fix: Use qualified name for free functions too
+                                    // This ensures namespace::function is captured correctly
+                                    let n = get_qualified_name(&ref_entity);
+                                    debug_println!("DEBUG AST: Got function name '{}' from reference (kind: {:?})", n, ref_entity.get_kind());
+                                    name = n;
+                                    name_providing_child_idx = Some(i);
+                                    break;
                                 }
 
                                 // Fallback: check name field (for non-template cases)

@@ -125,11 +125,29 @@ impl SafetyContext {
                 return *mode;
             }
 
-            // Also check if one is a suffix of the other (for namespace::Class::method matching)
-            // This handles cases where header has "rrr::Timer::start" and impl has "Timer::start"
-            if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
-                return *mode;
+            let sig_is_qualified = sig.name.contains("::");
+            let func_is_qualified = func_name.contains("::");
+
+            // Bug #8 fix: Careful suffix matching to avoid namespace collisions
+            // Case 1: Qualified stored name, unqualified lookup - allow if lookup is a suffix
+            //         e.g., stored "test::create_thing", lookup "create_thing" -> MATCH
+            // Case 2: Both qualified - allow suffix matching on either side
+            //         e.g., stored "rrr::Timer::start", lookup "Timer::start" -> MATCH
+            // Case 3: Unqualified stored, qualified lookup - DON'T match (bug #8 scenario)
+            //         e.g., stored "Node", lookup "yaml::Node" -> NO MATCH (different namespaces)
+            if sig_is_qualified && !func_is_qualified {
+                // Stored is qualified, lookup is unqualified - allow if lookup matches the tail
+                if sig.name.ends_with(&format!("::{}", func_name)) {
+                    return *mode;
+                }
+            } else if sig_is_qualified && func_is_qualified {
+                // Both are qualified - allow suffix matching on either side
+                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
+                    return *mode;
+                }
             }
+            // Note: if !sig_is_qualified && func_is_qualified, we DON'T match
+            // This prevents "Node" from matching "yaml::Node" (bug #8)
         }
 
         // If the function is a method (contains "::"), check if the class is annotated
@@ -146,9 +164,18 @@ impl SafetyContext {
                         return *mode;
                     }
 
-                    // Also check suffix matching for the class
-                    if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
-                        return *mode;
+                    // Bug #8 fix: Careful suffix matching
+                    let sig_is_qualified = sig.name.contains("::");
+                    let class_is_qualified = class_name.contains("::");
+
+                    if sig_is_qualified && !class_is_qualified {
+                        if sig.name.ends_with(&format!("::{}", class_name)) {
+                            return *mode;
+                        }
+                    } else if sig_is_qualified && class_is_qualified {
+                        if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
+                            return *mode;
+                        }
                     }
                 }
             }
@@ -176,16 +203,34 @@ impl SafetyContext {
                 return *mode;
             }
 
-            // Check suffix matching (handles namespace::Class vs Class)
-            if sig.name.ends_with(&format!("::{}", class_name)) {
-                debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
-                return *mode;
-            }
+            // Bug #8 fix: Careful suffix matching to avoid namespace collisions
+            let sig_is_qualified = sig.name.contains("::");
+            let class_is_qualified = class_name.contains("::");
 
-            if class_name.ends_with(&format!("::{}", sig.name)) {
-                debug_println!("DEBUG SAFETY: Prefix match for class '{}' (query has more qualifiers) -> {:?}", class_name, mode);
-                return *mode;
+            // Case 1: Qualified stored, unqualified lookup - allow suffix match
+            //         e.g., stored "rusty::Node", lookup "Node" -> MATCH
+            // Case 2: Both qualified - allow suffix matching on either side
+            //         e.g., stored "rusty::Node", lookup "ns::rusty::Node" -> MATCH
+            // Case 3: Unqualified stored, qualified lookup - DON'T match (bug #8)
+            //         e.g., stored "Node", lookup "yaml::Node" -> NO MATCH
+            if sig_is_qualified && !class_is_qualified {
+                if sig.name.ends_with(&format!("::{}", class_name)) {
+                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
+                    return *mode;
+                }
+            } else if sig_is_qualified && class_is_qualified {
+                // Both are qualified - suffix matching is sound
+                if sig.name.ends_with(&format!("::{}", class_name)) {
+                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
+                    return *mode;
+                }
+
+                if class_name.ends_with(&format!("::{}", sig.name)) {
+                    debug_println!("DEBUG SAFETY: Prefix match for class '{}' (query has more qualifiers) -> {:?}", class_name, mode);
+                    return *mode;
+                }
             }
+            // Note: if !sig_is_qualified && class_is_qualified, we DON'T match (bug #8)
         }
 
         debug_println!("DEBUG SAFETY: No match for class '{}', using file default: {:?}", class_name, self.file_default);
@@ -199,15 +244,19 @@ impl SafetyContext {
 pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
     let file = File::open(path)
         .map_err(|e| format!("Failed to open file for safety parsing: {}", e))?;
-    
+
     let reader = BufReader::new(file);
     let mut context = SafetyContext::new();
     let mut pending_annotation: Option<SafetyMode> = None;
     let mut in_comment_block = false;
     let mut _current_line = 0;
-    
+
     let mut accumulated_line = String::new();
     let mut accumulating_for_annotation = false;
+
+    // Bug #8 fix: Track class context for method annotations
+    let mut class_context_stack: Vec<String> = Vec::new();
+    let mut brace_depth = 0;
     
     for line_result in reader.lines() {
         _current_line += 1;
@@ -261,7 +310,35 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         if trimmed.is_empty() || trimmed.starts_with("#") {
             continue;
         }
-        
+
+        // Bug #8 fix: Track braces to know when we exit a class
+        // Note: This is a simplified tracking that doesn't handle strings/comments perfectly
+        // but works for typical C++ code with annotations
+        let opens = trimmed.matches('{').count() as i32;
+        let closes = trimmed.matches('}').count() as i32;
+        brace_depth += opens - closes;
+
+        // Pop class context when we exit its scope
+        if brace_depth <= 0 && !class_context_stack.is_empty() {
+            class_context_stack.pop();
+            brace_depth = 0; // Reset to handle nested classes properly
+        }
+
+        // Bug #8 fix: Track class declarations even without annotations
+        // This ensures method annotations get qualified with class name
+        // NOTE: Only push non-annotated classes here; annotated classes are pushed
+        // in the annotation handling section below
+        let is_class_line = is_class_declaration(trimmed);
+        let needs_class_tracking = is_class_line && pending_annotation.is_none() && !accumulating_for_annotation;
+        if needs_class_tracking {
+            if let Some(class_name) = extract_class_name(trimmed) {
+                class_context_stack.push(class_name);
+                // Reset brace depth to track this class's scope
+                brace_depth = trimmed.matches('{').count() as i32
+                            - trimmed.matches('}').count() as i32;
+            }
+        }
+
         // If we have a pending annotation, start accumulating
         if pending_annotation.is_some() && !accumulating_for_annotation {
             accumulated_line.clear();
@@ -319,22 +396,39 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                     } else if is_class_declaration(&accumulated_line) {
                         // Class/struct declaration - extract class name and store annotation
                         if let Some(class_name) = extract_class_name(&accumulated_line) {
-                            let signature = FunctionSignature::from_name_only(class_name.clone());
+                            // Bug #8 fix: Build qualified class name using context
+                            let qualified_name = if class_context_stack.is_empty() {
+                                class_name.clone()
+                            } else {
+                                format!("{}::{}", class_context_stack.join("::"), class_name)
+                            };
+                            let signature = FunctionSignature::from_name_only(qualified_name.clone());
                             context.function_overrides.push((signature, annotation));
-                            debug_println!("DEBUG SAFETY: Set class '{}' to {:?}", class_name, annotation);
+                            debug_println!("DEBUG SAFETY: Set class '{}' to {:?}", qualified_name, annotation);
+
+                            // Push class to context for nested methods
+                            class_context_stack.push(class_name.clone());
+                            brace_depth = accumulated_line.matches('{').count() as i32
+                                        - accumulated_line.matches('}').count() as i32;
                         }
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function signature (name + params) and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
+                            // Bug #8 fix: Build qualified function name using class context
+                            let qualified_name = if class_context_stack.is_empty() {
+                                func_name.clone()
+                            } else {
+                                format!("{}::{}", class_context_stack.join("::"), func_name)
+                            };
                             let param_types = extract_parameter_types(&accumulated_line);
-                            let signature = FunctionSignature::new(func_name.clone(), param_types.clone());
+                            let signature = FunctionSignature::new(qualified_name.clone(), param_types.clone());
                             context.function_overrides.push((signature, annotation));
 
                             if let Some(ref params) = param_types {
                                 debug_println!("DEBUG SAFETY: Set function '{}({})' to {:?}",
-                                             func_name, params.join(", "), annotation);
+                                             qualified_name, params.join(", "), annotation);
                             } else {
-                                debug_println!("DEBUG SAFETY: Set function '{}' to {:?}", func_name, annotation);
+                                debug_println!("DEBUG SAFETY: Set function '{}' to {:?}", qualified_name, annotation);
                             }
                         }
                     } else {
