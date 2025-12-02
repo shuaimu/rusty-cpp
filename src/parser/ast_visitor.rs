@@ -1178,22 +1178,29 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             if let Some(ref_entity) = entity.get_reference() {
                 debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
 
-                if let Some(n) = ref_entity.get_name() {
-                    name = n;
-                }
-
                 // Check if it references a type (struct/class/typedef)
                 // BUT: A CallExpr with 0 children is likely a constructor/declaration
                 if children.is_empty() {
+                    if let Some(n) = ref_entity.get_name() {
+                        name = n;
+                    }
                     debug_println!("DEBUG AST: CallExpr with 0 children referencing '{}' - likely a variable declaration", name);
                     return None;  // Not a function call, it's a variable declaration
                 }
 
-                // Build qualified name for member functions and constructors
-                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
+                // Build qualified name for all functions to avoid namespace collisions
+                // This ensures ns1::func and ns2::func are distinguished
+                if ref_entity.get_kind() == EntityKind::Method
+                    || ref_entity.get_kind() == EntityKind::Constructor
+                    || ref_entity.get_kind() == EntityKind::FunctionDecl
+                    || ref_entity.get_kind() == EntityKind::FunctionTemplate {
                     name = get_qualified_name(&ref_entity);
-                    method_name_from_callexpr = true;
-                    debug_println!("DEBUG AST: Method name extracted from CallExpr reference: {}", name);
+                    if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
+                        method_name_from_callexpr = true;
+                    }
+                    debug_println!("DEBUG AST: Function name extracted from CallExpr reference: {}", name);
+                } else if let Some(n) = ref_entity.get_name() {
+                    name = n;
                 }
             }
             

@@ -789,6 +789,14 @@ impl ExternalAnnotations {
             }
         }
         
+        // Handle case where pattern is unqualified but name is qualified
+        // e.g., pattern "make_unique" should match name "std::make_unique"
+        if !pattern.contains("::") && name.contains("::") {
+            if name.ends_with(&format!("::{}", pattern)) {
+                return true;
+            }
+        }
+
         name == pattern
     }
     

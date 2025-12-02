@@ -262,15 +262,9 @@ impl HeaderCache {
 
                 // Extract lifetime annotations
                 if let Some(mut sig) = extract_annotations(entity) {
-                    // Use qualified name for methods, constructors, and template functions to avoid collisions
-                    // This ensures lifetime signatures match safety annotations
-                    let qualified_name = if entity.get_kind() == EntityKind::Method
-                                || entity.get_kind() == EntityKind::Constructor
-                                || entity.get_kind() == EntityKind::FunctionTemplate {
-                        crate::parser::ast_visitor::get_qualified_name(entity)
-                    } else {
-                        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
-                    };
+                    // Always use qualified name for all functions to avoid namespace collisions
+                    // This ensures functions like ns1::helper and ns2::helper are distinguished
+                    let qualified_name = crate::parser::ast_visitor::get_qualified_name(entity);
 
                     // Update the signature name to use qualified name
                     sig.name = qualified_name.clone();
@@ -293,14 +287,9 @@ impl HeaderCache {
                 // }
 
                 if let Some(safety_mode) = safety {
-                    // Use qualified name for methods, constructors, and template functions to avoid collisions
-                    let raw_name = if entity.get_kind() == EntityKind::Method
-                                || entity.get_kind() == EntityKind::Constructor
-                                || entity.get_kind() == EntityKind::FunctionTemplate {
-                        crate::parser::ast_visitor::get_qualified_name(entity)
-                    } else {
-                        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
-                    };
+                    // Always use qualified name for all functions to avoid namespace collisions
+                    // This ensures functions like ns1::helper and ns2::helper are distinguished
+                    let raw_name = crate::parser::ast_visitor::get_qualified_name(entity);
 
                     // For template constructors, the name may include template params like "Option<T>"
                     // Strip template params so lookups match (call sites use "Option", not "Option<T>")
