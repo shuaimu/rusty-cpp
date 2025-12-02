@@ -266,28 +266,18 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                         // PHASE 2: If function returns a reference, check what we're returning
                         if returns_reference(&function.return_type) {
                             if let Some(var_info) = function.variables.get(val) {
-                                // Check if we're returning a local variable
-                                // This applies whether the variable is owned or already a reference
-                                // Static variables are OK to return (they have 'static lifetime)
                                 let is_param = is_parameter(val, function);
 
-                                if !is_param && !var_info.is_static {
-                                    // Returning a local variable when function returns a reference
-                                    // (but static variables are safe)
-                                    errors.push(format!(
-                                        "Cannot return reference to local variable '{}'",
-                                        val
-                                    ));
-                                }
-
-                                // If the returned variable is itself a reference, check dependencies
-                                match var_info.ty {
+                                // Check based on variable type
+                                match &var_info.ty {
                                     crate::ir::VariableType::Reference(_) |
                                     crate::ir::VariableType::MutableReference(_) => {
+                                        // Variable is already a reference (alias) - it's NOT a local object
+                                        // Check its dependencies instead of flagging as "returning local"
                                         if let Some(lifetime) = lifetimes.get(val) {
                                             // Check if it depends on local variables
                                             for dep in &lifetime.dependencies {
-                                                if !is_parameter(dep, function) {
+                                                if !is_parameter(dep, function) && !var_info.is_static {
                                                     errors.push(format!(
                                                         "Potential dangling reference: returning '{}' which depends on local variable '{}'",
                                                         val, dep
@@ -295,8 +285,19 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                                                 }
                                             }
                                         }
+                                        // If no dependencies tracked, the reference alias is safe to return
+                                        // (it inherits the lifetime of whatever it was bound to)
                                     }
-                                    _ => {} // Owned variable - already checked above
+                                    _ => {
+                                        // Variable is an OWNED local object (not a reference alias)
+                                        // Returning a reference to it is dangerous
+                                        if !is_param && !var_info.is_static {
+                                            errors.push(format!(
+                                                "Cannot return reference to local variable '{}'",
+                                                val
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }

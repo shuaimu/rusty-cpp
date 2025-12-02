@@ -437,7 +437,10 @@ pub fn extract_function(entity: &Entity) -> Function {
         (None, None)
     };
 
-    // Extract template parameters from parent if this is a template class method
+    // Extract template parameters from:
+    // 1. ClassTemplate parent (for template class methods)
+    // 2. FunctionTemplate entity itself (for free template functions)
+    // 3. FunctionTemplate parent (fallback for nested cases)
     let template_parameters = if is_method {
         // Check if parent is a ClassTemplate
         if let Some(parent) = entity.get_semantic_parent() {
@@ -450,10 +453,22 @@ pub fn extract_function(entity: &Entity) -> Function {
         } else {
             Vec::new()
         }
+    } else if entity.get_kind() == EntityKind::FunctionTemplate {
+        // Entity IS a FunctionTemplate - extract parameters directly from it
+        debug_println!("TEMPLATE: Free template function (entity is FunctionTemplate), extracting parameters");
+        extract_template_parameters(entity)
     } else {
-        // For free functions, template params would come from FunctionTemplate parent
-        // We'll handle this in Phase 2
-        Vec::new()
+        // For free functions, check if parent is a FunctionTemplate (fallback)
+        if let Some(parent) = entity.get_semantic_parent() {
+            if parent.get_kind() == EntityKind::FunctionTemplate {
+                debug_println!("TEMPLATE: Free template function, extracting parameters from FunctionTemplate parent");
+                extract_template_parameters(&parent)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
     };
 
     Function {

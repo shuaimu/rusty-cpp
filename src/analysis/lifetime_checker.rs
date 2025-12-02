@@ -421,11 +421,23 @@ fn check_return_lifetime(
     if let Some(var_info) = function.variables.get(value) {
         match &var_info.ty {
             VariableType::Reference(_) | VariableType::MutableReference(_) => {
-                // This is a reference type - check for dangling reference
+                // Variable is a REFERENCE type (alias) - it's not a local object itself
+                // Check if its lifetime is tied to a local OWNED variable
                 if let Some(lifetime) = scope.get_lifetime(value) {
-                    // Check if this lifetime is tied to a local variable
-                    for (var_name, _) in &function.variables {
-                        if lifetime.contains(var_name) && !is_parameter(var_name, function) {
+                    // Check if this lifetime is tied to a local owned variable
+                    for (var_name, other_var_info) in &function.variables {
+                        // Skip self-referential check (variable tracking its own name as lifetime)
+                        if var_name == value {
+                            continue;
+                        }
+                        // Only flag if the dependency is an OWNED local variable
+                        // Reference aliases that depend on other references are OK
+                        // (they inherit the lifetime of whatever they're bound to)
+                        let is_owned_type = matches!(
+                            other_var_info.ty,
+                            VariableType::Owned(_)
+                        );
+                        if is_owned_type && lifetime.contains(var_name) && !is_parameter(var_name, function) {
                             errors.push(format!(
                                 "Returning reference to local variable '{}' - this will create a dangling reference",
                                 var_name
@@ -434,7 +446,12 @@ fn check_return_lifetime(
                     }
                 }
             }
-            // Pointer types (Raw, Owned, UniquePtr, SharedPtr) are safe to return
+            VariableType::Owned(_) => {
+                // Variable is an OWNED local object - returning a reference to it is dangerous
+                // (This case is handled elsewhere - the function returns a reference but
+                // the variable itself is not a reference type, so we're taking &local)
+            }
+            // Pointer types (Raw, UniquePtr, SharedPtr) are safe to return
             // The pointer value is copied, heap memory persists after function return
             _ => {}
         }

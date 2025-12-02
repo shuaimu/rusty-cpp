@@ -476,3 +476,77 @@ T process(T x) {
         output
     );
 }
+
+/// Test that template-dependent member function calls (like values.size()) are NOT
+/// reported as "unknown" undeclared functions in free template functions.
+/// This tests the fix for extracting template parameters from FunctionTemplate entities.
+#[test]
+fn test_template_dependent_member_calls_in_free_functions() {
+    let code = r#"
+#include <vector>
+
+class Value {};
+
+template<class Container>
+// @safe
+void process_container(const Container& values) {
+    // values.size() is a template-dependent member function call
+    // The parser can't resolve "size" because Container is a template parameter
+    // But this should NOT be reported as "calling undeclared function 'unknown'"
+    std::vector<const Value*> values_ptr(values.size(), nullptr);
+}
+"#;
+
+    let (output, _) = run_checker(code);
+
+    // Should NOT report "unknown" function errors for template-dependent calls
+    // in free template functions
+    assert!(
+        !output.contains("Calling unsafe function 'unknown") &&
+        !output.contains("Calling undeclared function 'unknown"),
+        "Template-dependent member calls in free template functions should not cause 'unknown' errors. Output: {}",
+        output
+    );
+}
+
+/// Test that returning a reference ALIAS is NOT flagged as "returning reference to local variable"
+/// When we have `T& value = some_function();` and `return value;`, the `value` is a reference
+/// alias, not a local object. It's safe to return because it inherits the lifetime of whatever
+/// it was bound to.
+#[test]
+fn test_reference_alias_return_not_flagged_as_local() {
+    let code = r#"
+class Node {
+public:
+    int data;
+};
+
+class Container {
+    Node m_node;
+public:
+    // @safe
+    Node& get() {
+        return m_node;  // Safe: returning reference to member
+    }
+};
+
+// @safe
+Node& get_node_alias(Container& c) {
+    // 'value' is a REFERENCE ALIAS, not a local object
+    // Returning it should NOT be flagged as "returning reference to local variable"
+    Node& value = c.get();
+    return value;  // This is safe - value is just an alias for c.m_node
+}
+"#;
+
+    let (output, _) = run_checker(code);
+
+    // Should NOT report "returning reference to local variable" for reference aliases
+    assert!(
+        !output.contains("return reference to local variable") &&
+        !output.contains("Returning reference to local variable") &&
+        !output.contains("Cannot return reference to local variable"),
+        "Reference alias return should not be flagged as returning local. Output: {}",
+        output
+    );
+}

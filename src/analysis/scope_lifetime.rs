@@ -332,18 +332,25 @@ fn analyze_block(
                         // If returning a reference to a local variable, it's an error
                         // Static variables are OK to return (they have 'static lifetime)
                         if *var_scope != 0 && !is_parameter(val, function) {
-                            // Check if this is a reference type and not a static variable
+                            // Check if this is an OWNED local variable (not a reference alias)
                             if let Some(var_info) = function.variables.get(val) {
                                 if !var_info.is_static {  // Static variables are safe to return
                                     match var_info.ty {
                                         crate::ir::VariableType::Reference(_) |
                                         crate::ir::VariableType::MutableReference(_) => {
+                                            // Variable is a reference alias - it's NOT a local object
+                                            // The reference inherits the lifetime of what it was bound to
+                                            // We rely on dependency tracking for these cases
+                                        }
+                                        crate::ir::VariableType::Owned(_) => {
+                                            // Variable is an OWNED local object
+                                            // Returning a reference to it is dangerous
                                             errors.push(format!(
                                                 "Returning reference to local variable '{}' - will create dangling reference",
                                                 val
                                             ));
                                         }
-                                        _ => {}
+                                        _ => {} // Pointers (Raw, UniquePtr, SharedPtr) are safe to return
                                     }
                                 }
                             }
