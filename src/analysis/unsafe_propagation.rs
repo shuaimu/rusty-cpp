@@ -406,9 +406,39 @@ fn is_standard_safe_function(func_name: &str) -> bool {
         }
     }
 
+    // Check for STL constructors (e.g., std::vector::vector, std::shared_ptr::shared_ptr)
+    // A constructor has the pattern: Type::Type or namespace::Type::Type
+    if is_stl_constructor(func_name) {
+        return true;
+    }
+
     // Keep ONLY std::move and std::forward whitelisted
     // All other functions must be explicitly marked @safe or called from @unsafe blocks
     matches!(stripped, "move" | "forward") || matches!(method_name, "move" | "forward")
+}
+
+/// Check if a function name represents an STL constructor
+/// Constructors have the pattern: Class::Class or std::Class::Class or std::ns::Class::Class
+fn is_stl_constructor(func_name: &str) -> bool {
+    // Only consider std:: prefixed names as STL constructors
+    if !func_name.starts_with("std::") {
+        return false;
+    }
+
+    // Find the last two parts separated by ::
+    // e.g., "std::vector::vector" -> parts = ["std", "vector", "vector"]
+    // e.g., "std::__cxx11::basic_string::basic_string" -> last two are "basic_string", "basic_string"
+    let parts: Vec<&str> = func_name.split("::").collect();
+    if parts.len() >= 2 {
+        let last = parts[parts.len() - 1];
+        let second_last = parts[parts.len() - 2];
+        // Constructor: last part == second-to-last part (class name == method name)
+        if last == second_last && !last.is_empty() {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

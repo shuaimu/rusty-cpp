@@ -399,3 +399,80 @@ void test_real_move() {
         output
     );
 }
+
+/// Test that function parameter names are NOT detected as undeclared function calls
+/// This tests the namespace collision fix where template function arguments
+/// like `rhs`, `schema`, `vv` were incorrectly being treated as function names.
+#[test]
+fn test_parameter_names_not_detected_as_function_calls() {
+    let code = r#"
+// Helper class with a method that takes a parameter
+class Data {
+public:
+    int value;
+
+    // @safe
+    void Assign(const Data& rhs) {
+        value = rhs.value;
+    }
+};
+
+// Template function that forwards a parameter to a method
+template<typename T>
+// @safe
+void assign_helper(T& dest, const T& src) {
+    // The parameter `src` should NOT be detected as a function call
+    dest.Assign(src);
+}
+
+// Function with common parameter names that caused false positives
+// @safe
+void test_with_common_names(int schema, int vv, int rhs) {
+    // These parameter names should NOT cause "undeclared function" errors
+    int x = schema;
+    int y = vv;
+    int z = rhs;
+}
+"#;
+
+    let (output, _) = run_checker(code);
+
+    // Should NOT report undeclared function errors for parameter names
+    // The old bug would report things like "Calling undeclared function 'rhs'"
+    assert!(
+        !output.contains("Calling undeclared function 'rhs'") &&
+        !output.contains("Calling undeclared function 'schema'") &&
+        !output.contains("Calling undeclared function 'vv'") &&
+        !output.contains("Calling undeclared function 'src'"),
+        "Parameter names should not be detected as function calls. Output: {}",
+        output
+    );
+}
+
+/// Test that template-dependent function calls still work correctly
+/// after the namespace collision fix (regression test)
+#[test]
+fn test_template_dependent_calls_still_work() {
+    let code = r#"
+#include <utility>
+
+template<typename T>
+// @safe
+T process(T x) {
+    // std::move should still be detected as a function call
+    T moved = std::move(x);
+    return moved;
+}
+"#;
+
+    let (output, _) = run_checker(code);
+
+    // The template function should still be analyzed
+    // std::move should be detected (it's in the whitelist, so no error expected)
+    // But importantly, it should NOT cause crashes or incorrect parsing
+    assert!(
+        !output.contains("Parse error") && !output.contains("panicked"),
+        "Template-dependent calls should parse correctly. Output: {}",
+        output
+    );
+}

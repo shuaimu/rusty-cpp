@@ -781,12 +781,25 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 }
                 
                 // Try to extract the function name from children
+                // CRITICAL: EXCLUDE entities that reference variables/parameters
+                // (which caused the "rhs"/"schema"/"vv" bugs where args were mistaken for function names)
                 for (idx, c) in children.iter().enumerate() {
                     debug_println!("DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
                         idx, c.get_kind(), c.get_name(), c.get_display_name(),
                         c.get_reference().map(|r| (r.get_kind(), r.get_name())));
 
                     if c.get_kind() == EntityKind::UnexposedExpr || c.get_kind() == EntityKind::DeclRefExpr {
+                        // Check if this entity references a variable/parameter - if so, skip it
+                        if let Some(ref_entity) = c.get_reference() {
+                            let ref_kind = ref_entity.get_kind();
+                            // EXCLUDE variables and parameters - these are arguments, not function names
+                            if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
+                                debug_println!("DEBUG AST: Skipping variable/parameter reference: {:?}", ref_kind);
+                                continue;
+                            }
+                        }
+                        // Either references a function, or no reference (template-dependent)
+                        // Both are valid candidates for function names
                         if let Some(n) = c.get_name() {
                             if name == "unknown" {
                                 debug_println!("DEBUG AST: Got name from child: {}", n);
@@ -840,6 +853,14 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 }
                             }
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
+                                // CRITICAL FIX: EXCLUDE variables/parameters
+                                // (which caused the "rhs"/"schema"/"vv" bugs)
+                                if let Some(ref_entity) = c.get_reference() {
+                                    let ref_kind = ref_entity.get_kind();
+                                    if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
+                                        continue; // Skip variables/parameters
+                                    }
+                                }
                                 if let Some(n) = c.get_name() {
                                     name = n;
                                     name_providing_child_idx = Some(i);
@@ -1307,10 +1328,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     for (i, c) in children.iter().enumerate() {
                         match c.get_kind() {
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
-                                // CRITICAL FIX: Check reference FIRST before name
-                                // For template-dependent functions (like std::move in templates),
-                                // the function name is in the reference, not the name field
+                                // CRITICAL FIX: EXCLUDE variables/parameters
+                                // (which caused the "rhs"/"schema"/"vv" bugs)
                                 if let Some(ref_entity) = c.get_reference() {
+                                    let ref_kind = ref_entity.get_kind();
+                                    if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
+                                        continue; // Skip variables/parameters
+                                    }
                                     // Bug #8 fix: Use qualified name for free functions too
                                     // This ensures namespace::function is captured correctly
                                     let n = get_qualified_name(&ref_entity);
@@ -1319,8 +1343,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                     name_providing_child_idx = Some(i);
                                     break;
                                 }
-
-                                // Fallback: check name field (for non-template cases)
+                                // No reference - might be template-dependent, use name directly
                                 if let Some(n) = c.get_name() {
                                     debug_println!("DEBUG AST: Got function name '{}' from name field", n);
                                     name = n;
