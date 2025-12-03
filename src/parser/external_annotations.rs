@@ -207,8 +207,9 @@ impl ExternalAnnotations {
                     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
 
                     if parts.len() >= 1 {
-                        // Check for unsafe_type annotation
-                        if parts[0] == "unsafe_type" {
+                        // Check for unsafe_type annotation (also accept just "unsafe" for types)
+                        // When a type has [unsafe] with no lifetime spec, treat it as unsafe_type
+                        if parts[0] == "unsafe_type" || (parts[0] == "unsafe" && parts.len() == 1) {
                             self.unsafe_types.push(name);
                             continue;
                         }
