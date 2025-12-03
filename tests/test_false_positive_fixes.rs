@@ -550,3 +550,101 @@ Node& get_node_alias(Container& c) {
         output
     );
 }
+
+/// Test that unqualified function names don't match qualified annotations
+/// This tests the fix for yaml-cpp's `get` being incorrectly matched to `rusty::Cell::get`
+/// when both are unrelated functions in different namespaces.
+#[test]
+fn test_unqualified_get_does_not_match_qualified_annotation() {
+    let code = r#"
+// Simulating a user-defined class with a @safe get method
+namespace rusty {
+    class Cell {
+    public:
+        // @safe
+        int get() const {
+            return 0;
+        }
+    };
+}
+
+// Simulating an external library function with an unqualified get
+// (like yaml-cpp's node_data::get)
+namespace external_lib {
+    // No annotation - undeclared
+    class Node {
+    public:
+        int get() const {
+            return 0;
+        }
+    };
+}
+
+// Undeclared function (can call other undeclared functions)
+void use_external_lib() {
+    external_lib::Node node;
+    int x = node.get();  // Should NOT match rusty::Cell::get
+}
+"#;
+
+    let (output, success) = run_checker(code);
+
+    // The undeclared function use_external_lib() can call external_lib::Node::get()
+    // because undeclared can call undeclared.
+    // The key point is that external_lib::Node::get should NOT be treated as @safe
+    // just because rusty::Cell::get is @safe.
+    assert!(
+        success || !output.contains("rusty::Cell::get"),
+        "Unqualified external 'get' should not match 'rusty::Cell::get'. Output: {}",
+        output
+    );
+}
+
+/// Test that functions in different namespaces with the same simple name
+/// are correctly distinguished when one is annotated and one is not.
+#[test]
+fn test_same_name_different_namespace_no_collision() {
+    let code = r#"
+namespace safe_ns {
+    // @safe
+    int helper() {
+        return 1;
+    }
+}
+
+namespace undeclared_ns {
+    // No annotation - undeclared
+    int helper() {
+        return 2;
+    }
+}
+
+// @safe
+void safe_caller_to_safe() {
+    int x = safe_ns::helper();  // OK - calling @safe function
+}
+
+// @safe
+void safe_caller_to_undeclared() {
+    int x = undeclared_ns::helper();  // ERROR - @safe calling undeclared
+}
+"#;
+
+    let (output, _) = run_checker(code);
+
+    // Should detect safe calling undeclared for undeclared_ns::helper
+    // The key test: it should identify the CORRECT namespace
+    assert!(
+        output.contains("undeclared_ns::helper"),
+        "Should detect @safe calling undeclared 'undeclared_ns::helper'. Output: {}",
+        output
+    );
+
+    // Make sure we don't flag the call to safe_ns::helper (which is @safe)
+    // Note: 'safe_ns::helper' should not appear in error messages
+    assert!(
+        !output.contains("safe_ns::helper"),
+        "Should NOT flag call to safe_ns::helper (which is @safe). Output: {}",
+        output
+    );
+}

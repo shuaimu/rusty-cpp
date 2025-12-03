@@ -382,13 +382,13 @@ pub fn extract_function(entity: &Entity) -> Function {
     let kind = entity.get_kind();
     let is_method = kind == EntityKind::Method || kind == EntityKind::Constructor;
 
-    // Use qualified name for methods to avoid collisions
-    let name = if is_method {
-        // For methods, try to get the qualified name
-        get_qualified_name(entity)
-    } else {
-        entity.get_name().unwrap_or_else(|| "anonymous".to_string())
-    };
+    // Use qualified name for ALL functions (methods AND free functions in namespaces)
+    // This ensures:
+    // 1. Methods get qualified names like "MyClass::method"
+    // 2. Namespaced functions get qualified names like "network::send_message"
+    // 3. External library functions get qualified names like "YAML::detail::node_data::get"
+    // This prevents false matches where unqualified "get" incorrectly matches "rusty::Cell::get"
+    let name = get_qualified_name(entity);
     let location = extract_location(entity);
 
     let mut parameters = Vec::new();
@@ -779,13 +779,13 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         is_likely_var_decl = true;
                     }
                     
-                    if let Some(n) = ref_entity.get_name() {
-                        // Build qualified name for member functions
-                        if ref_entity.get_kind() == EntityKind::Method {
-                            name = get_qualified_name(&ref_entity);
-                        } else {
-                            name = n;
-                        }
+                    if let Some(_n) = ref_entity.get_name() {
+                        // Build qualified name for ALL functions (methods AND free functions)
+                        // This ensures:
+                        // 1. Methods get qualified names like "MyClass::method"
+                        // 2. Namespaced functions get qualified names like "mylib::dangerous_op"
+                        // This prevents false matches between same-named functions in different namespaces
+                        name = get_qualified_name(&ref_entity);
                     }
                 }
                 
@@ -812,13 +812,19 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 debug_println!("DEBUG AST: Skipping variable/parameter reference: {:?}", ref_kind);
                                 continue;
                             }
-                        }
-                        // Either references a function, or no reference (template-dependent)
-                        // Both are valid candidates for function names
-                        if let Some(n) = c.get_name() {
+                            // This is a function reference - use qualified name
                             if name == "unknown" {
-                                debug_println!("DEBUG AST: Got name from child: {}", n);
-                                name = n;
+                                let qualified = get_qualified_name(&ref_entity);
+                                debug_println!("DEBUG AST: Got qualified name from child reference: {}", qualified);
+                                name = qualified;
+                            }
+                        } else {
+                            // No reference (template-dependent) - use unqualified name as fallback
+                            if let Some(n) = c.get_name() {
+                                if name == "unknown" {
+                                    debug_println!("DEBUG AST: Got name from child (template-dependent): {}", n);
+                                    name = n;
+                                }
                             }
                         }
                     }
@@ -854,12 +860,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 if let Some(ref_entity) = c.get_reference() {
                                     debug_println!("DEBUG AST: MemberRefExpr has reference: kind={:?}, name={:?}",
                                         ref_entity.get_kind(), ref_entity.get_name());
-                                    if let Some(n) = ref_entity.get_name() {
-                                        if ref_entity.get_kind() == EntityKind::Method {
-                                            name = get_qualified_name(&ref_entity);
-                                        } else {
-                                            name = n;
-                                        }
+                                    if let Some(_n) = ref_entity.get_name() {
+                                        // Use qualified name for ALL function calls
+                                        name = get_qualified_name(&ref_entity);
                                         name_providing_child_idx = Some(i);
                                         break;
                                     }
@@ -875,8 +878,13 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                     if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
                                         continue; // Skip variables/parameters
                                     }
-                                }
-                                if let Some(n) = c.get_name() {
+                                    // Use qualified name for function calls
+                                    let qualified = get_qualified_name(&ref_entity);
+                                    name = qualified;
+                                    name_providing_child_idx = Some(i);
+                                    break;
+                                } else if let Some(n) = c.get_name() {
+                                    // No reference (template-dependent) - use unqualified name
                                     name = n;
                                     name_providing_child_idx = Some(i);
                                     break;

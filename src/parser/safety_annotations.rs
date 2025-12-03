@@ -129,18 +129,17 @@ impl SafetyContext {
             let func_is_qualified = func_name.contains("::");
 
             // Bug #8 fix: Careful suffix matching to avoid namespace collisions
-            // Case 1: Qualified stored name, unqualified lookup - allow if lookup is a suffix
-            //         e.g., stored "test::create_thing", lookup "create_thing" -> MATCH
+            // REMOVED Case 1: Qualified stored name, unqualified lookup - NO LONGER MATCH
+            //         This was causing false positives: an unqualified "get" would incorrectly
+            //         match "rusty::Cell::get" or any other qualified ::get annotation.
+            //         e.g., stored "rusty::Cell::get", lookup "get" -> NO MATCH (could be any get)
             // Case 2: Both qualified - allow suffix matching on either side
             //         e.g., stored "rrr::Timer::start", lookup "Timer::start" -> MATCH
             // Case 3: Unqualified stored, qualified lookup - DON'T match (bug #8 scenario)
             //         e.g., stored "Node", lookup "yaml::Node" -> NO MATCH (different namespaces)
-            if sig_is_qualified && !func_is_qualified {
-                // Stored is qualified, lookup is unqualified - allow if lookup matches the tail
-                if sig.name.ends_with(&format!("::{}", func_name)) {
-                    return *mode;
-                }
-            } else if sig_is_qualified && func_is_qualified {
+            // Note: If sig_is_qualified && !func_is_qualified, we DON'T match anymore.
+            //       This is stricter but prevents false matches from unqualified external function calls.
+            if sig_is_qualified && func_is_qualified {
                 // Both are qualified - allow suffix matching on either side
                 if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
                     return *mode;
@@ -168,11 +167,9 @@ impl SafetyContext {
                     let sig_is_qualified = sig.name.contains("::");
                     let class_is_qualified = class_name.contains("::");
 
-                    if sig_is_qualified && !class_is_qualified {
-                        if sig.name.ends_with(&format!("::{}", class_name)) {
-                            return *mode;
-                        }
-                    } else if sig_is_qualified && class_is_qualified {
+                    // Note: If sig_is_qualified && !class_is_qualified, we DON'T match anymore.
+                    // This prevents an unqualified "Node" from matching "yaml::Node" annotation.
+                    if sig_is_qualified && class_is_qualified {
                         if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
                             return *mode;
                         }
@@ -207,18 +204,15 @@ impl SafetyContext {
             let sig_is_qualified = sig.name.contains("::");
             let class_is_qualified = class_name.contains("::");
 
-            // Case 1: Qualified stored, unqualified lookup - allow suffix match
-            //         e.g., stored "rusty::Node", lookup "Node" -> MATCH
+            // REMOVED Case 1: Qualified stored, unqualified lookup - NO LONGER MATCH
+            //         This was causing false positives: an unqualified "Node" would incorrectly
+            //         match "rusty::Node" or any other qualified ::Node annotation.
             // Case 2: Both qualified - allow suffix matching on either side
             //         e.g., stored "rusty::Node", lookup "ns::rusty::Node" -> MATCH
             // Case 3: Unqualified stored, qualified lookup - DON'T match (bug #8)
             //         e.g., stored "Node", lookup "yaml::Node" -> NO MATCH
-            if sig_is_qualified && !class_is_qualified {
-                if sig.name.ends_with(&format!("::{}", class_name)) {
-                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
-                    return *mode;
-                }
-            } else if sig_is_qualified && class_is_qualified {
+            // Note: If sig_is_qualified && !class_is_qualified, we DON'T match anymore.
+            if sig_is_qualified && class_is_qualified {
                 // Both are qualified - suffix matching is sound
                 if sig.name.ends_with(&format!("::{}", class_name)) {
                     debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
@@ -339,6 +333,22 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
         }
 
+        // Track namespace declarations (even without annotations) for qualified name building
+        // This ensures function annotations inside namespaces get the proper qualified name
+        let is_namespace_line = (trimmed.starts_with("namespace ") || trimmed.contains(" namespace "))
+                                && !trimmed.contains("using ")
+                                && trimmed.contains('{');
+        let needs_namespace_tracking = is_namespace_line && pending_annotation.is_none() && !accumulating_for_annotation;
+        if needs_namespace_tracking {
+            if let Some(ns_name) = extract_namespace_name(trimmed) {
+                debug_println!("DEBUG SAFETY: Entering namespace '{}' for context", ns_name);
+                class_context_stack.push(ns_name);
+                // Reset brace depth to track this namespace's scope
+                brace_depth = trimmed.matches('{').count() as i32
+                            - trimmed.matches('}').count() as i32;
+            }
+        }
+
         // If we have a pending annotation, start accumulating
         if pending_annotation.is_some() && !accumulating_for_annotation {
             accumulated_line.clear();
@@ -393,6 +403,13 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                         // Namespace declaration - applies to whole namespace contents
                         context.file_default = annotation;
                         debug_println!("DEBUG SAFETY: Set file default to {:?} (namespace)", annotation);
+                        // Also push namespace to context stack for qualifying nested function annotations
+                        if let Some(ns_name) = extract_namespace_name(&accumulated_line) {
+                            debug_println!("DEBUG SAFETY: Entering annotated namespace '{}' for context", ns_name);
+                            class_context_stack.push(ns_name);
+                            brace_depth = accumulated_line.matches('{').count() as i32
+                                        - accumulated_line.matches('}').count() as i32;
+                        }
                     } else if is_class_declaration(&accumulated_line) {
                         // Class/struct declaration - extract class name and store annotation
                         if let Some(class_name) = extract_class_name(&accumulated_line) {
@@ -498,6 +515,28 @@ fn extract_class_name(line: &str) -> Option<String> {
                 if name != "rusty" && name != "Arc" && name != "std" && !name.is_empty() {
                     return Some(name.to_string());
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Extract namespace name from a namespace declaration
+fn extract_namespace_name(line: &str) -> Option<String> {
+    // Look for "namespace Name {"
+    // Handle multi-line declarations by replacing newlines with spaces
+    let normalized = line.replace('\n', " ").replace('\r', " ");
+
+    // Find "namespace " keyword
+    if let Some(pos) = normalized.find("namespace ") {
+        let after_keyword = &normalized[pos + "namespace ".len()..];
+        // Namespace name is the first word after "namespace"
+        let parts: Vec<&str> = after_keyword.split_whitespace().collect();
+        if let Some(name) = parts.first() {
+            // Remove opening brace if attached
+            let name = name.split('{').next().unwrap_or(name);
+            if !name.is_empty() {
+                return Some(name.to_string());
             }
         }
     }

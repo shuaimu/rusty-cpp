@@ -14,8 +14,9 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
     let mut errors = Vec::new();
     let mut unsafe_depth = 0;
 
-    // If the function itself is marked @unsafe, the entire function body is in an unsafe context
-    let function_is_unsafe = function_safety == SafetyMode::Unsafe;
+    // Only @safe functions have pointer operations checked
+    // Undeclared and @unsafe functions are allowed to do pointer operations
+    let skip_pointer_checks = function_safety != SafetyMode::Safe;
 
     for stmt in &function.body {
         // Track unsafe scope depth
@@ -33,8 +34,8 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
             _ => {}
         }
 
-        // Skip checking if we're in an unsafe block OR the function itself is marked @unsafe
-        let in_unsafe_scope = unsafe_depth > 0 || function_is_unsafe;
+        // Skip checking if we're in an unsafe block OR the function is not @safe
+        let in_unsafe_scope = unsafe_depth > 0 || skip_pointer_checks;
 
         if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope) {
             errors.push(format!("In function '{}': {}", function.name, error));
