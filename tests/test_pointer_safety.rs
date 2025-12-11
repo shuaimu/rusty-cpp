@@ -197,3 +197,50 @@ void unsafe_func() {
     // Clean up
     let _ = fs::remove_file("test_mixed_pointers.cpp");
 }
+
+#[test]
+fn test_non_pointer_unary_operators_are_safe() {
+    // Issue #10: Non-pointer unary operators (!, ~, -, +) should NOT be flagged as address-of
+    // These are pure arithmetic/logical operations, not pointer operations
+    let test_code = r#"
+// @safe - logical NOT returns int (0 or 1), not pointer
+int test_logical_not(int v) {
+    return v + !v;
+}
+
+// @safe - bitwise NOT is pure arithmetic
+unsigned test_bitwise_not(unsigned v) {
+    return ~v;
+}
+
+// @safe - unary minus is pure arithmetic
+int test_unary_minus(int v) {
+    return -v;
+}
+
+// @safe - unary plus is pure arithmetic
+int test_unary_plus(int v) {
+    return +v;
+}
+"#;
+
+    fs::write("test_unary_non_pointer.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_unary_non_pointer.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT detect any violations - these are not pointer operations
+    assert!(stdout.contains("no violations") || stdout.contains("✓"),
+            "Non-pointer unary operators should be safe. Output: {}", stdout);
+
+    // Make sure we're not seeing false positives for address-of
+    assert!(!stdout.contains("address-of"),
+            "Should not flag non-pointer unary operators as address-of. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_unary_non_pointer.cpp");
+}

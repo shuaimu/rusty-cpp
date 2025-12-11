@@ -1522,6 +1522,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         }
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&) or dereference (*)
+            // Other unary operators (!, ~, -, +) should be treated as simple expressions
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
                 if let Some(inner) = extract_expression(&children[0]) {
@@ -1533,18 +1534,27 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if let Some(child_type) = children[0].get_type() {
                             let child_type_str = type_to_string(&child_type);
 
-                            // If child is pointer and result is not, it's dereference
+                            // If child is pointer and result is not, it's dereference (*)
                             if child_type_str.contains('*') && !type_str.contains('*') {
                                 return Some(Expression::Dereference(Box::new(inner)));
                             }
-                            // If child is not pointer but result is, it's address-of
+                            // If child is not pointer but result is, it's address-of (&)
                             else if !child_type_str.contains('*') && type_str.contains('*') {
                                 return Some(Expression::AddressOf(Box::new(inner)));
                             }
+                            // Otherwise, it's a non-pointer unary operator (!, ~, -, +)
+                            // These don't affect ownership/borrowing, so just return the inner expression
+                            // wrapped in a BinaryOp with the operator for completeness
+                            else {
+                                // For borrow checking purposes, these operators are transparent
+                                // Just return the inner expression since we don't need to track
+                                // the arithmetic/logical operation
+                                return Some(inner);
+                            }
                         }
                     }
-                    // Default to address-of if we can't determine
-                    return Some(Expression::AddressOf(Box::new(inner)));
+                    // If we couldn't get types, return inner expression (conservative: don't assume pointer op)
+                    return Some(inner);
                 }
             }
             None
