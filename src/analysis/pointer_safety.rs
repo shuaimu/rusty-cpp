@@ -45,6 +45,40 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
     errors
 }
 
+/// Process a list of statements while tracking unsafe depth for pointer safety
+fn check_statements_for_pointers_with_unsafe_tracking(
+    statements: &[Statement],
+    initial_unsafe_depth: usize,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut unsafe_depth = initial_unsafe_depth;
+
+    for stmt in statements {
+        // Track unsafe scope depth
+        match stmt {
+            Statement::EnterUnsafe => {
+                unsafe_depth += 1;
+                continue;
+            }
+            Statement::ExitUnsafe => {
+                if unsafe_depth > 0 {
+                    unsafe_depth -= 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        let in_unsafe_scope = unsafe_depth > 0;
+
+        if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope) {
+            errors.push(error);
+        }
+    }
+
+    errors
+}
+
 /// Check if a parsed statement contains pointer operations
 pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bool) -> Option<String> {
     use crate::parser::Statement;
@@ -85,17 +119,37 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
                 ));
             }
         }
-        Statement::If { condition, location, .. } => {
+        Statement::If { condition, then_branch, else_branch, location } => {
             if let Some(op) = contains_pointer_operation(condition) {
                 return Some(format!(
-                    "Unsafe pointer {} in condition at line {}: pointer operations require unsafe context", 
+                    "Unsafe pointer {} in condition at line {}: pointer operations require unsafe context",
                     op, location.line
                 ));
+            }
+
+            // Recursively check branches with proper unsafe depth tracking
+            let then_errors = check_statements_for_pointers_with_unsafe_tracking(then_branch, 0);
+            if !then_errors.is_empty() {
+                return Some(then_errors.into_iter().next().unwrap());
+            }
+
+            if let Some(else_stmts) = else_branch {
+                let else_errors = check_statements_for_pointers_with_unsafe_tracking(else_stmts, 0);
+                if !else_errors.is_empty() {
+                    return Some(else_errors.into_iter().next().unwrap());
+                }
+            }
+        }
+        Statement::Block(statements) => {
+            // Check all statements in the block with proper unsafe depth tracking
+            let block_errors = check_statements_for_pointers_with_unsafe_tracking(statements, 0);
+            if !block_errors.is_empty() {
+                return Some(block_errors.into_iter().next().unwrap());
             }
         }
         _ => {}
     }
-    
+
     None
 }
 

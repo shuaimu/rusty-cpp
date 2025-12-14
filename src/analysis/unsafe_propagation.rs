@@ -109,6 +109,46 @@ fn is_template_parameter_like(name: &str, template_params: &[String]) -> bool {
     false
 }
 
+/// Process a list of statements while tracking unsafe depth, returning all errors found
+fn check_statements_with_unsafe_tracking(
+    statements: &[Statement],
+    safety_context: &SafetyContext,
+    known_safe_functions: &HashSet<String>,
+    external_annotations: Option<&ExternalAnnotations>,
+    template_params: &[String],
+    initial_unsafe_depth: usize,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut unsafe_depth = initial_unsafe_depth;
+
+    for stmt in statements {
+        // Track unsafe scope depth
+        match stmt {
+            Statement::EnterUnsafe => {
+                unsafe_depth += 1;
+                continue;
+            }
+            Statement::ExitUnsafe => {
+                if unsafe_depth > 0 {
+                    unsafe_depth -= 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        let in_unsafe_scope = unsafe_depth > 0;
+
+        if let Some(error) = check_statement_for_unsafe_calls_with_external(
+            stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope
+        ) {
+            errors.push(error);
+        }
+    }
+
+    errors
+}
+
 fn check_statement_for_unsafe_calls_with_external(
     stmt: &Statement,
     safety_context: &SafetyContext,
@@ -140,7 +180,7 @@ fn check_statement_for_unsafe_calls_with_external(
 
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
-            
+
             match called_safety {
                 SafetyMode::Safe => {
                     // OK: safe can call safe
@@ -186,32 +226,36 @@ fn check_statement_for_unsafe_calls_with_external(
                 ));
             }
 
-            // Recursively check branches
-            for branch_stmt in then_branch {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
-                    return Some(error);
-                }
+            // Recursively check branches with proper unsafe depth tracking
+            // Start with unsafe_depth=0 since in_unsafe_scope=false here (we return early if true)
+            let then_errors = check_statements_with_unsafe_tracking(
+                then_branch, safety_context, known_safe_functions, external_annotations, template_params, 0
+            );
+            if !then_errors.is_empty() {
+                return Some(then_errors.into_iter().next().unwrap());
             }
 
             if let Some(else_stmts) = else_branch {
-                for branch_stmt in else_stmts {
-                    if let Some(error) = check_statement_for_unsafe_calls_with_external(branch_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
-                        return Some(error);
-                    }
+                let else_errors = check_statements_with_unsafe_tracking(
+                    else_stmts, safety_context, known_safe_functions, external_annotations, template_params, 0
+                );
+                if !else_errors.is_empty() {
+                    return Some(else_errors.into_iter().next().unwrap());
                 }
             }
         }
         Statement::Block(statements) => {
-            // Check all statements in the block
-            for block_stmt in statements {
-                if let Some(error) = check_statement_for_unsafe_calls_with_external(block_stmt, safety_context, known_safe_functions, external_annotations, template_params, in_unsafe_scope) {
-                    return Some(error);
-                }
+            // Check all statements in the block with proper unsafe depth tracking
+            let block_errors = check_statements_with_unsafe_tracking(
+                statements, safety_context, known_safe_functions, external_annotations, template_params, 0
+            );
+            if !block_errors.is_empty() {
+                return Some(block_errors.into_iter().next().unwrap());
             }
         }
         _ => {}
     }
-    
+
     None
 }
 
