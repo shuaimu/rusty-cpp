@@ -1,9 +1,11 @@
-/// Tests for lambda capture safety in @safe code
+/// Tests for lambda capture safety in @safe code with escape analysis
 ///
 /// In @safe code:
-/// - Reference captures ([&], [&x]) are FORBIDDEN - can create dangling references
-/// - Copy captures ([x], [=]) are ALLOWED - safe copy semantics
-/// - Move captures ([x = std::move(y)]) are ALLOWED - ownership transfer is safe
+/// - Reference captures ([&], [&x]) are ALLOWED if the lambda doesn't escape
+/// - Reference captures that ESCAPE are FORBIDDEN - can create dangling references
+/// - Copy captures ([x], [=]) are ALWAYS ALLOWED - safe copy semantics
+/// - Move captures ([x = std::move(y)]) are ALWAYS ALLOWED - ownership transfer is safe
+/// - 'this' capture is ALWAYS FORBIDDEN - 'this' is a raw pointer that can dangle
 ///
 /// This follows Rust's approach where closures capturing by reference have
 /// strict lifetime requirements.
@@ -57,82 +59,12 @@ fn analyze(source: &str) -> (bool, String) {
 }
 
 // =============================================================================
-// Tests for INVALID code (reference captures in @safe - should error)
+// Tests for ESCAPING lambdas with reference captures (should error)
 // =============================================================================
 
 #[test]
-fn test_explicit_ref_capture_forbidden() {
-    // Explicit reference capture [&x] is forbidden in @safe code
-    let source = r#"
-// @safe
-void test() {
-    int x = 42;
-    auto f = [&x]() { return x; };  // ERROR: reference capture in @safe
-}
-
-int main() { return 0; }
-"#;
-
-    let (success, output) = analyze(source);
-    assert!(
-        !success,
-        "Explicit reference capture [&x] should be forbidden in @safe. Output: {}",
-        output
-    );
-    assert!(
-        output.contains("reference capture") || output.contains("Reference capture"),
-        "Error should mention reference capture. Got: {}",
-        output
-    );
-}
-
-#[test]
-fn test_default_ref_capture_forbidden() {
-    // Default reference capture [&] is forbidden in @safe code
-    let source = r#"
-// @safe
-void test() {
-    int x = 42;
-    int y = 10;
-    auto f = [&]() { return x + y; };  // ERROR: default reference capture
-}
-
-int main() { return 0; }
-"#;
-
-    let (success, output) = analyze(source);
-    assert!(
-        !success,
-        "Default reference capture [&] should be forbidden in @safe. Output: {}",
-        output
-    );
-}
-
-#[test]
-fn test_mixed_capture_with_ref_forbidden() {
-    // Mixed capture with any reference is forbidden
-    let source = r#"
-// @safe
-void test() {
-    int x = 42;
-    int y = 10;
-    auto f = [x, &y]() { return x + y; };  // ERROR: &y is reference capture
-}
-
-int main() { return 0; }
-"#;
-
-    let (success, output) = analyze(source);
-    assert!(
-        !success,
-        "Mixed capture with reference [x, &y] should be forbidden. Output: {}",
-        output
-    );
-}
-
-#[test]
 fn test_this_ref_capture_forbidden() {
-    // Capturing 'this' by reference is also dangerous
+    // Capturing 'this' by reference is always dangerous (always forbidden)
     let source = r#"
 // @safe
 class Foo {
@@ -151,6 +83,103 @@ int main() { return 0; }
     assert!(
         !success,
         "Capturing 'this' should be forbidden in @safe lambdas. Output: {}",
+        output
+    );
+}
+
+// =============================================================================
+// Tests for NON-ESCAPING lambdas with reference captures (now ALLOWED)
+// =============================================================================
+
+#[test]
+fn test_explicit_ref_capture_non_escaping_allowed() {
+    // Explicit reference capture [&x] is now allowed if the lambda doesn't escape
+    let source = r#"
+// @safe
+void test() {
+    int x = 42;
+    auto f = [&x]() { return x; };  // OK: non-escaping lambda
+    int result = f();  // Used immediately
+}
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "Non-escaping reference capture [&x] should be allowed in @safe. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_default_ref_capture_non_escaping_allowed() {
+    // Default reference capture [&] is now allowed if the lambda doesn't escape
+    let source = r#"
+// @safe
+void test() {
+    int x = 42;
+    int y = 10;
+    auto f = [&]() { return x + y; };  // OK: non-escaping lambda
+    int result = f();  // Used immediately
+}
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "Non-escaping default reference capture [&] should be allowed in @safe. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_mixed_capture_non_escaping_allowed() {
+    // Mixed capture with reference is now allowed if lambda doesn't escape
+    let source = r#"
+// @safe
+void test() {
+    int x = 42;
+    int y = 10;
+    auto f = [x, &y]() { return x + y; };  // OK: non-escaping
+    int result = f();  // Used immediately
+}
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "Non-escaping mixed capture [x, &y] should be allowed in @safe. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_lambda_in_safe_class_method_non_escaping() {
+    // Lambda in @safe class method - non-escaping is now allowed
+    let source = r#"
+// @safe
+class Foo {
+public:
+    void method() {
+        int x = 42;
+        auto f = [&x]() { return x; };  // OK: non-escaping
+        int result = f();  // Used immediately
+    }
+};
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "Non-escaping reference capture in @safe class method should be allowed. Output: {}",
         output
     );
 }
@@ -316,14 +345,14 @@ int main() { return 0; }
 // =============================================================================
 
 #[test]
-fn test_nested_lambda_ref_capture_forbidden() {
-    // Nested lambdas with ref capture should also be caught
+fn test_nested_lambda_ref_capture() {
+    // Nested lambdas with ref capture - verify it doesn't crash
     let source = r#"
 // @safe
 void test() {
     int x = 42;
     auto outer = [=]() {
-        auto inner = [&x]() { return x; };  // ERROR: inner has ref capture
+        auto inner = [&x]() { return x; };  // Inner has ref capture
         return inner();
     };
 }
@@ -331,32 +360,6 @@ void test() {
 int main() { return 0; }
 "#;
 
-    let (success, output) = analyze(source);
-    // This might be tricky to detect - document expected behavior
-    let _ = (success, output);
-    // For now, just verify it doesn't crash
-}
-
-#[test]
-fn test_lambda_in_safe_class_method() {
-    // Lambda in @safe class method should be checked
-    let source = r#"
-// @safe
-class Foo {
-public:
-    void method() {
-        int x = 42;
-        auto f = [&x]() { return x; };  // ERROR: ref capture in @safe method
-    }
-};
-
-int main() { return 0; }
-"#;
-
-    let (success, output) = analyze(source);
-    assert!(
-        !success,
-        "Reference capture in @safe class method should be forbidden. Output: {}",
-        output
-    );
+    let (_success, _output) = analyze(source);
+    // Just verify it doesn't crash
 }

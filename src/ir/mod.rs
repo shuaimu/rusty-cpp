@@ -48,6 +48,8 @@ pub struct IrProgram {
     pub functions: Vec<IrFunction>,
     #[allow(dead_code)]
     pub ownership_graph: OwnershipGraph,
+    /// RAII Phase 2: Types with user-defined destructors
+    pub user_defined_raii_types: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +284,11 @@ pub enum OwnershipEdge {
 /// Detect if a type has a non-trivial destructor (RAII type)
 /// These types need implicit drop tracking at scope end
 fn is_raii_type(type_name: &str) -> bool {
+    is_raii_type_with_user_defined(type_name, &std::collections::HashSet::new())
+}
+
+/// RAII Phase 2: Check if type is RAII, including user-defined types with destructors
+pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: &std::collections::HashSet<String>) -> bool {
     // Check for Rusty RAII types (with or without namespace prefix)
     if type_name.starts_with("rusty::Box<") ||
        type_name.starts_with("Box<") ||  // Without namespace
@@ -322,8 +329,27 @@ fn is_raii_type(type_name: &str) -> bool {
         return true;
     }
 
-    // Conservative: assume user-defined classes might have destructors
-    // In the future, we could parse class definitions to check
+    // RAII Phase 2: Check user-defined types with destructors
+    // Extract base type name (without template parameters and qualifiers)
+    let base_type = type_name
+        .split('<').next().unwrap_or(type_name)
+        .trim_start_matches("const ")
+        .trim_end_matches('&')
+        .trim_end_matches('*')
+        .trim();
+
+    if user_defined_raii_types.contains(base_type) {
+        return true;
+    }
+
+    // Also check with common namespace prefixes stripped
+    for raii_type in user_defined_raii_types {
+        // Check if type_name contains the RAII type name
+        if type_name.contains(raii_type) {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -331,15 +357,25 @@ fn is_raii_type(type_name: &str) -> bool {
 pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
     let mut functions = Vec::new();
     let ownership_graph = DiGraph::new();
-    
+
+    // RAII Phase 2: Collect types with user-defined destructors
+    let mut user_defined_raii_types = std::collections::HashSet::new();
+    for class in &ast.classes {
+        if class.has_destructor {
+            user_defined_raii_types.insert(class.name.clone());
+            debug_println!("RAII: Registered user-defined RAII type '{}'", class.name);
+        }
+    }
+
     for func in ast.functions {
         let ir_func = convert_function(&func)?;
         functions.push(ir_func);
     }
-    
+
     Ok(IrProgram {
         functions,
         ownership_graph,
+        user_defined_raii_types,
     })
 }
 
@@ -349,15 +385,25 @@ pub fn build_ir_with_safety_context(
 ) -> Result<IrProgram, String> {
     let mut functions = Vec::new();
     let ownership_graph = DiGraph::new();
-    
+
+    // RAII Phase 2: Collect types with user-defined destructors
+    let mut user_defined_raii_types = std::collections::HashSet::new();
+    for class in &ast.classes {
+        if class.has_destructor {
+            user_defined_raii_types.insert(class.name.clone());
+            debug_println!("RAII: Registered user-defined RAII type '{}'", class.name);
+        }
+    }
+
     for func in ast.functions {
         let ir_func = convert_function(&func)?;
         functions.push(ir_func);
     }
-    
+
     Ok(IrProgram {
         functions,
         ownership_graph,
+        user_defined_raii_types,
     })
 }
 

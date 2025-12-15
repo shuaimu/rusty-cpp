@@ -68,6 +68,7 @@ pub mod this_tracking;
 pub mod liveness;
 pub mod mutable_checker;
 pub mod lambda_capture_safety;
+pub mod raii_tracking;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -166,6 +167,10 @@ pub fn check_borrows_with_safety_context(
         if safety_context.should_check_function(&function.name) {
             let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
             errors.extend(inference_errors);
+
+            // Phase 1-7: Run RAII tracking checks
+            let raii_errors = raii_tracking::check_raii_issues(function, &header_cache)?;
+            errors.extend(raii_errors);
         }
     }
 
@@ -1822,6 +1827,7 @@ mod tests {
         IrProgram {
             functions: vec![],
             ownership_graph: DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         }
     }
 
@@ -2539,6 +2545,7 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2578,6 +2585,7 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2606,6 +2614,7 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2650,6 +2659,7 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2680,6 +2690,7 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
+            user_defined_raii_types: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);

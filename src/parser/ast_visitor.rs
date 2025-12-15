@@ -201,6 +201,8 @@ pub struct Class {
     pub methods: Vec<Function>,            // Member methods
     pub base_classes: Vec<String>,         // Base class names (may contain packs like "Bases...")
     pub location: SourceLocation,
+    // RAII Phase 2: Track if class has a destructor
+    pub has_destructor: bool,              // True if class has ~ClassName()
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +511,7 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut members = Vec::new();
     let mut methods = Vec::new();
     let mut base_classes = Vec::new();
+    let mut has_destructor = false;  // RAII Phase 2: Track destructors
 
     // LibClang's get_children() flattens the hierarchy and returns class members directly
     // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
@@ -532,7 +535,14 @@ pub fn extract_class(entity: &Entity) -> Class {
 
                 members.push(member);
             }
-            EntityKind::Method | EntityKind::Constructor | EntityKind::Destructor => {
+            EntityKind::Destructor => {
+                // RAII Phase 2: Mark class as having a destructor
+                has_destructor = true;
+                debug_println!("DEBUG PARSE: Class '{}' has user-defined destructor", name);
+                let method = extract_function(&child);
+                methods.push(method);
+            }
+            EntityKind::Method | EntityKind::Constructor => {
                 // Member method
                 let method = extract_function(&child);
                 methods.push(method);
@@ -556,8 +566,8 @@ pub fn extract_class(entity: &Entity) -> Class {
         }
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes",
-        name, members.len(), methods.len(), base_classes.len());
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}",
+        name, members.len(), methods.len(), base_classes.len(), has_destructor);
 
     Class {
         name,
@@ -567,6 +577,7 @@ pub fn extract_class(entity: &Entity) -> Class {
         methods,
         base_classes,
         location,
+        has_destructor,  // RAII Phase 2
     }
 }
 

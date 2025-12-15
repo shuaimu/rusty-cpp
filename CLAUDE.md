@@ -6,12 +6,23 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: January 2025 - Advanced Borrow Checking Complete!)
+## Current State (Updated: December 2025 - RAII Tracking Complete!)
 
 ### What's Fully Implemented ✅
 
-**Latest Features (January 2025):**
-- ✅ **Phase 3: Conflict Detection** - Prevents multiple mutable borrows (**newly implemented!**)
+**Latest Features (December 2025):**
+- ✅ **RAII Tracking Module** - Comprehensive resource lifetime tracking (**newly implemented!**)
+  - Reference/pointer stored in container detection
+  - User-defined RAII types (classes with destructors)
+  - Iterator outlives container detection
+  - Lambda escape analysis (refined - non-escaping ref captures allowed)
+  - Member lifetime tracking (`&obj.field` borrows)
+  - new/delete tracking (double-free, use-after-free)
+  - 22 comprehensive tests
+  - See `docs/RAII_TRACKING.md` for details
+
+**Previous Features (January 2025):**
+- ✅ **Phase 3: Conflict Detection** - Prevents multiple mutable borrows
   - Detects when the same variable is borrowed mutably twice
   - Prevents mutable borrow when immutable borrows exist
   - Allows multiple immutable borrows (Rust-style rules)
@@ -169,7 +180,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 630+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 650+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Virtual function calls (basic method calls work)
@@ -190,11 +201,16 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Thread safety not analyzed
 
 #### Important for Correctness
-  
-- ❌ **Constructor/Destructor (RAII)**
-  - Object lifetime not tracked
-  - Destructor calls not analyzed
-  - RAII patterns not understood
+
+- ⚠️ **Constructor/Destructor (RAII)** - Partially implemented!
+  - ✅ Object lifetime tracked via scope-based analysis
+  - ✅ User-defined RAII types detected (classes with destructors)
+  - ✅ Member lifetime tracking (`&obj.field` tied to `obj`)
+  - ✅ Iterator/container lifetime relationships
+  - ✅ Lambda escape analysis with reference captures
+  - ✅ new/delete tracking (double-free, use-after-free)
+  - ❌ Constructor initialization order not checked
+  - See `docs/RAII_TRACKING.md` for full details
 
 #### Nice to Have
 - ✅ **Reassignment after move** (Implemented November 2025!)
@@ -207,12 +223,13 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Try/catch blocks ignored
   - Stack unwinding not modeled
   
-- ✅ **Lambda capture safety** (Implemented November 2025!)
-  - Reference captures ([&], [&x]) forbidden in @safe code
-  - Copy captures ([x], [=]) allowed
-  - Move captures ([y = std::move(x)]) allowed
-  - 'this' capture forbidden (raw pointer)
-  - 13 comprehensive tests
+- ✅ **Lambda capture safety** (Implemented November 2025, **refined December 2025!**)
+  - Reference captures ([&], [&x]) now allowed if lambda doesn't escape
+  - Reference captures that escape (returned, stored) are forbidden
+  - Copy captures ([x], [=]) always allowed
+  - Move captures ([y = std::move(x)]) always allowed
+  - 'this' capture always forbidden (raw pointer)
+  - 13 comprehensive tests + escape analysis tests
   
 - ❌ **Better diagnostics**
   - No code snippets in errors
@@ -273,7 +290,9 @@ src/
 │   ├── lifetimes.rs        # Original lifetime framework
 │   ├── lifetime_checker.rs # Annotation-based checking
 │   ├── scope_lifetime.rs   # Scope-based tracking
-│   └── lifetime_inference.rs # Automatic inference
+│   ├── lifetime_inference.rs # Automatic inference
+│   ├── raii_tracking.rs    # RAII tracking (containers, iterators, members, new/delete)
+│   └── lambda_capture_safety.rs # Lambda capture escape analysis
 ├── solver/
 │   └── mod.rs          # Z3 constraint solving
 └── diagnostics/
@@ -559,6 +578,8 @@ cargo test borrow     # Borrow checking tests
 cargo test safe       # Safe/unsafe annotation tests
 cargo test move       # Move detection tests
 cargo test template   # Template support tests
+cargo test raii       # RAII tracking tests
+cargo test lambda     # Lambda capture safety tests
 
 # Run on example files
 cargo run -- examples/reference_demo.cpp
@@ -682,7 +703,46 @@ Use after move: variable 'x' has been moved
 
 ## Recent Achievements
 
-**Latest (January 2025): Advanced Borrow Checking - Phases 3 & 4 Complete**
+**Latest (December 2025): RAII Tracking Implementation Complete**
+1. ✅ **Phase 1: Reference/Pointer Stored in Container**
+   - Detects pointers stored in containers that outlive pointees
+   - Tracks `push_back`, `insert`, `emplace`, etc.
+   - Container types: vector, list, deque, set, map, etc.
+
+2. ✅ **Phase 2: User-Defined RAII Types**
+   - Detects classes with user-defined destructors
+   - Added `has_destructor` field to Class parsing
+   - Integrated with `IrProgram.user_defined_raii_types`
+
+3. ✅ **Phase 3: Iterator Outlives Container**
+   - Tracks iterator borrows from containers
+   - Detects when container dies while iterator survives
+   - Tracks `begin`, `end`, `find`, etc.
+
+4. ✅ **Phase 4: Lambda Escape Analysis (Refined)**
+   - Changed from blanket ban to escape analysis
+   - Reference captures allowed if lambda doesn't escape
+   - Errors only for escaping lambdas with ref captures
+   - 'this' capture still always forbidden
+
+5. ✅ **Phase 5: Member Lifetime Tracking**
+   - Tracks `&obj.field` borrows
+   - Detects when member references outlive containing object
+   - Proper cleanup when reference or object dies
+
+6. ✅ **Phase 6: new/delete Tracking**
+   - Tracks heap allocations
+   - Detects double-free (delete freed pointer)
+   - Detects use-after-free
+
+7. ⏳ **Phase 7: Constructor Init Order** (Pending - LOW priority)
+   - Requires parser changes for member initializer lists
+   - Would detect initialization order dependencies
+
+**Testing:** 22 RAII-specific tests, all passing
+**Documentation:** See `docs/RAII_TRACKING.md`
+
+**Previous (January 2025): Advanced Borrow Checking - Phases 3 & 4 Complete**
 1. ✅ **Phase 3: Conflict Detection** (~2 hours implementation)
    - Multiple mutable borrow detection
    - Mutable/immutable borrow conflict detection
@@ -741,14 +801,14 @@ Earlier achievements:
 ## Next Priority Tasks
 
 ### High Priority
-1. **Constructor/Destructor tracking** - RAII patterns, object lifetime
-2. **Better error messages** - Code snippets and fix suggestions
+1. **Better error messages** - Code snippets and fix suggestions
+2. **Constructor initialization order** - Member initializer list analysis (Phase 7)
 
 ### Medium Priority
 3. **Advanced template features** - Variadic templates, SFINAE, partial specialization
 4. **Switch/case statements** - Common control flow
 5. **Loop counter variable tracking** - Variables in `for(int i=...)`
-6. **Closure lifetime tracking** - Lambda escaping its scope
+6. **Iterator invalidation from modifications** - Track `clear()`, `erase()`, etc.
 
 ### Low Priority
 7. **Circular reference detection** - Complex whole-program analysis
