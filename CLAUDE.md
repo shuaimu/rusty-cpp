@@ -6,12 +6,21 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: December 2025 - RAII Tracking Complete!)
+## Current State (Updated: December 2025 - Partial Borrows Complete!)
 
 ### What's Fully Implemented ✅
 
 **Latest Features (December 2025):**
-- ✅ **RAII Tracking Module** - Comprehensive resource lifetime tracking (**newly implemented!**)
+- ✅ **Partial Borrow Tracking** - Borrow individual struct fields independently (**newly implemented!**)
+  - Borrow different fields mutably at the same time (`&mut p.first` and `&mut p.second`)
+  - Nested field support (`o.inner.data`)
+  - Double mutable borrow of same field detected
+  - Mixed mutable/immutable borrow conflict detection
+  - Whole-struct vs field borrow conflict detection
+  - Sequential borrows in separate scopes properly cleaned up
+  - See `docs/PARTIAL_MOVES_PLAN.md` for details
+
+- ✅ **RAII Tracking Module** - Comprehensive resource lifetime tracking
   - Reference/pointer stored in container detection
   - User-defined RAII types (classes with destructors)
   - Iterator outlives container detection
@@ -180,7 +189,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 650+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection and transitive borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 650+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection, transitive borrows, and partial borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), partial moves/borrows, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Virtual function calls (basic method calls work)
@@ -703,7 +712,27 @@ Use after move: variable 'x' has been moved
 
 ## Recent Achievements
 
-**Latest (December 2025): RAII Tracking Implementation Complete**
+**Latest (December 2025): Partial Borrow Tracking Complete**
+1. ✅ **Partial Borrow Tracking** - Borrow different struct fields independently
+   - Added `field_borrows: HashMap<String, HashMap<String, BorrowInfo>>` for per-field tracking
+   - Added `check_field_borrow_conflicts()` function for field-level conflict detection
+   - Added `check_whole_object_vs_field_borrows()` for whole/field conflict detection
+   - Proper cleanup of field borrows on scope exit
+   - Nested field support (`o.inner.data`)
+
+2. ✅ **Bug Fixes**
+   - Fixed single-line struct context stack issue (structs complete on one line no longer pollute context)
+   - Fixed references incorrectly marked as RAII types (`std::string&` no longer has `has_destructor=true`)
+   - Fixed field borrows not cleared on scope exit (sequential borrows in separate scopes now work)
+
+3. **Test files added:**
+   - `tests/raii/partial_borrow_test.cpp` - 7 tests for basic partial borrows
+   - `tests/raii/partial_borrow_nested_test.cpp` - 9 tests for nested field borrows
+   - `tests/raii/partial_borrow_control_flow_test.cpp` - 11 tests for control flow
+
+**Documentation:** See `docs/PARTIAL_MOVES_PLAN.md` and `docs/RUST_COMPARISON.md`
+
+**Previous (December 2025): RAII Tracking Implementation Complete**
 1. ✅ **Phase 1: Reference/Pointer Stored in Container**
    - Detects pointers stored in containers that outlive pointees
    - Tracks `push_back`, `insert`, `emplace`, etc.
@@ -801,20 +830,23 @@ Earlier achievements:
 ## Next Priority Tasks
 
 ### High Priority
-1. **Better error messages** - Code snippets and fix suggestions
-2. **Constructor initialization order** - Member initializer list analysis (Phase 7)
+1. **Non-Lexical Lifetimes (NLL)** - Would dramatically reduce false positives
+2. **Reborrowing** - Important for ergonomic reference-heavy code
 
 ### Medium Priority
-3. **Advanced template features** - Variadic templates, SFINAE, partial specialization
-4. **Switch/case statements** - Common control flow
-5. **Loop counter variable tracking** - Variables in `for(int i=...)`
-6. **Iterator invalidation from modifications** - Track `clear()`, `erase()`, etc.
+3. **Better error messages** - Code snippets and fix suggestions
+4. **Constructor initialization order** - Member initializer list analysis (Phase 7)
+5. **Advanced template features** - Variadic templates, SFINAE, partial specialization
+6. **Switch/case statements** - Common control flow
 
 ### Low Priority
-7. **Circular reference detection** - Complex whole-program analysis
-8. **Exception handling** - Stack unwinding
-9. **Virtual function analysis** - Dynamic dispatch tracking
-10. **IDE integration (LSP)** - CLI works for now
+7. **Two-phase borrows** - Method call patterns
+8. **Loop counter variable tracking** - Variables in `for(int i=...)`
+9. **Iterator invalidation from modifications** - Track `clear()`, `erase()`, etc.
+10. **Circular reference detection** - Complex whole-program analysis
+11. **Exception handling** - Stack unwinding
+12. **Virtual function analysis** - Dynamic dispatch tracking
+13. **IDE integration (LSP)** - CLI works for now
 
 ## Contact with Original Requirements
 

@@ -503,6 +503,106 @@ fn check_borrow_conflicts(
     true
 }
 
+/// Check for field-level borrow conflicts (partial borrow tracking)
+/// Returns false if there's a conflict, true if the borrow is allowed
+fn check_field_borrow_conflicts(
+    object: &str,
+    field: &str,
+    kind: &BorrowKind,
+    ownership_tracker: &OwnershipTracker,
+    errors: &mut Vec<String>,
+) -> bool {
+    // First, check if the whole object is already borrowed
+    let whole_object_borrows = ownership_tracker.get_borrows(object);
+    if whole_object_borrows.has_mutable {
+        errors.push(format!(
+            "Cannot borrow field '{}.{}': '{}' is already mutably borrowed",
+            object, field, object
+        ));
+        return false;
+    }
+    if whole_object_borrows.immutable_count > 0 && *kind == BorrowKind::Mutable {
+        errors.push(format!(
+            "Cannot mutably borrow field '{}.{}': '{}' is already immutably borrowed",
+            object, field, object
+        ));
+        return false;
+    }
+
+    // Now check field-level borrows
+    let field_borrows = ownership_tracker.get_field_borrows(object, field);
+
+    match kind {
+        BorrowKind::Immutable => {
+            // Can have multiple immutable borrows, but not if there's a mutable borrow
+            if field_borrows.has_mutable {
+                errors.push(format!(
+                    "Cannot create immutable reference to '{}.{}': already mutably borrowed",
+                    object, field
+                ));
+                return false;
+            }
+        }
+        BorrowKind::Mutable => {
+            // Can only have one mutable borrow, and no immutable borrows
+            if field_borrows.immutable_count > 0 {
+                errors.push(format!(
+                    "Cannot create mutable reference to '{}.{}': already immutably borrowed",
+                    object, field
+                ));
+                return false;
+            } else if field_borrows.has_mutable {
+                errors.push(format!(
+                    "Cannot create mutable reference to '{}.{}': already mutably borrowed",
+                    object, field
+                ));
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Check if borrowing the whole object conflicts with existing field borrows
+fn check_whole_object_vs_field_borrows(
+    object: &str,
+    kind: &BorrowKind,
+    ownership_tracker: &OwnershipTracker,
+    errors: &mut Vec<String>,
+) -> bool {
+    // Check if any fields are borrowed
+    let borrowed_fields = ownership_tracker.get_borrowed_fields(object);
+
+    if !borrowed_fields.is_empty() {
+        let field_list: Vec<String> = borrowed_fields.iter().map(|(f, _)| f.clone()).collect();
+
+        match kind {
+            BorrowKind::Mutable => {
+                errors.push(format!(
+                    "Cannot mutably borrow '{}': fields are already borrowed ({})",
+                    object, field_list.join(", ")
+                ));
+                return false;
+            }
+            BorrowKind::Immutable => {
+                // Check if any field is mutably borrowed
+                let any_mutable = borrowed_fields.iter().any(|(_, is_mut)| *is_mut);
+                if any_mutable {
+                    errors.push(format!(
+                        "Cannot immutably borrow '{}': field is already mutably borrowed",
+                        object
+                    ));
+                    return false;
+                }
+                // Multiple immutable is OK
+            }
+        }
+    }
+
+    true
+}
+
 // Extract statement processing logic into a separate function
 // Phase 2: Added header_cache and function parameters for return value borrow detection
 fn process_statement(
@@ -711,6 +811,9 @@ fn process_statement(
 
             // Skip checking if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
+                // Still record the borrow for consistency
+                ownership_tracker.add_field_borrow(object.clone(), field.clone(), to.clone(), kind.clone());
+                ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
                 return;
             }
 
@@ -744,9 +847,13 @@ fn process_statement(
                 }
             }
 
-            // Record the borrow (for now, borrow the whole object)
-            // In a complete implementation, we'd track field-level borrows separately
-            ownership_tracker.add_borrow(object.clone(), to.clone(), kind.clone());
+            // NEW: Check for field-level borrow conflicts (Partial Borrow Tracking)
+            if !check_field_borrow_conflicts(object, field, kind, ownership_tracker, errors) {
+                return;
+            }
+
+            // Record the field-level borrow (NOT whole object)
+            ownership_tracker.add_field_borrow(object.clone(), field.clone(), to.clone(), kind.clone());
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
 
             // Update this tracker state if this is a field of 'this'
@@ -765,10 +872,10 @@ fn process_statement(
                 ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
                 return;
             }
-            
+
             // Check if the source is accessible
             let from_state = ownership_tracker.get_ownership(from);
-            
+
             if from_state == Some(&OwnershipState::Moved) {
                 errors.push(format!(
                     "Cannot borrow '{}' because it has been moved",
@@ -776,12 +883,17 @@ fn process_statement(
                 ));
                 return;
             }
-            
+
             // Phase 3: Check for borrow conflicts using helper function
             if !check_borrow_conflicts(from, kind, ownership_tracker, errors) {
                 return;
             }
-            
+
+            // NEW: Check if whole-object borrow conflicts with existing field borrows
+            if !check_whole_object_vs_field_borrows(from, kind, ownership_tracker, errors) {
+                return;
+            }
+
             // Record the borrow
             ownership_tracker.add_borrow(from.clone(), to.clone(), kind.clone());
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
@@ -1265,6 +1377,9 @@ struct OwnershipTracker {
     // NEW: Track field-level ownership state
     // Key: object name, Value: map of field name to ownership state
     field_ownership: HashMap<String, HashMap<String, OwnershipState>>,
+    // NEW: Track field-level borrows (for partial borrow tracking)
+    // Key: object name, Value: map of field name to borrow info
+    field_borrows: HashMap<String, HashMap<String, BorrowInfo>>,
     // NEW: Track method context (are we in a method? is 'this' owned or borrowed?)
     this_context: Option<ThisContext>,
     // NEW: Liveness analysis - track last use of variables
@@ -1280,6 +1395,8 @@ struct TrackerState {
     active_borrows: HashMap<String, Vec<ActiveBorrow>>,
     // NEW: Field-level ownership tracking
     field_ownership: HashMap<String, HashMap<String, OwnershipState>>,
+    // NEW: Field-level borrow tracking
+    field_borrows: HashMap<String, HashMap<String, BorrowInfo>>,
 }
 
 #[derive(Clone)]
@@ -1359,6 +1476,7 @@ impl OwnershipTracker {
             unsafe_depth: 0,
             active_borrows: HashMap::new(),
             field_ownership: HashMap::new(),  // NEW
+            field_borrows: HashMap::new(),    // NEW: Partial borrow tracking
             this_context: None,                // NEW
             last_use_map,                      // NEW: Liveness analysis
         };
@@ -1513,25 +1631,115 @@ impl OwnershipTracker {
             .insert(field, OwnershipState::Moved);
     }
 
-    /// Check if object has any moved fields
+    /// Check if object has any moved fields (including nested paths)
+    /// For object "o", checks if "o" has direct moved fields,
+    /// and also checks if any "o.X" has moved fields (nested)
     fn has_moved_fields(&self, object: &str) -> bool {
-        self.field_ownership
+        // Check direct moved fields
+        if self.field_ownership
             .get(object)
             .map(|fields| fields.values().any(|s| *s == OwnershipState::Moved))
-            .unwrap_or(false)
+            .unwrap_or(false) {
+            return true;
+        }
+
+        // Check nested paths: if object is "o", look for "o.X" keys that have moved fields
+        let prefix = format!("{}.", object);
+        for (key, fields) in &self.field_ownership {
+            if key.starts_with(&prefix) {
+                if fields.values().any(|s| *s == OwnershipState::Moved) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
-    /// Get list of moved fields
+    /// Get list of moved fields (including nested paths)
     fn get_moved_fields(&self, object: &str) -> Vec<String> {
-        self.field_ownership
+        let mut result = Vec::new();
+
+        // Get direct moved fields
+        if let Some(fields) = self.field_ownership.get(object) {
+            for (field, state) in fields.iter() {
+                if *state == OwnershipState::Moved {
+                    result.push(field.clone());
+                }
+            }
+        }
+
+        // Get nested moved fields: if object is "o", look for "o.X" keys
+        let prefix = format!("{}.", object);
+        for (key, fields) in &self.field_ownership {
+            if key.starts_with(&prefix) {
+                for (field, state) in fields.iter() {
+                    if *state == OwnershipState::Moved {
+                        // Return the full nested path relative to object
+                        // e.g., for object="o", key="o.inner", field="data" -> "inner.data"
+                        let nested_path = &key[prefix.len()..];
+                        result.push(format!("{}.{}", nested_path, field));
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    // NEW: Field-level borrow tracking methods
+
+    /// Get borrow info for a specific field
+    fn get_field_borrows(&self, object: &str, field: &str) -> BorrowInfo {
+        self.field_borrows
             .get(object)
-            .map(|fields| {
-                fields.iter()
-                    .filter(|(_, state)| **state == OwnershipState::Moved)
-                    .map(|(field, _)| field.clone())
-                    .collect()
-            })
+            .and_then(|fields| fields.get(field))
+            .cloned()
             .unwrap_or_default()
+    }
+
+    /// Add a field borrow
+    fn add_field_borrow(&mut self, object: String, field: String, borrower: String, kind: BorrowKind) {
+        let field_map = self.field_borrows.entry(object).or_default();
+        let borrow_info = field_map.entry(field).or_default();
+        borrow_info.borrowers.insert(borrower.clone());
+
+        match kind {
+            BorrowKind::Immutable => borrow_info.immutable_count += 1,
+            BorrowKind::Mutable => borrow_info.has_mutable = true,
+        }
+
+        // Track in current scope for cleanup
+        if let Some(current_scope) = self.scope_stack.last_mut() {
+            current_scope.local_borrows.insert(borrower);
+        }
+    }
+
+    /// Check if any field of the object is borrowed
+    fn has_any_field_borrowed(&self, object: &str) -> bool {
+        if let Some(fields) = self.field_borrows.get(object) {
+            for borrow_info in fields.values() {
+                if borrow_info.immutable_count > 0 || borrow_info.has_mutable {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get list of borrowed fields for an object
+    fn get_borrowed_fields(&self, object: &str) -> Vec<(String, bool)> {
+        let mut result = Vec::new();
+        if let Some(fields) = self.field_borrows.get(object) {
+            for (field, borrow_info) in fields {
+                if borrow_info.has_mutable {
+                    result.push((field.clone(), true)); // is_mutable = true
+                } else if borrow_info.immutable_count > 0 {
+                    result.push((field.clone(), false)); // is_mutable = false
+                }
+            }
+        }
+        result
     }
 
     /// Check if can move from 'this' in current context
@@ -1554,7 +1762,7 @@ impl OwnershipTracker {
     
     fn exit_scope(&mut self) {
         if let Some(scope) = self.scope_stack.pop() {
-            let current_scope_level = self.scope_stack.len() + 1; // +1 because we just popped
+            let _current_scope_level = self.scope_stack.len() + 1; // +1 because we just popped
 
             // Clean up all borrows created in this scope
             for borrow_name in &scope.local_borrows {
@@ -1573,6 +1781,23 @@ impl OwnershipTracker {
                 for active_borrows in self.active_borrows.values_mut() {
                     active_borrows.retain(|b| &b.borrower != borrow_name);
                 }
+
+                // NEW: Remove from field borrows (Partial Borrow Tracking)
+                // When a borrower goes out of scope, remove it from field borrow tracking
+                for field_map in self.field_borrows.values_mut() {
+                    for borrow_info in field_map.values_mut() {
+                        if borrow_info.borrowers.remove(borrow_name) {
+                            // If this borrower was removed, update the counts
+                            // We need to track if this was a mutable or immutable borrow
+                            // For simplicity, we'll reset counts based on remaining borrowers
+                            // This is conservative - a more complete impl would track borrow kinds per borrower
+                            if borrow_info.borrowers.is_empty() {
+                                borrow_info.has_mutable = false;
+                                borrow_info.immutable_count = 0;
+                            }
+                        }
+                    }
+                }
             }
 
             // Clean up empty borrow entries
@@ -1580,6 +1805,12 @@ impl OwnershipTracker {
 
             // NEW: Clean up empty active borrow entries
             self.active_borrows.retain(|_, borrows| !borrows.is_empty());
+
+            // NEW: Clean up empty field borrow entries
+            for field_map in self.field_borrows.values_mut() {
+                field_map.retain(|_, info| !info.borrowers.is_empty());
+            }
+            self.field_borrows.retain(|_, fields| !fields.is_empty());
         }
     }
     
@@ -1653,6 +1884,7 @@ impl OwnershipTracker {
             reference_info: self.reference_info.clone(),
             active_borrows: self.active_borrows.clone(),
             field_ownership: self.field_ownership.clone(),  // NEW
+            field_borrows: self.field_borrows.clone(),      // NEW: Partial borrow tracking
         }
     }
 
@@ -1662,6 +1894,7 @@ impl OwnershipTracker {
         self.reference_info = state.reference_info.clone();
         self.active_borrows = state.active_borrows.clone();
         self.field_ownership = state.field_ownership.clone();  // NEW
+        self.field_borrows = state.field_borrows.clone();      // NEW: Partial borrow tracking
     }
     
     fn merge_states(&mut self, then_state: &TrackerState, else_state: &TrackerState) {
@@ -1782,8 +2015,48 @@ impl OwnershipTracker {
                 (None, None) => unreachable!(),
             }
         }
+
+        // NEW: Merge field borrows - keep borrows that exist in BOTH branches (conservative)
+        self.field_borrows.clear();
+        // Collect all objects that have field borrows in either branch
+        let mut all_borrow_objects: HashSet<String> = HashSet::new();
+        all_borrow_objects.extend(then_state.field_borrows.keys().cloned());
+        all_borrow_objects.extend(else_state.field_borrows.keys().cloned());
+
+        for object in all_borrow_objects {
+            let then_fields = then_state.field_borrows.get(&object);
+            let else_fields = else_state.field_borrows.get(&object);
+
+            match (then_fields, else_fields) {
+                (Some(then_f), Some(else_f)) => {
+                    // Object has field borrows in both branches - keep only common
+                    let mut merged_fields = HashMap::new();
+
+                    for (field, then_borrow) in then_f {
+                        if let Some(else_borrow) = else_f.get(field) {
+                            // Field borrow exists in both branches
+                            let mut merged = then_borrow.clone();
+                            merged.borrowers.retain(|b| else_borrow.borrowers.contains(b));
+                            merged.immutable_count = merged.immutable_count.min(else_borrow.immutable_count);
+                            merged.has_mutable = merged.has_mutable && else_borrow.has_mutable;
+
+                            if !merged.borrowers.is_empty() || merged.immutable_count > 0 || merged.has_mutable {
+                                merged_fields.insert(field.clone(), merged);
+                            }
+                        }
+                    }
+
+                    if !merged_fields.is_empty() {
+                        self.field_borrows.insert(object, merged_fields);
+                    }
+                }
+                _ => {
+                    // Borrow only in one branch - don't keep it (conservative)
+                }
+            }
+        }
     }
-    
+
     fn clear_loop_locals(&mut self, loop_locals: &HashSet<String>) {
         // Clear borrows for loop-local variables
         for local_var in loop_locals {

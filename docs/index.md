@@ -35,6 +35,24 @@ Complete implementation summaries for major features:
 
 ### Root Documentation Files
 
+- **[RUST_COMPARISON.md](RUST_COMPARISON.md)** - ⭐ RustyCpp vs Rust borrow checker comparison
+  - What's implemented vs missing
+  - Detailed gap analysis with code examples
+  - Workarounds for missing features
+  - Implementation priorities
+
+- **[RAII_TRACKING.md](RAII_TRACKING.md)** - RAII tracking implementation
+  - Container/iterator lifetime tracking
+  - Member lifetime tracking
+  - Lambda escape analysis
+  - new/delete tracking
+
+- **[PARTIAL_MOVES_PLAN.md](PARTIAL_MOVES_PLAN.md)** - Partial moves improvement plan
+  - Current status (basic support implemented)
+  - Nested field tracking plan
+  - Partial borrow tracking plan
+  - Implementation priorities
+
 - **[annotation_reference.md](annotation_reference.md)** - Syntax reference for @safe, @unsafe, @lifetime annotations
 - **[annotations.md](annotations.md)** - Detailed annotation system documentation
 - **[method_qualifiers.md](method_qualifiers.md)** - C++ method qualifier handling (const, &&, etc.)

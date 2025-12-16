@@ -326,10 +326,16 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         let needs_class_tracking = is_class_line && pending_annotation.is_none() && !accumulating_for_annotation;
         if needs_class_tracking {
             if let Some(class_name) = extract_class_name(trimmed) {
-                class_context_stack.push(class_name);
-                // Reset brace depth to track this class's scope
-                brace_depth = trimmed.matches('{').count() as i32
+                // Calculate brace depth for this class declaration
+                let class_brace_depth = trimmed.matches('{').count() as i32
                             - trimmed.matches('}').count() as i32;
+                // Only push class to context if it's NOT complete on the same line
+                // A class complete on one line (like `struct Foo { int x; };`) has brace_depth == 0
+                // and should not be pushed to context stack
+                if class_brace_depth > 0 {
+                    class_context_stack.push(class_name);
+                    brace_depth = class_brace_depth;
+                }
             }
         }
 
@@ -424,9 +430,13 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                             debug_println!("DEBUG SAFETY: Set class '{}' to {:?}", qualified_name, annotation);
 
                             // Push class to context for nested methods
-                            class_context_stack.push(class_name.clone());
-                            brace_depth = accumulated_line.matches('{').count() as i32
+                            // Only push if the class is NOT complete on the same line
+                            let class_brace_depth = accumulated_line.matches('{').count() as i32
                                         - accumulated_line.matches('}').count() as i32;
+                            if class_brace_depth > 0 {
+                                class_context_stack.push(class_name.clone());
+                                brace_depth = class_brace_depth;
+                            }
                         }
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function signature (name + params) and apply ONLY to this function

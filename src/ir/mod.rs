@@ -43,6 +43,44 @@ fn is_member_access_operator(func_name: &str) -> bool {
     }
 }
 
+/// Extract the full object path and final field from a nested MemberAccess expression
+/// For `o.inner.data`, returns Some(("o.inner", "data"))
+/// For `o.field`, returns Some(("o", "field"))
+/// For other expressions, returns None
+fn extract_member_path(expr: &crate::parser::Expression) -> Option<(String, String)> {
+    match expr {
+        crate::parser::Expression::MemberAccess { object, field } => {
+            match object.as_ref() {
+                crate::parser::Expression::Variable(var_name) => {
+                    // Simple case: var.field
+                    Some((var_name.clone(), field.clone()))
+                }
+                crate::parser::Expression::MemberAccess { .. } => {
+                    // Nested case: obj.path.field - recursively build the path
+                    let object_path = extract_full_member_path(object.as_ref())?;
+                    Some((object_path, field.clone()))
+                }
+                _ => None
+            }
+        }
+        _ => None
+    }
+}
+
+/// Extract the full path string from a MemberAccess chain
+/// For `o.inner.data`, returns "o.inner.data"
+/// For Variable("x"), returns "x"
+fn extract_full_member_path(expr: &crate::parser::Expression) -> Option<String> {
+    match expr {
+        crate::parser::Expression::Variable(name) => Some(name.clone()),
+        crate::parser::Expression::MemberAccess { object, field } => {
+            let obj_path = extract_full_member_path(object.as_ref())?;
+            Some(format!("{}.{}", obj_path, field))
+        }
+        _ => None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IrProgram {
     pub functions: Vec<IrFunction>,
@@ -289,6 +327,19 @@ fn is_raii_type(type_name: &str) -> bool {
 
 /// RAII Phase 2: Check if type is RAII, including user-defined types with destructors
 pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: &std::collections::HashSet<String>) -> bool {
+    // IMPORTANT: References don't have destructors - the referenced object does
+    // So a `std::string&` is NOT an RAII type (it's just an alias)
+    // References should not be marked as having destructors
+    let trimmed = type_name.trim();
+    if trimmed.ends_with('&') || trimmed.ends_with("& ") {
+        return false;  // References never have destructors
+    }
+    // Also check for "const T&" pattern where & comes after the base type
+    if trimmed.contains('&') && !trimmed.contains('<') {
+        // If there's a & but not in template params, it's a reference
+        return false;
+    }
+
     // Check for Rusty RAII types (with or without namespace prefix)
     if type_name.starts_with("rusty::Box<") ||
        type_name.starts_with("Box<") ||  // Without namespace
@@ -786,12 +837,12 @@ fn convert_statement(
                 },
 
                 // Reference to a field: create a field borrow
+                // Supports both simple (p.field) and nested (o.inner.field) member access
                 crate::parser::Expression::MemberAccess { object, field } => {
-                    debug_println!("DEBUG IR: ReferenceBinding to field: {}.{}",
-                        if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                        field);
+                    // Use helper to extract full object path for nested access
+                    if let Some((obj_path, final_field)) = extract_member_path(target) {
+                        debug_println!("DEBUG IR: ReferenceBinding to field: {}.{}", obj_path, final_field);
 
-                    if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
                         let kind = if *is_mutable {
                             BorrowKind::Mutable
                         } else {
@@ -813,7 +864,36 @@ fn convert_statement(
                             }
                         }
 
-                        // Generate BorrowField IR statement
+                        // Generate BorrowField IR statement with full nested path
+                        statements.push(IrStatement::BorrowField {
+                            object: obj_path,
+                            field: final_field,
+                            to: name.clone(),
+                            kind,
+                        });
+                    } else if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                        // Fallback for simple Variable case
+                        debug_println!("DEBUG IR: ReferenceBinding to field (simple): {}.{}", obj_name, field);
+
+                        let kind = if *is_mutable {
+                            BorrowKind::Mutable
+                        } else {
+                            BorrowKind::Immutable
+                        };
+
+                        if let Some(var_info) = variables.get_mut(name) {
+                            var_info.ownership = OwnershipState::Borrowed(kind.clone());
+                            if *is_mutable {
+                                if let VariableType::Owned(type_name) = &var_info.ty {
+                                    var_info.ty = VariableType::MutableReference(type_name.clone());
+                                }
+                            } else {
+                                if let VariableType::Owned(type_name) = &var_info.ty {
+                                    var_info.ty = VariableType::Reference(type_name.clone());
+                                }
+                            }
+                        }
+
                         statements.push(IrStatement::BorrowField {
                             object: obj_name.clone(),
                             field: field.clone(),
@@ -982,26 +1062,24 @@ fn convert_statement(
                         Ok(None)
                     }
                 }
-                // NEW: Handle field access (not a move)
-                crate::parser::Expression::MemberAccess { object, field } => {
-                    debug_println!("DEBUG IR: Processing MemberAccess read from '{}.{}'",
-                        if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                        field);
-                    // Extract object name
-                    if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                // NEW: Handle field access (not a move) - including nested fields
+                crate::parser::Expression::MemberAccess { .. } => {
+                    // Use helper to extract full path for nested member access
+                    if let Some((obj_path, field_name)) = extract_member_path(rhs) {
+                        debug_println!("DEBUG IR: Processing MemberAccess read from '{}.{}'", obj_path, field_name);
                         Ok(Some(vec![
                             IrStatement::UseField {
-                                object: obj_name.clone(),
-                                field: field.clone(),
+                                object: obj_path.clone(),
+                                field: field_name.clone(),
                                 operation: "read".to_string(),
                             },
                             IrStatement::Assign {
                                 lhs: lhs_var.clone(),
-                                rhs: IrExpression::Variable(format!("{}.{}", obj_name, field)),
+                                rhs: IrExpression::Variable(format!("{}.{}", obj_path, field_name)),
                             }
                         ]))
                     } else {
-                        debug_println!("DEBUG IR: MemberAccess object is not a simple variable");
+                        debug_println!("DEBUG IR: MemberAccess could not be parsed");
                         Ok(None)
                     }
                 }
@@ -1023,18 +1101,18 @@ fn convert_statement(
                                 to: lhs_var.clone(),
                             }]))
                         }
-                        // NEW: Handle std::move(obj.field)
-                        crate::parser::Expression::MemberAccess { object, field } => {
-                            debug_println!("DEBUG IR: Creating MoveField for field '{}' of object", field);
-                            // Extract object name
-                            if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                        // NEW: Handle std::move(obj.field) including nested fields
+                        crate::parser::Expression::MemberAccess { .. } => {
+                            // Use helper to extract full path for nested member access
+                            if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
+                                debug_println!("DEBUG IR: Creating MoveField for field '{}' of object '{}'", field_name, obj_path);
                                 Ok(Some(vec![IrStatement::MoveField {
-                                    object: obj_name.clone(),
-                                    field: field.clone(),
+                                    object: obj_path,
+                                    field: field_name,
                                     to: lhs_var.clone(),
                                 }]))
                             } else {
-                                debug_println!("DEBUG IR: MemberAccess object is not a simple variable");
+                                debug_println!("DEBUG IR: MemberAccess could not be parsed");
                                 Ok(None)
                             }
                         }
@@ -1112,17 +1190,16 @@ fn convert_statement(
                                             arg_names.push(var.clone());
                                         }
                                     }
-                                    crate::parser::Expression::MemberAccess { object, field } => {
-                                        debug_println!("DEBUG IR: Move(MemberAccess) in assignment: {}.{}",
-                                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                                            field);
-                                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                    crate::parser::Expression::MemberAccess { .. } => {
+                                        // Use helper to extract full path for nested member access
+                                        if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
+                                            debug_println!("DEBUG IR: Move(MemberAccess) in assignment: {}.{}", obj_path, field_name);
                                             statements.push(IrStatement::MoveField {
-                                                object: obj_name.clone(),
-                                                field: field.clone(),
+                                                object: obj_path.clone(),
+                                                field: field_name.clone(),
                                                 to: lhs_var.clone(),  // Move to the LHS variable
                                             });
-                                            arg_names.push(format!("{}.{}", obj_name, field));
+                                            arg_names.push(format!("{}.{}", obj_path, field_name));
                                         }
                                     }
                                     _ => {}
@@ -1157,19 +1234,18 @@ fn convert_statement(
                                     arg_names.push(var.clone());
                                 }
                             }
-                            // NEW: Handle field access as function argument
-                            crate::parser::Expression::MemberAccess { object, field } => {
-                                debug_println!("DEBUG IR: MemberAccess as function argument in assignment: {}.{}",
-                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                                    field);
-                                // Generate UseField statement to check if field is valid
-                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                            // NEW: Handle field access as function argument (including nested)
+                            crate::parser::Expression::MemberAccess { .. } => {
+                                // Use helper to extract full path for nested member access
+                                if let Some((obj_path, field_name)) = extract_member_path(arg) {
+                                    debug_println!("DEBUG IR: MemberAccess as function argument in assignment: {}.{}", obj_path, field_name);
+                                    // Generate UseField statement to check if field is valid
                                     statements.push(IrStatement::UseField {
-                                        object: obj_name.clone(),
-                                        field: field.clone(),
+                                        object: obj_path.clone(),
+                                        field: field_name.clone(),
                                         operation: "use in function call".to_string(),
                                     });
-                                    arg_names.push(format!("{}.{}", obj_name, field));
+                                    arg_names.push(format!("{}.{}", obj_path, field_name));
                                 }
                             }
                             _ => {}
@@ -1358,17 +1434,16 @@ fn convert_statement(
                                     arg_names.push(var.clone());
                                 }
                             }
-                            crate::parser::Expression::MemberAccess { object, field } => {
-                                debug_println!("DEBUG IR: Move(MemberAccess) as direct argument: {}.{}",
-                                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                                    field);
-                                if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                            crate::parser::Expression::MemberAccess { .. } => {
+                                // Use helper to extract full path for nested member access
+                                if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
+                                    debug_println!("DEBUG IR: Move(MemberAccess) as direct argument: {}.{}", obj_path, field_name);
                                     statements.push(IrStatement::MoveField {
-                                        object: obj_name.clone(),
-                                        field: field.clone(),
-                                        to: format!("_moved_{}", field),
+                                        object: obj_path.clone(),
+                                        field: field_name.clone(),
+                                        to: format!("_moved_{}", field_name),
                                     });
-                                    arg_names.push(format!("{}.{}", obj_name, field));
+                                    arg_names.push(format!("{}.{}", obj_path, field_name));
                                 }
                             }
                             _ => {}
@@ -1405,15 +1480,14 @@ fn convert_statement(
                                             to: format!("_moved_{}", var),
                                         });
                                     }
-                                    crate::parser::Expression::MemberAccess { object, field } => {
-                                        debug_println!("DEBUG IR: Found Move(MemberAccess) in nested call: {}.{}",
-                                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                                            field);
-                                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                    crate::parser::Expression::MemberAccess { .. } => {
+                                        // Use helper to extract full path for nested member access
+                                        if let Some((obj_path, field_name)) = extract_member_path(move_inner.as_ref()) {
+                                            debug_println!("DEBUG IR: Found Move(MemberAccess) in nested call: {}.{}", obj_path, field_name);
                                             statements.push(IrStatement::MoveField {
-                                                object: obj_name.clone(),
-                                                field: field.clone(),
-                                                to: format!("_moved_{}", field),
+                                                object: obj_path,
+                                                field: field_name.clone(),
+                                                to: format!("_moved_{}", field_name),
                                             });
                                         }
                                     }
@@ -1424,19 +1498,18 @@ fn convert_statement(
                         // Use placeholder for nested call result
                         arg_names.push(format!("_result_of_{}", inner_name));
                     }
-                    // NEW: Handle field access as function argument
-                    crate::parser::Expression::MemberAccess { object, field } => {
-                        debug_println!("DEBUG IR: MemberAccess as function argument: {}.{}",
-                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                            field);
-                        // Generate UseField statement to check if field is valid
-                        if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                    // NEW: Handle field access as function argument (including nested)
+                    crate::parser::Expression::MemberAccess { .. } => {
+                        // Use helper to extract full path for nested member access
+                        if let Some((obj_path, field_name)) = extract_member_path(arg) {
+                            debug_println!("DEBUG IR: MemberAccess as function argument: {}.{}", obj_path, field_name);
+                            // Generate UseField statement to check if field is valid
                             statements.push(IrStatement::UseField {
-                                object: obj_name.clone(),
-                                field: field.clone(),
+                                object: obj_path.clone(),
+                                field: field_name.clone(),
                                 operation: "use in function call".to_string(),
                             });
-                            arg_names.push(format!("{}.{}", obj_name, field));
+                            arg_names.push(format!("{}.{}", obj_path, field_name));
                         }
                     }
                     // Track literals as temporaries for lifetime analysis
