@@ -16,11 +16,10 @@ Bringing Rust's safety to C++ through:
 
 This project aims to catch memory safety issues at compile-time by applying Rust's proven ownership model to C++ code. It helps prevent common bugs like use-after-move, double-free, and dangling references before they reach production.
 
-Though C++ is flexible enough to mimic Rust's idioms in many ways, implementing a borrow-checking without modifying the compiler system appears to be impossible, as analyzed in [document](https://docs.google.com/document/d/e/2PACX-1vSt2VB1zQAJ6JDMaIA9PlmEgBxz2K5Tx6w2JqJNeYCy0gU4aoubdTxlENSKNSrQ2TXqPWcuwtXe6PlO/pub). 
+Though C++ is flexible enough to mimic Rust's idioms in many ways, implementing a borrow-checking without modifying the compiler system appears to be impossible, as analyzed in [this document](https://docs.google.com/document/d/e/2PACX-1vSt2VB1zQAJ6JDMaIA9PlmEgBxz2K5Tx6w2JqJNeYCy0gU4aoubdTxlENSKNSrQ2TXqPWcuwtXe6PlO/pub). 
 
 We provide rusty-cpp-checker, a standalone static analyzer that enforces Rust-like ownership and borrowing rules for C++ code, bringing memory safety guarantees to existing C++ codebases without runtime overhead. rusty-cpp-checker does not bringing any new grammar into c++. Everything works through simple annoations such as adding `// @safe` enables safety checking on a function.
 
-Note: two projects that (attempt to) implement borrow checking in C++ at compile time are [Circle C++](https://www.circle-lang.org/site/index.html) and [Crubit](https://github.com/google/crubit). As of 2025, Circle is not open sourced, and its design introduces aggressive modifications, such as the ref pointer ^. Crubit is not yet usable on this feature.
 
 ### Example
 
@@ -54,13 +53,11 @@ void demonstrate_const_ref_violation() {
 
 **Analysis Output:**
 ```
-error: cannot borrow `value` as mutable because it is also borrowed as immutable
-  --> example.cpp:6:5
-   |
-5  |     const int& const_ref = value;  // Immutable borrow - OK
-   |                            ----- immutable borrow occurs here
-6  |     int& mut_ref = value;          // ERROR
-   |          ^^^^^^^ mutable borrow occurs here
+Rusty C++ Checker
+Analyzing: example.cpp
+✗ Found 2 violation(s) in example.cpp:
+Cannot create mutable reference to 'value': already immutably borrowed
+Cannot create mutable borrow 'mut_ref': 'value' is already borrowed by 'const_ref'
 ```
 
 ### ✨ Features
@@ -345,22 +342,16 @@ void bad_code() {
 
 **Output:**
 ```
-error: use of moved value: `ptr1`
-  --> example.cpp:6:5
-   |
-6  |     *ptr1 = 10;
-   |     ^^^^^ value used here after move
-   |
-note: value moved here
-  --> example.cpp:5:29
-   |
-5  |     rusty::Box<int> ptr2 = std::move(ptr1);
-   |                             ^^^^^^^^^^^^^^
+Rusty C++ Checker
+Analyzing: example.cpp
+✗ Found 1 violation(s) in example.cpp:
+Use after move: cannot dereference_write (via operator*) variable 'ptr1' because it has been moved
 ```
 
 #### Example 2: Multiple Mutable Borrows
 
 ```cpp
+// @safe
 void bad_borrow() {
     int value = 42;
     int& ref1 = value;
@@ -368,13 +359,33 @@ void bad_borrow() {
 }
 ```
 
+**Output:**
+```
+Rusty C++ Checker
+Analyzing: example.cpp
+✗ Found 3 violation(s) in example.cpp:
+Cannot create mutable reference to 'value': already mutably borrowed
+Cannot create mutable borrow 'ref1': 'value' is already borrowed by 'ref2'
+Cannot create mutable borrow 'ref2': 'value' is already borrowed by 'ref1'
+```
+
 #### Example 3: Lifetime Violation
 
 ```cpp
+// @safe
 int& dangling_reference() {
     int local = 42;
     return local;  // ERROR: Returning reference to local variable
 }
+```
+
+**Output:**
+```
+Rusty C++ Checker
+Analyzing: example.cpp
+✗ Found 2 violation(s) in example.cpp:
+Safe function 'dangling_reference' returns a reference but has no @lifetime annotation
+Cannot return reference to local variable 'local'
 ```
 
 ### 🏗️ Architecture
@@ -768,6 +779,10 @@ Unfortunately, Rust does not support this level of integration (perhaps intentio
 Currently, the best approach for C++/Rust interoperability is through the cxx/autocxx crates.
 This interoperability is implemented as a semi-automated process based on C FFIs (Foreign Function Interfaces) that both C++ and Rust support.
 However, if your C++ code follows the guidelines in this document, particularly if all types are POD, the interoperability experience can approach the seamless integration offered by other languages (though this remains to be verified).
+
+### Closely related projects to watch
+
+Two projects that (attempt to) implement borrow checking in C++ at compile time are [Circle C++](https://github.com/seanbaxter/circle), and [Crubit](https://github.com/google/crubit). 
 
 <!-- ### TODO 
 
