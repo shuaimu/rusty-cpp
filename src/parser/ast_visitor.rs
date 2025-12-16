@@ -1212,6 +1212,21 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
 fn extract_expression(entity: &Entity) -> Option<Expression> {
     match entity.get_kind() {
         EntityKind::DeclRefExpr => {
+            // Check if this references a field declaration (member variable)
+            // If so, it's an implicit this->field access
+            if let Some(ref_entity) = entity.get_reference() {
+                if ref_entity.get_kind() == EntityKind::FieldDecl {
+                    // This is a member field access - convert to this.field
+                    if let Some(field_name) = entity.get_name() {
+                        debug_println!("DEBUG: DeclRefExpr to FieldDecl '{}' - converting to this.{}", field_name, field_name);
+                        return Some(Expression::MemberAccess {
+                            object: Box::new(Expression::Variable("this".to_string())),
+                            field: field_name,
+                        });
+                    }
+                }
+            }
+            // Regular variable reference
             entity.get_name().map(Expression::Variable)
         }
         EntityKind::ThisExpr => {

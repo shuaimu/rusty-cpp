@@ -625,6 +625,17 @@ fn extract_return_source(
             // This creates a temporary, but for implicit constructors (e.g., return ptr;)
             // the variable might be in the arguments
             debug_println!("DEBUG IR: Return function call: {}", name);
+
+            // Check if any argument is a Move expression (e.g., return Constructor(std::move(x)))
+            // This handles cases like: return std::move(data); where the move is wrapped in a constructor
+            for arg in args.iter() {
+                if let Expression::Move(inner) = arg {
+                    debug_println!("DEBUG IR: Found Move inside function call argument");
+                    // Recursively extract from the Move
+                    return extract_return_source(arg, statements);
+                }
+            }
+
             if let Some(Expression::Variable(var)) = args.first() {
                 Some(var.clone())
             } else {
