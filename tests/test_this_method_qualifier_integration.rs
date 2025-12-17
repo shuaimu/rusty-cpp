@@ -348,6 +348,79 @@ int main() { return 0; }
 }
 
 // =============================================================================
+// Tests for *this dereference (should be allowed in all method types)
+// =============================================================================
+
+#[test]
+fn test_this_dereference_allowed_in_const_method() {
+    let source = r#"
+// @safe
+class Container {
+    int data;
+public:
+    Container copy() const {
+        return *this;  // OK: *this dereference is safe
+    }
+};
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "*this dereference should be allowed in const method. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_this_dereference_allowed_in_nonconst_method() {
+    let source = r#"
+// @safe
+class Container {
+    int data;
+public:
+    Container copy() {
+        return *this;  // OK: *this dereference is safe
+    }
+};
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "*this dereference should be allowed in non-const method. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_this_dereference_allowed_in_rvalue_method() {
+    let source = r#"
+// @safe
+class Container {
+    int data;
+public:
+    Container consume() && {
+        return *this;  // OK: *this dereference is safe (moving whole object)
+    }
+};
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    assert!(
+        success,
+        "*this dereference should be allowed in && method. Output: {}",
+        output
+    );
+}
+
+// =============================================================================
 // Combined tests
 // =============================================================================
 

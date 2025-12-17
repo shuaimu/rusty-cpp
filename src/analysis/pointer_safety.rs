@@ -155,9 +155,17 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
 
 fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
     use crate::parser::Expression;
-    
+
     match expr {
-        Expression::Dereference(_) => Some("dereference"),
+        Expression::Dereference(inner) => {
+            // *this is safe in member functions - this pointer is guaranteed valid
+            if let Expression::Variable(name) = inner.as_ref() {
+                if name == "this" {
+                    return None;  // *this is safe
+                }
+            }
+            Some("dereference")
+        }
         Expression::AddressOf(_) => {
             // Taking address is generally safe in Rust, but we can make it require unsafe too
             Some("address-of")
