@@ -178,6 +178,10 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             }
             contains_pointer_operation(right)
         }
+        Expression::MemberAccess { object, .. } => {
+            // Check object for pointer operations (e.g., ptr->field wraps object in Dereference)
+            contains_pointer_operation(object)
+        }
         _ => None
     }
 }

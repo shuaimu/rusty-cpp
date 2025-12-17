@@ -966,14 +966,22 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         // For MemberRefExpr, extract the receiver from its children
                         if c.get_kind() == EntityKind::MemberRefExpr {
                             debug_println!("DEBUG AST: Extracting receiver from MemberRefExpr");
-                            let member_children = c.get_children();
+                            let member_children: Vec<Entity> = c.get_children().into_iter().collect();
                             if !member_children.is_empty() {
                                 // Has children - extract receiver from first child
-                                for member_child in member_children {
-                                    if let Some(receiver_expr) = extract_expression(&member_child) {
-                                        debug_println!("DEBUG AST: Found receiver from child: {:?}", receiver_expr);
+                                if let Some(receiver_expr) = extract_expression(&member_children[0]) {
+                                    // Check if receiver type is a pointer (means -> was used)
+                                    // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
+                                    let is_arrow = member_children[0].get_type()
+                                        .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
+                                        .unwrap_or(false);
+
+                                    if is_arrow {
+                                        debug_println!("DEBUG AST: Arrow method call (stmt) - receiver is pointer: (*{:?})", receiver_expr);
+                                        args.push(Expression::Dereference(Box::new(receiver_expr)));
+                                    } else {
+                                        debug_println!("DEBUG AST: Dot method call (stmt) - receiver: {:?}", receiver_expr);
                                         args.push(receiver_expr);
-                                        break; // Only take the first child (the receiver)
                                     }
                                 }
                             } else {
@@ -1433,8 +1441,19 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if !member_children.is_empty() {
                             // First child of MemberRefExpr is the receiver object
                             if let Some(recv_expr) = extract_expression(&member_children[0]) {
-                                debug_println!("DEBUG AST: Extracted receiver from MemberRefExpr: {:?}", recv_expr);
-                                args.push(recv_expr);
+                                // Check if receiver type is a pointer (means -> was used)
+                                // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
+                                let is_arrow = member_children[0].get_type()
+                                    .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
+                                    .unwrap_or(false);
+
+                                if is_arrow {
+                                    debug_println!("DEBUG AST: Arrow method call - receiver is pointer: (*{:?})", recv_expr);
+                                    args.push(Expression::Dereference(Box::new(recv_expr)));
+                                } else {
+                                    debug_println!("DEBUG AST: Dot method call - extracted receiver: {:?}", recv_expr);
+                                    args.push(recv_expr);
+                                }
                             }
                         } else {
                             // No children - the receiver might be implicit or a simple variable
@@ -1613,16 +1632,32 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
-                // First child is the object being accessed (explicit object.field)
+                // First child is the object being accessed (explicit object.field or ptr->field)
                 if let Some(object_expr) = extract_expression(&children[0]) {
-                    debug_println!("DEBUG: MemberRefExpr explicit access: object={:?}, field={}", object_expr, field_name);
-                    return Some(Expression::MemberAccess {
-                        object: Box::new(object_expr),
-                        field: field_name,
-                    });
+                    // Check if object type is a pointer (means -> was used, not .)
+                    // ptr->field is semantically (*ptr).field, so wrap in Dereference
+                    let is_arrow = children[0].get_type()
+                        .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
+                        .unwrap_or(false);
+
+                    if is_arrow {
+                        debug_println!("DEBUG: MemberRefExpr arrow access: (*{:?}).{}", object_expr, field_name);
+                        return Some(Expression::MemberAccess {
+                            object: Box::new(Expression::Dereference(Box::new(object_expr))),
+                            field: field_name,
+                        });
+                    } else {
+                        debug_println!("DEBUG: MemberRefExpr dot access: {:?}.{}", object_expr, field_name);
+                        return Some(Expression::MemberAccess {
+                            object: Box::new(object_expr),
+                            field: field_name,
+                        });
+                    }
                 }
             } else {
                 // No children means implicit 'this->field' access in a method
+                // 'this' is guaranteed valid inside member functions, so NOT unsafe
+                // (Unlike arbitrary raw pointers, 'this' cannot be null/invalid in well-formed code)
                 debug_println!("DEBUG: MemberRefExpr implicit 'this' access: this.{}", field_name);
                 return Some(Expression::MemberAccess {
                     object: Box::new(Expression::Variable("this".to_string())),
