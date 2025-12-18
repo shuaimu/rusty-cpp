@@ -240,14 +240,24 @@ impl HeaderCache {
     }
     
     fn visit_entity_for_signatures(&mut self, entity: &clang::Entity) {
-        self.visit_entity_with_namespace(entity, None);
+        self.visit_entity_with_context(entity, None, None);
     }
-    
-    fn visit_entity_with_namespace(&mut self, entity: &clang::Entity, namespace_safety: Option<SafetyMode>) {
+
+    /// Visit entities tracking both namespace and class-level safety annotations.
+    /// Annotation hierarchy: function > class > namespace
+    fn visit_entity_with_context(
+        &mut self,
+        entity: &clang::Entity,
+        namespace_safety: Option<SafetyMode>,
+        class_safety: Option<SafetyMode>,
+    ) {
         use clang::EntityKind;
-        
-        // Check if this is a namespace with safety annotation
+
+        // Track current context
         let mut current_namespace_safety = namespace_safety;
+        let mut current_class_safety = class_safety;
+
+        // Check if this is a namespace with safety annotation
         if entity.get_kind() == EntityKind::Namespace {
             if let Some(safety) = parse_entity_safety(entity) {
                 current_namespace_safety = Some(safety);
@@ -256,7 +266,21 @@ impl HeaderCache {
                 }
             }
         }
-        
+
+        // Check if this is a class/struct with safety annotation
+        if entity.get_kind() == EntityKind::ClassDecl || entity.get_kind() == EntityKind::StructDecl {
+            if let Some(safety) = parse_entity_safety(entity) {
+                current_class_safety = Some(safety);
+                if let Some(name) = entity.get_name() {
+                    debug_println!("DEBUG SAFETY: Found class '{}' with {:?} annotation in header", name, safety);
+                }
+            } else if current_namespace_safety.is_some() {
+                // If class has no explicit annotation, DON'T inherit from namespace
+                // Classes without annotations are undeclared
+                current_class_safety = None;
+            }
+        }
+
         match entity.get_kind() {
             EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor | EntityKind::FunctionTemplate => {
 
@@ -274,17 +298,19 @@ impl HeaderCache {
                 // Extract safety annotations from the entity itself
                 let mut safety = parse_entity_safety(entity);
 
-                // If no explicit safety annotation, inherit from namespace
+                // If no explicit safety annotation, inherit from class first, then namespace
+                // Hierarchy: function > class > namespace
                 if safety.is_none() {
-                    safety = current_namespace_safety;
+                    if current_class_safety.is_some() {
+                        safety = current_class_safety;
+                        debug_println!("DEBUG SAFETY: Method inheriting {:?} from class", safety);
+                    } else {
+                        safety = current_namespace_safety;
+                        if safety.is_some() {
+                            debug_println!("DEBUG SAFETY: Function inheriting {:?} from namespace", safety);
+                        }
+                    }
                 }
-
-                // if let Some(name) = entity.get_name() {
-                //     debug_println!("DEBUG HEADER: Processing function '{}'", name);
-                //     if let Some(comment) = entity.get_comment() {
-                //         debug_println!("DEBUG HEADER:   Comment: {}", comment);
-                //     }
-                // }
 
                 if let Some(safety_mode) = safety {
                     // Always use qualified name for all functions to avoid namespace collisions
@@ -301,10 +327,18 @@ impl HeaderCache {
             }
             _ => {}
         }
-        
-        // Recursively visit children, passing down namespace safety
+
+        // Recursively visit children, passing down context
+        // For class children, pass current_class_safety
+        // For namespace children (not inside a class), pass None for class_safety
+        let child_class_safety = if entity.get_kind() == EntityKind::ClassDecl || entity.get_kind() == EntityKind::StructDecl {
+            current_class_safety
+        } else {
+            class_safety  // Keep parent's class safety for nested entities
+        };
+
         for child in entity.get_children() {
-            self.visit_entity_with_namespace(&child, current_namespace_safety);
+            self.visit_entity_with_context(&child, current_namespace_safety, child_class_safety);
         }
     }
     

@@ -8,6 +8,10 @@ This document describes how RustyCpp enforces Rust's ownership and borrowing rul
 2. [Rust's Self Types](#rusts-self-types)
 3. [C++ to Rust Mapping](#c-to-rust-mapping)
 4. [Rules Enforced](#rules-enforced)
+   - [Field Access Rules](#field-access-rules)
+   - [`*this` Dereference Rules](#this-dereference-rules)
+   - [Lambda `this` Capture Rules](#lambda-this-capture-rules)
+   - [Field Borrow Rules](#field-borrow-rules)
 5. [Design Principles](#design-principles)
 6. [Examples](#examples)
 7. [Common Patterns](#common-patterns)
@@ -178,6 +182,74 @@ auto result = std::move(c).consume();  // OK: c is moved into consume()
 | Move field | ❌ No | ❌ No | ✅ Yes |
 | Borrow field immutably | ✅ Yes | ✅ Yes | ✅ Yes |
 | Borrow field mutably | ❌ No | ✅ Yes | ✅ Yes |
+
+### `*this` Dereference Rules
+
+The `*this` dereference is **always allowed** in member functions because `this` is guaranteed to be valid within a non-static member function:
+
+```cpp
+// @safe
+class Container {
+    int data;
+public:
+    // ✅ OK: *this dereference allowed in const method
+    Container copy_const() const {
+        return *this;
+    }
+
+    // ✅ OK: *this dereference allowed in non-const method
+    Container copy_nonconst() {
+        return *this;
+    }
+
+    // ✅ OK: *this dereference allowed in && method
+    Container consume() && {
+        return *this;
+    }
+};
+```
+
+**Note**: While `*this` dereference is safe, dereferencing other raw pointers still requires `@unsafe` context.
+
+### Lambda `this` Capture Rules
+
+| Capture | Allowed in @safe | Reason |
+|---------|------------------|--------|
+| `[this]` | ❌ No | Raw pointer that can dangle |
+| `[*this]` | ✅ Yes | Copies the object (C++17) |
+| `[=]` with `this` | ❌ No | Implicitly captures `this` |
+
+```cpp
+// @safe
+class Widget {
+    int value;
+public:
+    auto bad_lambda() {
+        return [this]() { return value; };  // ❌ ERROR: 'this' is raw pointer
+    }
+
+    auto good_lambda() {
+        return [*this]() { return value; };  // ✅ OK: copies object (C++17)
+    }
+
+    auto also_good() {
+        int v = value;  // Copy to local
+        return [v]() { return v; };  // ✅ OK: captures copy
+    }
+};
+```
+
+**Why is `[this]` forbidden?** The `this` pointer is a raw pointer. If the lambda outlives the object, dereferencing `this` inside the lambda would be undefined behavior:
+
+```cpp
+auto get_lambda() {
+    Widget w;
+    return w.bad_lambda();  // Lambda captures &w
+}  // w is destroyed here
+
+auto lambda = get_lambda();
+lambda();  // 💥 UNDEFINED BEHAVIOR: this points to destroyed object
+```
 
 ### Field Borrow Rules
 

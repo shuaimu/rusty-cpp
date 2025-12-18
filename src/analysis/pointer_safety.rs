@@ -89,7 +89,16 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
     }
 
     match stmt {
-        Statement::Assignment { rhs, location, .. } => {
+        Statement::Assignment { lhs, rhs, location } => {
+            // Check BOTH lhs and rhs for pointer operations
+            // e.g., `n->value_ = val` has the dereference on lhs
+            // e.g., `x = *ptr` has the dereference on rhs
+            if let Some(op) = contains_pointer_operation(lhs) {
+                return Some(format!(
+                    "Unsafe pointer {} at line {}: pointer operations require unsafe context",
+                    op, location.line
+                ));
+            }
             if let Some(op) = contains_pointer_operation(rhs) {
                 return Some(format!(
                     "Unsafe pointer {} at line {}: pointer operations require unsafe context",

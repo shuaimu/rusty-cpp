@@ -1565,6 +1565,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 Some(Expression::Literal("0".to_string()))
             }
         }
+        EntityKind::ParenExpr => {
+            // Parenthesized expression - just extract the inner expression
+            // e.g., (*n) in (*n).value_ - we want to get the Dereference(n) inside
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if !children.is_empty() {
+                debug_println!("DEBUG: ParenExpr has child: kind={:?}", children[0].get_kind());
+                return extract_expression(&children[0]);
+            }
+            None
+        }
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&) or dereference (*)
             // Other unary operators (!, ~, -, +) should be treated as simple expressions
