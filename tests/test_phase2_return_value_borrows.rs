@@ -151,6 +151,8 @@ int main() {
 fn test_phase2_borrow_ends_at_scope() {
     // Test that borrows end when reference goes out of scope
     let code = r#"
+#include <utility>
+
 // @lifetime: (&'a) -> &'a int
 const int& identity(const int& x) {
     return x;
@@ -165,8 +167,8 @@ int main() {
         // use ref...
     }  // borrow ends - ref destroyed
 
-    // OK: Can move now
-    int moved = (int&&)value;
+    // OK: Can move now (use std::move, not C-style cast which is unsafe)
+    int moved = std::move(value);
 
     return 0;
 }

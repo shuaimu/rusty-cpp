@@ -199,6 +199,12 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // Check object for pointer operations (e.g., ptr->field wraps object in Dereference)
             contains_pointer_operation(object)
         }
+        Expression::Cast(inner) => {
+            // C++ casts (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
+            // are all considered unsafe operations in @safe code
+            // Return "cast" as the operation type, but also check inner for other violations
+            Some("cast")
+        }
         _ => None
     }
 }

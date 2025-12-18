@@ -368,6 +368,9 @@ pub enum Expression {
     Lambda {
         captures: Vec<LambdaCaptureKind>,
     },
+    // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
+    // All casts are considered unsafe operations in @safe code
+    Cast(Box<Expression>),
 }
 
 #[derive(Debug, Clone)]
@@ -1583,17 +1586,18 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         | EntityKind::ReinterpretCastExpr
         | EntityKind::ConstCastExpr
         | EntityKind::CStyleCastExpr => {
-            // C++ cast expressions - extract the inner expression being cast
-            // The cast itself is transparent for borrow checking
+            // C++ cast expressions are unsafe operations in @safe code
+            // Wrap the inner expression in Cast to track this
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             // Find the expression being cast (not the type reference)
             for child in &children {
                 if child.get_kind() != EntityKind::TypeRef {
-                    if let Some(expr) = extract_expression(child) {
-                        return Some(expr);
+                    if let Some(inner_expr) = extract_expression(child) {
+                        return Some(Expression::Cast(Box::new(inner_expr)));
                     }
                 }
             }
+            // Even if we can't extract the inner expression, the cast itself is unsafe
             None
         }
         EntityKind::UnaryOperator => {

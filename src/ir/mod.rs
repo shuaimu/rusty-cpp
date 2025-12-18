@@ -663,6 +663,13 @@ fn extract_return_source(
             // Lambdas are self-contained closures, no direct source variable
             None
         }
+
+        Expression::Cast(inner) => {
+            // Cast: return static_cast<T>(x);
+            // The source is whatever is being casted
+            debug_println!("DEBUG IR: Return cast expression");
+            extract_return_source(inner, statements)
+        }
     }
 }
 

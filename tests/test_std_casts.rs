@@ -336,3 +336,173 @@ fn test_complex_cast_usage() {
         output
     );
 }
+
+// ============================================================================
+// Cast with Pointer Dereference Tests (Issue #13 - static_cast bypass)
+// ============================================================================
+
+#[test]
+fn test_static_cast_arrow_in_safe_should_fail() {
+    // static_cast<T*>(ptr)->member involves a pointer dereference
+    // This should be flagged as unsafe in @safe code
+    let code = r#"
+    struct Node { int value; };
+    struct Leaf : Node { int parent; };
+
+    // @safe
+    int* bad_static_cast_arrow(Node* n) {
+        return &static_cast<Leaf*>(n)->parent;  // ERROR: dereference through ->
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "static_cast<T*>(ptr)->member should be flagged as unsafe (pointer dereference). Output: {}",
+        output
+    );
+    assert!(
+        output.contains("dereference") || output.contains("address-of"),
+        "Error should mention pointer operation. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_static_cast_deref_in_safe_should_fail() {
+    // (*static_cast<T*>(ptr)).member involves a pointer dereference
+    // This should be flagged as unsafe in @safe code
+    let code = r#"
+    struct Node { int value; };
+    struct Leaf : Node { int parent; };
+
+    // @safe
+    int* bad_static_cast_deref(Node* n) {
+        return &(*static_cast<Leaf*>(n)).parent;  // ERROR: explicit dereference
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "(*static_cast<T*>(ptr)).member should be flagged as unsafe (pointer dereference). Output: {}",
+        output
+    );
+    assert!(
+        output.contains("dereference") || output.contains("address-of"),
+        "Error should mention pointer operation. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_static_cast_in_unsafe_should_pass() {
+    // Same operations should be allowed in @unsafe code
+    let code = r#"
+    struct Node { int value; };
+    struct Leaf : Node { int parent; };
+
+    // @unsafe
+    int* ok_static_cast_arrow(Node* n) {
+        return &static_cast<Leaf*>(n)->parent;  // OK in unsafe
+    }
+
+    // @unsafe
+    int* ok_static_cast_deref(Node* n) {
+        return &(*static_cast<Leaf*>(n)).parent;  // OK in unsafe
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        success,
+        "static_cast with pointer dereference should be allowed in @unsafe functions. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_dynamic_cast_arrow_in_safe_should_fail() {
+    // dynamic_cast<T*>(ptr)->member also involves a pointer dereference
+    let code = r#"
+    struct Base { virtual ~Base() = default; int value; };
+    struct Derived : Base { int extra; };
+
+    // @safe
+    int* bad_dynamic_cast(Base* b) {
+        return &dynamic_cast<Derived*>(b)->extra;  // ERROR: dereference
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "dynamic_cast<T*>(ptr)->member should be flagged as unsafe. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_reinterpret_cast_arrow_in_safe_should_fail() {
+    // reinterpret_cast<T*>(ptr)->member involves a pointer dereference
+    let code = r#"
+    struct Data { int value; };
+
+    // @safe
+    int bad_reinterpret_cast(void* ptr) {
+        return reinterpret_cast<Data*>(ptr)->value;  // ERROR: dereference
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "reinterpret_cast<T*>(ptr)->member should be flagged as unsafe. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_c_style_cast_arrow_in_safe_should_fail() {
+    // C-style cast (T*)(ptr)->member also involves a pointer dereference
+    let code = r#"
+    struct Node { int value; };
+    struct Leaf : Node { int parent; };
+
+    // @safe
+    int bad_c_style_cast(Node* n) {
+        return ((Leaf*)n)->parent;  // ERROR: C-style cast + dereference
+    }
+
+    int main() { return 0; }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "C-style cast (T*)(ptr)->member should be flagged as unsafe. Output: {}",
+        output
+    );
+}
