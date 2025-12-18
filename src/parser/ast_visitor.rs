@@ -1575,6 +1575,27 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             None
         }
+        // C++ cast expressions - extract the inner expression
+        // static_cast<T*>(ptr), dynamic_cast<T*>(ptr), reinterpret_cast<T*>(ptr), const_cast<T*>(ptr)
+        // These are transparent for borrow checking - we care about what's being cast
+        EntityKind::StaticCastExpr
+        | EntityKind::DynamicCastExpr
+        | EntityKind::ReinterpretCastExpr
+        | EntityKind::ConstCastExpr
+        | EntityKind::CStyleCastExpr => {
+            // C++ cast expressions - extract the inner expression being cast
+            // The cast itself is transparent for borrow checking
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            // Find the expression being cast (not the type reference)
+            for child in &children {
+                if child.get_kind() != EntityKind::TypeRef {
+                    if let Some(expr) = extract_expression(child) {
+                        return Some(expr);
+                    }
+                }
+            }
+            None
+        }
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&) or dereference (*)
             // Other unary operators (!, ~, -, +) should be treated as simple expressions
