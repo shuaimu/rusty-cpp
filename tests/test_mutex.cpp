@@ -13,13 +13,13 @@ void test_basic_locking() {
     Mutex<int> m(42);
 
     {
-        auto guard = m.lock();
+        auto guard = m.lock().unwrap();  // Rust-like: lock() returns Result
         assert(*guard == 42);
         *guard = 100;
     }
 
     {
-        auto guard = m.lock();
+        auto guard = m.lock().unwrap();
         assert(*guard == 100);
     }
 
@@ -32,7 +32,7 @@ void test_try_lock() {
     Mutex<int> m(42);
 
     {
-        auto guard1 = m.lock();
+        auto guard1 = m.lock().unwrap();
         assert(*guard1 == 42);
 
         // Try to acquire while already locked
@@ -52,7 +52,7 @@ void test_move_guard() {
 
     Mutex<int> m(42);
 
-    auto guard1 = m.lock();
+    auto guard1 = m.lock().unwrap();
     *guard1 = 100;
 
     // Move guard
@@ -73,7 +73,7 @@ void test_arrow_operator() {
     Mutex<Data> m(Data{10, 20});
 
     {
-        auto guard = m.lock();
+        auto guard = m.lock().unwrap();
         assert(guard->x == 10);
         assert(guard->y == 20);
 
@@ -81,7 +81,7 @@ void test_arrow_operator() {
         guard->y = 40;
     }
 
-    auto guard = m.lock();
+    auto guard = m.lock().unwrap();
     assert(guard->x == 30);
     assert(guard->y == 40);
 
@@ -98,7 +98,7 @@ void test_thread_safety() {
         auto handle = thread::spawn(
             [](Arc<Mutex<int>> counter) {
                 for (int j = 0; j < 1000; ++j) {
-                    auto guard = counter->lock();
+                    auto guard = counter->lock().unwrap();
                     *guard += 1;
                 }
             },
@@ -112,7 +112,7 @@ void test_thread_safety() {
         h.join();
     }
 
-    auto final_value = counter->lock();
+    auto final_value = counter->lock().unwrap();
     assert(*final_value == 10000);
 
     std::cout << "PASSED (final value: " << *final_value << ")\n";
@@ -127,14 +127,14 @@ void test_scoped_threads_with_mutex() {
         for (int i = 0; i < 10; ++i) {
             s.spawn([&counter]() {
                 for (int j = 0; j < 100; ++j) {
-                    auto guard = counter.lock();
+                    auto guard = counter.lock().unwrap();
                     *guard += 1;
                 }
             });
         }
     });
 
-    auto result = counter.lock();
+    auto result = counter.lock().unwrap();
     assert(*result == 1000);
 
     std::cout << "PASSED (final value: " << *result << ")\n";
@@ -146,7 +146,7 @@ void test_const_mutex() {
     const Mutex<int> m(42);
 
     // Can still lock const Mutex (interior mutability)
-    auto guard = m.lock();
+    auto guard = m.lock().unwrap();
     assert(*guard == 42);
 
     std::cout << "PASSED\n";
@@ -157,7 +157,13 @@ void test_new_api() {
 
     Mutex<int> m(100);
 
-    // Test unwrap() - cleaner than has_value() + **
+    // Test unwrap() on lock() - Rust-like API
+    {
+        auto guard = m.lock().unwrap();
+        assert(*guard == 100);
+    }
+
+    // Test unwrap() on try_lock() - Option API
     {
         auto guard = m.try_lock().unwrap();
         assert(*guard == 100);
@@ -171,14 +177,14 @@ void test_new_api() {
 
     // Test get_mut() - Rust-like naming
     {
-        auto guard = m.lock();
+        auto guard = m.lock().unwrap();
         guard.get_mut() = 200;
         assert(*guard == 200);
     }
 
     // Test into_inner() - consumes guard and extracts value
     {
-        auto guard = m.lock();
+        auto guard = m.lock().unwrap();
         int value = std::move(guard).into_inner();
         assert(value == 200);
         // guard is now moved-from, lock released
@@ -186,9 +192,17 @@ void test_new_api() {
 
     // Test is_none() with rusty::Option
     {
-        auto guard1 = m.lock();
+        auto guard1 = m.lock().unwrap();
         auto maybe_guard2 = m.try_lock();
         assert(maybe_guard2.is_none());  // Can't lock twice
+    }
+
+    // Test is_ok() on LockResult
+    {
+        auto result = m.lock();
+        assert(result.is_ok());  // Should always be Ok (no poisoning in C++)
+        auto guard = result.unwrap();
+        assert(*guard == 200);
     }
 
     std::cout << "PASSED\n";

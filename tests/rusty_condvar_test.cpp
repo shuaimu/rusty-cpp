@@ -218,10 +218,200 @@ void test_condvar_wait_until() {
     printf("PASS\n");
 }
 
+// =============================================================================
+// Tests with MutexGuard<T> (Rust-like API)
+// =============================================================================
+
+// Test basic wait with MutexGuard (returns LockResult)
+void test_condvar_wait_returns_result() {
+    printf("test_condvar_wait_returns_result: ");
+    {
+        Mutex<bool> ready(false);
+        Condvar cv;
+
+        std::thread waiter([&]() {
+            auto guard = ready.lock().unwrap();
+            // Basic wait - returns LockResult, need to unwrap
+            // Note: This can wake spuriously, so we loop
+            while (!*guard) {
+                guard = cv.wait(std::move(guard)).unwrap();
+            }
+            assert(*guard == true);
+        });
+
+        std::this_thread::sleep_for(50ms);
+
+        {
+            auto guard = ready.lock().unwrap();
+            *guard = true;
+        }
+        cv.notify_one();
+
+        waiter.join();
+    }
+    printf("PASS\n");
+}
+
+// Test wait_while with MutexGuard (Rust semantics: waits WHILE condition is TRUE)
+void test_condvar_wait_while() {
+    printf("test_condvar_wait_while: ");
+    {
+        Mutex<bool> ready(false);
+        Condvar cv;
+
+        std::thread waiter([&]() {
+            auto guard = ready.lock().unwrap();
+            // wait_while: waits WHILE condition is TRUE, stops when FALSE
+            // So we wait while NOT ready (i.e., while *guard == false)
+            guard = cv.wait_while(std::move(guard), [](bool& r){ return !r; }).unwrap();
+            assert(*guard == true);
+        });
+
+        std::this_thread::sleep_for(50ms);
+
+        {
+            auto guard = ready.lock().unwrap();
+            *guard = true;
+        }
+        cv.notify_one();
+
+        waiter.join();
+    }
+    printf("PASS\n");
+}
+
+// Test wait_timeout with MutexGuard
+void test_condvar_wait_timeout_with_guard() {
+    printf("test_condvar_wait_timeout_with_guard: ");
+    {
+        Mutex<int> value(0);
+        Condvar cv;
+
+        // Test timeout case
+        {
+            auto guard = value.lock().unwrap();
+            auto [new_guard, result] = cv.wait_timeout(std::move(guard), 50ms).unwrap();
+            assert(result.timed_out());  // Should timeout
+            guard = std::move(new_guard);
+        }
+
+        // Test notification case
+        std::thread notifier([&]() {
+            std::this_thread::sleep_for(30ms);
+            {
+                auto guard = value.lock().unwrap();
+                *guard = 42;
+            }
+            cv.notify_one();
+        });
+
+        {
+            auto guard = value.lock().unwrap();
+            auto [new_guard, result] = cv.wait_timeout(std::move(guard), 200ms).unwrap();
+            // May or may not have timed out depending on timing
+            guard = std::move(new_guard);
+        }
+
+        notifier.join();
+    }
+    printf("PASS\n");
+}
+
+// Test wait_timeout_while with MutexGuard (Rust semantics)
+void test_condvar_wait_timeout_while() {
+    printf("test_condvar_wait_timeout_while: ");
+    {
+        Mutex<int> value(0);
+        Condvar cv;
+
+        std::thread notifier([&]() {
+            std::this_thread::sleep_for(50ms);
+            {
+                auto guard = value.lock().unwrap();
+                *guard = 42;
+            }
+            cv.notify_one();
+        });
+
+        auto guard = value.lock().unwrap();
+        // wait_timeout_while: waits WHILE condition is TRUE
+        // Condition: value != 42, so waits while value is not 42
+        auto [new_guard, condition_false] = cv.wait_timeout_while(
+            std::move(guard),
+            200ms,
+            [](int& v){ return v != 42; }  // Wait while v != 42
+        ).unwrap();
+
+        assert(condition_false);  // Condition (v != 42) is now false, meaning v == 42
+        assert(*new_guard == 42);
+
+        notifier.join();
+    }
+    printf("PASS\n");
+}
+
+// Test producer-consumer with MutexGuard (Rust-like pattern)
+void test_condvar_producer_consumer_rust_style() {
+    printf("test_condvar_producer_consumer_rust_style: ");
+    {
+        struct SharedState {
+            std::vector<int> queue;
+            bool done = false;
+        };
+
+        Mutex<SharedState> state(SharedState{});
+        Condvar cv;
+        std::vector<int> consumed;
+
+        std::thread consumer([&]() {
+            auto guard = state.lock().unwrap();
+            while (true) {
+                // wait_while: waits WHILE queue is empty AND not done
+                guard = cv.wait_while(
+                    std::move(guard),
+                    [](SharedState& s){ return s.queue.empty() && !s.done; }
+                ).unwrap();
+
+                if (!guard->queue.empty()) {
+                    int item = guard->queue.back();
+                    guard->queue.pop_back();
+                    consumed.push_back(item);
+                } else if (guard->done) {
+                    break;
+                }
+            }
+        });
+
+        std::thread producer([&]() {
+            for (int i = 1; i <= 5; ++i) {
+                {
+                    auto guard = state.lock().unwrap();
+                    guard->queue.push_back(i);
+                }
+                cv.notify_one();
+                std::this_thread::sleep_for(10ms);
+            }
+
+            {
+                auto guard = state.lock().unwrap();
+                guard->done = true;
+            }
+            cv.notify_one();
+        });
+
+        producer.join();
+        consumer.join();
+
+        assert(consumed.size() == 5);
+    }
+    printf("PASS\n");
+}
+
 int main() {
     printf("Running Condvar tests...\n");
     printf("=======================\n");
 
+    // Tests with std::unique_lock (C++ compatibility)
     test_condvar_wait_notify_one();
     test_condvar_notify_all();
     test_condvar_wait_for_timeout();
@@ -229,6 +419,14 @@ int main() {
     test_condvar_producer_consumer();
     test_condvar_wait_manual();
     test_condvar_wait_until();
+
+    // Tests with MutexGuard<T> (Rust-like API)
+    printf("\n--- MutexGuard<T> tests (Rust-like API) ---\n");
+    test_condvar_wait_returns_result();
+    test_condvar_wait_while();
+    test_condvar_wait_timeout_with_guard();
+    test_condvar_wait_timeout_while();
+    test_condvar_producer_consumer_rust_style();
 
     printf("\nAll Condvar tests passed!\n");
     return 0;
