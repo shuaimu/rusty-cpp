@@ -52,6 +52,37 @@ public:
         return &value;
     }
 
+    // @safe - Get mutable reference when you have exclusive access (Rust-like API)
+    // This is safe because non-const method requires exclusive (&mut) access
+    // Matches Rust's UnsafeCell::get_mut(&mut self) -> &mut T
+    // @lifetime: (&'a mut) -> &'a mut T
+    T& get_mut() {
+        return value;
+    }
+
+    // @safe - Get const reference when you have exclusive access
+    // @lifetime: (&'a mut) -> &'a T
+    const T& get_mut() const {
+        return value;
+    }
+
+    // @safe - Get mutable reference through shared access (interior mutability)
+    // Similar to Rust's unchecked access patterns - no runtime checks performed.
+    // Has internal @unsafe block.
+    // SAFETY: Caller must ensure no data races or aliasing violations
+    // @lifetime: (&'a) -> &'a mut T
+    T& as_mut_unchecked() const {
+        // @unsafe
+        { return *const_cast<T*>(&value); }
+    }
+
+    // @safe - Get const reference through shared access (has internal @unsafe block)
+    // @lifetime: (&'a) -> &'a T
+    const T& as_ref_unchecked() const {
+        // @unsafe
+        { return value; }
+    }
+
     // Take ownership of the value, leaving default in its place
     // Only available if T has a default constructor
     template<typename U = T>
