@@ -172,70 +172,65 @@ public:
     }
 
     // Dereference - get immutable reference
-    // @unsafe
+    // @safe - safe to call, internal unsafe operations are encapsulated
     // @lifetime: (&'a) -> &'a
     const T& operator*() const {
-        // @unsafe {
-        assert(ptr != nullptr && ptr->value != nullptr);
-        return *ptr->value;
-        // }
+        // @unsafe
+        { assert(ptr != nullptr && ptr->value != nullptr); }
+        // @unsafe
+        { return *ptr->value; }
     }
 
     // Arrow operator - access members
-    // @unsafe
+    // @safe - safe to call, internal unsafe operations are encapsulated
     // @lifetime: (&'a) -> &'a
     const T* operator->() const {
-        // @unsafe {
-        assert(ptr != nullptr && ptr->value != nullptr);
-        return ptr->value;
-        // }
+        // @unsafe
+        { assert(ptr != nullptr && ptr->value != nullptr); }
+        // @unsafe
+        { return ptr->value; }
     }
 
     // Get raw pointer
-    // @unsafe
+    // @safe - safe to call, returns const pointer
     // @lifetime: (&'a) -> &'a
     const T* get() const {
-        // @unsafe {
-        return (ptr && ptr->value) ? ptr->value : nullptr;
-        // }
+        // @unsafe
+        { return (ptr && ptr->value) ? ptr->value : nullptr; }
     }
 
-    // Check if Arc contains a value
+    // @safe - Check if Arc contains a value
     bool is_valid() const {
-        return ptr != nullptr && ptr->value != nullptr;
+        // @unsafe
+        { return ptr != nullptr && ptr->value != nullptr; }
     }
 
-    // Explicit bool conversion
+    // @safe - Explicit bool conversion
     explicit operator bool() const {
         return is_valid();
     }
 
-    // Get current reference count
-    // @unsafe
+    // @safe - Get current reference count
     size_t strong_count() const {
-        // @unsafe {
-        return ptr ? ptr->strong_count.load(std::memory_order_relaxed) : 0;
-        // }
+        // @unsafe
+        { return ptr ? ptr->strong_count.load(std::memory_order_relaxed) : 0; }
     }
 
-    // Get weak count excluding implicit strong-held weak
-    // @unsafe
+    // @safe - Get weak count excluding implicit strong-held weak
     size_t weak_count() const {
-        // @unsafe {
-        if (!ptr) {
-            return 0;
+        // @unsafe
+        {
+            if (!ptr) {
+                return 0;
+            }
+            size_t count = ptr->weak_count.load(std::memory_order_relaxed);
+            return count > 0 ? count - 1 : 0;
         }
-        size_t count = ptr->weak_count.load(std::memory_order_relaxed);
-        return count > 0 ? count - 1 : 0;
-        // }
     }
 
-    // Clone - explicitly create a new Arc to the same value
-    // @unsafe
+    // @safe - Clone - explicitly create a new Arc to the same value
     Arc clone() const {
-        // @unsafe {
         return Arc(*this);
-        // }
     }
 
     // Try to get mutable reference if we're the only owner
@@ -252,67 +247,51 @@ public:
     }
 };
 
-// Rust-idiomatic factory function
-// @unsafe
+// @safe - Rust-idiomatic factory function
 template<typename T, typename... Args>
 // @lifetime: owned
 Arc<T> arc(Args&&... args) {
-    // @unsafe {
     return Arc<T>::new_(T(std::forward<Args>(args)...));
-    // }
 }
 
-// C++-friendly factory function (kept for compatibility)
-// @unsafe
+// @safe - C++-friendly factory function (kept for compatibility)
 template<typename T, typename... Args>
 // @lifetime: owned
 Arc<T> make_arc(Args&&... args) {
-    // @unsafe {
     return Arc<T>::make(T(std::forward<Args>(args)...));
-    // }
 }
 
-// Comparison operators for Arc<T> (needed for std::set and std::map)
-// @unsafe
+// @safe - Comparison operators for Arc<T> (needed for std::set and std::map)
 template<typename T>
 bool operator<(const Arc<T>& lhs, const Arc<T>& rhs) {
-    // @unsafe {
     return lhs.get() < rhs.get();
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator==(const Arc<T>& lhs, const Arc<T>& rhs) {
-    // @unsafe {
     return lhs.get() == rhs.get();
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator!=(const Arc<T>& lhs, const Arc<T>& rhs) {
-    // @unsafe {
     return !(lhs == rhs);
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator<=(const Arc<T>& lhs, const Arc<T>& rhs) {
-    // @unsafe {
     return !(rhs < lhs);
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator>(const Arc<T>& lhs, const Arc<T>& rhs) {
-    // @unsafe {
     return rhs < lhs;
-    // }
 }
 
+// @safe
 template<typename T>
 bool operator>=(const Arc<T>& lhs, const Arc<T>& rhs) {
     return !(lhs < rhs);

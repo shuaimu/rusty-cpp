@@ -14,7 +14,7 @@ private:
     T data_;
 
 public:
-    // MutexGuard - RAII lock guard
+    // @safe - MutexGuard - RAII lock guard
     class MutexGuard {
     private:
         std::unique_lock<std::mutex> lock_;
@@ -26,21 +26,25 @@ public:
             : lock_(std::move(lock)), data_(data) {}
 
     public:
-        // Access to data
+        // @safe - Access to data
         T& operator*() { return *data_; }
+        // @safe
         const T& operator*() const { return *data_; }
 
+        // @safe
         T* operator->() { return data_; }
+        // @safe
         const T* operator->() const { return data_; }
 
-        // Get raw pointer
+        // @safe - Get raw pointer
         T* get() { return data_; }
+        // @safe
         const T* get() const { return data_; }
 
-        // Get mutable reference (Rust-like API)
+        // @safe - Get mutable reference (Rust-like API)
         T& get_mut() { return *data_; }
 
-        // Consume guard and extract data (like Rust's into_inner)
+        // @safe - Consume guard and extract data (like Rust's into_inner)
         T into_inner() && {
             T result = std::move(*data_);
             // Lock will be released by destructor
@@ -50,10 +54,12 @@ public:
         // Non-copyable, movable
         MutexGuard(const MutexGuard&) = delete;
         MutexGuard& operator=(const MutexGuard&) = delete;
+        // @safe
         MutexGuard(MutexGuard&&) = default;
+        // @safe
         MutexGuard& operator=(MutexGuard&&) = default;
 
-        // Destructor unlocks automatically
+        // @safe - Destructor unlocks automatically
         ~MutexGuard() = default;
     };
 
