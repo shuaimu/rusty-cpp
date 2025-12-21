@@ -264,6 +264,13 @@ impl HeaderCache {
                 if let Some(name) = entity.get_name() {
                     debug_println!("DEBUG SAFETY: Found namespace '{}' with {:?} annotation", name, safety);
                 }
+            } else {
+                // IMPORTANT: Reset namespace safety when entering a namespace without annotation
+                // This prevents safety from leaking from one namespace to another
+                // (e.g., user's @safe namespace shouldn't apply to std::)
+                current_namespace_safety = None;
+                debug_println!("DEBUG SAFETY: Entering namespace {:?} without annotation - resetting namespace safety",
+                    entity.get_name());
             }
         }
 

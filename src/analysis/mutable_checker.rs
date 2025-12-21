@@ -64,35 +64,52 @@ pub fn check_mutable_fields(
 }
 
 /// Check if a class is marked as safe (either via annotation or file-level safety)
+///
+/// IMPORTANT: This function now uses file-aware safety checking to avoid the namespace
+/// collision bug. The file_default (from @safe namespace) only applies to classes
+/// from the source file being analyzed. Classes from other files (system headers,
+/// external libraries) are treated as Undeclared unless explicitly annotated.
 fn is_class_safe(class: &Class, safety_context: &SafetyContext) -> bool {
     use crate::parser::safety_annotations::SafetyMode;
     use crate::debug_println;
 
-    // First check if the class itself has an @unsafe annotation
-    // If so, skip checking (allow mutable fields in unsafe classes)
-    // This takes HIGHEST priority - even if methods are @safe
-    let class_safety = safety_context.get_class_safety(&class.name);
-    debug_println!("MUTABLE: Class '{}' has safety mode: {:?}", class.name, class_safety);
+    // Get the class's source file location
+    let class_file = &class.location.file;
+
+    // Use file-aware safety checking to avoid namespace collisions
+    // This ensures that file_default only applies to classes from the source file
+    let class_safety = safety_context.get_class_safety_for_file(&class.name, class_file);
+    debug_println!("MUTABLE: Class '{}' from '{}' has safety mode: {:?}", class.name, class_file, class_safety);
 
     if class_safety == SafetyMode::Unsafe {
-        debug_println!("MUTABLE: Class '{}' is explicitly marked @unsafe - skipping mutable field check (ignoring method annotations)", class.name);
-        return false; // Unsafe class - skip mutable field checking, even if methods are safe
+        debug_println!("MUTABLE: Class '{}' is explicitly marked @unsafe - skipping mutable field check", class.name);
+        return false;
     }
 
-    // If class is explicitly marked @safe, check it
     if class_safety == SafetyMode::Safe {
         debug_println!("MUTABLE: Class '{}' is marked @safe - checking for mutable fields", class.name);
-        return true; // Safe class - check for mutable fields
+        return true;
     }
 
     // Class has no explicit annotation (Undeclared)
-    // Check if any method in the class is marked safe
+    // Check if any method in the class is marked safe AND is from the source file
+    // IMPORTANT: Pre-annotated STL methods (like std::fpos::operator=) shouldn't
+    // trigger mutable field checking on their containing classes. Only consider
+    // methods that are actually from the source file being analyzed.
     let mut has_safe_methods = false;
     let mut has_any_methods = false;
     for method in &class.methods {
         has_any_methods = true;
-        if safety_context.should_check_function(&method.name) {
-            debug_println!("MUTABLE: Class '{}' has safe method '{}' - will check for mutable fields",
+        let method_file = &method.location.file;
+
+        // Only consider methods from the source file for mutable field checking
+        // This prevents pre-annotated STL methods from triggering checks on STL classes
+        if !safety_context.is_from_source_file(method_file) {
+            continue;
+        }
+
+        if safety_context.should_check_function_for_file(&method.name, method_file) {
+            debug_println!("MUTABLE: Class '{}' has safe method '{}' from source file - will check for mutable fields",
                 class.name, method.name);
             has_safe_methods = true;
             break;
@@ -104,10 +121,8 @@ fn is_class_safe(class: &Class, safety_context: &SafetyContext) -> bool {
         return true;
     }
 
-    // If class has methods but none are safe (all are unsafe or undeclared), skip checking
-    // This handles the case where a class is effectively @unsafe via all its methods being @unsafe
     if has_any_methods {
-        debug_println!("MUTABLE: Class '{}' has no safe methods (all methods are unsafe/undeclared) - skipping mutable field check", class.name);
+        debug_println!("MUTABLE: Class '{}' has no safe methods - skipping mutable field check", class.name);
     } else {
         debug_println!("MUTABLE: Class '{}' is undeclared with no methods - skipping mutable field check", class.name);
     }

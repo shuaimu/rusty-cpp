@@ -73,6 +73,7 @@ impl FunctionSignature {
 pub struct SafetyContext {
     pub file_default: SafetyMode,
     pub function_overrides: Vec<(FunctionSignature, SafetyMode)>, // Function signature -> safety mode
+    pub source_file: Option<String>, // The source file where annotations were parsed from
 }
 
 
@@ -81,6 +82,7 @@ impl SafetyContext {
         Self {
             file_default: SafetyMode::Undeclared,
             function_overrides: Vec::new(),
+            source_file: None,
         }
     }
     
@@ -113,6 +115,23 @@ impl SafetyContext {
     /// Check if a specific function should be checked
     pub fn should_check_function(&self, func_name: &str) -> bool {
         self.get_function_safety(func_name) == SafetyMode::Safe
+    }
+
+    /// Check if a file path is from the source file where annotations were parsed
+    /// Returns true if the file path matches the source file, false otherwise
+    pub fn is_from_source_file(&self, file_path: &str) -> bool {
+        if let Some(ref source) = self.source_file {
+            // Compare file paths - handle both absolute and relative paths
+            // Check if either path ends with the other (to handle different path prefixes)
+            file_path == source ||
+            file_path.ends_with(source) ||
+            source.ends_with(file_path) ||
+            // Also check just the filename in case paths differ
+            std::path::Path::new(file_path).file_name() == std::path::Path::new(source).file_name()
+        } else {
+            // No source file set - assume everything is from source (backward compatibility)
+            true
+        }
     }
 
     /// Get the safety mode of a specific function
@@ -231,6 +250,117 @@ impl SafetyContext {
         // Fall back to file default
         self.file_default
     }
+
+    /// Get the safety mode of a class, considering its source file location
+    ///
+    /// IMPORTANT: file_default only applies to classes from the source file being analyzed.
+    /// Classes from other files (system headers, external libraries) are treated as Undeclared
+    /// unless they have an explicit annotation.
+    ///
+    /// This fixes the namespace collision bug where a user's @safe namespace annotation
+    /// was incorrectly applying to STL classes from system headers.
+    pub fn get_class_safety_for_file(&self, class_name: &str, class_file: &str) -> SafetyMode {
+        let query = FunctionSignature::from_name_only(class_name.to_string());
+
+        debug_println!("DEBUG SAFETY: Looking up class '{}' from file '{}'", class_name, class_file);
+
+        // Check for explicit annotation (exact match or qualified match)
+        for (sig, mode) in &self.function_overrides {
+            if sig.matches(&query) {
+                debug_println!("DEBUG SAFETY: Exact match for class '{}' -> {:?}", class_name, mode);
+                return *mode;
+            }
+
+            let sig_is_qualified = sig.name.contains("::");
+            let class_is_qualified = class_name.contains("::");
+
+            if sig_is_qualified && class_is_qualified {
+                if sig.name.ends_with(&format!("::{}", class_name)) {
+                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' -> {:?}", class_name, mode);
+                    return *mode;
+                }
+
+                if class_name.ends_with(&format!("::{}", sig.name)) {
+                    debug_println!("DEBUG SAFETY: Prefix match for class '{}' -> {:?}", class_name, mode);
+                    return *mode;
+                }
+            }
+        }
+
+        // No explicit annotation found
+        // Only apply file_default if the class is from the source file
+        if self.is_from_source_file(class_file) {
+            debug_println!("DEBUG SAFETY: Class '{}' is from source file, using file default: {:?}",
+                class_name, self.file_default);
+            self.file_default
+        } else {
+            // Class is from another file (header, system library, etc.)
+            // Treat as Undeclared - user must explicitly annotate external types
+            debug_println!("DEBUG SAFETY: Class '{}' is NOT from source file '{}', treating as Undeclared",
+                class_name, class_file);
+            SafetyMode::Undeclared
+        }
+    }
+
+    /// Get the safety mode of a function, considering its source file location
+    ///
+    /// IMPORTANT: file_default only applies to functions from the source file being analyzed.
+    /// Functions from other files are treated as Undeclared unless explicitly annotated.
+    pub fn get_function_safety_for_file(&self, func_name: &str, func_file: &str) -> SafetyMode {
+        let query = FunctionSignature::from_name_only(func_name.to_string());
+
+        // Check for explicit function-specific override
+        for (sig, mode) in &self.function_overrides {
+            if sig.matches(&query) {
+                return *mode;
+            }
+
+            let sig_is_qualified = sig.name.contains("::");
+            let func_is_qualified = func_name.contains("::");
+
+            if sig_is_qualified && func_is_qualified {
+                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
+                    return *mode;
+                }
+            }
+        }
+
+        // Check class-level annotation for methods
+        if func_name.contains("::") {
+            if let Some(last_colon) = func_name.rfind("::") {
+                let class_name = &func_name[..last_colon];
+
+                let class_query = FunctionSignature::from_name_only(class_name.to_string());
+                for (sig, mode) in &self.function_overrides {
+                    if sig.matches(&class_query) {
+                        return *mode;
+                    }
+
+                    let sig_is_qualified = sig.name.contains("::");
+                    let class_is_qualified = class_name.contains("::");
+
+                    if sig_is_qualified && class_is_qualified {
+                        if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
+                            return *mode;
+                        }
+                    }
+                }
+            }
+        }
+
+        // No explicit annotation found
+        // Only apply file_default if the function is from the source file
+        if self.is_from_source_file(func_file) {
+            self.file_default
+        } else {
+            SafetyMode::Undeclared
+        }
+    }
+
+    /// Check if a function should be checked, considering its source file location
+    pub fn should_check_function_for_file(&self, func_name: &str, func_file: &str) -> bool {
+        self.get_function_safety_for_file(func_name, func_file) == SafetyMode::Safe
+    }
 }
 
 /// Parse safety annotations from a C++ file using the unified rule:
@@ -241,6 +371,11 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
 
     let reader = BufReader::new(file);
     let mut context = SafetyContext::new();
+
+    // Store the source file path for later reference
+    // This is used to only apply file_default to code from this file
+    context.source_file = path.to_str().map(|s| s.to_string());
+
     let mut pending_annotation: Option<SafetyMode> = None;
     let mut in_comment_block = false;
     let mut _current_line = 0;
