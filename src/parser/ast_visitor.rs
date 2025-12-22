@@ -11,6 +11,39 @@ fn is_forward_function(name: &str) -> bool {
     name == "forward" || name == "std::forward" || name.ends_with("::forward")
 }
 
+/// Check if an entity represents a call to an overloaded operator->
+///
+/// Key insight: If the entity is a call to "operator->", it means the type has
+/// an overloaded operator->. This is the definition of a smart pointer.
+/// Raw pointers use the built-in -> operator which does NOT create a CallExpr.
+///
+/// So the detection is simple:
+/// - If we see a CallExpr/UnexposedExpr named "operator->", it's a smart pointer
+/// - Raw pointers never create such a call
+fn has_overloaded_arrow_operator(entity: &Entity) -> bool {
+    // Check if the entity's name is "operator->"
+    // This indicates an overloaded operator-> was called, meaning it's a smart pointer
+    if let Some(name) = entity.get_name() {
+        if name == "operator->" {
+            debug_println!("DEBUG: Found overloaded operator-> call");
+            return true;
+        }
+    }
+
+    // For nested cases (like method calls), check children recursively
+    // e.g., box->get_value() has nested operator-> calls
+    for child in entity.get_children() {
+        if let Some(child_name) = child.get_name() {
+            if child_name == "operator->" {
+                debug_println!("DEBUG: Found overloaded operator-> in child");
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Check if an entity has an @unsafe annotation by reading source file
 fn check_for_unsafe_annotation(entity: &Entity) -> bool {
     use std::fs::File;
@@ -975,15 +1008,24 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 if let Some(receiver_expr) = extract_expression(&member_children[0]) {
                                     // Check if receiver type is a pointer (means -> was used)
                                     // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
+                                    // EXCEPT for safe smart pointers whose operator-> is safe
                                     let is_arrow = member_children[0].get_type()
                                         .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
                                         .unwrap_or(false);
 
-                                    if is_arrow {
-                                        debug_println!("DEBUG AST: Arrow method call (stmt) - receiver is pointer: (*{:?})", receiver_expr);
+                                    // Check if this is an overloaded operator-> (smart pointer)
+                                    // Raw pointers use built-in ->, smart pointers call operator->
+                                    let has_overloaded_arrow = if is_arrow {
+                                        has_overloaded_arrow_operator(&member_children[0])
+                                    } else {
+                                        false
+                                    };
+
+                                    if is_arrow && !has_overloaded_arrow {
+                                        debug_println!("DEBUG AST: Raw pointer arrow method call: (*{:?})", receiver_expr);
                                         args.push(Expression::Dereference(Box::new(receiver_expr)));
                                     } else {
-                                        debug_println!("DEBUG AST: Dot method call (stmt) - receiver: {:?}", receiver_expr);
+                                        debug_println!("DEBUG AST: Dot/smart pointer method call: {:?}", receiver_expr);
                                         args.push(receiver_expr);
                                     }
                                 }
@@ -1446,15 +1488,24 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             if let Some(recv_expr) = extract_expression(&member_children[0]) {
                                 // Check if receiver type is a pointer (means -> was used)
                                 // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
+                                // EXCEPT for safe smart pointers whose operator-> is safe
                                 let is_arrow = member_children[0].get_type()
                                     .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
                                     .unwrap_or(false);
 
-                                if is_arrow {
-                                    debug_println!("DEBUG AST: Arrow method call - receiver is pointer: (*{:?})", recv_expr);
+                                // Check if this is an overloaded operator-> (smart pointer)
+                                // Raw pointers use built-in ->, smart pointers call operator->
+                                let has_overloaded_arrow = if is_arrow {
+                                    has_overloaded_arrow_operator(&member_children[0])
+                                } else {
+                                    false
+                                };
+
+                                if is_arrow && !has_overloaded_arrow {
+                                    debug_println!("DEBUG AST: Raw pointer arrow method call: (*{:?})", recv_expr);
                                     args.push(Expression::Dereference(Box::new(recv_expr)));
                                 } else {
-                                    debug_println!("DEBUG AST: Dot method call - extracted receiver: {:?}", recv_expr);
+                                    debug_println!("DEBUG AST: Dot/smart pointer method call: {:?}", recv_expr);
                                     args.push(recv_expr);
                                 }
                             }
@@ -1671,18 +1722,30 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 if let Some(object_expr) = extract_expression(&children[0]) {
                     // Check if object type is a pointer (means -> was used, not .)
                     // ptr->field is semantically (*ptr).field, so wrap in Dereference
-                    let is_arrow = children[0].get_type()
+                    let child_type = children[0].get_type();
+
+                    let is_arrow = child_type
                         .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
                         .unwrap_or(false);
 
-                    if is_arrow {
-                        debug_println!("DEBUG: MemberRefExpr arrow access: (*{:?}).{}", object_expr, field_name);
+                    // Check if this is an overloaded operator-> (smart pointer)
+                    // Raw pointers use built-in ->, smart pointers call operator->
+                    let has_overloaded_arrow = if is_arrow {
+                        has_overloaded_arrow_operator(&children[0])
+                    } else {
+                        false
+                    };
+
+                    if is_arrow && !has_overloaded_arrow {
+                        debug_println!("DEBUG: MemberRefExpr raw pointer arrow: (*{:?}).{}", object_expr, field_name);
                         return Some(Expression::MemberAccess {
                             object: Box::new(Expression::Dereference(Box::new(object_expr))),
                             field: field_name,
                         });
                     } else {
-                        debug_println!("DEBUG: MemberRefExpr dot access: {:?}.{}", object_expr, field_name);
+                        debug_println!("DEBUG: MemberRefExpr {} access: {:?}.{}",
+                            if has_overloaded_arrow { "smart pointer" } else { "dot" },
+                            object_expr, field_name);
                         return Some(Expression::MemberAccess {
                             object: Box::new(object_expr),
                             field: field_name,
