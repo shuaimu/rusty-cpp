@@ -1,22 +1,27 @@
 // External annotations parser - handles safety and lifetime annotations
 // for third-party functions that can't be modified
 //
-// IMPORTANT: All external functions must be marked [unsafe] because:
-// - External code is not analyzed by RustyCpp
-// - Programmer takes responsibility for auditing external code
-// - "safe" implies RustyCpp verification, which doesn't happen for external code
-// - "unsafe" correctly indicates programmer-audited code
+// External functions can be marked as:
+// - [safe] - programmer has audited the function and confirmed it follows safety rules
+//           (e.g., std::string::length() is safe - no UB, no raw pointers exposed)
+// - [unsafe] - function may have unsafe behavior, must be called from @unsafe block
+//
+// NOTE: The distinction is about programmer audit, not tool verification.
+// [safe] external functions can be called directly from @safe code.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
 use regex::Regex;
 
-// External functions are always unsafe because RustyCpp doesn't verify them.
-// The programmer audits external code and takes responsibility.
+/// Safety level for external functions.
+/// - Safe: Programmer has audited and confirmed the function follows safety rules.
+///         Can be called directly from @safe code without @unsafe block.
+/// - Unsafe: Function may have unsafe behavior. Must be called from @unsafe context.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalSafety {
-    Unsafe,  // Only option: external code is always programmer-audited, not tool-verified
+    Safe,    // Programmer audited, safe to call from @safe code
+    Unsafe,  // Must be called from @unsafe block
 }
 
 #[derive(Debug, Clone)]
@@ -214,16 +219,7 @@ impl ExternalAnnotations {
                         }
 
                         let safety = match parts[0] {
-                            "safe" => {
-                                return Err(format!(
-                                    "ERROR: External function '{}' marked [safe] - this is not allowed!\n\
-                                     External functions must be [unsafe] because:\n\
-                                     - RustyCpp does not verify external code\n\
-                                     - 'safe' implies tool verification, 'unsafe' means programmer audited\n\
-                                     - Change to: {}: [unsafe, ...]",
-                                    name, name
-                                ));
-                            }
+                            "safe" => ExternalSafety::Safe,
                             "unsafe" => ExternalSafety::Unsafe,
                             _ => continue,
                         };
@@ -325,20 +321,13 @@ impl ExternalAnnotations {
                 let func_name = name.as_str().to_string();
                 let block_content = block.as_str();
 
-                // Parse safety field - only unsafe is allowed for external functions
-                let safety = if block_content.contains("safety: unsafe") {
+                // Parse safety field - safe or unsafe
+                let safety = if block_content.contains("safety: safe") {
+                    ExternalSafety::Safe
+                } else if block_content.contains("safety: unsafe") {
                     ExternalSafety::Unsafe
-                } else if block_content.contains("safety: safe") {
-                    return Err(format!(
-                        "ERROR: External function '{}' marked 'safety: safe' - this is not allowed!\n\
-                         External functions must be 'safety: unsafe' because:\n\
-                         - RustyCpp does not verify external code\n\
-                         - 'safe' implies tool verification, 'unsafe' means programmer audited\n\
-                         - Change to: @external_function: {} {{ safety: unsafe, ... }}",
-                        func_name, func_name
-                    ));
                 } else {
-                    // Default to unsafe (was safe before, but external code should be explicit)
+                    // Default to unsafe (conservative choice for external code)
                     ExternalSafety::Unsafe
                 };
                 
@@ -521,21 +510,14 @@ impl ExternalAnnotations {
     }
     
     fn load_defaults(&mut self) {
-        // Load common C standard library functions
+        // Load common C standard library functions (unsafe)
         self.add_c_stdlib_defaults();
 
         // Load default unsafe types - STL containers whose internal structure should not be analyzed
         // These types have internal classes with mutable fields that would trigger false positives
         self.add_stl_unsafe_types();
 
-        // Load common patterns
-        // NOTE: Removed "std::*" wildcard - std functions must be explicitly declared
-        self.whitelist_patterns.extend(vec![
-            "*::size".to_string(),
-            "*::length".to_string(),
-            "*::empty".to_string(),
-        ]);
-
+        // Blacklisted patterns - always unsafe
         self.blacklist_patterns.extend(vec![
             "*::operator new*".to_string(),
             "*::operator delete*".to_string(),
@@ -666,22 +648,21 @@ impl ExternalAnnotations {
         }
 
         // Then check explicit function annotations
-        // NOTE: All external functions are Unsafe by design (programmer-audited, not tool-verified)
         // Try exact match first
-        if self.functions.contains_key(func_name) {
-            return Some(false);  // External functions are always unsafe
+        if let Some(annotation) = self.functions.get(func_name) {
+            return Some(annotation.safety == ExternalSafety::Safe);
         }
 
         // Try to match against stored qualified names
         // e.g., if func_name is "swap", check if any "xxx::swap" exists
-        for (annotated_name, _annotation) in &self.functions {
+        for (annotated_name, annotation) in &self.functions {
             // Check if annotated_name ends with "::func_name"
             if annotated_name.ends_with(&format!("::{}", func_name)) {
-                return Some(false);  // External functions are always unsafe
+                return Some(annotation.safety == ExternalSafety::Safe);
             }
             // Also check if func_name is qualified and annotated_name is just the suffix
             if func_name.ends_with(&format!("::{}", annotated_name)) {
-                return Some(false);  // External functions are always unsafe
+                return Some(annotation.safety == ExternalSafety::Safe);
             }
         }
         
@@ -819,7 +800,7 @@ mod tests {
         // Test that unqualified names match qualified annotations
         let content = r#"
         // @external: {
-        //   std::swap: [unsafe, (T& a, T& b) -> void]
+        //   std::swap: [safe, (T& a, T& b) -> void]
         //   my_namespace::helper: [unsafe, () -> void]
         // }
         "#;
@@ -827,11 +808,32 @@ mod tests {
         let mut annotations = ExternalAnnotations::new();
         annotations.parse_content(content).unwrap();
 
-        // Unqualified name should match qualified annotation (all external = unsafe)
-        assert_eq!(annotations.is_function_safe("swap"), Some(false));
-        assert_eq!(annotations.is_function_safe("helper"), Some(false));
+        // Unqualified name should match qualified annotation
+        assert_eq!(annotations.is_function_safe("swap"), Some(true));  // safe
+        assert_eq!(annotations.is_function_safe("helper"), Some(false));  // unsafe
         // Qualified name should still work
-        assert_eq!(annotations.is_function_safe("std::swap"), Some(false));
+        assert_eq!(annotations.is_function_safe("std::swap"), Some(true));  // safe
+    }
+
+    #[test]
+    fn test_safe_vs_unsafe_annotation() {
+        let content = r#"
+        // @external: {
+        //   std::string::length: [safe, (&self) -> size_t]
+        //   std::string::c_str: [unsafe, (&self) -> const char*]
+        // }
+        "#;
+
+        let mut annotations = ExternalAnnotations::new();
+        annotations.parse_content(content).unwrap();
+
+        // Safe functions return Some(true)
+        assert_eq!(annotations.is_function_safe("std::string::length"), Some(true));
+        assert_eq!(annotations.is_function_safe("length"), Some(true));
+
+        // Unsafe functions return Some(false)
+        assert_eq!(annotations.is_function_safe("std::string::c_str"), Some(false));
+        assert_eq!(annotations.is_function_safe("c_str"), Some(false));
     }
 
     #[test]

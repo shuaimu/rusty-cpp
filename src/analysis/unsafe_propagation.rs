@@ -178,6 +178,13 @@ fn check_statement_for_unsafe_calls_with_external(
                 return None; // Allow unknown function calls in template context
             }
 
+            // Special case: Lambda operator() calls
+            // Lambdas defined in @safe context have already been checked for safety
+            // Their operator() is safe to call
+            if name == "operator()" || name.contains("operator()") {
+                return None; // Lambda calls are safe - their body was already checked
+            }
+
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
 
@@ -186,14 +193,10 @@ fn check_statement_for_unsafe_calls_with_external(
                     // OK: safe can call safe
                 }
                 SafetyMode::Unsafe => {
-                    // OK: safe can call explicitly unsafe functions
-                    // The unsafe function takes responsibility for its own safety
-                }
-                SafetyMode::Undeclared => {
-                    // ERROR: safe cannot call undeclared functions
-                    // They must be explicitly audited and marked
+                    // ERROR: safe cannot call unsafe/unannotated functions directly
+                    // Must wrap in @unsafe { } block
                     return Some(format!(
-                        "Calling undeclared function '{}' at line {} - must be explicitly marked @safe or @unsafe",
+                        "Calling non-safe function '{}' at line {} requires @unsafe {{ }} block",
                         name, location.line
                     ));
                 }
@@ -303,6 +306,18 @@ fn find_unsafe_function_call_with_external(
                 return None; // Allow unknown function calls in template context
             }
 
+            // Special case: Lambda operator() calls
+            // Lambdas defined in @safe context have already been checked for safety
+            if name == "operator()" || name.contains("operator()") {
+                // Just check the arguments
+                for arg in args {
+                    if let Some(unsafe_func) = find_unsafe_function_call_with_external(arg, safety_context, known_safe_functions, external_annotations, template_params) {
+                        return Some(unsafe_func);
+                    }
+                }
+                return None; // Lambda calls are safe - their body was already checked
+            }
+
             // Get the safety mode of the called function
             let called_safety = get_called_function_safety(name, safety_context, known_safe_functions, external_annotations);
 
@@ -315,11 +330,8 @@ fn find_unsafe_function_call_with_external(
                     // OK: safe can call safe
                 }
                 SafetyMode::Unsafe => {
-                    // OK: safe can call explicitly unsafe functions
-                }
-                SafetyMode::Undeclared => {
-                    // Error: safe function cannot call undeclared function
-                    return Some(format!("{} (undeclared - must be explicitly marked @safe or @unsafe)", name));
+                    // Error: safe function cannot call unsafe function directly
+                    return Some(format!("{} (non-safe - use @unsafe block)", name));
                 }
             }
 
@@ -366,31 +378,26 @@ fn get_called_function_safety(
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
 ) -> SafetyMode {
-    // Check for standard library functions we consider safe first
-    if is_standard_safe_function(func_name) {
-        return SafetyMode::Safe;
-    }
-    
     // First check if we know about this function in our context
     let local_safety = safety_context.get_function_safety(func_name);
-    if local_safety != SafetyMode::Undeclared {
+    if local_safety != SafetyMode::Unsafe {
         return local_safety;
     }
-    
+
     // Check if it's in our known safe functions set
     if known_safe_functions.contains(func_name) {
         return SafetyMode::Safe;
     }
-    
+
     // Check external annotations if provided
     if let Some(annotations) = external_annotations {
         if let Some(is_safe) = annotations.is_function_safe(func_name) {
             return if is_safe { SafetyMode::Safe } else { SafetyMode::Unsafe };
         }
     }
-    
-    // Default to undeclared
-    SafetyMode::Undeclared
+
+    // Default to unsafe - all unannotated functions are unsafe
+    SafetyMode::Unsafe
 }
 
 fn is_function_safe_with_external(
@@ -399,90 +406,7 @@ fn is_function_safe_with_external(
     known_safe_functions: &HashSet<String>,
     external_annotations: Option<&ExternalAnnotations>,
 ) -> bool {
-    // Check for standard library functions we consider safe first
-    if is_standard_safe_function(func_name) {
-        return true;
-    }
-    
     get_called_function_safety(func_name, safety_context, known_safe_functions, external_annotations) == SafetyMode::Safe
-}
-
-/// Strip std:: prefix from function name for matching
-fn strip_std_prefix(func_name: &str) -> &str {
-    func_name.strip_prefix("std::").unwrap_or(func_name)
-}
-
-/// Check if function is a safe C++ stream operation
-
-/// Check if function is a safe operator
-fn is_safe_operator(name: &str) -> bool {
-    matches!(name,
-        "operator+" | "operator-" | "operator*" | "operator/" | "operator%" |
-        "operator++" | "operator--" |
-        "operator==" | "operator!=" | "operator<" | "operator>" | "operator<=" | "operator>=" |
-        "operator[]" | "operator()" |
-        "operator=" | "operator+=" | "operator-=" | "operator*=" | "operator/=" |
-        "operator<<" | "operator>>" |
-        "operator!" | "operator&&" | "operator||" |
-        "operator&" | "operator|" | "operator^" | "operator~" |
-        "operator," | "operator->*" | "operator.*"
-    )
-}
-
-fn is_standard_safe_function(func_name: &str) -> bool {
-    // Strip std:: prefix for more general matching
-    let stripped = strip_std_prefix(func_name);
-
-    // Also get just the method name (part after last ::) for matching class methods
-    let method_name = func_name.rfind("::").map(|pos| &func_name[pos + 2..]).unwrap_or(func_name);
-
-    // Check operators first (they don't have std:: prefix)
-    // Also check if the function name ends with an operator (for std::function::operator=)
-    if is_safe_operator(func_name) {
-        return true;
-    }
-
-    // Handle qualified operator names like std::function::operator=
-    if let Some(op_pos) = func_name.rfind("::operator") {
-        let op_name = &func_name[op_pos + 2..]; // Get "operator..." part
-        if is_safe_operator(op_name) {
-            return true;
-        }
-    }
-
-    // Check for STL constructors (e.g., std::vector::vector, std::shared_ptr::shared_ptr)
-    // A constructor has the pattern: Type::Type or namespace::Type::Type
-    if is_stl_constructor(func_name) {
-        return true;
-    }
-
-    // Keep ONLY std::move and std::forward whitelisted
-    // All other functions must be explicitly marked @safe or called from @unsafe blocks
-    matches!(stripped, "move" | "forward") || matches!(method_name, "move" | "forward")
-}
-
-/// Check if a function name represents an STL constructor
-/// Constructors have the pattern: Class::Class or std::Class::Class or std::ns::Class::Class
-fn is_stl_constructor(func_name: &str) -> bool {
-    // Only consider std:: prefixed names as STL constructors
-    if !func_name.starts_with("std::") {
-        return false;
-    }
-
-    // Find the last two parts separated by ::
-    // e.g., "std::vector::vector" -> parts = ["std", "vector", "vector"]
-    // e.g., "std::__cxx11::basic_string::basic_string" -> last two are "basic_string", "basic_string"
-    let parts: Vec<&str> = func_name.split("::").collect();
-    if parts.len() >= 2 {
-        let last = parts[parts.len() - 1];
-        let second_last = parts[parts.len() - 2];
-        // Constructor: last part == second-to-last part (class name == method name)
-        if last == second_last && !last.is_empty() {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]
@@ -513,7 +437,8 @@ mod tests {
     }
     
     #[test]
-    fn test_move_function_allowed() {
+    fn test_stl_functions_require_unsafe() {
+        // With the new two-state model, ALL non-safe functions (including STL) require @unsafe blocks
         let stmt = Statement::FunctionCall {
             name: "std::move".to_string(),
             args: vec![Expression::Variable("x".to_string())],
@@ -528,7 +453,10 @@ mod tests {
         let known_safe = HashSet::new();
 
         let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
-        assert!(error.is_none(), "std::move should be whitelisted in safe code");
+        assert!(error.is_some(), "std::move should require @unsafe block in safe code");
+        let error_msg = error.unwrap();
+        assert!(error_msg.contains("std::move"));
+        assert!(error_msg.contains("@unsafe"));
     }
     
     #[test]

@@ -87,12 +87,13 @@ void forwarder(T&& arg) {
     );
 }
 
-/// Test that safe whitelist functions work with "using namespace std;"
+/// Test that STL functions require @unsafe blocks in two-state model
 #[test]
 fn test_using_namespace_std_safe_functions() {
     let temp_dir = TempDir::new().unwrap();
     let source_path = temp_dir.path().join("test.cpp");
 
+    // In two-state model, all STL functions require @unsafe blocks
     let code = r#"
 #include <vector>
 #include <algorithm>
@@ -101,12 +102,15 @@ using namespace std;
 
 // @safe
 void test_algorithms() {
-    vector<int> vec = {3, 1, 4, 1, 5};
+    // @unsafe
+    {
+        vector<int> vec = {3, 1, 4, 1, 5};
 
-    // These should all be recognized as safe std:: functions
-    sort(vec.begin(), vec.end());
-    reverse(vec.begin(), vec.end());
-    auto it = find(vec.begin(), vec.end(), 4);
+        // STL functions require @unsafe block in two-state model
+        sort(vec.begin(), vec.end());
+        reverse(vec.begin(), vec.end());
+        auto it = find(vec.begin(), vec.end(), 4);
+    }
 }
 "#;
 
@@ -116,15 +120,16 @@ void test_algorithms() {
     println!("=== TEST: using namespace std with algorithms ===");
     println!("{}", output);
 
-    // Should NOT report violations for safe std functions
+    // Should NOT report violations when using @unsafe block
     assert!(
-        output.contains("no violations") || !output.contains("cannot call undeclared"),
-        "Should recognize sort/reverse/find as safe std:: functions. Output:\n{}",
+        output.contains("no violations") || !output.contains("non-safe"),
+        "Should handle STL algorithms with @unsafe block. Output:\n{}",
         output
     );
 }
 
-/// Test that undeclared functions are still caught with "using namespace std;"
+/// Test that non-safe functions are still caught with "using namespace std;"
+/// In two-state model, unannotated functions are @unsafe
 #[test]
 fn test_using_namespace_std_still_catches_undeclared() {
     let temp_dir = TempDir::new().unwrap();
@@ -133,51 +138,53 @@ fn test_using_namespace_std_still_catches_undeclared() {
     let code = r#"
 using namespace std;
 
-// Undeclared function (not in std)
+// Unannotated function (not in std) - is @unsafe by default
 void my_custom_function(int x);
 
 // @safe
-void test_undeclared() {
-    my_custom_function(42);  // Should still be caught as undeclared
+void test_unsafe_call() {
+    my_custom_function(42);  // Should be caught as non-safe
 }
 "#;
 
     fs::write(&source_path, code).unwrap();
     let (_success, output) = run_analyzer(&source_path);
 
-    println!("=== TEST: using namespace std still catches undeclared ===");
+    println!("=== TEST: using namespace std still catches non-safe ===");
     println!("{}", output);
 
-    // Should still catch undeclared functions
+    // Should still catch non-safe function calls (unannotated = @unsafe in two-state model)
     assert!(
-        output.contains("cannot call undeclared") ||
-        output.contains("undeclared function") ||
+        output.contains("non-safe") ||
+        output.contains("@unsafe") ||
         output.contains("my_custom_function"),
-        "Should still detect undeclared functions even with 'using namespace std;'. Output:\n{}",
+        "Should still detect non-safe functions even with 'using namespace std;'. Output:\n{}",
         output
     );
 }
 
 /// Test container methods with "using namespace std;"
+/// In the two-state model, STL operations require @unsafe blocks
 #[test]
 fn test_using_namespace_std_containers() {
     let temp_dir = TempDir::new().unwrap();
     let source_path = temp_dir.path().join("test.cpp");
 
+    // With two-state model, @safe functions must use @unsafe blocks for STL
     let code = r#"
 #include <vector>
 
 using namespace std;
 
-// Mark all vector methods as unsafe using wildcard pattern
-// @external_unsafe: std::vector::*
-
 // @safe
 void test_vector() {
-    vector<int> vec;
-    vec.push_back(1);
-    vec.push_back(2);
-    int x = vec.size();
+    // @unsafe
+    {
+        vector<int> vec;
+        vec.push_back(1);
+        vec.push_back(2);
+        int x = vec.size();
+    }
 }
 "#;
 
@@ -187,10 +194,10 @@ void test_vector() {
     println!("=== TEST: using namespace std with vector ===");
     println!("{}", output);
 
-    // Should not report violations
+    // Should not report violations when using @unsafe block
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Should handle vector<int> without std:: prefix. Output:\n{}",
+        "Should handle vector<int> with @unsafe block. Output:\n{}",
         output
     );
 }

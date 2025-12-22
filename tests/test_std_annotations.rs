@@ -1,5 +1,9 @@
-/// Tests for std_annotation.hpp - verifying that common std functions
-/// can be used in @safe code without additional annotations
+/// Tests for std usage in the two-state safety model
+///
+/// With the two-state model:
+/// - All STL functions are @unsafe by default (not analyzed by RustyCpp)
+/// - @safe code must use @unsafe blocks to call STL
+/// - Users can mark specific external functions as [safe] via external annotations
 
 use std::io::Write;
 use std::path::Path;
@@ -41,29 +45,19 @@ fn create_temp_cpp_file(content: &str) -> NamedTempFile {
 }
 
 // ============================================================================
-// Tests for common std usage patterns
+// Tests demonstrating STL requires @unsafe blocks in @safe code
 // ============================================================================
 
 #[test]
-fn test_vector_operations_in_safe_code() {
+fn test_stl_without_unsafe_block_fails() {
+    // STL operations without @unsafe block should fail in @safe code
     let code = r#"
     #include <vector>
-    #include <algorithm>
-
-    // @external_unsafe: std::vector::*
-    // @external_unsafe: sort
-    // @external_unsafe: std::initializer_list::*
 
     // @safe
     void use_vector() {
-        std::vector<int> vec = {1, 2, 3, 4, 5};
-        vec.push_back(6);
-        vec.pop_back();
-
-        std::sort(vec.begin(), vec.end());
-
-        int size = vec.size();
-        bool empty = vec.empty();
+        std::vector<int> vec;  // ERROR: STL is unsafe by default
+        vec.push_back(1);
     }
 
     int main() {
@@ -75,36 +69,32 @@ fn test_vector_operations_in_safe_code() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed without requiring @unsafe blocks
     assert!(
-        success,
-        "Vector operations should work in @safe code with std_annotation.hpp. Output: {}",
+        !success,
+        "STL without @unsafe block should fail in @safe code. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_cout_operations_in_safe_code() {
+fn test_stl_with_unsafe_block_succeeds() {
+    // STL operations with @unsafe block should succeed
     let code = r#"
-    #include <iostream>
-    #include <string>
-
-    // @external_unsafe: std::basic_ostream::*
-    // @external_unsafe: endl
-    // @external_unsafe: std::string::*
-    // @external_unsafe: std::__cxx11::basic_string::*
+    #include <vector>
 
     // @safe
-    void use_cout() {
-        std::cout << "Hello" << std::endl;
-        std::cout << 42 << std::endl;
-
-        std::string s = "World";
-        std::cout << s << std::endl;
+    void use_vector() {
+        // @unsafe
+        {
+            std::vector<int> vec;
+            vec.push_back(1);
+            vec.push_back(2);
+            int size = vec.size();
+        }
     }
 
     int main() {
-        use_cout();
+        use_vector();
         return 0;
     }
     "#;
@@ -112,31 +102,28 @@ fn test_cout_operations_in_safe_code() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed - iostream operations marked safe
     assert!(
         success,
-        "cout operations should work in @safe code. Output: {}",
+        "STL with @unsafe block should succeed. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_string_operations_in_safe_code() {
+fn test_string_with_unsafe_block() {
+    // String operations with @unsafe block should succeed
     let code = r#"
     #include <string>
 
-    // @external_unsafe: std::string::*
-    // @external_unsafe: std::__cxx11::basic_string::*
-
     // @safe
     void use_string() {
-        std::string s1 = "Hello";
-        std::string s2 = " World";
-        std::string s3 = s1 + s2;
-
-        s3.append("!");
-        size_t len = s3.length();
-        char c = s3[0];
+        // @unsafe
+        {
+            std::string s1 = "Hello";
+            std::string s2 = " World";
+            std::string s3 = s1 + s2;
+            s3.append("!");
+        }
     }
 
     int main() {
@@ -148,115 +135,28 @@ fn test_string_operations_in_safe_code() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed - string operations marked safe
     assert!(
         success,
-        "String operations should work in @safe code. Output: {}",
+        "String with @unsafe block should succeed. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_smart_pointers_in_safe_code() {
-    let code = r#"
-    #include <memory>
-
-    // @external_unsafe: make_unique
-    // @external_unsafe: make_shared
-    // @external_unsafe: std::unique_ptr::*
-    // @external_unsafe: std::shared_ptr::*
-
-    // @safe
-    void use_smart_pointers() {
-        auto ptr1 = std::make_unique<int>(42);
-        int value1 = *ptr1;
-
-        auto ptr2 = std::make_shared<int>(100);
-        int value2 = *ptr2;
-    }
-
-    int main() {
-        use_smart_pointers();
-        return 0;
-    }
-    "#;
-
-    let temp_file = create_temp_cpp_file(code);
-    let (success, output) = run_analyzer(temp_file.path());
-
-    // Should succeed - smart pointer operations marked safe
-    assert!(
-        success,
-        "Smart pointer operations should work in @safe code. Output: {}",
-        output
-    );
-}
-
-#[test]
-fn test_algorithms_in_safe_code() {
-    let code = r#"
-    #include <vector>
-    #include <algorithm>
-    #include <numeric>
-
-    // @external_unsafe: std::vector::*
-    // @external_unsafe: std::initializer_list::*
-    // @external_unsafe: sort
-    // @external_unsafe: find
-    // @external_unsafe: accumulate
-    // @external_unsafe: copy
-
-    // @safe
-    void use_algorithms() {
-        std::vector<int> vec = {5, 2, 8, 1, 9};
-
-        std::sort(vec.begin(), vec.end());
-
-        auto it = std::find(vec.begin(), vec.end(), 8);
-
-        int sum = std::accumulate(vec.begin(), vec.end(), 0);
-
-        std::vector<int> vec2(5);
-        std::copy(vec.begin(), vec.end(), vec2.begin());
-    }
-
-    int main() {
-        use_algorithms();
-        return 0;
-    }
-    "#;
-
-    let temp_file = create_temp_cpp_file(code);
-    let (success, output) = run_analyzer(temp_file.path());
-
-    // Should succeed - algorithm operations marked safe
-    assert!(
-        success,
-        "Algorithm operations should work in @safe code. Output: {}",
-        output
-    );
-}
-
-#[test]
-fn test_map_operations_in_safe_code() {
+fn test_map_with_unsafe_block() {
+    // Map operations with @unsafe block should succeed
     let code = r#"
     #include <map>
     #include <string>
 
-    // @external_unsafe: std::map::*
-    // @external_unsafe: std::string::*
-    // @external_unsafe: std::__cxx11::basic_string::*
-
     // @safe
     void use_map() {
-        std::map<int, std::string> m;
-        m[1] = "one";
-        m[2] = "two";
-
-        auto it = m.find(1);
-
-        size_t size = m.size();
-        bool empty = m.empty();
+        // @unsafe
+        {
+            std::map<int, std::string> m;
+            m[1] = "one";
+            m[2] = "two";
+        }
     }
 
     int main() {
@@ -268,75 +168,32 @@ fn test_map_operations_in_safe_code() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed - map operations marked safe
     assert!(
         success,
-        "Map operations should work in @safe code. Output: {}",
+        "Map with @unsafe block should succeed. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_utility_functions_in_safe_code() {
+fn test_smart_pointers_with_unsafe_block() {
+    // Smart pointer operations with @unsafe block should succeed
     let code = r#"
-    #include <utility>
-    #include <algorithm>
-
-    // @external_unsafe: swap
-    // @external_unsafe: make_pair
-    // @external_unsafe: std::string::*
-    // @external_unsafe: std::__cxx11::basic_string::*
+    #include <memory>
 
     // @safe
-    void use_utilities() {
-        int a = 5;
-        int b = 10;
-
-        std::swap(a, b);
-
-        int&& r = std::move(a);
-
-        auto p = std::make_pair(1, std::string("one"));
-    }
-
-    int main() {
-        use_utilities();
-        return 0;
-    }
-    "#;
-
-    let temp_file = create_temp_cpp_file(code);
-    let (success, output) = run_analyzer(temp_file.path());
-
-    // Should succeed - utility functions marked safe
-    assert!(
-        success,
-        "Utility functions should work in @safe code. Output: {}",
-        output
-    );
-}
-
-#[test]
-fn test_optional_in_safe_code() {
-    let code = r#"
-    #include <optional>
-
-    // @external_unsafe: std::optional::*
-
-    // @safe
-    void use_optional() {
-        std::optional<int> opt1 = 42;
-        std::optional<int> opt2;
-
-        if (opt1.has_value()) {
-            int value = opt1.value();
+    void use_smart_pointers() {
+        // @unsafe
+        {
+            auto ptr1 = std::make_unique<int>(42);
+            int value1 = *ptr1;
+            auto ptr2 = std::make_shared<int>(100);
+            int value2 = *ptr2;
         }
-
-        int value_or = opt2.value_or(0);
     }
 
     int main() {
-        use_optional();
+        use_smart_pointers();
         return 0;
     }
     "#;
@@ -344,61 +201,32 @@ fn test_optional_in_safe_code() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed - optional operations marked safe
     assert!(
         success,
-        "Optional operations should work in @safe code. Output: {}",
+        "Smart pointers with @unsafe block should succeed. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_complex_std_usage() {
+fn test_algorithms_with_unsafe_block() {
+    // Algorithm operations with @unsafe block should succeed
     let code = r#"
     #include <vector>
-    #include <map>
-    #include <string>
     #include <algorithm>
-    #include <memory>
-    #include <iostream>
-
-    // @external_unsafe: std::vector::*
-    // @external_unsafe: std::map::*
-    // @external_unsafe: std::string::*
-    // @external_unsafe: std::__cxx11::basic_string::*
-    // @external_unsafe: std::initializer_list::*
-    // @external_unsafe: sort
-    // @external_unsafe: find
-    // @external_unsafe: make_unique
-    // @external_unsafe: std::unique_ptr::*
-    // @external_unsafe: std::basic_ostream::*
-    // @external_unsafe: endl
-    // @external_unsafe: swap
 
     // @safe
-    void complex_example() {
-        // Containers
-        std::vector<int> vec = {1, 2, 3};
-        std::map<std::string, int> m;
-        m["one"] = 1;
-        m["two"] = 2;
-
-        // Algorithms
-        std::sort(vec.begin(), vec.end());
-        auto it = std::find(vec.begin(), vec.end(), 2);
-
-        // Smart pointers
-        auto ptr = std::make_unique<std::string>("test");
-
-        // I/O
-        std::cout << "Size: " << vec.size() << std::endl;
-
-        // Utilities
-        std::swap(vec[0], vec[1]);
+    void use_algorithms() {
+        // @unsafe
+        {
+            std::vector<int> vec = {5, 2, 8, 1, 9};
+            std::sort(vec.begin(), vec.end());
+            auto it = std::find(vec.begin(), vec.end(), 8);
+        }
     }
 
     int main() {
-        complex_example();
+        use_algorithms();
         return 0;
     }
     "#;
@@ -406,10 +234,175 @@ fn test_complex_std_usage() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Should succeed - all operations marked safe
     assert!(
         success,
-        "Complex std usage should work in @safe code. Output: {}",
+        "Algorithms with @unsafe block should succeed. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_cout_with_unsafe_block() {
+    // iostream operations with @unsafe block should succeed
+    let code = r#"
+    #include <iostream>
+    #include <string>
+
+    // @safe
+    void use_cout() {
+        // @unsafe
+        {
+            std::cout << "Hello" << std::endl;
+            std::cout << 42 << std::endl;
+        }
+    }
+
+    int main() {
+        use_cout();
+        return 0;
+    }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        success,
+        "cout with @unsafe block should succeed. Output: {}",
+        output
+    );
+}
+
+// ============================================================================
+// Tests for @unsafe functions (STL allowed directly)
+// ============================================================================
+
+#[test]
+fn test_unsafe_function_can_use_stl_directly() {
+    // @unsafe functions can use STL without @unsafe blocks
+    let code = r#"
+    #include <vector>
+    #include <algorithm>
+
+    // @unsafe
+    void use_stl() {
+        std::vector<int> vec = {1, 2, 3};
+        vec.push_back(4);
+        std::sort(vec.begin(), vec.end());
+    }
+
+    int main() {
+        use_stl();
+        return 0;
+    }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        success,
+        "@unsafe functions should be able to use STL directly. Output: {}",
+        output
+    );
+}
+
+// ============================================================================
+// Tests for external annotations allowing [safe] marking
+// ============================================================================
+
+#[test]
+fn test_external_safe_annotation_allows_direct_call() {
+    // Functions marked [safe] via external annotations can be called from @safe code
+    let code = r#"
+    // @external: {
+    //   my_safe_function: [safe, () -> void]
+    // }
+
+    void my_safe_function();
+
+    // @safe
+    void caller() {
+        my_safe_function();  // OK: marked [safe] in external annotations
+    }
+
+    int main() {
+        caller();
+        return 0;
+    }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        success,
+        "External [safe] annotation should allow direct call from @safe code. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_external_unsafe_annotation_requires_unsafe_block() {
+    // Functions marked [unsafe] via external annotations require @unsafe block
+    let code = r#"
+    // @external: {
+    //   my_unsafe_function: [unsafe, () -> void]
+    // }
+
+    void my_unsafe_function();
+
+    // @safe
+    void caller() {
+        my_unsafe_function();  // ERROR: marked [unsafe], needs @unsafe block
+    }
+
+    int main() {
+        caller();
+        return 0;
+    }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        !success,
+        "External [unsafe] annotation should require @unsafe block. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_external_unsafe_with_block_succeeds() {
+    // Functions marked [unsafe] can be called with @unsafe block
+    let code = r#"
+    // @external: {
+    //   my_unsafe_function: [unsafe, () -> void]
+    // }
+
+    void my_unsafe_function();
+
+    // @safe
+    void caller() {
+        // @unsafe
+        {
+            my_unsafe_function();  // OK: in @unsafe block
+        }
+    }
+
+    int main() {
+        caller();
+        return 0;
+    }
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    assert!(
+        success,
+        "External [unsafe] with @unsafe block should succeed. Output: {}",
         output
     );
 }

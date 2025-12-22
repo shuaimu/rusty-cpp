@@ -26,16 +26,21 @@ fn run_analyzer(cpp_file: &std::path::Path) -> (bool, String) {
 #[test]
 fn test_unsafe_with_hyphen_suffix() {
     // Test that @unsafe-XXX is recognized
+    // This test just verifies the suffix parsing, not calling rules
     let code = r#"
 // @unsafe-this should work
 void unsafe_func() {
     int* ptr = nullptr;
-    *ptr = 42;  // Would be error in @safe, but OK in @unsafe
+    *ptr = 42;  // OK in @unsafe function
 }
 
 // @safe
 void safe_func() {
-    unsafe_func();  // OK: safe can call unsafe
+    // Use @unsafe block to call unsafe function
+    // @unsafe
+    {
+        unsafe_func();  // OK: inside @unsafe block
+    }
 }
 "#;
 

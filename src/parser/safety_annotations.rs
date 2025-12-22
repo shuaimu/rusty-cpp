@@ -33,9 +33,8 @@ fn contains_annotation(text: &str, annotation: &str) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SafetyMode {
-    Safe,       // Enforce borrow checking, strict call rules
-    Unsafe,     // Skip borrow checking, explicitly marked as unsafe
-    Undeclared, // Not explicitly marked - treated as unsafe but safe functions cannot call them
+    Safe,   // Enforce borrow checking, can only call other @safe functions
+    Unsafe, // Skip borrow checking, default for unannotated code
 }
 
 /// Function signature for disambiguating overloaded functions
@@ -80,7 +79,7 @@ pub struct SafetyContext {
 impl SafetyContext {
     pub fn new() -> Self {
         Self {
-            file_default: SafetyMode::Undeclared,
+            file_default: SafetyMode::Unsafe,
             function_overrides: Vec::new(),
             source_file: None,
         }
@@ -298,7 +297,7 @@ impl SafetyContext {
             // Treat as Undeclared - user must explicitly annotate external types
             debug_println!("DEBUG SAFETY: Class '{}' is NOT from source file '{}', treating as Undeclared",
                 class_name, class_file);
-            SafetyMode::Undeclared
+            SafetyMode::Unsafe
         }
     }
 
@@ -353,7 +352,7 @@ impl SafetyContext {
         if self.is_from_source_file(func_file) {
             self.file_default
         } else {
-            SafetyMode::Undeclared
+            SafetyMode::Unsafe
         }
     }
 
@@ -1009,6 +1008,6 @@ void func() {}
         
         let context = parse_safety_annotations(file.path()).unwrap();
         // @safe only applies to the next element (global_var), not the whole file
-        assert_eq!(context.file_default, SafetyMode::Undeclared);
+        assert_eq!(context.file_default, SafetyMode::Unsafe);
     }
 }

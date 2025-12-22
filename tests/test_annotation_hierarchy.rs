@@ -506,8 +506,8 @@ public:
 }
 
 #[test]
-fn test_calling_across_hierarchy_levels() {
-    // Test that safe functions can call unsafe functions at different hierarchy levels
+fn test_safe_cannot_call_unsafe_without_block() {
+    // Test that safe functions CANNOT call unsafe functions directly - must use @unsafe block
     let code = r#"
 // @safe
 namespace myapp {
@@ -526,7 +526,56 @@ public:
     // @safe
     void safe_method() {
         UnsafeHelper helper;
-        helper.do_unsafe_work();  // OK: safe can call unsafe
+        helper.do_unsafe_work();  // ERROR: safe cannot call unsafe directly
+    }
+};
+
+} // namespace myapp
+"#;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    write!(temp_file, "{}", code).unwrap();
+
+    let (success, output) = run_analyzer(temp_file.path());
+
+    // With the new two-state model, safe functions cannot call unsafe functions directly
+    assert!(
+        !success,
+        "Safe functions should NOT be able to call unsafe functions directly. Output: {}",
+        output
+    );
+    assert!(
+        output.contains("@unsafe"),
+        "Error should mention @unsafe block requirement. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_safe_can_call_unsafe_with_block() {
+    // Test that safe functions CAN call unsafe functions inside @unsafe block
+    let code = r#"
+// @safe
+namespace myapp {
+
+// @unsafe
+class UnsafeHelper {
+public:
+    void do_unsafe_work() {
+        int* ptr = nullptr;
+    }
+};
+
+// @safe
+class SafeClass {
+public:
+    // @safe
+    void safe_method() {
+        // @unsafe
+        {
+            UnsafeHelper helper;
+            helper.do_unsafe_work();  // OK: inside @unsafe block
+        }
     }
 };
 
@@ -540,7 +589,7 @@ public:
 
     assert!(
         success,
-        "Safe functions should be able to call unsafe functions. Output: {}",
+        "Safe functions should be able to call unsafe functions inside @unsafe block. Output: {}",
         output
     );
 }

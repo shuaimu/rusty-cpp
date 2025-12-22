@@ -127,12 +127,14 @@ public:
 }
 
 #[test]
-fn test_mutable_with_safe_method_only() {
+fn test_mutable_with_safe_class() {
+    // With the new two-state model (Safe/Unsafe), mutable fields are checked
+    // at the CLASS level. A @safe class should not have mutable fields.
     let code = r#"
+// @safe
 class Counter {
     mutable int count;
 public:
-    // @safe
     void increment() const {
         count++;
     }
@@ -148,4 +150,30 @@ public:
 
     assert!(output.contains("count"), "Error should mention field name, got: {}", output);
     assert!(output.contains("Mutable field"), "Should report mutable field error, got: {}", output);
+}
+
+#[test]
+fn test_mutable_with_unsafe_class_allowed() {
+    // With the new two-state model, unannotated classes are @unsafe by default.
+    // Mutable fields are allowed in unsafe classes.
+    let code = r#"
+class Counter {
+    mutable int count;
+public:
+    // @safe - method can be safe even in unsafe class
+    void increment() const {
+        count++;
+    }
+
+    void reset() {
+        count = 0;
+    }
+};
+    "#;
+
+    let temp_file = create_temp_cpp_file(code);
+    let (success, output) = run_analyzer(temp_file.path());
+
+    // Should pass - unannotated class is @unsafe, mutable is allowed
+    assert!(success, "Mutable fields should be allowed in unsafe class, got: {}", output);
 }

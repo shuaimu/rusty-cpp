@@ -108,9 +108,9 @@ namespace safe_namespace {
 }
 
 #[test]
-fn test_safe_can_call_unsafe() {
-    // According to the design: @safe → can call: @safe ✅, @unsafe ✅, undeclared ❌
-    // So calling @unsafe from @safe is ALLOWED
+fn test_safe_cannot_call_unsafe_without_block() {
+    // With two-state model: @safe can ONLY call @safe
+    // To call @unsafe, must use @unsafe block
     let source = r#"
 // @safe
 namespace safe_namespace {
@@ -121,15 +121,44 @@ namespace safe_namespace {
 
     // @safe
     void safe_function() {
-        unsafe_operation(); // This is ALLOWED - safe can call unsafe
+        unsafe_operation(); // ERROR: @safe cannot call @unsafe without @unsafe block
     }
 }
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    // Should have NO violations - safe can call unsafe
+    // Should have violations - @safe cannot call @unsafe without @unsafe block
+    assert!(!violations.is_empty(),
+            "Expected violations when @safe calls @unsafe without @unsafe block, got: {:?}", violations);
+    assert!(violations.iter().any(|v| v.contains("non-safe") || v.contains("@unsafe")),
+            "Error should mention unsafe call requirement, got: {:?}", violations);
+}
+
+#[test]
+fn test_safe_can_call_unsafe_with_block() {
+    // With two-state model: @safe can call @unsafe IF wrapped in @unsafe block
+    let source = r#"
+// @safe
+namespace safe_namespace {
+    // @unsafe
+    void unsafe_operation() {
+        // Explicitly unsafe
+    }
+
+    // @safe
+    void safe_function() {
+        // @unsafe
+        {
+            unsafe_operation(); // OK: inside @unsafe block
+        }
+    }
+}
+"#;
+
+    let violations = compile_and_check(source).unwrap();
+    // Should have NO violations - @unsafe block allows calling unsafe
     assert!(violations.is_empty(),
-            "Expected no violations when @safe calls @unsafe, got: {:?}", violations);
+            "Expected no violations when @safe calls @unsafe via @unsafe block, got: {:?}", violations);
 }
 
 #[test]
@@ -181,7 +210,7 @@ namespace default_namespace {
 #[test]
 fn test_unsafe_override_in_safe_namespace() {
     // Test that explicit @unsafe annotation overrides @safe namespace
-    // And that safe functions CAN call unsafe functions (per the design)
+    // With two-state model: safe cannot call unsafe without @unsafe block
     let source = r#"
 // @safe
 namespace safe_namespace {
@@ -195,15 +224,18 @@ namespace safe_namespace {
     }
 
     void safe_caller() {
-        explicitly_unsafe(); // This is ALLOWED - safe can call unsafe
+        // @unsafe
+        {
+            explicitly_unsafe(); // OK - inside @unsafe block
+        }
     }
 }
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    // Should have NO violations - safe can call unsafe, and unsafe is not checked
+    // Should have NO violations - @unsafe block allows calling unsafe, and unsafe is not checked
     assert!(violations.is_empty(),
-            "Expected no violations - safe can call unsafe and unsafe is not checked, got: {:?}", violations);
+            "Expected no violations - @unsafe block allows call and unsafe is not checked, got: {:?}", violations);
 }
 
 #[test]

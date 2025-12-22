@@ -2,7 +2,7 @@
 
 This is the comprehensive guide for all annotation features in RustyCpp. It consolidates safety annotations, lifetime annotations, external annotations, and STL handling.
 
-**IMPORTANT**: By default, all STL and external functions are **undeclared**, meaning they cannot be called from `@safe` functions. The recommended approach is to use Rusty structures (`rusty::Vec`, `rusty::Box`, etc.) instead of STL structures.
+**IMPORTANT**: RustyCpp uses a **two-state safety model**: code is either `@safe` or `@unsafe`. Unannotated code is `@unsafe` by default. All STL and external functions are `@unsafe`, so `@safe` code must use `@unsafe` blocks to call them, or use Rusty structures (`rusty::Vec`, `rusty::Box`, etc.) instead.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ This is the comprehensive guide for all annotation features in RustyCpp. It cons
 3. [Lifetime Annotations](#lifetime-annotations)
 4. [Using Rusty Structures (Recommended)](#using-rusty-structures-recommended)
 5. [External Annotations](#external-annotations)
-6. [STL Annotations (When Needed)](#stl-annotations-when-needed)
+6. [STL in Safe Code](#stl-in-safe-code)
 7. [Complete Examples](#complete-examples)
 8. [Reference Tables](#reference-tables)
 9. [Best Practices](#best-practices)
@@ -42,12 +42,6 @@ void example() {
 
 ```cpp
 #include <vector>
-#include <unified_external_annotations.hpp>
-
-// @external: {
-//   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
-//   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
-// }
 
 // @safe
 void use_stl() {
@@ -59,27 +53,40 @@ void use_stl() {
 }
 ```
 
+### If You've Audited External Functions
+
+```cpp
+// @external: {
+//   my_audited_function: [safe, () -> void]
+// }
+
+void my_audited_function();
+
+// @safe
+void caller() {
+    my_audited_function();  // OK: marked [safe] via external annotation
+}
+```
+
 ---
 
 ## Safety System
 
-### Three-State Safety Model
+### Two-State Safety Model
 
-RustyCpp uses a three-state safety system:
+RustyCpp uses a two-state safety system:
 
 1. **`@safe`** - Functions with full borrow checking and strict calling rules
-2. **`@unsafe`** - Explicitly marked unsafe functions (documented risks)
-3. **Undeclared** (default) - Functions without annotations (unaudited legacy code)
+2. **`@unsafe`** - Everything else (unannotated code is @unsafe by default)
 
 ### Calling Rules Matrix
 
-| Caller → Can Call | @safe | @unsafe | Undeclared |
-|-------------------|-------|---------|------------|
-| **@safe**         | ✅ Yes | ✅ Yes  | ❌ No      |
-| **@unsafe**       | ✅ Yes | ✅ Yes  | ✅ Yes     |
-| **Undeclared**    | ✅ Yes | ✅ Yes  | ✅ Yes     |
+| Caller → Can Call | @safe | @unsafe |
+|-------------------|-------|---------|
+| **@safe**         | ✅ Yes | ❌ No (use `@unsafe` block) |
+| **@unsafe**       | ✅ Yes | ✅ Yes  |
 
-**Key Insight**: This creates an "audit ratchet" - once you mark a function as `@safe`, you must explicitly audit all its dependencies.
+**Key Insight**: This is a clean two-state model - code is either `@safe` or `@unsafe`. To call unsafe code from `@safe` functions, use an `@unsafe { }` block.
 
 ### Safety Annotation Syntax
 
@@ -90,30 +97,35 @@ void safe_function() {
     // ✅ CAN call other @safe functions
     safe_helper();
 
-    // ✅ CAN call @unsafe functions (risks are documented)
-    explicitly_unsafe_func();
+    // ❌ CANNOT call @unsafe functions directly
+    // unsafe_func();  // ERROR
 
-    // ❌ CANNOT call undeclared functions (must audit first!)
-    // legacy_function();  // ERROR
+    // ✅ CAN call @unsafe via @unsafe block
+    // @unsafe
+    {
+        unsafe_func();           // OK: in @unsafe block
+        std::vector<int> vec;    // OK: STL in @unsafe block
+    }
 
-    // ❌ CANNOT do pointer operations
+    // ❌ CANNOT do pointer operations (outside @unsafe block)
     // int* ptr = &x;  // ERROR: requires unsafe context
 }
 
-// @unsafe - Apply to next element only
+// @unsafe - Apply to next element only (or no annotation = same)
 // @unsafe
 void unsafe_function() {
     // ✅ Can call anything and do pointer operations
-    legacy_function();     // OK
     safe_function();       // OK
+    another_unsafe();      // OK
     int* ptr = nullptr;    // OK
+    std::vector<int> vec;  // OK
 }
 
-// No annotation - undeclared (default)
+// No annotation = @unsafe by default
 void legacy_function() {
-    // Not checked by borrow checker
-    // ✅ Can call anything including other undeclared functions
-    another_legacy();      // OK: undeclared can call undeclared
+    // Treated as @unsafe
+    // ✅ Can call anything
+    std::vector<int> vec;  // OK
 }
 
 // Apply to entire namespace
@@ -379,7 +391,7 @@ public:
 
 External annotations allow you to annotate third-party code without modifying the source.
 
-### Unified Syntax (Recommended)
+### Unified Syntax
 
 ```cpp
 // @external: {
@@ -387,9 +399,33 @@ External annotations allow you to annotate third-party code without modifying th
 // }
 ```
 
+Where `safety` is either `safe` or `unsafe`:
+- **`[safe, ...]`** - Function can be called directly from `@safe` code (you've audited it)
+- **`[unsafe, ...]`** - Function requires `@unsafe` block (default for all external code)
+
+### Marking External Functions as Safe
+
+If you've audited an external function and determined it's safe:
+
+```cpp
+// @external: {
+//   my_audited_function: [safe, () -> void]
+//   another_safe_func: [safe, (int x) -> int]
+// }
+
+void my_audited_function();
+int another_safe_func(int x);
+
+// @safe
+void caller() {
+    my_audited_function();      // OK: marked [safe]
+    int y = another_safe_func(42);  // OK: marked [safe]
+}
+```
+
 ### C Standard Library
 
-**IMPORTANT**: All external functions must be marked `[unsafe]` because RustyCpp doesn't analyze external code. The programmer takes responsibility for auditing external functions.
+By default, all external functions are `@unsafe`. You can mark them as `[unsafe]` with lifetime info for documentation, or use `@unsafe` blocks to call them:
 
 ```cpp
 // @external: {
@@ -442,17 +478,16 @@ External annotations allow you to annotate third-party code without modifying th
 
 ---
 
-## STL Annotations (When Needed)
+## STL in Safe Code
 
-**IMPORTANT**: STL structures are **undeclared by default** and cannot be used in `@safe` code without explicit annotation. **Always prefer Rusty structures.**
+**IMPORTANT**: All STL functions are **@unsafe by default**. To use STL in `@safe` code, you have two options:
 
-### Why Annotate STL as Unsafe?
+1. **Use `@unsafe` blocks** (recommended for STL)
+2. **Use Rusty structures instead** (best option)
 
-STL was not designed with Rust-style borrow checking in mind. To use STL in safe code, you must:
+### Why STL is Unsafe
 
-1. Annotate all STL functions as `unsafe`
-2. Wrap STL usage in `@unsafe` blocks
-3. Better: Use Rusty structures instead
+STL was not designed with Rust-style borrow checking in mind. Operations can invalidate iterators, create dangling references, and allow data races. Rather than maintaining a whitelist of "safe" functions, RustyCpp treats all external code as unsafe by default.
 
 ### Complete STL Annotations
 
@@ -500,11 +535,10 @@ STL was not designed with Rust-style borrow checking in mind. To use STL in safe
 
 ### Using STL in Safe Code
 
+Simply wrap STL usage in `@unsafe` blocks:
+
 ```cpp
 #include <vector>
-#include <unified_external_annotations.hpp>
-
-// Annotate STL functions (as shown above)
 
 // @safe
 void use_stl_in_safe() {
@@ -617,7 +651,7 @@ void process_json() {
 |-----------|-----------|-------|----------|
 | `@safe` | Next element | Function/namespace | Full borrow checking |
 | `@unsafe` | Next element | Function/namespace | No checking |
-| None (undeclared) | Current element | Implicit | No checking |
+| None (default) | Current element | Implicit | Treated as @unsafe |
 
 ### Lifetime Constraint Reference
 
@@ -664,10 +698,10 @@ void avoid_this() {
 ### 2. Gradual Adoption
 
 - Start by marking obviously safe functions as `@safe`
-- Mark dangerous functions as `@unsafe`
-- Leave legacy code undeclared initially
-- Gradually audit and mark undeclared functions
-- Use external annotations for dependencies
+- Leave legacy code unannotated (it's `@unsafe` by default)
+- Gradually audit functions and mark them `@safe` as you verify them
+- Use `@unsafe` blocks when `@safe` code needs to call unsafe functions
+- Use external annotations with `[safe]` for audited third-party functions
 
 ### 3. Clear Lifetime Documentation
 
@@ -693,17 +727,26 @@ const T& get_element(const Container& c, size_t idx);
 
 ### Common Errors
 
-#### 1. "Cannot call undeclared function from safe code"
+#### 1. "Cannot call unsafe function from safe code"
 
 ```cpp
 // Problem:
 // @safe
 void my_func() {
-    legacy_function();  // ERROR: undeclared
+    legacy_function();  // ERROR: unsafe function
 }
 
-// Solution: Mark legacy_function
-// @safe (or @unsafe)
+// Solution 1: Use @unsafe block
+// @safe
+void my_func() {
+    // @unsafe
+    {
+        legacy_function();  // OK: in unsafe block
+    }
+}
+
+// Solution 2: Mark legacy_function as @safe (if it truly is safe)
+// @safe
 void legacy_function() { }
 ```
 
@@ -741,7 +784,7 @@ rusty::Box<int> ptr2 = std::move(ptr1);
 // Problem:
 // @safe
 void my_func() {
-    std::vector<int> vec;  // ERROR: std::vector is undeclared
+    std::vector<int> vec;  // ERROR: STL is @unsafe
 }
 
 // Solution 1: Use Rusty structures (recommended)
@@ -750,11 +793,7 @@ void my_func() {
     rusty::Vec<int> vec;  // OK
 }
 
-// Solution 2: Annotate STL and use unsafe block
-// @external: {
-//   std::vector::vector: [unsafe, () -> owned]
-// }
-
+// Solution 2: Use @unsafe block for STL
 // @safe
 void my_func() {
     // @unsafe
@@ -842,30 +881,30 @@ Planned improvements:
 ### Key Takeaways
 
 1. ✅ **Use Rusty structures** (`rusty::Vec`, `rusty::Box`) for safe code
-2. ⚠️ **STL is undeclared by default** - requires unsafe annotation
-3. 🔒 **Three-state safety** - @safe, @unsafe, undeclared
+2. ⚠️ **STL is @unsafe by default** - use `@unsafe` blocks or Rusty structures
+3. 🔒 **Two-state safety** - code is either `@safe` or `@unsafe`
 4. 📝 **Lifetime annotations** - Express borrowing relationships
-5. 🎯 **Gradual adoption** - Mark functions incrementally
-6. 🔧 **External annotations** - Handle third-party code
+5. 🎯 **Gradual adoption** - Mark functions `@safe` as you audit them
+6. 🔧 **External annotations** - Mark audited external functions as `[safe]`
 
 ### Quick Decision Tree
 
 ```
 Need a container?
 ├─ In @safe code? → Use rusty::Vec
-├─ In @unsafe code? → Can use std::vector
-└─ Legacy code? → Keep std::vector (undeclared)
+├─ In @safe with STL? → Use @unsafe block
+└─ In @unsafe code? → Can use std::vector directly
 
 Need a smart pointer?
 ├─ Unique ownership? → Use rusty::Box
 ├─ Shared ownership (thread-safe)? → Use rusty::Arc
 ├─ Shared ownership (single-thread)? → Use rusty::Rc
-└─ Legacy code? → Keep std::unique_ptr (undeclared)
+└─ In @unsafe code? → Can use std::unique_ptr
 
-Calling a function?
-├─ From @safe? → Target must be @safe or @unsafe
-├─ From @unsafe? → Can call anything
-└─ From undeclared? → Can call anything
+Calling a function from @safe?
+├─ Is it @safe? → Can call directly
+├─ Is it @unsafe? → Use @unsafe block
+└─ Want direct call? → Mark with [safe] external annotation
 ```
 
 ---

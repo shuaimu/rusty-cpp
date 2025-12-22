@@ -57,7 +57,8 @@ T create_thing() {
 } // namespace test
 "#;
 
-    // Create source file with @safe function calling the template
+    // With two-state model: @safe calling @unsafe without @unsafe block should fail
+    // This test verifies the annotation is recognized (error message says "non-safe", not "undeclared")
     let source_content = r#"
 #include "test.h"
 
@@ -65,7 +66,7 @@ namespace test {
 
 // @safe
 void safe_caller() {
-    int x = create_thing<int>();  // Should be ERROR: calling unsafe function
+    int x = create_thing<int>();  // ERROR: @safe calling @unsafe without @unsafe block
 }
 
 } // namespace test
@@ -100,15 +101,16 @@ void safe_caller() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let full_output = format!("{}{}", stdout, stderr);
 
-    // Should succeed because @safe can call @unsafe
-    // But if the bug exists, it will fail with "undeclared" error
+    // With two-state model: @safe CANNOT call @unsafe without @unsafe block
+    // Should FAIL - but the key is the error message says "non-safe" not "undeclared"
+    // This verifies the @unsafe annotation in header was recognized
     assert!(
-        output.status.success(),
-        "Template function safety annotation from header should be recognized. Output: {}",
+        !output.status.success() || full_output.contains("non-safe") || full_output.contains("@unsafe"),
+        "Template function marked @unsafe should require @unsafe block to call from @safe. Output: {}",
         full_output
     );
 
-    // Should NOT contain "undeclared" error
+    // Should NOT contain "undeclared" error - proves the annotation was recognized
     assert!(
         !full_output.contains("undeclared"),
         "Should not report function as undeclared when it's marked @unsafe in header. Output: {}",

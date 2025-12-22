@@ -49,11 +49,11 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 - ✅ **@unsafe Block Support** - Fine-grained safety escapes
   - Use `// @unsafe { ... }` to mark specific code blocks as unsafe
-  - Allows calling undeclared functions within the block
+  - **Required in two-state model** to call @unsafe functions from @safe code
+  - Allows calling STL, unannotated, and explicitly @unsafe functions
   - Proper scope tracking with depth counter for nested blocks
   - All safety checks skipped inside @unsafe blocks
   - Works with both qualified (`std::`) and unqualified names
-  - See `UNSAFE_BLOCK_NOT_IMPLEMENTED.md` for implementation details
 
 - ✅ **Full Template Support** - Complete analysis of C++ template code
   - Template free functions analyzed with generic types
@@ -63,11 +63,12 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Analyzes template declarations (no instantiation needed!)
   - 100% test pass rate on template test suite
 
-- ✅ **Three-State Safety System** - Safe/Unsafe/Undeclared distinction
-  - Safe functions have strict calling rules
-  - Safe CAN call unsafe (documented risks)
-  - Safe CANNOT call undeclared (unaudited code)
-  - Creates audit ratchet effect
+- ✅ **Two-State Safety System** - Safe/Unsafe distinction (December 2025)
+  - **Simplified model**: Only `@safe` and `@unsafe` states (no "undeclared")
+  - **Unannotated code is @unsafe by default**
+  - **@safe can ONLY call @safe** - must use `@unsafe { }` block to call anything else
+  - STL/external functions require `@unsafe` blocks in @safe code
+  - Clean audit boundary - either code is safe or it isn't
 
 - ✅ **Header-to-Implementation Propagation** - Annotations flow from .h to .cpp
   - Safety annotations in headers automatically apply to implementations
@@ -76,13 +77,12 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Works with class methods and free functions
 
 **Advanced Features (Added 2025):**
-- ✅ **C++ Standard Library Annotations** - ~180+ std functions work in @safe code
-  - No explicit annotations needed for common std library usage
-  - Covers containers (vector, map, string), algorithms (sort, find), smart pointers, I/O
-  - Operators (+, -, *, ==, [], <<, etc.) fully supported
-  - Users can write natural C++ code without @unsafe blocks
-  - **Note**: Cast operations (dynamic_cast, get(), etc.) correctly require @unsafe
-  - See `include/std_annotation.hpp` and `STD_CASTS_ARE_UNSAFE.md`
+- ✅ **STL Usage in @safe Code** - Requires `@unsafe` blocks
+  - With two-state model, all STL functions are @unsafe by default
+  - @safe functions must wrap STL calls in `@unsafe { }` blocks
+  - This is the "strict" approach - no STL whitelist
+  - Users can use external annotations to mark specific STL functions as safe
+  - See `tests/test_std_annotations.rs` for examples
 
 - ✅ **STL Lifetime Annotations** - Complete lifetime checking for C++ STL types
   - Vector, map, unique_ptr, shared_ptr, string, etc.
@@ -93,9 +93,9 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 - ✅ **Unified External Annotations** - Combined safety + lifetime for third-party code
   - Annotate external functions without source modification
-  - Compact syntax: `func: [safety, lifetime_spec]`
-  - Pre-configured for C stdlib, POSIX, Boost, SQLite, etc.
-  - Pattern-based matching and library profiles
+  - Compact syntax: `func: [safety, lifetime_spec]` where safety is `safe` or `unsafe`
+  - Mark audited external functions as `[safe]` to call them directly from @safe code
+  - No hardcoded defaults - users control what is marked safe
   - See `include/unified_external_annotations.hpp` and `docs/unified_annotations.md`
 
 **Core Features:**
@@ -126,16 +126,26 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Variable is moved only if moved in ALL paths
   - Borrows cleared when not present in all branches
   - Handles nested conditionals
-- ✅ **Three-state safety annotation system**
-  - **Three states**: `@safe`, `@unsafe`, and undeclared (default)
+- ✅ **Two-state safety annotation system** (Updated December 2025)
+  - **Two states**: `@safe` and `@unsafe` only (no "undeclared" state)
   - **Single rule**: Annotations only attach to the NEXT code element
   - **Annotation suffixes**: Annotations support any suffix (`@safe-note`, `@unsafe: reason`, etc.)
-  - C++ files are undeclared by default (not checked, but distinct from unsafe)
+  - **Unannotated code is @unsafe by default**
   - **Calling rules matrix**:
-    - `@safe` → can call: @safe ✅, @unsafe ✅, undeclared ❌
-    - `@unsafe` → can call: @safe ✅, @unsafe ✅, undeclared ✅
-    - `undeclared` → can call: @safe ✅, @unsafe ✅, undeclared ✅
-  - **Key insight**: Undeclared functions can call other undeclared functions, enabling gradual migration
+    - `@safe` → can call: @safe ✅, @unsafe ❌ (use `@unsafe { }` block)
+    - `@unsafe` → can call: @safe ✅, @unsafe ✅
+  - **Key insight**: Clean audit boundary - code is either safe or unsafe, no middle ground
+  - **@unsafe blocks**: Required to call @unsafe functions from @safe code
+    ```cpp
+    // @safe
+    void example() {
+        // @unsafe
+        {
+            std::vector<int> v;  // STL is @unsafe
+            v.push_back(1);
+        }
+    }
+    ```
   - **Annotation hierarchy** (lower level overrides higher level):
     1. **Function-level**: `// @safe` before function - highest priority
     2. **Class-level**: `// @safe` before class - overrides namespace
@@ -145,8 +155,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
     - Each file's annotation only affects code in that file
     - Enables gradual migration: annotate files independently
   - **Header propagation**: Annotations in headers automatically apply to implementations
-  - STL and external libraries are undeclared by default (must be explicitly marked)
-  - Creates "audit ratchet" - forces explicit safety decisions
+  - STL and external libraries are @unsafe by default (require @unsafe blocks)
 - ✅ **Cross-file analysis with lifetime annotations**
   - Rust-like lifetime syntax in headers (`&'a`, `&'a mut`, `owned`)
   - Header parsing and caching system
@@ -180,9 +189,11 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Type-based detection to distinguish & from *
   - References remain safe (not raw pointers)
 - ✅ **Unsafe propagation checking**
-  - Safe functions cannot call unmarked or explicitly unsafe functions
-  - Requires explicit @unsafe annotation for unsafe calls in safe context
-  - Whitelisted standard library functions (printf, malloc, move, etc.)
+  - Safe functions cannot call @unsafe functions directly
+  - Must use `@unsafe { }` blocks to call @unsafe functions from @safe code
+  - All unannotated functions (including STL) are @unsafe by default
+  - No hardcoded STL whitelist - users control what is marked safe
+  - Users can mark audited external functions as `[safe]` via external annotations
   - Proper error reporting with function names and locations
   - Comprehensive test coverage (10+ tests)
 - ✅ **Standalone binary support**
@@ -368,7 +379,7 @@ void safe_example() {
 #include <vector>
 #include <unified_external_annotations.hpp>
 
-// STL structures are undeclared by default and need to be annotated as unsafe
+// STL structures are @unsafe by default in the two-state model
 // @external: {
 //   std::vector::push_back: [unsafe, (&'a mut, T) -> void]
 //   std::vector::operator[]: [unsafe, (&'a, size_t) -> &'a]
@@ -407,16 +418,15 @@ void better_example() {
 
 // @safe
 void external_example() {
-    // C stdlib with lifetime checking
-    const char* str = "hello";
-    const char* found = strchr(str, 'e');  // Lifetime tied to str (strchr is in std whitelist)
-
-    // Third-party functions are unsafe (must be called from unsafe context)
+    // All external functions require @unsafe blocks (no hardcoded whitelist)
     // @unsafe
     {
+        const char* str = "hello";
+        const char* found = strchr(str, 'e');  // OK: in unsafe block
+
         Data d;
-        Result r = third_party::process(d);  // OK: called from unsafe block
-        void* buf = third_party::allocate(100);  // OK: called from unsafe block
+        Result r = third_party::process(d);  // OK: in unsafe block
+        void* buf = third_party::allocate(100);  // OK: in unsafe block
     }
 }
 ```
@@ -667,8 +677,8 @@ The tool correctly follows C++'s compilation model:
    - Lifetime inference and validation
 4. **Track system functions** → Safety annotation checking only (no internal analysis)
    - System header functions are NOT analyzed for borrow violations
-   - They ARE checked for safety annotations (safe/unsafe/undeclared)
-   - Allows detecting when @safe code calls undeclared system functions
+   - They ARE checked for safety annotations (safe/unsafe)
+   - System functions are @unsafe by default, requiring @unsafe blocks in @safe code
 5. **Validate calls** → Ensure safety rules and lifetime constraints are met
 6. **Report errors** → With clear messages and locations
 
@@ -803,7 +813,7 @@ Use after move: variable 'x' has been moved
 3. ✅ **Selective analysis** - System headers skipped during internal analysis
    - System header functions NOT analyzed for borrow violations
    - System header functions ARE tracked for safety annotation checking
-   - Enables detecting when @safe code calls undeclared system functions
+   - System functions are @unsafe by default, requiring @unsafe blocks in @safe code
 4. ✅ **Source file tracking** - Added `source_file` field to `IrFunction`
    - Analysis modules use file path to distinguish user code from system code
    - Applied across all analysis phases (borrow checking, pointer safety, lifetime inference)
