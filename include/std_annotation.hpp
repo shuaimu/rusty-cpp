@@ -1,22 +1,21 @@
-// Standard Library Lifetime Annotations for RustyCpp
+// Standard Library Annotations for RustyCpp
 //
-// This header provides lifetime annotations for common C++ standard library
-// functions. Since RustyCpp does not verify external code, all std functions
-// are marked as [unsafe] - they must be called from @unsafe contexts.
+// This header provides safety and lifetime annotations for C++ standard library.
+//
+// Design principles:
+// 1. Non-pointer operations are marked [safe] - they don't expose raw memory
+// 2. Pointer-returning/taking operations remain [unsafe] (default, not annotated)
+// 3. Lifetime annotations are provided where return value borrows from input
 //
 // Usage:
 //   #include <std_annotation.hpp>
 //
-//   // std functions require @unsafe context:
-//   // @unsafe
+//   // @safe - Can use most STL operations directly
 //   void my_function() {
 //       std::vector<int> vec = {1, 2, 3};
-//       std::sort(vec.begin(), vec.end());
-//       std::cout << "Hello" << std::endl;
+//       vec.push_back(4);
+//       if (!vec.empty()) { ... }
 //   }
-//
-// NOTE: All std library functions are [unsafe] because RustyCpp cannot verify
-// external code. The programmer takes responsibility for correct usage.
 
 #ifndef RUSTYCPP_STD_ANNOTATION_HPP
 #define RUSTYCPP_STD_ANNOTATION_HPP
@@ -26,425 +25,438 @@
 // ============================================================================
 
 // @external: {
-//   std::move: [unsafe, (T& x) -> T&& where x: 'a, return: 'a]
-//   std::forward: [unsafe, (T& x) -> T&& where x: 'a, return: 'a]
-//   std::swap: [unsafe, (T& a, T& b) -> void]
-//   std::exchange: [unsafe, (T& obj, U&& new_val) -> T]
+//   std::swap: [safe]
+//   std::exchange: [safe]
+//   std::move: [safe, (&'a T) -> T&& where return: 'a]
+//   std::forward: [safe, (&'a T) -> T&& where return: 'a]
 // }
 
 // ============================================================================
 // Smart Pointers - Memory Management
 // ============================================================================
 
-// std::unique_ptr operations
+// std::unique_ptr - pointer operations need lifetime tracking
 // @external: {
-//   std::make_unique: [unsafe, (Args&&... args) -> owned std::unique_ptr<T>]
-//   std::unique_ptr::get: [unsafe, () -> T* where this: 'a, return: 'a]
-//   std::unique_ptr::release: [unsafe, () -> owned T*]
-//   std::unique_ptr::reset: [unsafe, (T* ptr) -> void]
-//   std::unique_ptr::operator*: [unsafe, () -> T& where this: 'a, return: 'a]
-//   std::unique_ptr::operator->: [unsafe, () -> T* where this: 'a, return: 'a]
-//   std::unique_ptr::operator bool: [unsafe, () const -> bool]
+//   std::make_unique: [safe]
+//   std::unique_ptr::operator bool: [safe]
+//   std::unique_ptr::get: [safe, (&'a) -> T* where return: 'a]
+//   std::unique_ptr::operator*: [safe, (&'a) -> T& where return: 'a]
+//   std::unique_ptr::operator->: [safe, (&'a) -> T* where return: 'a]
 // }
 
 // std::shared_ptr operations
 // @external: {
-//   std::make_shared: [unsafe, (Args&&... args) -> owned std::shared_ptr<T>]
-//   std::shared_ptr::get: [unsafe, () const -> T* where this: 'a, return: 'a]
-//   std::shared_ptr::reset: [unsafe, (T* ptr) -> void]
-//   std::shared_ptr::operator*: [unsafe, () const -> const T& where this: 'a, return: 'a]
-//   std::shared_ptr::operator->: [unsafe, () const -> const T* where this: 'a, return: 'a]
-//   std::shared_ptr::operator bool: [unsafe, () const -> bool]
-//   std::shared_ptr::use_count: [unsafe, () const -> long]
+//   std::make_shared: [safe]
+//   std::shared_ptr::operator bool: [safe]
+//   std::shared_ptr::use_count: [safe]
+//   std::shared_ptr::get: [safe, (&'a) -> T* where return: 'a]
+//   std::shared_ptr::operator*: [safe, (&'a) -> T& where return: 'a]
+//   std::shared_ptr::operator->: [safe, (&'a) -> T* where return: 'a]
 // }
 
 // std::weak_ptr operations
 // @external: {
-//   std::weak_ptr::lock: [unsafe, () const -> std::shared_ptr<T>]
-//   std::weak_ptr::expired: [unsafe, () const -> bool]
-//   std::weak_ptr::use_count: [unsafe, () const -> long]
-// }
-
-// Smart pointer casts
-// @external: {
-//   std::dynamic_pointer_cast: [unsafe, (const std::shared_ptr<U>& ptr) -> std::shared_ptr<T>]
-//   std::static_pointer_cast: [unsafe, (const std::shared_ptr<U>& ptr) -> std::shared_ptr<T>]
-//   std::const_pointer_cast: [unsafe, (const std::shared_ptr<U>& ptr) -> std::shared_ptr<T>]
-//   std::reinterpret_pointer_cast: [unsafe, (const std::shared_ptr<U>& ptr) -> std::shared_ptr<T>]
-// }
-
-// C++ cast operators
-// @external: {
-//   dynamic_cast: [unsafe, (T* ptr) -> U*]
-//   static_cast: [unsafe, (T value) -> U]
-//   const_cast: [unsafe, (T value) -> U]
-//   reinterpret_cast: [unsafe, (T value) -> U]
+//   std::weak_ptr::lock: [safe]
+//   std::weak_ptr::expired: [safe]
+//   std::weak_ptr::use_count: [safe]
 // }
 
 // ============================================================================
-// Type Utilities
+// Containers - std::vector
 // ============================================================================
 
 // @external: {
-//   std::as_const: [unsafe, (T& value) -> const T& where value: 'a, return: 'a]
-//   std::to_underlying: [unsafe, (Enum e) -> std::underlying_type_t<Enum>]
-//   std::addressof: [unsafe, (T& value) -> T* where value: 'a, return: 'a]
-//   std::launder: [unsafe, (T* ptr) -> T* where ptr: 'a, return: 'a]
-//   std::bit_cast: [unsafe, (const From& from) -> To]
+//   std::vector::push_back: [safe]
+//   std::vector::emplace_back: [safe]
+//   std::vector::pop_back: [safe]
+//   std::vector::clear: [safe]
+//   std::vector::size: [safe]
+//   std::vector::empty: [safe]
+//   std::vector::capacity: [safe]
+//   std::vector::reserve: [safe]
+//   std::vector::resize: [safe]
+//   std::vector::shrink_to_fit: [safe]
+//   std::vector::operator[]: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::vector::at: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::vector::front: [safe, (&'a) -> T& where return: 'a]
+//   std::vector::back: [safe, (&'a) -> T& where return: 'a]
+//   std::vector::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::vector::end: [safe, (&'a) -> iterator]
+//   std::vector::rbegin: [safe, (&'a) -> reverse_iterator where return: 'a]
+//   std::vector::rend: [safe, (&'a) -> reverse_iterator]
+//   std::vector::cbegin: [safe, (&'a) -> const_iterator where return: 'a]
+//   std::vector::cend: [safe, (&'a) -> const_iterator]
+//   std::vector::data: [safe, (&'a) -> T* where return: 'a]
 // }
 
 // ============================================================================
-// Containers - Constructors and Basic Operations
-// ============================================================================
-
-// std::vector operations
-// @external: {
-//   std::vector::push_back: [unsafe, (const T& value) -> void]
-//   std::vector::emplace_back: [unsafe, (Args&&... args) -> T&]
-//   std::vector::pop_back: [unsafe, () -> void]
-//   std::vector::clear: [unsafe, () -> void]
-//   std::vector::size: [unsafe, () const -> size_t]
-//   std::vector::empty: [unsafe, () const -> bool]
-//   std::vector::capacity: [unsafe, () const -> size_t]
-//   std::vector::reserve: [unsafe, (size_t n) -> void]
-//   std::vector::resize: [unsafe, (size_t n) -> void]
-//   std::vector::operator[]: [unsafe, (size_t n) -> T& where this: 'a, return: 'a]
-//   std::vector::at: [unsafe, (size_t n) -> T& where this: 'a, return: 'a]
-//   std::vector::front: [unsafe, () -> T& where this: 'a, return: 'a]
-//   std::vector::back: [unsafe, () -> T& where this: 'a, return: 'a]
-//   std::vector::data: [unsafe, () -> T* where this: 'a, return: 'a]
-//   std::vector::begin: [unsafe, () -> iterator where this: 'a, return: 'a]
-//   std::vector::end: [unsafe, () -> iterator where this: 'a, return: 'a]
-// }
-
-// std::string operations
-// @external: {
-//   std::string::size: [unsafe, () const -> size_t]
-//   std::string::length: [unsafe, () const -> size_t]
-//   std::string::empty: [unsafe, () const -> bool]
-//   std::string::clear: [unsafe, () -> void]
-//   std::string::operator[]: [unsafe, (size_t n) -> char& where this: 'a, return: 'a]
-//   std::string::at: [unsafe, (size_t n) -> char& where this: 'a, return: 'a]
-//   std::string::front: [unsafe, () -> char& where this: 'a, return: 'a]
-//   std::string::back: [unsafe, () -> char& where this: 'a, return: 'a]
-//   std::string::c_str: [unsafe, () const -> const char* where this: 'a, return: 'a]
-//   std::string::data: [unsafe, () -> char* where this: 'a, return: 'a]
-//   std::string::append: [unsafe, (const std::string& str) -> std::string&]
-//   std::string::operator+=: [unsafe, (const std::string& str) -> std::string&]
-//   std::string::operator+: [unsafe, (const std::string& lhs, const std::string& rhs) -> std::string]
-//   std::string::substr: [unsafe, (size_t pos, size_t len) const -> std::string]
-//   std::string::find: [unsafe, (const std::string& str) const -> size_t]
-// }
-
-// std::map operations
-// @external: {
-//   std::map::operator[]: [unsafe, (const Key& key) -> Value& where this: 'a, return: 'a]
-//   std::map::at: [unsafe, (const Key& key) -> Value& where this: 'a, return: 'a]
-//   std::map::insert: [unsafe, (const pair<Key,Value>& val) -> pair<iterator,bool>]
-//   std::map::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
-//   std::map::erase: [unsafe, (const Key& key) -> size_t]
-//   std::map::find: [unsafe, (const Key& key) -> iterator where this: 'a, return: 'a]
-//   std::map::size: [unsafe, () const -> size_t]
-//   std::map::empty: [unsafe, () const -> bool]
-//   std::map::clear: [unsafe, () -> void]
-//   std::map::begin: [unsafe, () -> iterator where this: 'a, return: 'a]
-//   std::map::end: [unsafe, () -> iterator where this: 'a, return: 'a]
-// }
-
-// std::unordered_map operations
-// @external: {
-//   std::unordered_map::operator[]: [unsafe, (const Key& key) -> Value& where this: 'a, return: 'a]
-//   std::unordered_map::at: [unsafe, (const Key& key) -> Value& where this: 'a, return: 'a]
-//   std::unordered_map::insert: [unsafe, (const pair<Key,Value>& val) -> pair<iterator,bool>]
-//   std::unordered_map::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
-//   std::unordered_map::erase: [unsafe, (const Key& key) -> size_t]
-//   std::unordered_map::find: [unsafe, (const Key& key) -> iterator where this: 'a, return: 'a]
-//   std::unordered_map::insert_or_assign: [unsafe, (const Key& key, M&& obj) -> pair<iterator,bool>]
-//   std::unordered_map::size: [unsafe, () const -> size_t]
-//   std::unordered_map::empty: [unsafe, () const -> bool]
-//   std::unordered_map::clear: [unsafe, () -> void]
-//   std::unordered_map::begin: [unsafe, () -> iterator where this: 'a, return: 'a]
-//   std::unordered_map::end: [unsafe, () -> iterator where this: 'a, return: 'a]
-// }
-
-// std::set operations
-// @external: {
-//   std::set::set: [unsafe, () -> void]
-//   std::set::insert: [unsafe, (const T& value) -> pair<iterator,bool>]
-//   std::set::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
-//   std::set::erase: [unsafe, (const T& value) -> size_t]
-//   std::set::find: [unsafe, (const T& value) const -> const_iterator where this: 'a, return: 'a]
-//   std::set::count: [unsafe, (const T& value) const -> size_t]
-//   std::set::size: [unsafe, () const -> size_t]
-//   std::set::empty: [unsafe, () const -> bool]
-//   std::set::clear: [unsafe, () -> void]
-//   std::set::begin: [unsafe, () -> iterator where this: 'a, return: 'a]
-//   std::set::end: [unsafe, () -> iterator where this: 'a, return: 'a]
-// }
-
-// std::unordered_set operations
-// @external: {
-//   std::unordered_set::unordered_set: [unsafe, () -> void]
-//   std::unordered_set::insert: [unsafe, (const T& value) -> pair<iterator,bool>]
-//   std::unordered_set::emplace: [unsafe, (Args&&... args) -> pair<iterator,bool>]
-//   std::unordered_set::erase: [unsafe, (const T& value) -> size_t]
-//   std::unordered_set::find: [unsafe, (const T& value) const -> const_iterator where this: 'a, return: 'a]
-//   std::unordered_set::count: [unsafe, (const T& value) const -> size_t]
-//   std::unordered_set::size: [unsafe, () const -> size_t]
-//   std::unordered_set::empty: [unsafe, () const -> bool]
-//   std::unordered_set::clear: [unsafe, () -> void]
-//   std::unordered_set::swap: [unsafe, (unordered_set& other) -> void]
-// }
-
-// std::pair operations
-// @external: {
-//   std::make_pair: [unsafe, (T1&& first, T2&& second) -> pair<T1,T2>]
-//   std::pair::first: [unsafe, field -> T1&]
-//   std::pair::second: [unsafe, field -> T2&]
-// }
-
-// std::tuple operations
-// @external: {
-//   std::make_tuple: [unsafe, (Args&&... args) -> tuple<Args...>]
-//   std::get: [unsafe, (tuple<Args...>& t) -> T& where t: 'a, return: 'a]
-//   std::tuple_size: [unsafe, type_trait -> size_t]
-// }
-
-// std::optional operations (C++17)
-// @external: {
-//   std::make_optional: [unsafe, (T&& value) -> optional<T>]
-//   std::optional::value: [unsafe, () -> T& where this: 'a, return: 'a]
-//   std::optional::value_or: [unsafe, (T&& default_val) const -> T]
-//   std::optional::has_value: [unsafe, () const -> bool]
-//   std::optional::operator*: [unsafe, () -> T& where this: 'a, return: 'a]
-//   std::optional::operator->: [unsafe, () -> T* where this: 'a, return: 'a]
-//   std::optional::operator bool: [unsafe, () const -> bool]
-//   std::optional::reset: [unsafe, () -> void]
-// }
-
-// std::variant operations (C++17)
-// @external: {
-//   std::holds_alternative: [unsafe, (const variant<Ts...>& v) -> bool]
-//   std::get: [unsafe, (variant<Ts...>& v) -> T& where v: 'a, return: 'a]
-//   std::get_if: [unsafe, (variant<Ts...>* v) -> T* where v: 'a, return: 'a]
-//   std::visit: [unsafe, (Visitor&& vis, variant<Ts...>& v) -> decltype(auto)]
-// }
-
-// ============================================================================
-// Algorithms - Common STL Algorithms
-// ============================================================================
-
-// Non-modifying sequence operations
-// @external: {
-//   std::find: [unsafe, (InputIt first, InputIt last, const T& value) -> InputIt where first: 'a, return: 'a]
-//   std::find_if: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> InputIt where first: 'a, return: 'a]
-//   std::find_if_not: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> InputIt where first: 'a, return: 'a]
-//   std::count: [unsafe, (InputIt first, InputIt last, const T& value) -> typename iterator_traits<InputIt>::difference_type]
-//   std::count_if: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> typename iterator_traits<InputIt>::difference_type]
-//   std::all_of: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> bool]
-//   std::any_of: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> bool]
-//   std::none_of: [unsafe, (InputIt first, InputIt last, UnaryPred pred) -> bool]
-//   std::for_each: [unsafe, (InputIt first, InputIt last, UnaryFunc func) -> UnaryFunc]
-// }
-
-// Modifying sequence operations
-// @external: {
-//   std::copy: [unsafe, (InputIt first, InputIt last, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-//   std::copy_if: [unsafe, (InputIt first, InputIt last, OutputIt d_first, UnaryPred pred) -> OutputIt where d_first: 'a, return: 'a]
-//   std::copy_n: [unsafe, (InputIt first, Size count, OutputIt result) -> OutputIt where result: 'a, return: 'a]
-//   std::move: [unsafe, (InputIt first, InputIt last, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-//   std::fill: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> void]
-//   std::fill_n: [unsafe, (OutputIt first, Size count, const T& value) -> OutputIt where first: 'a, return: 'a]
-//   std::transform: [unsafe, (InputIt first, InputIt last, OutputIt d_first, UnaryOp op) -> OutputIt where d_first: 'a, return: 'a]
-//   std::generate: [unsafe, (ForwardIt first, ForwardIt last, Generator gen) -> void]
-//   std::remove: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> ForwardIt where first: 'a, return: 'a]
-//   std::remove_if: [unsafe, (ForwardIt first, ForwardIt last, UnaryPred pred) -> ForwardIt where first: 'a, return: 'a]
-//   std::replace: [unsafe, (ForwardIt first, ForwardIt last, const T& old_val, const T& new_val) -> void]
-//   std::replace_if: [unsafe, (ForwardIt first, ForwardIt last, UnaryPred pred, const T& new_val) -> void]
-// }
-
-// Sorting and searching
-// @external: {
-//   std::sort: [unsafe, (RandomIt first, RandomIt last) -> void]
-//   std::stable_sort: [unsafe, (RandomIt first, RandomIt last) -> void]
-//   std::partial_sort: [unsafe, (RandomIt first, RandomIt middle, RandomIt last) -> void]
-//   std::is_sorted: [unsafe, (ForwardIt first, ForwardIt last) -> bool]
-//   std::binary_search: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> bool]
-//   std::lower_bound: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> ForwardIt where first: 'a, return: 'a]
-//   std::upper_bound: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> ForwardIt where first: 'a, return: 'a]
-//   std::equal_range: [unsafe, (ForwardIt first, ForwardIt last, const T& value) -> pair<ForwardIt,ForwardIt>]
-//   std::min: [unsafe, (const T& a, const T& b) -> const T& where a: 'a, b: 'a, return: 'a]
-//   std::max: [unsafe, (const T& a, const T& b) -> const T& where a: 'a, b: 'a, return: 'a]
-//   std::minmax: [unsafe, (const T& a, const T& b) -> pair<const T&, const T&>]
-//   std::min_element: [unsafe, (ForwardIt first, ForwardIt last) -> ForwardIt where first: 'a, return: 'a]
-//   std::max_element: [unsafe, (ForwardIt first, ForwardIt last) -> ForwardIt where first: 'a, return: 'a]
-// }
-
-// Set operations
-// @external: {
-//   std::set_union: [unsafe, (InputIt1 first1, InputIt1 last1, InputIt2 first2, InputIt2 last2, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-//   std::set_intersection: [unsafe, (InputIt1 first1, InputIt1 last1, InputIt2 first2, InputIt2 last2, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-//   std::set_difference: [unsafe, (InputIt1 first1, InputIt1 last1, InputIt2 first2, InputIt2 last2, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-// }
-
-// Numeric operations
-// @external: {
-//   std::accumulate: [unsafe, (InputIt first, InputIt last, T init) -> T]
-//   std::inner_product: [unsafe, (InputIt1 first1, InputIt1 last1, InputIt2 first2, T init) -> T]
-//   std::adjacent_difference: [unsafe, (InputIt first, InputIt last, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-//   std::partial_sum: [unsafe, (InputIt first, InputIt last, OutputIt d_first) -> OutputIt where d_first: 'a, return: 'a]
-// }
-
-// ============================================================================
-// Input/Output - iostream operations
-// ============================================================================
-
-// std::cout, std::cin, std::cerr operations
-// @external: {
-//   std::cout.operator<<: [unsafe, (const T& value) -> std::ostream&]
-//   std::cin.operator>>: [unsafe, (T& value) -> std::istream&]
-//   std::cerr.operator<<: [unsafe, (const T& value) -> std::ostream&]
-//   std::clog.operator<<: [unsafe, (const T& value) -> std::ostream&]
-//   std::endl: [unsafe, (std::ostream& os) -> std::ostream&]
-//   std::flush: [unsafe, (std::ostream& os) -> std::ostream&]
-//   std::getline: [unsafe, (std::istream& is, std::string& str) -> std::istream&]
-// }
-
-// File streams
-// @external: {
-//   std::ifstream::open: [unsafe, (const std::string& filename) -> void]
-//   std::ifstream::close: [unsafe, () -> void]
-//   std::ifstream::is_open: [unsafe, () const -> bool]
-//   std::ifstream::good: [unsafe, () const -> bool]
-//   std::ifstream::eof: [unsafe, () const -> bool]
-//   std::ofstream::open: [unsafe, (const std::string& filename) -> void]
-//   std::ofstream::close: [unsafe, () -> void]
-//   std::ofstream::is_open: [unsafe, () const -> bool]
-//   std::ofstream::good: [unsafe, () const -> bool]
-// }
-
-// String streams
-// @external: {
-//   std::stringstream::str: [unsafe, () const -> std::string]
-//   std::stringstream::str: [unsafe, (const std::string& s) -> void]
-//   std::ostringstream::str: [unsafe, () const -> std::string]
-//   std::istringstream::str: [unsafe, (const std::string& s) -> void]
-// }
-
-// ============================================================================
-// Utilities - Type Traits and Meta-programming
-// ============================================================================
-
-// Type traits (compile-time)
-// @external: {
-//   std::is_same: [unsafe, type_trait -> bool]
-//   std::is_integral: [unsafe, type_trait -> bool]
-//   std::is_floating_point: [unsafe, type_trait -> bool]
-//   std::is_pointer: [unsafe, type_trait -> bool]
-//   std::is_reference: [unsafe, type_trait -> bool]
-//   std::is_const: [unsafe, type_trait -> bool]
-//   std::is_move_constructible: [unsafe, type_trait -> bool]
-//   std::is_copy_constructible: [unsafe, type_trait -> bool]
-//   std::enable_if: [unsafe, type_trait -> type]
-//   std::decay: [unsafe, type_trait -> type]
-//   std::remove_reference: [unsafe, type_trait -> type]
-//   std::remove_const: [unsafe, type_trait -> type]
-// }
-
-// ============================================================================
-// Threading - Thread operations
+// Containers - std::list
 // ============================================================================
 
 // @external: {
-//   std::mutex::lock: [unsafe, () -> void]
-//   std::mutex::unlock: [unsafe, () -> void]
-//   std::mutex::try_lock: [unsafe, () -> bool]
-//   std::lock_guard: [unsafe, constructor (std::mutex& m)]
-//   std::unique_lock: [unsafe, constructor (std::mutex& m)]
-//   std::this_thread::sleep_for: [unsafe, (const std::chrono::duration& d) -> void]
-//   std::this_thread::yield: [unsafe, () -> void]
-//   std::this_thread::get_id: [unsafe, () -> std::thread::id]
+//   std::list::push_back: [safe]
+//   std::list::push_front: [safe]
+//   std::list::emplace_back: [safe]
+//   std::list::emplace_front: [safe]
+//   std::list::pop_back: [safe]
+//   std::list::pop_front: [safe]
+//   std::list::insert: [safe]
+//   std::list::erase: [safe]
+//   std::list::clear: [safe]
+//   std::list::size: [safe]
+//   std::list::empty: [safe]
+//   std::list::front: [safe, (&'a) -> T& where return: 'a]
+//   std::list::back: [safe, (&'a) -> T& where return: 'a]
+//   std::list::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::list::end: [safe, (&'a) -> iterator]
+//   std::__cxx11::list::push_back: [safe]
+//   std::__cxx11::list::push_front: [safe]
+//   std::__cxx11::list::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::__cxx11::list::end: [safe, (&'a) -> iterator]
+//   std::__cxx11::list::empty: [safe]
+//   std::__cxx11::list::size: [safe]
 // }
 
 // ============================================================================
-// Chrono - Time operations
+// Containers - std::deque
 // ============================================================================
 
 // @external: {
-//   std::chrono::system_clock::now: [unsafe, () -> std::chrono::time_point]
-//   std::chrono::steady_clock::now: [unsafe, () -> std::chrono::time_point]
-//   std::chrono::high_resolution_clock::now: [unsafe, () -> std::chrono::time_point]
-//   std::chrono::duration_cast: [unsafe, (Duration d) -> TargetDuration]
+//   std::deque::push_back: [safe]
+//   std::deque::push_front: [safe]
+//   std::deque::emplace_back: [safe]
+//   std::deque::emplace_front: [safe]
+//   std::deque::pop_back: [safe]
+//   std::deque::pop_front: [safe]
+//   std::deque::clear: [safe]
+//   std::deque::size: [safe]
+//   std::deque::empty: [safe]
+//   std::deque::operator[]: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::deque::at: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::deque::front: [safe, (&'a) -> T& where return: 'a]
+//   std::deque::back: [safe, (&'a) -> T& where return: 'a]
+//   std::deque::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::deque::end: [safe, (&'a) -> iterator]
 // }
 
 // ============================================================================
-// Functional - Function objects and lambdas
+// Containers - std::string
 // ============================================================================
 
 // @external: {
-//   std::function: [unsafe, type_wrapper]
-//   std::bind: [unsafe, (Func&& func, Args&&... args) -> unspecified]
-//   std::ref: [unsafe, (T& t) -> reference_wrapper<T> where t: 'a, return: 'a]
-//   std::cref: [unsafe, (const T& t) -> reference_wrapper<const T> where t: 'a, return: 'a]
+//   std::string::size: [safe]
+//   std::string::length: [safe]
+//   std::string::empty: [safe]
+//   std::string::clear: [safe]
+//   std::string::reserve: [safe]
+//   std::string::shrink_to_fit: [safe]
+//   std::string::push_back: [safe]
+//   std::string::pop_back: [safe]
+//   std::string::append: [safe]
+//   std::string::operator+=: [safe]
+//   std::string::operator+: [safe]
+//   std::string::substr: [safe]
+//   std::string::find: [safe]
+//   std::string::rfind: [safe]
+//   std::string::compare: [safe]
+//   std::string::operator[]: [safe, (&'a, size_t) -> char& where return: 'a]
+//   std::string::at: [safe, (&'a, size_t) -> char& where return: 'a]
+//   std::string::front: [safe, (&'a) -> char& where return: 'a]
+//   std::string::back: [safe, (&'a) -> char& where return: 'a]
+//   std::string::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::string::end: [safe, (&'a) -> iterator]
+//   std::string::c_str: [safe, (&'a) -> const char* where return: 'a]
+//   std::string::data: [safe, (&'a) -> char* where return: 'a]
 // }
 
 // ============================================================================
-// Memory - Memory operations
+// Containers - std::map
 // ============================================================================
 
 // @external: {
-//   std::align: [unsafe, (size_t alignment, size_t size, void*& ptr, size_t& space) -> void*]
-//   std::allocator::allocate: [unsafe, (size_t n) -> T*]
-//   std::allocator::deallocate: [unsafe, (T* p, size_t n) -> void]
-//   std::allocator::construct: [unsafe, (T* p, Args&&... args) -> void]
-//   std::allocator::destroy: [unsafe, (T* p) -> void]
+//   std::map::insert: [safe]
+//   std::map::insert_or_assign: [safe]
+//   std::map::emplace: [safe]
+//   std::map::erase: [safe]
+//   std::map::clear: [safe]
+//   std::map::size: [safe]
+//   std::map::empty: [safe]
+//   std::map::count: [safe]
+//   std::map::contains: [safe]
+//   std::map::operator[]: [safe, (&'a mut, const K&) -> V& where return: 'a]
+//   std::map::at: [safe, (&'a, const K&) -> V& where return: 'a]
+//   std::map::find: [safe, (&'a, const K&) -> iterator where return: 'a]
+//   std::map::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::map::end: [safe, (&'a) -> iterator]
 // }
 
-// Shared-from-this
+// ============================================================================
+// Containers - std::unordered_map
+// ============================================================================
+
 // @external: {
-//   std::enable_shared_from_this::shared_from_this: [unsafe, () -> std::shared_ptr<T>]
-//   std::enable_shared_from_this::weak_from_this: [unsafe, () -> std::weak_ptr<T>]
+//   std::unordered_map::insert: [safe]
+//   std::unordered_map::insert_or_assign: [safe]
+//   std::unordered_map::emplace: [safe]
+//   std::unordered_map::erase: [safe]
+//   std::unordered_map::clear: [safe]
+//   std::unordered_map::size: [safe]
+//   std::unordered_map::empty: [safe]
+//   std::unordered_map::count: [safe]
+//   std::unordered_map::contains: [safe]
+//   std::unordered_map::operator[]: [safe, (&'a mut, const K&) -> V& where return: 'a]
+//   std::unordered_map::at: [safe, (&'a, const K&) -> V& where return: 'a]
+//   std::unordered_map::find: [safe, (&'a, const K&) -> iterator where return: 'a]
+//   std::unordered_map::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::unordered_map::end: [safe, (&'a) -> iterator]
 // }
 
 // ============================================================================
-// Usage Examples
+// Containers - std::set
 // ============================================================================
 
-// Example 1: Using containers requires @unsafe
-// @unsafe
-// void container_example() {
-//     std::vector<int> vec = {1, 2, 3};
-//     vec.push_back(4);
-//     std::sort(vec.begin(), vec.end());
-//
-//     for (int x : vec) {
-//         std::cout << x << " ";
-//     }
-//     std::cout << std::endl;
+// @external: {
+//   std::set::insert: [safe]
+//   std::set::emplace: [safe]
+//   std::set::erase: [safe]
+//   std::set::clear: [safe]
+//   std::set::size: [safe]
+//   std::set::empty: [safe]
+//   std::set::count: [safe]
+//   std::set::contains: [safe]
+//   std::set::find: [safe, (&'a, const T&) -> iterator where return: 'a]
+//   std::set::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::set::end: [safe, (&'a) -> iterator]
 // }
 
-// Example 2: Using algorithms requires @unsafe
-// @unsafe
-// void algorithm_example() {
-//     std::vector<int> v1 = {1, 2, 3, 4, 5};
-//     std::vector<int> v2(5);
-//
-//     std::copy(v1.begin(), v1.end(), v2.begin());
-//     auto it = std::find(v2.begin(), v2.end(), 3);
-//
-//     if (it != v2.end()) {
-//         std::cout << "Found: " << *it << std::endl;
-//     }
+// ============================================================================
+// Containers - std::unordered_set
+// ============================================================================
+
+// @external: {
+//   std::unordered_set::insert: [safe]
+//   std::unordered_set::emplace: [safe]
+//   std::unordered_set::erase: [safe]
+//   std::unordered_set::clear: [safe]
+//   std::unordered_set::size: [safe]
+//   std::unordered_set::empty: [safe]
+//   std::unordered_set::count: [safe]
+//   std::unordered_set::contains: [safe]
+//   std::unordered_set::find: [safe, (&'a, const T&) -> iterator where return: 'a]
+//   std::unordered_set::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::unordered_set::end: [safe, (&'a) -> iterator]
 // }
 
-// Example 3: Using smart pointers requires @unsafe
-// @unsafe
-// void smart_pointer_example() {
-//     auto ptr = std::make_unique<int>(42);
-//     std::cout << *ptr << std::endl;
-//
-//     auto sptr = std::make_shared<int>(100);
-//     std::cout << *sptr << std::endl;
+// ============================================================================
+// Containers - std::array
+// ============================================================================
+
+// @external: {
+//   std::array::size: [safe]
+//   std::array::empty: [safe]
+//   std::array::fill: [safe]
+//   std::array::operator[]: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::array::at: [safe, (&'a, size_t) -> T& where return: 'a]
+//   std::array::front: [safe, (&'a) -> T& where return: 'a]
+//   std::array::back: [safe, (&'a) -> T& where return: 'a]
+//   std::array::begin: [safe, (&'a) -> iterator where return: 'a]
+//   std::array::end: [safe, (&'a) -> iterator]
+//   std::array::data: [safe, (&'a) -> T* where return: 'a]
+// }
+
+// ============================================================================
+// Utility Types - std::pair, std::tuple, std::optional, std::variant
+// ============================================================================
+
+// @external: {
+//   std::make_pair: [safe]
+//   std::make_tuple: [safe]
+//   std::get: [safe, (&'a tuple) -> T& where return: 'a]
+//   std::tie: [safe]
+// }
+
+// @external: {
+//   std::make_optional: [safe]
+//   std::optional::has_value: [safe]
+//   std::optional::operator bool: [safe]
+//   std::optional::reset: [safe]
+//   std::optional::value: [safe, (&'a) -> T& where return: 'a]
+//   std::optional::value_or: [safe]
+//   std::optional::operator*: [safe, (&'a) -> T& where return: 'a]
+//   std::optional::operator->: [safe, (&'a) -> T* where return: 'a]
+// }
+
+// @external: {
+//   std::holds_alternative: [safe]
+//   std::get: [safe, (&'a variant) -> T& where return: 'a]
+//   std::get_if: [safe, (&'a variant) -> T* where return: 'a]
+//   std::visit: [safe]
+// }
+
+// ============================================================================
+// Algorithms - Safe operations
+// ============================================================================
+
+// @external: {
+//   std::sort: [safe]
+//   std::stable_sort: [safe]
+//   std::partial_sort: [safe]
+//   std::is_sorted: [safe]
+//   std::reverse: [safe]
+//   std::rotate: [safe]
+//   std::shuffle: [safe]
+//   std::unique: [safe]
+//   std::fill: [safe]
+//   std::fill_n: [safe]
+//   std::copy: [safe]
+//   std::copy_n: [safe]
+//   std::copy_if: [safe]
+//   std::transform: [safe]
+//   std::replace: [safe]
+//   std::replace_if: [safe]
+//   std::swap_ranges: [safe]
+//   std::count: [safe]
+//   std::count_if: [safe]
+//   std::all_of: [safe]
+//   std::any_of: [safe]
+//   std::none_of: [safe]
+//   std::for_each: [safe]
+//   std::binary_search: [safe]
+//   std::accumulate: [safe]
+//   std::reduce: [safe]
+//   std::inner_product: [safe]
+// }
+
+// Algorithms returning iterators (need lifetime tracking)
+// @external: {
+//   std::find: [safe, (It first, It last, const T&) -> It where first: 'a, return: 'a]
+//   std::find_if: [safe, (It first, It last, Pred) -> It where first: 'a, return: 'a]
+//   std::find_if_not: [safe, (It first, It last, Pred) -> It where first: 'a, return: 'a]
+//   std::lower_bound: [safe, (It first, It last, const T&) -> It where first: 'a, return: 'a]
+//   std::upper_bound: [safe, (It first, It last, const T&) -> It where first: 'a, return: 'a]
+//   std::min_element: [safe, (It first, It last) -> It where first: 'a, return: 'a]
+//   std::max_element: [safe, (It first, It last) -> It where first: 'a, return: 'a]
+//   std::remove: [safe, (It first, It last, const T&) -> It where first: 'a, return: 'a]
+//   std::remove_if: [safe, (It first, It last, Pred) -> It where first: 'a, return: 'a]
+// }
+
+// @external: {
+//   std::min: [safe, (const T& a, const T& b) -> const T& where a: 'a, b: 'a, return: 'a]
+//   std::max: [safe, (const T& a, const T& b) -> const T& where a: 'a, b: 'a, return: 'a]
+//   std::clamp: [safe, (const T& v, const T& lo, const T& hi) -> const T& where v: 'a, lo: 'a, hi: 'a, return: 'a]
+// }
+
+// ============================================================================
+// I/O Operations - Safe
+// ============================================================================
+
+// @external: {
+//   std::cout.operator<<: [safe]
+//   std::cerr.operator<<: [safe]
+//   std::clog.operator<<: [safe]
+//   std::cin.operator>>: [safe]
+//   std::endl: [safe]
+//   std::flush: [safe]
+//   std::getline: [safe]
+// }
+
+// @external: {
+//   std::ifstream::is_open: [safe]
+//   std::ifstream::good: [safe]
+//   std::ifstream::eof: [safe]
+//   std::ifstream::fail: [safe]
+//   std::ifstream::bad: [safe]
+//   std::ofstream::is_open: [safe]
+//   std::ofstream::good: [safe]
+//   std::ofstream::fail: [safe]
+//   std::ofstream::bad: [safe]
+//   std::stringstream::str: [safe]
+//   std::ostringstream::str: [safe]
+//   std::istringstream::str: [safe]
+// }
+
+// ============================================================================
+// Threading - Safe operations
+// ============================================================================
+
+// @external: {
+//   std::mutex::lock: [safe]
+//   std::mutex::unlock: [safe]
+//   std::mutex::try_lock: [safe]
+//   std::lock_guard: [safe]
+//   std::unique_lock: [safe]
+//   std::scoped_lock: [safe]
+//   std::this_thread::sleep_for: [safe]
+//   std::this_thread::sleep_until: [safe]
+//   std::this_thread::yield: [safe]
+//   std::this_thread::get_id: [safe]
+// }
+
+// ============================================================================
+// Chrono - Safe operations
+// ============================================================================
+
+// @external: {
+//   std::chrono::system_clock::now: [safe]
+//   std::chrono::steady_clock::now: [safe]
+//   std::chrono::high_resolution_clock::now: [safe]
+//   std::chrono::duration_cast: [safe]
+//   std::chrono::time_point_cast: [safe]
+// }
+
+// ============================================================================
+// Functional - Safe operations
+// ============================================================================
+
+// @external: {
+//   std::function::operator(): [safe]
+//   std::function::operator bool: [safe]
+//   std::bind: [safe]
+//   std::ref: [safe, (&'a T) -> reference_wrapper<T> where return: 'a]
+//   std::cref: [safe, (const &'a T) -> reference_wrapper<const T> where return: 'a]
+// }
+
+// ============================================================================
+// Comparison Operators - Safe
+// ============================================================================
+
+// @external: {
+//   operator==: [safe]
+//   operator!=: [safe]
+//   operator<: [safe]
+//   operator>: [safe]
+//   operator<=: [safe]
+//   operator>=: [safe]
+//   operator<=>: [safe]
+// }
+
+// ============================================================================
+// Numeric - Safe operations
+// ============================================================================
+
+// @external: {
+//   std::abs: [safe]
+//   std::fabs: [safe]
+//   std::sqrt: [safe]
+//   std::pow: [safe]
+//   std::exp: [safe]
+//   std::log: [safe]
+//   std::log10: [safe]
+//   std::sin: [safe]
+//   std::cos: [safe]
+//   std::tan: [safe]
+//   std::floor: [safe]
+//   std::ceil: [safe]
+//   std::round: [safe]
+// }
+
+// ============================================================================
+// Type Utilities with Lifetime - Safe with annotations
+// ============================================================================
+
+// @external: {
+//   std::as_const: [safe, (&'a T) -> const T& where return: 'a]
+//   std::addressof: [safe, (&'a T) -> T* where return: 'a]
 // }
 
 #endif // RUSTYCPP_STD_ANNOTATION_HPP
