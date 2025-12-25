@@ -35,6 +35,11 @@ Complete implementation summaries for major features:
 
 ### Root Documentation Files
 
+- **[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)** - ⭐ Known limitations and workarounds
+  - Loop-local variable move detection (false positive)
+  - Minimal examples and workarounds
+  - Other known limitations
+
 - **[RUST_COMPARISON.md](RUST_COMPARISON.md)** - ⭐ RustyCpp vs Rust borrow checker comparison
   - What's implemented vs missing
   - Detailed gap analysis with code examples

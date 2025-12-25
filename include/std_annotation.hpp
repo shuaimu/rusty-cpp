@@ -411,6 +411,7 @@
 // @external: {
 //   std::function::operator(): [safe]
 //   std::function::operator bool: [safe]
+//   std::function::operator=: [safe]
 //   std::bind: [safe]
 //   std::ref: [safe, (&'a T) -> reference_wrapper<T> where return: 'a]
 //   std::cref: [safe, (const &'a T) -> reference_wrapper<const T> where return: 'a]
@@ -428,6 +429,8 @@
 //   operator<=: [safe]
 //   operator>=: [safe]
 //   operator<=>: [safe]
+//   std::__detail::operator==: [safe]
+//   std::__detail::operator!=: [safe]
 // }
 
 // ============================================================================
