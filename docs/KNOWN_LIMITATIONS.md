@@ -2,131 +2,77 @@
 
 This document describes known limitations of the rusty-cpp borrow checker that may cause false positives or require workarounds.
 
-## Loop-Local Variable Move Detection (False Positive)
+## ~~Loop-Local Variable Move Detection~~ (Fixed December 2025)
 
-### Problem
+**This issue has been fixed.** Loop-local variables are now correctly tracked and do not produce false positives.
 
-The borrow checker's loop analysis simulates 2 iterations to detect use-after-move errors. However, it incorrectly tracks moved state across iterations for variables declared **inside** the loop body.
+The checker now tracks variables declared inside loop bodies via:
+- `CallExpr { result: Some(var) }` - function call results
+- `Move { to: var }` - move-initialization
+- `Assign { lhs: var }` - assignment
+- `Borrow { to: var }` - reference creation
 
-In C++, a variable declared inside a loop body is a fresh variable on each iteration - it's not the same variable being reused. The checker doesn't understand this and reports false positives.
+These variables are recognized as fresh each iteration and their moved state is properly reset.
 
-### Minimal Example
+### What Works Now
 
 ```cpp
-#include <list>
-#include <memory>
-
-struct Request {
-    int data;
-};
-
-void process(std::unique_ptr<Request> req);
-
 // @safe
 void handle_requests(std::list<std::unique_ptr<Request>>& requests) {
     // @unsafe
     {
         while (!requests.empty()) {
-            // This creates a FRESH variable each iteration
+            // Fresh variable each iteration - NOW WORKS CORRECTLY
             std::unique_ptr<Request> req = std::move(requests.front());
             requests.pop_front();
-
-            // Use the request
-            if (req->data > 0) {
-                process(std::move(req));  // Move req
-            }
-            // req goes out of scope here
+            process(std::move(req));  // OK - req is fresh each iteration
         }
     }
 }
-```
 
-**Expected behavior**: No error - each iteration has its own `req` variable.
-
-**Actual behavior**:
-```
-Use after move: variable 'req' has already been moved
-```
-
-The checker sees:
-1. Iteration 1: `req` created, moved at `process(std::move(req))`
-2. Iteration 2: `req` used at `req->data` → ERROR (thinks it's the same moved variable)
-
-### Why This Happens
-
-The checker's loop analysis (documented in CLAUDE.md):
-- Simulates 2 iterations to catch errors on second pass
-- Tracks moved state across loop iterations
-- Does NOT reset moved state for variables declared inside the loop body
-
-This is a fundamental limitation of the current scope tracking implementation.
-
-### Workarounds
-
-#### 1. Mark the function as @unsafe (Recommended)
-
-If the loop pattern is correct, mark the function as `@unsafe` with a comment explaining why:
-
-```cpp
-// @unsafe - Loop-local variable move is safe but checker has false positive
-void handle_requests(std::list<std::unique_ptr<Request>>& requests) {
-    while (!requests.empty()) {
-        std::unique_ptr<Request> req = std::move(requests.front());
-        requests.pop_front();
-        process(std::move(req));
-    }
+// Also works:
+for (int i = 0; i < n; i++) {
+    auto obj = create_object();
+    consume(std::move(obj));  // OK - obj is fresh each iteration
 }
 ```
 
-#### 2. Use an @unsafe block around the loop
+## Lambda Variable Declaration (Known Limitation)
+
+### Problem
+
+Variables declared via lambda expressions (e.g., `auto fn = [...]`) are not tracked as loop-local variables because the lambda declaration doesn't generate a proper variable declaration statement in the IR.
+
+### Example
 
 ```cpp
 // @safe
-void handle_requests(std::list<std::unique_ptr<Request>>& requests) {
-    // @unsafe - Loop-local variable move; checker false positive
+void test() {
+    // @unsafe
     {
-        while (!requests.empty()) {
-            std::unique_ptr<Request> req = std::move(requests.front());
-            requests.pop_front();
-            process(std::move(req));
+        for (int i = 0; i < 5; i++) {
+            std::unique_ptr<int> data = std::make_unique<int>(i);
+            auto fn = [d = std::move(data)]() mutable { };  // fn not tracked
+            dispatch(std::move(fn));  // FALSE POSITIVE: "fn was moved in first iteration"
         }
     }
 }
 ```
 
-**Note**: @unsafe blocks do NOT suppress use-after-move detection. The @unsafe annotation on the function itself is required.
+### Workaround
 
-#### 3. Refactor to avoid the pattern (Not recommended)
+Mark the function as `@unsafe` if using lambda moves in loops:
 
-You could refactor to use indices or iterators, but this makes the code less idiomatic and harder to read. The workarounds above are preferred.
-
-### Related Patterns
-
-This limitation also affects:
-
-1. **For-range loops with move**:
-   ```cpp
-   for (auto& item : container) {
-       process(std::move(item));  // False positive on second iteration
-   }
-   ```
-
-2. **Any loop with local variable that gets moved**:
-   ```cpp
-   for (int i = 0; i < n; i++) {
-       auto obj = create_object();
-       consume(std::move(obj));  // False positive
-   }
-   ```
-
-### Future Fix
-
-A proper fix would require the checker to:
-1. Track variable declarations per-scope, not just per-function
-2. Reset moved state when a variable goes out of scope
-3. Recognize that loop body scope creates fresh variables each iteration
-
-This would require changes to `src/analysis/ownership.rs` and the loop simulation logic.
+```cpp
+// @unsafe - Lambda variable declaration not tracked in loops
+void test() {
+    for (int i = 0; i < 5; i++) {
+        std::unique_ptr<int> data = std::make_unique<int>(i);
+        auto fn = [d = std::move(data)]() mutable { };
+        dispatch(std::move(fn));  // OK in unsafe function
+    }
+}
+```
 
 ## Other Known Limitations
 
@@ -144,4 +90,4 @@ This would require changes to `src/analysis/ownership.rs` and the loop simulatio
 
 ---
 
-*Last updated: December 2024*
+*Last updated: December 2025*

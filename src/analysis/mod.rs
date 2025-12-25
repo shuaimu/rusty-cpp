@@ -380,8 +380,24 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
                 
                 for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
                     // Track variable declarations in the loop
-                    if let crate::ir::IrStatement::Borrow { to, .. } = loop_stmt {
-                        loop_local_vars.insert(to.clone());
+                    // Variables declared inside loop body are fresh each iteration
+                    match loop_stmt {
+                        crate::ir::IrStatement::Borrow { to, .. } => {
+                            loop_local_vars.insert(to.clone());
+                        }
+                        crate::ir::IrStatement::Move { to, .. } => {
+                            // Move-initialization creates a new variable (e.g., unique_ptr<T> x = std::move(y))
+                            loop_local_vars.insert(to.clone());
+                        }
+                        crate::ir::IrStatement::Assign { lhs, .. } => {
+                            // Assignment to new variable (e.g., auto x = make_unique<T>())
+                            loop_local_vars.insert(lhs.clone());
+                        }
+                        crate::ir::IrStatement::CallExpr { result: Some(var), .. } => {
+                            // Function call with result stored in a variable (e.g., auto x = make_unique<T>())
+                            loop_local_vars.insert(var.clone());
+                        }
+                        _ => {}
                     }
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors, header_cache, function);
 
@@ -400,7 +416,7 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
                 for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
                     // Before processing each statement in second iteration,
                     // check if it would cause use-after-move (but only for non-loop-local vars)
-                    check_statement_for_loop_errors(loop_stmt, &state_after_first, &mut errors);
+                    check_statement_for_loop_errors(loop_stmt, &state_after_first, &loop_local_vars, &mut errors);
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors, header_cache, function);
 
                     // NEW: Check for last uses (after processing statement)
@@ -433,10 +449,17 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
 fn check_statement_for_loop_errors(
     statement: &crate::ir::IrStatement,
     state_after_first: &HashMap<String, OwnershipState>,
+    loop_local_vars: &HashSet<String>,
     errors: &mut Vec<String>,
 ) {
     match statement {
         crate::ir::IrStatement::Move { from, .. } => {
+            // Skip loop-local variables - they are fresh each iteration
+            // A variable declared inside the loop body (via Move, Borrow, or Assign)
+            // is a new variable on each iteration, not reused from previous iteration
+            if loop_local_vars.contains(from) {
+                return;
+            }
             if let Some(state) = state_after_first.get(from) {
                 if *state == OwnershipState::Moved {
                     errors.push(format!(
@@ -448,6 +471,10 @@ fn check_statement_for_loop_errors(
         }
         crate::ir::IrStatement::Assign { rhs, .. } => {
             if let crate::ir::IrExpression::Variable(var) = rhs {
+                // Skip loop-local variables - they are fresh each iteration
+                if loop_local_vars.contains(var) {
+                    return;
+                }
                 if let Some(state) = state_after_first.get(var) {
                     if *state == OwnershipState::Moved {
                         errors.push(format!(
