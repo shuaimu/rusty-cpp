@@ -160,26 +160,220 @@ pub fn check_method_safety_contracts(
         // For each method in the interface, find the implementation and check safety
         for interface_method in &interface.methods {
             // Skip destructors and constructors
-            if interface_method.name.starts_with('~') ||
-               interface_method.name == interface.name {
+            // A destructor starts with ~ or contains ::~
+            // A constructor has the same name as the class (after stripping prefix)
+            let method_name_only = interface_method.name.split("::").last()
+                .unwrap_or(&interface_method.name);
+
+            if method_name_only.starts_with('~') || method_name_only == interface.name {
                 continue;
             }
 
             // Find the implementation in the derived class
+            // Match by method name (strip class prefix if present)
+            let interface_method_name = interface_method.name.split("::").last()
+                .unwrap_or(&interface_method.name);
+
             let impl_method = class.methods.iter()
-                .find(|m| m.name == interface_method.name);
+                .find(|m| {
+                    let impl_name = m.name.split("::").last().unwrap_or(&m.name);
+                    impl_name == interface_method_name
+                });
 
-            let Some(_impl_method) = impl_method else { continue };
+            let Some(impl_method) = impl_method else { continue };
 
-            // TODO: Check if implementation has explicit safety annotation
-            // TODO: If explicit, verify it matches interface
-            // TODO: If implicit, inherit from interface
-            // TODO: If @safe (explicit or inherited), validate the method body
-
-            // For now, we just log that we found the implementation
             debug_println!("INHERITANCE: Found implementation of '{}' in '{}'",
                 interface_method.name, class.name);
+
+            // Get interface method's safety (explicit or default to @unsafe)
+            let interface_safety = interface_method.safety_annotation
+                .unwrap_or(SafetyMode::Unsafe);
+
+            // Check 1: If implementation has EXPLICIT annotation, it must match
+            if impl_method.has_explicit_safety_annotation {
+                let impl_safety = impl_method.safety_annotation.unwrap_or(SafetyMode::Unsafe);
+
+                if impl_safety != interface_safety {
+                    errors.push(format!(
+                        "Method '{}::{}' annotated @{} but interface '{}' requires @{}",
+                        class.name,
+                        interface_method_name,
+                        safety_mode_str(impl_safety),
+                        strip_template_params(base_name),
+                        safety_mode_str(interface_safety)
+                    ));
+                }
+            }
+            // Check 2: If no explicit annotation, it inherits from interface (no error needed)
+
+            // Determine effective safety for body validation
+            let effective_safety = if impl_method.has_explicit_safety_annotation {
+                impl_method.safety_annotation.unwrap_or(SafetyMode::Unsafe)
+            } else {
+                interface_safety  // Inherited
+            };
+
+            // Check 3: If effective safety is @safe, validate the method body
+            if effective_safety == SafetyMode::Safe {
+                let body_errors = validate_safe_method_body(impl_method, class, base_name);
+                errors.extend(body_errors);
+            }
         }
+    }
+
+    errors
+}
+
+/// Convert SafetyMode to string for error messages
+fn safety_mode_str(mode: SafetyMode) -> &'static str {
+    match mode {
+        SafetyMode::Safe => "safe",
+        SafetyMode::Unsafe => "unsafe",
+    }
+}
+
+/// Validate that a method body contains only safe operations
+fn validate_safe_method_body(
+    method: &crate::parser::ast_visitor::Function,
+    class: &Class,
+    interface_name: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    let method_name = method.name.split("::").last().unwrap_or(&method.name);
+
+    // Check each statement in the method body for unsafe operations
+    for stmt in &method.body {
+        let stmt_errors = check_statement_safety(stmt, method_name, &class.name, interface_name);
+        errors.extend(stmt_errors);
+    }
+
+    errors
+}
+
+/// Check a statement for unsafe operations
+fn check_statement_safety(
+    stmt: &crate::parser::Statement,
+    method_name: &str,
+    class_name: &str,
+    interface_name: &str,
+) -> Vec<String> {
+    use crate::parser::Statement;
+
+    let mut errors = Vec::new();
+
+    match stmt {
+        Statement::ExpressionStatement { expr, .. } => {
+            let expr_errors = check_expression_safety(expr, method_name, class_name, interface_name);
+            errors.extend(expr_errors);
+        }
+        Statement::VariableDecl(_) => {
+            // Variable declarations themselves are safe
+        }
+        Statement::Assignment { lhs, rhs, .. } => {
+            errors.extend(check_expression_safety(lhs, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(rhs, method_name, class_name, interface_name));
+        }
+        Statement::ReferenceBinding { target, .. } => {
+            errors.extend(check_expression_safety(target, method_name, class_name, interface_name));
+        }
+        Statement::Return(Some(expr)) => {
+            let expr_errors = check_expression_safety(expr, method_name, class_name, interface_name);
+            errors.extend(expr_errors);
+        }
+        Statement::Return(None) => {}
+        Statement::FunctionCall { args, .. } => {
+            for arg in args {
+                errors.extend(check_expression_safety(arg, method_name, class_name, interface_name));
+            }
+        }
+        Statement::If { condition, then_branch, else_branch, .. } => {
+            let cond_errors = check_expression_safety(condition, method_name, class_name, interface_name);
+            errors.extend(cond_errors);
+            for s in then_branch {
+                errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+                }
+            }
+        }
+        Statement::Block(stmts) => {
+            for s in stmts {
+                errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+            }
+        }
+        Statement::LambdaExpr { .. } => {
+            // Lambda expressions are checked separately
+        }
+        Statement::PackExpansion { .. } => {
+            // Pack expansions are safe by themselves
+        }
+        // Scope and loop markers are not expressions
+        Statement::EnterScope | Statement::ExitScope |
+        Statement::EnterLoop | Statement::ExitLoop |
+        Statement::EnterUnsafe | Statement::ExitUnsafe => {}
+    }
+
+    errors
+}
+
+/// Check an expression for unsafe operations
+fn check_expression_safety(
+    expr: &crate::parser::Expression,
+    method_name: &str,
+    class_name: &str,
+    interface_name: &str,
+) -> Vec<String> {
+    use crate::parser::Expression;
+
+    let mut errors = Vec::new();
+
+    match expr {
+        Expression::Dereference(inner) => {
+            // Pointer dereference is unsafe
+            errors.push(format!(
+                "Method '{}::{}' violates @safe contract from interface '{}': pointer dereference in @safe context",
+                class_name, method_name, strip_template_params(interface_name)
+            ));
+            // Also check inner expression
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::AddressOf(inner) => {
+            // Taking address is unsafe
+            errors.push(format!(
+                "Method '{}::{}' violates @safe contract from interface '{}': address-of operator in @safe context",
+                class_name, method_name, strip_template_params(interface_name)
+            ));
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::FunctionCall { args, .. } => {
+            // Check arguments for unsafe operations
+            for arg in args {
+                errors.extend(check_expression_safety(arg, method_name, class_name, interface_name));
+            }
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            errors.extend(check_expression_safety(left, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(right, method_name, class_name, interface_name));
+        }
+        Expression::MemberAccess { object, .. } => {
+            errors.extend(check_expression_safety(object, method_name, class_name, interface_name));
+        }
+        Expression::Cast(inner) => {
+            // Cast operations could be unsafe depending on the cast type
+            // For now, just check the inner expression
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::Move(inner) => {
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::Lambda { .. } => {
+            // Lambda captures are checked elsewhere
+        }
+        // Variable references and literals are safe
+        Expression::Variable(_) | Expression::Literal(_) => {}
     }
 
     errors

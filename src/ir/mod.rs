@@ -1770,7 +1770,9 @@ mod tests {
             is_method: false,
             method_qualifier: None,
             class_name: None,
-        template_parameters: vec![],
+            template_parameters: vec![],
+            safety_annotation: None,
+            has_explicit_safety_annotation: false,
         }
     }
 

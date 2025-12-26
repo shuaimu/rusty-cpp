@@ -1063,6 +1063,87 @@ pub fn check_class_interface_annotation(entity: &Entity) -> bool {
     false
 }
 
+/// Check method safety annotation by reading source file comments
+/// This is needed when libclang's get_comment() doesn't capture the annotation
+/// for methods inside a class definition
+pub fn check_method_safety_annotation(entity: &Entity) -> Option<SafetyMode> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    // Try get_comment() first
+    if let Some(comment) = entity.get_comment() {
+        for line in comment.lines() {
+            let trimmed = line.trim();
+            let content = if trimmed.starts_with("///") {
+                trimmed[3..].trim()
+            } else if trimmed.starts_with("//") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("/*") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("*") {
+                trimmed[1..].trim()
+            } else {
+                trimmed
+            };
+            if contains_annotation(content, "@safe") {
+                return Some(SafetyMode::Safe);
+            } else if contains_annotation(content, "@unsafe") {
+                return Some(SafetyMode::Unsafe);
+            }
+        }
+    }
+
+    // Fall back to reading source file directly
+    let location = match entity.get_location() {
+        Some(loc) => loc,
+        None => return None,
+    };
+
+    let file_location = location.get_file_location();
+    let file = match file_location.file {
+        Some(f) => f,
+        None => return None,
+    };
+
+    let file_path = file.get_path();
+    let entity_line = file_location.line as usize;
+
+    let file_handle = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    let reader = BufReader::new(file_handle);
+    let mut prev_line = String::new();
+    let mut current_line = 0;
+
+    for line_result in reader.lines() {
+        current_line += 1;
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if current_line == entity_line {
+            // Check if previous line has @safe or @unsafe
+            let trimmed = prev_line.trim();
+            if trimmed.starts_with("//") {
+                let content = trimmed[2..].trim();
+                if contains_annotation(content, "@safe") {
+                    return Some(SafetyMode::Safe);
+                } else if contains_annotation(content, "@unsafe") {
+                    return Some(SafetyMode::Unsafe);
+                }
+            }
+            return None;
+        }
+
+        prev_line = line;
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

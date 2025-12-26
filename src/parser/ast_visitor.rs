@@ -1,6 +1,25 @@
 use clang::{Entity, EntityKind, Type, TypeKind};
 use crate::debug_println;
 
+/// Check if a C++ method is deleted (= delete) or defaulted (= default)
+/// These special member functions don't count as regular methods for @interface validation.
+/// Since libclang 16.0+ is required for clang_CXXMethod_isDeleted,
+/// we detect this by tokenizing the method declaration.
+fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
+    if let Some(range) = entity.get_range() {
+        let tokens = range.tokenize();
+        // Look for the pattern: "=" followed by "delete" or "default"
+        for i in 0..tokens.len().saturating_sub(1) {
+            let spelling = tokens[i].get_spelling();
+            let next_spelling = tokens[i + 1].get_spelling();
+            if spelling == "=" && (next_spelling == "delete" || next_spelling == "default") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Check if a function name is std::move or a namespace-qualified move
 fn is_move_function(name: &str) -> bool {
     name == "move" || name == "std::move" || name.ends_with("::move")
@@ -284,6 +303,9 @@ pub struct Function {
     pub class_name: Option<String>,
     // Template information
     pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
+    // Safety annotation for method safety contract checking
+    pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>,
+    pub has_explicit_safety_annotation: bool,  // true if annotation was in source code
 }
 
 #[derive(Debug, Clone)]
@@ -423,8 +445,14 @@ pub struct SourceLocation {
 }
 
 pub fn extract_function(entity: &Entity) -> Function {
+    use crate::parser::safety_annotations::check_method_safety_annotation;
+
     let kind = entity.get_kind();
     let is_method = kind == EntityKind::Method || kind == EntityKind::Constructor;
+
+    // Parse safety annotation from comments (uses source file reading fallback)
+    let safety_annotation = check_method_safety_annotation(entity);
+    let has_explicit_safety_annotation = safety_annotation.is_some();
 
     // Use qualified name for ALL functions (methods AND free functions in namespaces)
     // This ensures:
@@ -525,6 +553,8 @@ pub fn extract_function(entity: &Entity) -> Function {
         method_qualifier,
         class_name,
         template_parameters,
+        safety_annotation,
+        has_explicit_safety_annotation,
     }
 }
 
@@ -613,16 +643,21 @@ pub fn extract_class(entity: &Entity) -> Class {
                 if child.get_kind() == EntityKind::Method {
                     has_any_method = true;
 
-                    // Check if method is virtual
+                    // Check if method is virtual, deleted, or defaulted
                     let is_virtual = child.is_virtual_method();
                     let is_pure_virtual = child.is_pure_virtual_method();
+                    let is_special = is_deleted_or_defaulted_method(&child);
 
-                    if !is_virtual {
+                    // Deleted/defaulted methods (= delete, = default) don't count as
+                    // non-virtual methods for @interface validation. They are special
+                    // member functions, not regular callable methods.
+                    if !is_virtual && !is_special {
                         has_non_virtual_methods = true;
                         debug_println!("DEBUG PARSE: Class '{}' has non-virtual method: {:?}", name, child.get_name());
                     }
 
-                    if !is_pure_virtual {
+                    // Deleted/defaulted methods also don't count for pure virtual check
+                    if !is_pure_virtual && !is_special {
                         all_methods_pure_virtual = false;
                         debug_println!("DEBUG PARSE: Class '{}' has non-pure-virtual method: {:?}", name, child.get_name());
                     }
