@@ -10,8 +10,6 @@ RAII tracking extends RustyCpp's borrow checking to handle C++-specific patterns
 
 ### 1. Reference/Pointer Stored in Container
 
-**Status:** ✅ Fully Implemented
-
 Detects when a pointer or reference is stored in a container that outlives the pointee.
 
 ```cpp
@@ -34,8 +32,6 @@ void bad_pointer_in_container() {
 
 ### 2. User-Defined RAII Types
 
-**Status:** ✅ Fully Implemented
-
 Recognizes classes with user-defined destructors as RAII types, enabling proper lifetime tracking.
 
 ```cpp
@@ -54,8 +50,6 @@ public:
 - Destructor presence propagated to IR for lifetime analysis
 
 ### 3. Iterator Outlives Container
-
-**Status:** ✅ Fully Implemented
 
 Detects when an iterator survives longer than its source container.
 
@@ -78,8 +72,6 @@ void bad_iterator_outlives_container() {
 - Iterator types: `*::iterator`, `*::const_iterator`, `*::reverse_iterator`
 
 ### 4. Lambda Escape Analysis
-
-**Status:** ✅ Fully Implemented (Refined)
 
 Detects when lambdas with reference captures escape their scope, potentially creating dangling references.
 
@@ -111,8 +103,6 @@ void good_lambda_local_use() {
 
 ### 5. Member Lifetime Tracking
 
-**Status:** ✅ Fully Implemented
-
 Detects when references to object members outlive the containing object.
 
 ```cpp
@@ -136,8 +126,6 @@ void bad_member_reference() {
 - Field borrows tracked through `BorrowField` IR statements
 
 ### 6. new/delete Tracking
-
-**Status:** ✅ Fully Implemented
 
 Detects double-free and use-after-free with raw heap allocations.
 
@@ -166,7 +154,7 @@ void bad_use_after_free() {
 
 ### 7. Constructor Initialization Order
 
-**Status:** ❌ Not Implemented (LOW priority)
+**Status:** Not Implemented (LOW priority)
 
 Would detect when member initializers reference uninitialized members.
 
@@ -183,45 +171,47 @@ class Bad {
 **Why not implemented:**
 - Requires parser changes to extract member initializer lists
 - Relatively rare bug pattern
-- LOW priority in the implementation plan
 
-## Architecture
+## Comparison with Rust
 
-### Key Components
+### What RustyCpp Has
 
-1. **`RaiiTracker`** (`src/analysis/raii_tracking.rs`)
-   - Main tracker coordinating all RAII-related analysis
-   - Tracks container borrows, iterator borrows, member borrows, lambda captures, heap allocations
-   - Scope-aware: detects issues at scope boundaries
+| Feature | Rust | RustyCpp | Notes |
+|---------|------|----------|-------|
+| Move detection | ✅ | ✅ | `std::move()` tracked |
+| Use-after-move | ✅ | ✅ | Full detection |
+| Multiple immutable borrows | ✅ | ✅ | Allowed |
+| Single mutable borrow | ✅ | ✅ | Enforced |
+| Mutable + immutable conflict | ✅ | ✅ | Detected |
+| Transitive borrow tracking | ✅ | ✅ | Chain detection |
+| Scope-based borrow cleanup | ✅ | ✅ | Working |
+| Loop iteration analysis | ✅ | ✅ | 2-iteration simulation |
+| Conditional path analysis | ✅ | ✅ | Path-sensitive |
+| Reassignment after move | ✅ | ✅ | Variable valid again |
+| Return reference to local | ✅ | ✅ | Detected |
+| Return reference to temp | ✅ | ✅ | Detected |
+| Lifetime annotations | ✅ | ✅ | `@lifetime` syntax |
+| Iterator outlives container | ✅ | ✅ | Detected |
+| Reference in container | ✅ | ✅ | Detected |
+| User-defined RAII | N/A | ✅ | C++ specific |
+| Lambda escape analysis | ✅ | ✅ | Refined implementation |
 
-2. **Tracking Structures:**
-   - `ContainerBorrow`: Tracks pointers stored in containers
-   - `IteratorBorrow`: Tracks iterators and their source containers
-   - `MemberBorrow`: Tracks references to object fields
-   - `LambdaCapture`: Tracks lambda reference captures and escape status
-   - `HeapAllocation`: Tracks new/delete operations
+### What RustyCpp Is Missing
 
-3. **Integration Points:**
-   - `IrStatement::BorrowField`: Generated when `&obj.field` is seen
-   - `IrStatement::LambdaCapture`: Generated for lambda capture lists
-   - `check_raii_issues()`: Main entry point called during analysis
+| Feature | Rust | RustyCpp | Notes |
+|---------|------|----------|-------|
+| Non-Lexical Lifetimes (NLL) | ✅ | ❌ | Would reduce false positives |
+| Constructor init order | N/A | ❌ | C++ specific, low priority |
 
-### Scope-Based Detection
+### Key Architectural Differences
 
-The tracker uses scope levels to detect lifetime violations:
+1. **Rust's NLL (Non-Lexical Lifetimes):** Borrows end at last use, not scope end. RustyCpp uses scope-based tracking, which can produce false positives.
 
-```
-Scope 0 (function level)
-├── Scope 1 (block)
-│   └── Scope 2 (nested block)
-```
+2. **Rust's Drop Check:** Rust understands exactly when destructors run and validates no references outlive their referents through drop analysis. RustyCpp has `ImplicitDrop` but limited semantic understanding.
 
-When exiting a scope:
-1. Check for container borrows where pointee dies but container survives
-2. Check for iterators that outlive their containers
-3. Check for member references that outlive their objects
-4. Check for escaped lambdas with reference captures to dying variables
-5. Clean up tracking data for the dying scope
+3. **Rust's Ownership System:** Built into the type system. RustyCpp retrofits ownership tracking onto C++, which has different semantics (copy by default, explicit move).
+
+4. **Type System Integration:** Rust's borrow checker is integrated with the type system. RustyCpp is a separate static analyzer that can't modify C++ compilation.
 
 ## Usage
 
@@ -260,7 +250,7 @@ The RAII tracking module has comprehensive test coverage:
 
 Run RAII-specific tests:
 ```bash
-cargo test --test raii_integration_tests
+cargo test raii
 ```
 
 ## Limitations
@@ -273,7 +263,8 @@ cargo test --test raii_integration_tests
 
 ## Future Work
 
-- Implement Phase 7 (Constructor Initialization Order)
+- Implement Constructor Initialization Order checking
 - Improve escape analysis for lambdas passed to functions
 - Better tracking of iterator invalidation from container modifications (not just destruction)
 - Support for custom container types via annotations
+- Non-Lexical Lifetimes (NLL) for reduced false positives
