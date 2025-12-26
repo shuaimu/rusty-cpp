@@ -37,6 +37,14 @@ pub enum SafetyMode {
     Unsafe, // Skip borrow checking, default for unannotated code
 }
 
+/// Class annotation types for inheritance safety
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClassAnnotation {
+    Interface,  // @interface - pure virtual class (like Rust trait)
+    Safe,       // @safe - class methods are safe by default
+    Unsafe,     // @unsafe - class methods are unsafe by default
+}
+
 /// Function signature for disambiguating overloaded functions
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
@@ -941,6 +949,118 @@ pub fn parse_entity_safety(entity: &Entity) -> Option<SafetyMode> {
     } else {
         None
     }
+}
+
+/// Parse class annotation from entity comment (for clang AST)
+/// Returns @interface, @safe, or @unsafe annotation for a class
+#[allow(dead_code)]
+pub fn parse_class_annotation(entity: &Entity) -> Option<ClassAnnotation> {
+    if let Some(comment) = entity.get_comment() {
+        // Parse each line of the comment and check for annotations at the start
+        for line in comment.lines() {
+            let trimmed = line.trim();
+            // Remove common comment prefixes
+            let content = if trimmed.starts_with("///") {
+                trimmed[3..].trim()
+            } else if trimmed.starts_with("//") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("/*") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("*") {
+                trimmed[1..].trim()
+            } else {
+                trimmed
+            };
+
+            // Check for @interface first (more specific)
+            if contains_annotation(content, "@interface") {
+                return Some(ClassAnnotation::Interface);
+            } else if contains_annotation(content, "@safe") {
+                return Some(ClassAnnotation::Safe);
+            } else if contains_annotation(content, "@unsafe") {
+                return Some(ClassAnnotation::Unsafe);
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
+
+/// Check if a class is marked as @interface by reading source file comments
+/// This is needed when libclang's get_comment() doesn't capture the annotation
+pub fn check_class_interface_annotation(entity: &Entity) -> bool {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    // Try get_comment() first
+    if let Some(comment) = entity.get_comment() {
+        for line in comment.lines() {
+            let trimmed = line.trim();
+            let content = if trimmed.starts_with("///") {
+                trimmed[3..].trim()
+            } else if trimmed.starts_with("//") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("/*") {
+                trimmed[2..].trim()
+            } else if trimmed.starts_with("*") {
+                trimmed[1..].trim()
+            } else {
+                trimmed
+            };
+            if contains_annotation(content, "@interface") {
+                return true;
+            }
+        }
+    }
+
+    // Fall back to reading source file directly
+    let location = match entity.get_location() {
+        Some(loc) => loc,
+        None => return false,
+    };
+
+    let file_location = location.get_file_location();
+    let file = match file_location.file {
+        Some(f) => f,
+        None => return false,
+    };
+
+    let file_path = file.get_path();
+    let entity_line = file_location.line as usize;
+
+    let file_handle = match File::open(&file_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let reader = BufReader::new(file_handle);
+    let mut prev_line = String::new();
+    let mut current_line = 0;
+
+    for line_result in reader.lines() {
+        current_line += 1;
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if current_line == entity_line {
+            // Check if previous line has @interface
+            let trimmed = prev_line.trim();
+            if trimmed.starts_with("//") {
+                let content = trimmed[2..].trim();
+                if contains_annotation(content, "@interface") {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        prev_line = line;
+    }
+
+    false
 }
 
 #[cfg(test)]

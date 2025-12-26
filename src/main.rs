@@ -215,6 +215,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     )?;
     violations.extend(mutable_violations);
 
+    // Check inheritance safety (@interface validation, safe inheritance rules)
+    let inheritance_violations = analysis::inheritance_safety::check_inheritance_safety(&ast.classes);
+    violations.extend(inheritance_violations);
+
     // Build intermediate representation with safety context
     let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
 

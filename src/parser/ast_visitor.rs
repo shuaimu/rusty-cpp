@@ -236,6 +236,12 @@ pub struct Class {
     pub location: SourceLocation,
     // RAII Phase 2: Track if class has a destructor
     pub has_destructor: bool,              // True if class has ~ClassName()
+    // Inheritance safety: Interface-related fields
+    pub is_interface: bool,                // Has @interface annotation
+    pub has_virtual_destructor: bool,      // virtual ~Class() or virtual ~Class() = default
+    pub all_methods_pure_virtual: bool,    // All methods are = 0 (pure virtual)
+    pub has_non_virtual_methods: bool,     // Has any non-virtual methods (excluding destructor)
+    pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>, // @safe or @unsafe on class
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +531,7 @@ pub fn extract_function(entity: &Entity) -> Function {
 // Phase 3: Extract class template information
 pub fn extract_class(entity: &Entity) -> Class {
     use crate::debug_println;
+    use crate::parser::safety_annotations::{check_class_interface_annotation, parse_entity_safety};
 
     // Bug #8 fix: Use qualified name for classes to prevent namespace collision
     // e.g., "yaml::Node" instead of just "Node"
@@ -544,10 +551,23 @@ pub fn extract_class(entity: &Entity) -> Class {
     debug_println!("DEBUG PARSE: Class '{}' has {} template parameters: {:?}",
         name, template_parameters.len(), template_parameters);
 
+    // Check for @interface annotation
+    let is_interface = check_class_interface_annotation(entity);
+    if is_interface {
+        debug_println!("DEBUG PARSE: Class '{}' is marked as @interface", name);
+    }
+
+    // Check for @safe/@unsafe annotation on the class
+    let safety_annotation = parse_entity_safety(entity);
+
     let mut members = Vec::new();
     let mut methods = Vec::new();
     let mut base_classes = Vec::new();
     let mut has_destructor = false;  // RAII Phase 2: Track destructors
+    let mut has_virtual_destructor = false;
+    let mut has_non_virtual_methods = false;
+    let mut all_methods_pure_virtual = true;  // Start true, set false if we find non-pure method
+    let mut has_any_method = false;  // Track if there are any methods to check
 
     // LibClang's get_children() flattens the hierarchy and returns class members directly
     // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
@@ -575,12 +595,39 @@ pub fn extract_class(entity: &Entity) -> Class {
                 // RAII Phase 2: Mark class as having a destructor
                 has_destructor = true;
                 debug_println!("DEBUG PARSE: Class '{}' has user-defined destructor", name);
+
+                // Check if destructor is virtual
+                if child.is_virtual_method() {
+                    has_virtual_destructor = true;
+                    debug_println!("DEBUG PARSE: Class '{}' has virtual destructor", name);
+                }
+
                 let method = extract_function(&child);
                 methods.push(method);
             }
             EntityKind::Method | EntityKind::Constructor => {
                 // Member method
                 let method = extract_function(&child);
+
+                // Skip constructors for pure virtual check
+                if child.get_kind() == EntityKind::Method {
+                    has_any_method = true;
+
+                    // Check if method is virtual
+                    let is_virtual = child.is_virtual_method();
+                    let is_pure_virtual = child.is_pure_virtual_method();
+
+                    if !is_virtual {
+                        has_non_virtual_methods = true;
+                        debug_println!("DEBUG PARSE: Class '{}' has non-virtual method: {:?}", name, child.get_name());
+                    }
+
+                    if !is_pure_virtual {
+                        all_methods_pure_virtual = false;
+                        debug_println!("DEBUG PARSE: Class '{}' has non-pure-virtual method: {:?}", name, child.get_name());
+                    }
+                }
+
                 methods.push(method);
             }
             EntityKind::FunctionTemplate => {
@@ -588,6 +635,10 @@ pub fn extract_class(entity: &Entity) -> Class {
                 if child.is_definition() {
                     let method = extract_function(&child);
                     methods.push(method);
+                    // Template methods cannot be pure virtual
+                    has_any_method = true;
+                    all_methods_pure_virtual = false;
+                    has_non_virtual_methods = true;
                 }
             }
             EntityKind::BaseSpecifier => {
@@ -602,8 +653,13 @@ pub fn extract_class(entity: &Entity) -> Class {
         }
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}",
-        name, members.len(), methods.len(), base_classes.len(), has_destructor);
+    // If no methods at all, all_methods_pure_virtual should be true (vacuously true for interfaces)
+    if !has_any_method {
+        all_methods_pure_virtual = true;
+    }
+
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, all_methods_pure_virtual={}, has_non_virtual_methods={}",
+        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, all_methods_pure_virtual, has_non_virtual_methods);
 
     Class {
         name,
@@ -614,6 +670,12 @@ pub fn extract_class(entity: &Entity) -> Class {
         base_classes,
         location,
         has_destructor,  // RAII Phase 2
+        // Inheritance safety fields
+        is_interface,
+        has_virtual_destructor,
+        all_methods_pure_virtual,
+        has_non_virtual_methods,
+        safety_annotation,
     }
 }
 
