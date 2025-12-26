@@ -1265,8 +1265,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
 fn extract_expression(entity: &Entity) -> Option<Expression> {
     match entity.get_kind() {
         EntityKind::DeclRefExpr => {
-            // Check if this references a field declaration (member variable)
-            // If so, it's an implicit this->field access
+            // Check what kind of entity this DeclRefExpr references
             if let Some(ref_entity) = entity.get_reference() {
                 if ref_entity.get_kind() == EntityKind::FieldDecl {
                     // This is a member field access - convert to this.field
@@ -1276,6 +1275,23 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             object: Box::new(Expression::Variable("this".to_string())),
                             field: field_name,
                         });
+                    }
+                }
+                // Check if this references a method (member function)
+                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::FunctionDecl {
+                    // This is a function/method reference - include class qualifier if available
+                    if let Some(func_name) = entity.get_name() {
+                        // Try to get the class name from semantic parent
+                        if let Some(parent) = ref_entity.get_semantic_parent() {
+                            if matches!(parent.get_kind(), EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate) {
+                                if let Some(class_name) = parent.get_name() {
+                                    // Return qualified name: ClassName::method
+                                    return Some(Expression::Variable(format!("{}::{}", class_name, func_name)));
+                                }
+                            }
+                        }
+                        // No class parent, return just the function name
+                        return Some(Expression::Variable(func_name));
                     }
                 }
             }

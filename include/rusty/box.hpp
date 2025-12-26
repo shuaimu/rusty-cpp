@@ -1,6 +1,7 @@
 #ifndef RUSTY_BOX_HPP
 #define RUSTY_BOX_HPP
 
+#include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
 
 // Box<T> - A smart pointer for heap-allocated values with single ownership
@@ -47,7 +48,14 @@ public:
     Box(Box&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;  // Other box becomes empty
     }
-    
+
+    // Converting move constructor - allows Box<Derived> to convert to Box<Base>
+    // Only enabled when U* is convertible to T* (i.e., U derives from T)
+    // @lifetime: owned
+    template<typename U, typename = typename std::enable_if<
+        std::is_convertible<U*, T*>::value && !std::is_same<U, T>::value>::type>
+    Box(Box<U>&& other) noexcept : ptr(other.release()) {}
+
     // Move assignment - transfers ownership
     // @lifetime: owned
     Box& operator=(Box&& other) noexcept {
@@ -58,6 +66,19 @@ public:
                 ptr = other.ptr;
                 other.ptr = nullptr;
             }
+            return *this;
+        }
+    }
+
+    // Converting move assignment - allows Box<Derived> to assign to Box<Base>
+    // @lifetime: owned
+    template<typename U, typename = typename std::enable_if<
+        std::is_convertible<U*, T*>::value && !std::is_same<U, T>::value>::type>
+    Box& operator=(Box<U>&& other) noexcept {
+        // @unsafe
+        {
+            delete ptr;
+            ptr = other.release();
             return *this;
         }
     }

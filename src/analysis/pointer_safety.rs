@@ -175,9 +175,25 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             }
             Some("dereference")
         }
-        Expression::AddressOf(_) => {
-            // Taking address is generally safe in Rust, but we can make it require unsafe too
-            Some("address-of")
+        Expression::AddressOf(inner) => {
+            // Check what we're taking the address of
+            match inner.as_ref() {
+                // &ClassName::method - taking address of member function is safe
+                // Member function pointers don't involve object lifetimes
+                Expression::MemberAccess { .. } => None,
+                // &ClassName::method often appears as Variable("ClassName::method")
+                // due to how C++ qualified names are parsed
+                Expression::Variable(name) if name.contains("::") => None,
+                // &variable - taking address of a local variable is unsafe (could create dangling pointers)
+                _ => Some("address-of")
+            }
+        }
+        Expression::Variable(name) if name == "this" => {
+            // Passing 'this' as a raw pointer is unsafe - the callee might store it
+            // and cause dangling pointer issues later. While 'this' is valid during
+            // the call, we can't guarantee how the callee uses it.
+            // Note: *this (dereference) is safe, but passing 'this' itself is not.
+            Some("'this' pointer")
         }
         Expression::FunctionCall { args, .. } => {
             // Check arguments recursively
@@ -196,7 +212,14 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             contains_pointer_operation(right)
         }
         Expression::MemberAccess { object, .. } => {
-            // Check object for pointer operations (e.g., ptr->field wraps object in Dereference)
+            // this->member is safe - just accessing a member through the implicit this pointer
+            // ptr->field (dereference through pointer) is handled by the parser wrapping object in Dereference
+            if let Expression::Variable(name) = object.as_ref() {
+                if name == "this" {
+                    return None;  // this->member is safe
+                }
+            }
+            // For other cases, check object for pointer operations
             contains_pointer_operation(object)
         }
         Expression::Cast(inner) => {
@@ -330,5 +353,76 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false);
         assert!(error.is_none(), "Pointer declaration should be allowed");
+    }
+
+    #[test]
+    fn test_this_pointer_in_function_call() {
+        // Passing 'this' as an argument should be flagged as unsafe
+        let stmt = Statement::FunctionCall {
+            name: "register".to_string(),
+            args: vec![
+                Expression::Variable("this".to_string())
+            ],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 25,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "Passing 'this' as argument should be flagged");
+        let error_msg = error.unwrap();
+        assert!(error_msg.contains("'this' pointer"), "Error should mention 'this' pointer");
+    }
+
+    #[test]
+    fn test_this_dereference_is_safe() {
+        // *this is safe - dereferencing this in a member function is valid
+        let expr = Expression::Dereference(Box::new(Expression::Variable("this".to_string())));
+        assert_eq!(contains_pointer_operation(&expr), None, "*this should be safe");
+    }
+
+    #[test]
+    fn test_this_as_variable_is_unsafe() {
+        // 'this' by itself (passed as pointer) is unsafe
+        let expr = Expression::Variable("this".to_string());
+        assert_eq!(contains_pointer_operation(&expr), Some("'this' pointer"));
+    }
+
+    #[test]
+    fn test_this_member_access_is_safe() {
+        // this->member is safe - just accessing a member through the implicit this pointer
+        let expr = Expression::MemberAccess {
+            object: Box::new(Expression::Variable("this".to_string())),
+            field: "value_".to_string(),
+        };
+        assert_eq!(contains_pointer_operation(&expr), None, "this->member should be safe");
+    }
+
+    #[test]
+    fn test_member_function_pointer_is_safe() {
+        // &ClassName::method is safe - member function pointers don't involve object lifetimes
+        // This tests the MemberAccess variant
+        let expr = Expression::AddressOf(Box::new(Expression::MemberAccess {
+            object: Box::new(Expression::Variable("TestService".to_string())),
+            field: "echo_wrapper".to_string(),
+        }));
+        assert_eq!(contains_pointer_operation(&expr), None, "&ClassName::method (MemberAccess) should be safe");
+    }
+
+    #[test]
+    fn test_qualified_member_function_pointer_is_safe() {
+        // &ClassName::method as Variable("ClassName::method") is safe
+        // The parser produces this form for qualified member function pointers
+        let expr = Expression::AddressOf(Box::new(Expression::Variable("TestService::echo_wrapper".to_string())));
+        assert_eq!(contains_pointer_operation(&expr), None, "&ClassName::method (qualified Variable) should be safe");
+    }
+
+    #[test]
+    fn test_address_of_variable_is_unsafe() {
+        // &x is unsafe - taking address of a local variable
+        let expr = Expression::AddressOf(Box::new(Expression::Variable("x".to_string())));
+        assert_eq!(contains_pointer_operation(&expr), Some("address-of"), "&variable should be unsafe");
     }
 }
