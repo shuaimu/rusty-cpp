@@ -170,14 +170,34 @@ pub fn check_method_safety_contracts(
             }
 
             // Find the implementation in the derived class
-            // Match by method name (strip class prefix if present)
+            // Match by method name (strip class prefix if present) AND parameter types
+            // This correctly handles overloaded methods like __reg_to__(Server&, size_t) vs __reg_to__(Server&)
             let interface_method_name = interface_method.name.split("::").last()
                 .unwrap_or(&interface_method.name);
+
+            // Extract parameter types from interface method for matching
+            let interface_param_types: Vec<&str> = interface_method.parameters.iter()
+                .map(|p| p.type_name.as_str())
+                .collect();
 
             let impl_method = class.methods.iter()
                 .find(|m| {
                     let impl_name = m.name.split("::").last().unwrap_or(&m.name);
-                    impl_name == interface_method_name
+                    if impl_name != interface_method_name {
+                        return false;
+                    }
+                    // For overloaded methods, also check parameter count and types
+                    if m.parameters.len() != interface_method.parameters.len() {
+                        return false;
+                    }
+                    // Compare parameter types (normalize by stripping namespaces)
+                    m.parameters.iter().zip(interface_param_types.iter()).all(|(impl_param, iface_type)| {
+                        let impl_type = impl_param.type_name.as_str();
+                        // Normalize types for comparison (strip leading namespace qualifiers)
+                        let impl_type_base = impl_type.split("::").last().unwrap_or(impl_type);
+                        let iface_type_base = iface_type.split("::").last().unwrap_or(iface_type);
+                        impl_type_base == iface_type_base || impl_type == *iface_type
+                    })
                 });
 
             let Some(impl_method) = impl_method else { continue };
