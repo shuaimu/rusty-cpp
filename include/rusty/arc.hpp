@@ -106,13 +106,12 @@ public:
     }
 
     // Factory method for in-place construction with arguments
-    // @unsafe
+    // @safe - Public API is safe, internal allocation is encapsulated
     // @lifetime: owned
     template<typename... Args>
     static Arc<T> make(Args&&... args) {
-        // @unsafe {
-        return Arc<T>(new ControlBlock(std::forward<Args>(args)...));
-        // }
+        // @unsafe - new allocation
+        { return Arc<T>(new ControlBlock(std::forward<Args>(args)...)); }
     }
 
     // Private constructor from control block
