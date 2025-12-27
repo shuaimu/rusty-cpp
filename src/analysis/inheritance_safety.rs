@@ -392,8 +392,9 @@ fn check_expression_safety(
         Expression::Lambda { .. } => {
             // Lambda captures are checked elsewhere
         }
-        // Variable references and literals are safe
-        Expression::Variable(_) | Expression::Literal(_) => {}
+        // Variable references, literals, and string literals are safe
+        // String literals have static lifetime and cannot dangle
+        Expression::Variable(_) | Expression::Literal(_) | Expression::StringLiteral(_) => {}
     }
 
     errors

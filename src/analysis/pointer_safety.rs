@@ -1,6 +1,33 @@
 use crate::parser::{Statement, Expression, Function};
 use crate::parser::safety_annotations::SafetyMode;
 
+/// Check if a type is a char pointer type (char*, const char*, wchar_t*, etc.)
+/// These types are unsafe in @safe code because they represent raw pointers
+/// that can dangle or be misused.
+fn is_char_pointer_type(type_name: &str) -> bool {
+    let normalized = type_name.replace(" ", "").to_lowercase();
+
+    // Check for various char pointer patterns
+    normalized == "char*" ||
+    normalized == "constchar*" ||
+    normalized == "charconst*" ||
+    normalized == "wchar_t*" ||
+    normalized == "constwchar_t*" ||
+    normalized == "wchar_tconst*" ||
+    normalized == "char16_t*" ||
+    normalized == "char32_t*" ||
+    // Handle qualified names (e.g., std::char*, ::char*)
+    normalized.ends_with("::char*") ||
+    normalized.ends_with("::constchar*") ||
+    // Handle spacing variations
+    type_name.contains("char *") ||
+    type_name.contains("char const *") ||
+    type_name.contains("const char *") ||
+    type_name.contains("wchar_t *") ||
+    type_name.contains("wchar_t const *") ||
+    type_name.contains("const wchar_t *")
+}
+
 /// Check for unsafe pointer operations in a function's AST
 #[allow(dead_code)]
 pub fn check_function_for_pointers(_function: &crate::ir::IrFunction) -> Result<Vec<String>, String> {
@@ -17,6 +44,16 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
     // Only @safe functions have pointer operations checked
     // Undeclared and @unsafe functions are allowed to do pointer operations
     let skip_pointer_checks = function_safety != SafetyMode::Safe;
+
+    // Note: We do NOT check function parameters for char* types.
+    // A @safe function CAN take const char* parameters and act as a safe wrapper.
+    // The key rule is:
+    // - Callers must pass string literals (not char* variables)
+    // - The function can internally use @unsafe blocks
+    // - Variable declarations of char* inside the function ARE flagged
+    //
+    // This enables the "safe wrapper" pattern:
+    //   void Logger::log(const char* msg) { @unsafe { internal_log(msg); } }
 
     for stmt in &function.body {
         // Track unsafe scope depth
@@ -107,7 +144,18 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
             }
         }
         Statement::VariableDecl(var) if var.is_pointer => {
-            // Raw pointer declaration is allowed, but dereferencing isn't
+            // Check if this is a char* type declaration
+            // char* and const char* are unsafe in @safe code because they are raw pointers
+            // String literals are safe (handled separately), but explicit char* variables are not
+            if is_char_pointer_type(&var.type_name) {
+                return Some(format!(
+                    "Cannot declare '{}' with type '{}' in @safe code at line {}. \
+                     Use @unsafe block or a safe wrapper type. \
+                     (String literals like \"hello\" are safe; explicit char* variables are not)",
+                    var.name, var.type_name, var.location.line
+                ));
+            }
+            // Other raw pointer declarations are allowed (dereferencing is still checked)
             return None;
         }
         Statement::FunctionCall { args, location, .. } => {
@@ -228,7 +276,28 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // Return "cast" as the operation type, but also check inner for other violations
             Some("cast")
         }
-        _ => None
+        Expression::StringLiteral(_) => {
+            // String literals have static lifetime and cannot dangle
+            // They are stored in the .rodata segment and are always safe
+            None
+        }
+        Expression::Literal(_) => {
+            // Numeric and other literals are safe
+            None
+        }
+        Expression::Lambda { .. } => {
+            // Lambda safety is checked elsewhere (capture analysis)
+            None
+        }
+        Expression::Move(inner) => {
+            // Check inner expression for pointer operations
+            contains_pointer_operation(inner)
+        }
+        Expression::Variable(_) => {
+            // Regular variable references (not 'this') are safe
+            // Note: 'this' is handled above with a guard
+            None
+        }
     }
 }
 
@@ -424,5 +493,44 @@ mod tests {
         // &x is unsafe - taking address of a local variable
         let expr = Expression::AddressOf(Box::new(Expression::Variable("x".to_string())));
         assert_eq!(contains_pointer_operation(&expr), Some("address-of"), "&variable should be unsafe");
+    }
+
+    // Tests for is_char_pointer_type
+    #[test]
+    fn test_char_ptr_detection() {
+        assert!(super::is_char_pointer_type("char*"));
+        assert!(super::is_char_pointer_type("char *"));
+        assert!(super::is_char_pointer_type("const char*"));
+        assert!(super::is_char_pointer_type("const char *"));
+        assert!(super::is_char_pointer_type("char const*"));
+        assert!(super::is_char_pointer_type("char const *"));
+    }
+
+    #[test]
+    fn test_wchar_ptr_detection() {
+        assert!(super::is_char_pointer_type("wchar_t*"));
+        assert!(super::is_char_pointer_type("wchar_t *"));
+        assert!(super::is_char_pointer_type("const wchar_t*"));
+        assert!(super::is_char_pointer_type("const wchar_t *"));
+    }
+
+    #[test]
+    fn test_char16_char32_ptr_detection() {
+        assert!(super::is_char_pointer_type("char16_t*"));
+        assert!(super::is_char_pointer_type("char32_t*"));
+    }
+
+    #[test]
+    fn test_non_char_ptr_not_detected() {
+        assert!(!super::is_char_pointer_type("int*"));
+        assert!(!super::is_char_pointer_type("void*"));
+        assert!(!super::is_char_pointer_type("std::string"));
+        assert!(!super::is_char_pointer_type("char")); // Not a pointer
+    }
+
+    #[test]
+    fn test_string_literal_expression_is_safe() {
+        let expr = Expression::StringLiteral("hello".to_string());
+        assert_eq!(contains_pointer_operation(&expr), None, "String literal should be safe");
     }
 }

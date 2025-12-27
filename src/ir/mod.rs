@@ -658,6 +658,12 @@ fn extract_return_source(
             None
         }
 
+        Expression::StringLiteral(_) => {
+            // String literal: return "hello";
+            // String literals have static lifetime and no source variable to track
+            None
+        }
+
         Expression::Lambda { .. } => {
             // Lambda: return [captures]() { ... };
             // Lambdas are self-contained closures, no direct source variable
@@ -791,6 +797,12 @@ fn convert_statement(
                             // Track literals as temporaries for lifetime analysis
                             crate::parser::Expression::Literal(lit) => {
                                 let temp_name = format!("_temp_literal_{}_{}", temp_counter, lit);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
+                            // Track string literals - they have static lifetime
+                            crate::parser::Expression::StringLiteral(lit) => {
+                                let temp_name = format!("_temp_string_literal_{}", temp_counter);
                                 temp_counter += 1;
                                 arg_names.push(temp_name);
                             }
@@ -1158,6 +1170,12 @@ fn convert_statement(
                                 temp_counter += 1;
                                 arg_names.push(temp_name);
                             }
+                            // Track string literals - they have static lifetime
+                            crate::parser::Expression::StringLiteral(lit) => {
+                                let temp_name = format!("_temp_string_literal_{}", temp_counter);
+                                temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
                             // Track binary expressions as temporaries (e.g., a + b)
                             crate::parser::Expression::BinaryOp { .. } => {
                                 let temp_name = format!("_temp_expr_{}", temp_counter);
@@ -1285,6 +1303,15 @@ fn convert_statement(
                     Ok(Some(vec![IrStatement::Assign {
                         lhs: lhs_var.clone(),
                         rhs: IrExpression::Literal(value.clone()),
+                    }]))
+                }
+                // String literal assignment (e.g., const char* s = "hello")
+                // String literals have static lifetime - this is safe
+                crate::parser::Expression::StringLiteral(value) => {
+                    debug_println!("DEBUG IR: String literal assignment: {} = \"{}\"", lhs_var, value);
+                    Ok(Some(vec![IrStatement::Assign {
+                        lhs: lhs_var.clone(),
+                        rhs: IrExpression::Literal(value.clone()),  // Treat as literal for IR
                     }]))
                 }
                 // Lambda expression: generate LambdaCapture statement for safety checking
@@ -1533,6 +1560,12 @@ fn convert_statement(
                     // Track literals as temporaries for lifetime analysis
                     crate::parser::Expression::Literal(lit) => {
                         let temp_name = format!("_temp_literal_{}_{}", temp_counter, lit);
+                        temp_counter += 1;
+                        arg_names.push(temp_name);
+                    }
+                    // Track string literals - they have static lifetime
+                    crate::parser::Expression::StringLiteral(lit) => {
+                        let temp_name = format!("_temp_string_literal_{}", temp_counter);
                         temp_counter += 1;
                         arg_names.push(temp_name);
                     }

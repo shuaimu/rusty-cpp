@@ -206,6 +206,130 @@ If implemented, the rules would likely be:
 
 This mirrors Rust's distinction between `fn()` (safe) and `unsafe fn()` (unsafe to call).
 
+## String Literals and `const char*` ✅
+
+**Status: Implemented (December 2025)**
+
+### The Problem
+
+String literals in C++ have type `const char[N]` but **decay** to `const char*` in most contexts:
+
+```cpp
+"hello"              // Type: const char[6]
+const char* p = "hello";  // Decays to const char*
+```
+
+If we treat string literals the same as raw `const char*` pointers, common patterns become unusable.
+
+### Our Approach: Literals Safe, Explicit `char*` Unsafe
+
+**Key distinction:**
+- **String literal expressions** (`"hello"`) are **safe** - they have static lifetime and cannot dangle
+- **Explicit `char*` / `const char*` types** are **unsafe** - they are raw pointers
+
+```cpp
+// @safe
+void example() {
+    log("hello");              // OK - string literal is safe
+
+    const char* ptr = "hello"; // UNSAFE - explicit char* type
+    log(ptr);                  // UNSAFE - using char* variable
+}
+```
+
+### Why String Literals Are Safe
+
+String literals have special properties:
+
+| Property | Safety Implication |
+|----------|-------------------|
+| Static storage duration | Cannot be freed, exists for entire program |
+| Stored in .rodata | Read-only memory, cannot be corrupted |
+| Compile-time known | Address fixed at link time |
+| Immutable | No mutation concerns |
+
+**String literals cannot dangle.** The expression `"hello"` is inherently safe.
+
+### Why Explicit `char*` Is Unsafe
+
+Once you have a `const char*` variable, the checker cannot know its origin:
+- Did it come from a string literal? (safe)
+- Did it come from `malloc`? (could be freed)
+- Did it come from a local array? (could dangle)
+
+Rather than complex lifetime tracking, we keep it simple: **explicit `char*` requires `@unsafe`**.
+
+### Safe API Pattern: Wrap Unsafe in Constructor
+
+APIs that need to accept string literals should use `@unsafe` blocks internally:
+
+```cpp
+class Logger {
+public:
+    // @safe - external interface is safe
+    void log(const char* msg) {
+        // @unsafe - internal use of char* is wrapped
+        {
+            internal_log(msg);
+        }
+    }
+};
+
+// @safe
+void example() {
+    Logger logger;
+    logger.log("hello");  // OK - literal passed to safe API
+}
+```
+
+### Alternative: Template API (No Decay)
+
+For APIs that only accept literals, use a template that accepts arrays directly:
+
+```cpp
+template<size_t N>
+void log(const char (&msg)[N]) {
+    // msg is const char[N], not const char*
+    // No decay, so we know it's a literal or static array
+}
+
+// @safe
+void example() {
+    log("hello");  // OK - array passed directly, no decay
+
+    const char* ptr = "hello";
+    log(ptr);      // ERROR - won't compile, ptr is not an array
+}
+```
+
+### Comparison with Rust
+
+Rust takes a similar approach:
+- `&'static str` (string literals) are safe
+- `*const c_char` (raw char pointer) requires `unsafe`
+
+```rust
+let s: &'static str = "hello";  // Safe
+let p: *const i8 = s.as_ptr();  // Raw pointer
+unsafe { use_ptr(p); }          // Must be in unsafe block
+```
+
+### Current Status
+
+**Implemented!** String literals are now recognized and allowed in `@safe` code. The checker:
+
+1. Detects `Expression::StringLiteral` in the AST
+2. Allows string literals to be passed to functions with `const char*` parameters
+3. Flags explicit `char*` variable declarations in `@safe` code
+4. Supports the safe wrapper pattern (functions with `const char*` parameters can use `@unsafe` blocks internally)
+
+### Implementation Details
+
+The string literal tracking is implemented in:
+- `src/parser/ast_visitor.rs` - `Expression::StringLiteral` variant
+- `src/analysis/pointer_safety.rs` - `is_char_pointer_type()` function
+- Tests in `tests/string_literal_tests.rs` and `tests/string_literals/`
+
 ## Other Known Limitations
 
 ### Virtual Function Calls

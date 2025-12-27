@@ -415,6 +415,10 @@ pub enum Expression {
         args: Vec<Expression>,
     },
     Literal(String),
+    /// String literal expression ("hello", L"wide", u8"utf8", etc.)
+    /// String literals are safe in @safe code because they have static lifetime.
+    /// They cannot dangle because they're stored in .rodata (read-only data segment).
+    StringLiteral(String),
     BinaryOp {
         left: Box<Expression>,
         op: String,
@@ -1730,6 +1734,20 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 // For integer literals, we can use a placeholder since we don't
                 // need the actual value for ownership/borrow checking
                 Some(Expression::Literal("0".to_string()))
+            }
+        }
+        EntityKind::StringLiteral => {
+            // String literals ("hello", L"wide", u8"utf8", etc.) have static lifetime
+            // and are safe in @safe code - they cannot dangle.
+            // Extract the string value from the entity
+            debug_println!("DEBUG: Found StringLiteral entity");
+            if let Some(name) = entity.get_name() {
+                Some(Expression::StringLiteral(name))
+            } else if let Some(display) = entity.get_display_name() {
+                Some(Expression::StringLiteral(display))
+            } else {
+                // Even without the exact value, we know it's a string literal
+                Some(Expression::StringLiteral("<string literal>".to_string()))
             }
         }
         EntityKind::ParenExpr => {
