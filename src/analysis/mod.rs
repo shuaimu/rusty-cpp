@@ -70,6 +70,7 @@ pub mod mutable_checker;
 pub mod lambda_capture_safety;
 pub mod raii_tracking;
 pub mod inheritance_safety;
+pub mod function_pointer_safety;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

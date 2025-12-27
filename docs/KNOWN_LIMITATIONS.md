@@ -148,63 +148,33 @@ using member_function_class_t = typename member_function_class<decltype(Func)>::
 
 This pattern makes RPC service registration safe by eliminating the runtime address-of operator while preserving the same functionality.
 
-## Function Pointers Not Supported
+## Function Pointers ✅
 
-### Current Status
+**Status: Implemented (December 2025)**
 
-Function pointers (both free function and member function pointers) are not currently tracked by RustyCpp.
+RustyCpp provides type-safe wrappers for function pointers:
 
-### Why Function Pointers Could Be Safe
-
-Unlike data pointers, function pointers have properties that make them inherently safer:
-
-1. **Point to code, not data** - The target is compiled code in the text segment
-2. **No deallocation** - Code isn't freed at runtime (except dlclose scenarios)
-3. **No use-after-free** - The pointed-to code remains valid for the program's lifetime
-4. **No mutation** - You can't modify code through a function pointer
-
-Rust treats function pointers (`fn(args) -> ret`) as safe for these reasons.
-
-### Why We Don't Support Them Yet
-
-The challenge is **safety propagation**. A function pointer's safety depends on what it points to:
+| Type | Description |
+|------|-------------|
+| `rusty::SafeFn<Sig>` | Holds @safe functions, safe to call |
+| `rusty::UnsafeFn<Sig>` | Holds any function, requires @unsafe to call |
+| `rusty::SafeMemFn<Sig>` | Holds @safe member functions |
+| `rusty::UnsafeMemFn<Sig>` | Holds any member function |
 
 ```cpp
-void safe_func() { /* safe operations */ }
-void unsafe_func() { int* p = nullptr; *p = 1; }
+#include <rusty/fn.hpp>
 
-void (*fp)();  // Same type for both!
+// @safe
+void example() {
+    rusty::SafeFn<void(int)> safe_cb = &safe_func;  // Analyzer verifies @safe
+    safe_cb(42);  // OK
 
-fp = &safe_func;   // Calling fp() should be safe
-fp = &unsafe_func; // Calling fp() should require @unsafe
-```
-
-C++ doesn't distinguish at the type level between pointers to @safe vs @unsafe functions. Tracking this would require:
-- Flow-sensitive analysis of function pointer assignments
-- Annotations on function pointer types
-- Conservative assumptions when the target is unknown
-
-### Workaround
-
-Mark code using function pointers as `@unsafe`:
-
-```cpp
-// @unsafe - uses function pointers
-void dispatch(void (*handler)(Request)) {
-    handler(req);  // Can't verify handler is @safe
+    rusty::UnsafeFn<void(int)> unsafe_cb = &any_func;
+    // @unsafe { unsafe_cb.call_unsafe(42); }  // Requires @unsafe block
 }
 ```
 
-### Future Consideration
-
-If implemented, the rules would likely be:
-- Declaring function pointers: Safe
-- Assigning from @safe function: Safe
-- Calling through pointer known to point to @safe function: Safe
-- Calling through pointer to @unsafe function: Requires @unsafe
-- Calling through pointer with unknown target: Requires @unsafe (conservative)
-
-This mirrors Rust's distinction between `fn()` (safe) and `unsafe fn()` (unsafe to call).
+**See [function_pointer_safety.md](function_pointer_safety.md) for full documentation.**
 
 ## String Literals and `const char*` ✅
 

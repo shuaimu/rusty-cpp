@@ -6,12 +6,26 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: December 2025 - Partial Borrows Complete!)
+## Current State (Updated: December 2025 - Function Pointer Safety!)
 
 ### What's Fully Implemented ✅
 
 **Latest Features (December 2025):**
-- ✅ **Partial Borrow Tracking** - Borrow individual struct fields independently (**newly implemented!**)
+- ✅ **Function Pointer Safety** - Type-safe function pointer wrappers (**newly implemented!**)
+  - `rusty::SafeFn<Sig>` - holds pointers to @safe functions, safe to call
+  - `rusty::UnsafeFn<Sig>` - holds any function, requires @unsafe to call
+  - `rusty::SafeMemFn<Sig>` / `rusty::UnsafeMemFn<Sig>` - for member function pointers
+  - Analyzer verifies SafeFn only holds @safe function targets
+  - UnsafeFn::call_unsafe() requires @unsafe context
+  - Mirrors Rust's `fn()` vs `unsafe fn()` type distinction
+  - See `docs/function_pointer_safety.md` and `include/rusty/fn.hpp`
+
+- ✅ **String Literal Safety** - String literals recognized as safe (**newly implemented!**)
+  - `"hello"` expressions are safe in @safe code (static lifetime)
+  - Explicit `char*` / `const char*` variable declarations require @unsafe
+  - Safe wrapper pattern: functions can take char* and use internal @unsafe
+
+- ✅ **Partial Borrow Tracking** - Borrow individual struct fields independently
   - Borrow different fields mutably at the same time (`&mut p.first` and `&mut p.second`)
   - Nested field support (`o.inner.data`)
   - Double mutable borrow of same field detected
@@ -200,7 +214,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 650+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection, transitive borrows, and partial borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), partial moves/borrows, and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 650+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection, transitive borrows, and partial borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), partial moves/borrows, function pointer safety, string literal tracking, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Virtual function calls (basic method calls work)
@@ -722,7 +736,28 @@ Use after move: variable 'x' has been moved
 
 ## Recent Achievements
 
-**Latest (December 2025): Partial Borrow Tracking Complete**
+**Latest (December 2025): Function Pointer Safety Implementation**
+1. ✅ **Function Pointer Safety via Type Wrappers**
+   - Created `rusty::SafeFn<Sig>` and `rusty::UnsafeFn<Sig>` wrapper types
+   - Created `rusty::SafeMemFn<Sig>` and `rusty::UnsafeMemFn<Sig>` for member functions
+   - Type detection in analyzer: `is_safe_fn_type()`, `is_unsafe_fn_type()`
+   - SafeFn assignment checking: verifies target is @safe
+   - UnsafeFn::call_unsafe() requires @unsafe context
+   - 9 unit tests + 8 integration tests
+
+2. ✅ **String Literal Safety Tracking**
+   - Added `Expression::StringLiteral` variant to AST
+   - String literals (`"hello"`) are safe in @safe code
+   - Explicit char* variable declarations require @unsafe
+   - 7 integration tests
+
+**Files created:**
+- `include/rusty/fn.hpp` - SafeFn/UnsafeFn wrapper types
+- `src/analysis/function_pointer_safety.rs` - Analyzer module
+- `tests/test_function_pointer_safety.rs` - Integration tests
+- `docs/function_pointer_safety.md` - User documentation
+
+**Previous (December 2025): Partial Borrow Tracking Complete**
 1. ✅ **Partial Borrow Tracking** - Borrow different struct fields independently
    - Added `field_borrows: HashMap<String, HashMap<String, BorrowInfo>>` for per-field tracking
    - Added `check_field_borrow_conflicts()` function for field-level conflict detection
