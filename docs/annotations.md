@@ -476,6 +476,50 @@ By default, all external functions are `@unsafe`. You can mark them as `[unsafe]
 // }
 ```
 
+### Important: STL Internal Type Names
+
+When annotating STL functions, you must use the **internal implementation names** that libclang reports, not the user-facing typedef names. This is because libclang parses the actual type definitions and reports the underlying type.
+
+**Example: `std::string`**
+
+`std::string` is actually a typedef:
+```cpp
+// In <string> header:
+namespace std {
+    typedef basic_string<char> string;
+    // Or in C++11 ABI:
+    namespace __cxx11 {
+        typedef basic_string<char> string;
+    }
+}
+```
+
+When you write code using `std::string`, libclang sees the internal name `std::__cxx11::basic_string`. Therefore, external annotations must use the internal name:
+
+```cpp
+// ❌ Won't work - typedef name
+// @external: {
+//   std::string: [safe]
+// }
+
+// ✅ Works - internal name that libclang reports
+// @external: {
+//   std::__cxx11::basic_string::basic_string: [safe]
+// }
+```
+
+**Common STL Internal Names:**
+
+| User-Facing Type | Internal Name (libclang) |
+|-----------------|--------------------------|
+| `std::string` | `std::__cxx11::basic_string<char>` |
+| `std::wstring` | `std::__cxx11::basic_string<wchar_t>` |
+| `std::string_view` | `std::basic_string_view<char>` |
+| `std::list<T>::front` | `std::list<...>::front` |
+| `std::list<T>::pop_front` | `std::list<...>::pop_front` |
+
+**Tip:** If you're unsure of the internal name, run the borrow checker with verbose output (`-vv`) to see what function names it reports in error messages.
+
 ---
 
 ## STL in Safe Code
