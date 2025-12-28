@@ -159,38 +159,31 @@ public:
     Rc() = delete;
 
     // Primary factory method - constructs T with given arguments
-    // @unsafe
+    // @safe - Public API is safe, internal allocation is encapsulated
     // @lifetime: owned
     template<typename... Args>
     static Rc<T> make(Args&&... args) {
-        // @unsafe {
-        auto* cb = new RcControlBlock<T>(std::forward<Args>(args)...);
-        return Rc<T>(cb, cb->value);
-        // }
+        // @unsafe - new allocation
+        {
+            auto* cb = new RcControlBlock<T>(std::forward<Args>(args)...);
+            return Rc<T>(cb, cb->value);
+        }
     }
 
-    // Rust-idiomatic factory method - Rc::new()
-    // @unsafe
-    // @lifetime: owned
-    static Rc<T> new_(T value) {
-        // @unsafe {
-        auto* cb = new RcControlBlock<T>(std::move(value));
-        return Rc<T>(cb, cb->value);
-        // }
-    }
-
-    // Copy constructor - increases reference count
+    // @safe - Copy constructor increases reference count
     Rc(const Rc& other)
         : ptr_(other.ptr_), control_(other.control_) {
-        increment_strong();
+        // @unsafe - reference count manipulation
+        { increment_strong(); }
     }
 
-    // Converting copy constructor - allows Rc<Derived> -> Rc<Base>
+    // @safe - Converting copy constructor allows Rc<Derived> -> Rc<Base>
     // This is what enables polymorphism!
     template<typename U, typename = std::enable_if_t<std::is_convertible<U*, T*>::value>>
     Rc(const Rc<U>& other)
         : ptr_(other.ptr_), control_(other.control_) {
-        increment_strong();
+        // @unsafe - reference count manipulation
+        { increment_strong(); }
     }
 
     // Move constructor - no ref count change
@@ -269,33 +262,31 @@ public:
         decrement_strong();
     }
 
-    // Dereference - get immutable reference
-    // @unsafe
+    // @safe - Dereference to get immutable reference
     // @lifetime: (&'a) -> &'a
     const T& operator*() const {
-        // @unsafe {
-        assert(ptr_ != nullptr);
-        return *ptr_;
-        // }
+        // @unsafe - assert and pointer dereference
+        {
+            assert(ptr_ != nullptr);
+            return *ptr_;
+        }
     }
 
-    // Arrow operator - access members (supports virtual dispatch!)
-    // @unsafe
+    // @safe - Arrow operator accesses members (supports virtual dispatch!)
     // @lifetime: (&'a) -> &'a
     const T* operator->() const {
-        // @unsafe {
-        assert(ptr_ != nullptr);
-        return ptr_;
-        // }
+        // @unsafe - assert and pointer access
+        {
+            assert(ptr_ != nullptr);
+            return ptr_;
+        }
     }
 
-    // Get raw pointer
-    // @unsafe
+    // @safe - Get raw pointer (const, so safe to return)
     // @lifetime: (&'a) -> &'a
     const T* get() const {
-        // @unsafe {
-        return ptr_;
-        // }
+        // @unsafe - raw pointer access
+        { return ptr_; }
     }
 
     // Check if Rc contains a value
@@ -318,12 +309,9 @@ public:
         return control_ ? (control_->weak_count > 0 ? control_->weak_count - 1 : 0) : 0;
     }
 
-    // Clone - explicitly create a new Rc to the same value
-    // @unsafe
+    // @safe - Clone explicitly creates a new Rc to the same value
     Rc clone() const {
-        // @unsafe {
         return Rc(*this);
-        // }
     }
 
     // Try to get mutable reference if we're the only owner
@@ -341,7 +329,7 @@ public:
     // Returns None if Rc is invalid
     Option<Rc<T>> make_unique() const {
         if (ptr_ && control_) {
-            return Some(Rc<T>::new_(*ptr_));
+            return Some(Rc<T>::make(*ptr_));
         }
         return None;
     }
@@ -378,54 +366,44 @@ public:
     }
 };
 
-// Factory function for creating Rc
+// @safe - Factory function for creating Rc
 template<typename T, typename... Args>
 // @lifetime: owned
 Rc<T> make_rc(Args&&... args) {
     return Rc<T>::make(std::forward<Args>(args)...);
 }
 
-// Comparison operators for Rc<T> (needed for std::set and std::map)
-// @unsafe
+// @safe - Comparison operators for Rc<T> (needed for std::set and std::map)
 template<typename T>
 bool operator<(const Rc<T>& lhs, const Rc<T>& rhs) {
-    // @unsafe {
     return lhs.get() < rhs.get();
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator==(const Rc<T>& lhs, const Rc<T>& rhs) {
-    // @unsafe {
     return lhs.get() == rhs.get();
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator!=(const Rc<T>& lhs, const Rc<T>& rhs) {
-    // @unsafe {
     return !(lhs == rhs);
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator<=(const Rc<T>& lhs, const Rc<T>& rhs) {
-    // @unsafe {
     return !(rhs < lhs);
-    // }
 }
 
-// @unsafe
+// @safe
 template<typename T>
 bool operator>(const Rc<T>& lhs, const Rc<T>& rhs) {
-    // @unsafe {
     return rhs < lhs;
-    // }
 }
 
+// @safe
 template<typename T>
 bool operator>=(const Rc<T>& lhs, const Rc<T>& rhs) {
     return !(lhs < rhs);

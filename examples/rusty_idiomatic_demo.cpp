@@ -63,20 +63,20 @@ void demo_arc_rust_style() {
 // @safe
 void demo_rc_rust_style() {
     printf("\n=== Rc (Rust-style API) ===\n");
-    
-    // Rust style: Rc::new()
-    auto rc1 = rusty::Rc<int>::new_(42);
-    printf("Rc::new_(42): %d, count: %zu\n", *rc1, rc1.strong_count());
-    
+
+    // Create Rc using make()
+    auto rc1 = rusty::Rc<int>::make(42);
+    printf("Rc::make(42): %d, count: %zu\n", *rc1, rc1.strong_count());
+
     // Short form: rusty::rc()
     auto rc2 = rusty::rc<int>(100);
-    
+
     // Clone increases ref count
     auto rc3 = rc1.clone();
     printf("After clone, count: %zu\n", rc1.strong_count());
-    
+
     // Try to get mutable (Rust pattern)
-    auto rc4 = rusty::Rc<int>::new_(200);
+    auto rc4 = rusty::Rc<int>::make(200);
     if (auto* mut_ref = rc4.get_mut()) {
         *mut_ref = 250;
         printf("Modified unique Rc: %d\n", *rc4);
@@ -213,16 +213,16 @@ void demo_combined_rust_style() {
     }
     
     // Result<Rc<T>, E>
-    auto make_rc = [](int val) -> rusty::Result<rusty::Rc<int>, const char*> {
+    auto make_rc_result = [](int val) -> rusty::Result<rusty::Rc<int>, const char*> {
         if (val < 0) {
             return rusty::Result<rusty::Rc<int>, const char*>::Err("Negative value");
         }
         return rusty::Result<rusty::Rc<int>, const char*>::Ok(
-            rusty::Rc<int>::new_(val)
+            rusty::Rc<int>::make(val)
         );
     };
     
-    auto result = make_rc(100);
+    auto result = make_rc_result(100);
     if (result.is_ok()) {
         auto rc = result.unwrap();
         printf("Result<Rc<int>>: %d\n", *rc);

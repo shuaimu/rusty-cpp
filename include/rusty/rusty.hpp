@@ -78,7 +78,7 @@ namespace rusty {
     // @lifetime: owned
     Rc<T> rc_from_box(Box<T>&& box) {
         T* ptr = box.into_raw();
-        Rc<T> result = Rc<T>::new_(std::move(*ptr));
+        Rc<T> result = Rc<T>::make(std::move(*ptr));
         delete ptr;
         return result;
     }
