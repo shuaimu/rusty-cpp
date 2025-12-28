@@ -4,6 +4,7 @@ use std::fs;
 // ============================================================================
 // Basic loop tests - detect use-after-move across iterations
 // NOTE: Tests use simple structs instead of STL to avoid libclang crashes.
+// NOTE: Tests use @safe annotation because @unsafe functions are not analyzed.
 // ============================================================================
 
 #[test]
@@ -14,9 +15,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     Box ptr;
 
@@ -37,7 +39,7 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should find the use-after-move error in loop
-    assert!(stdout.contains("loop") || stdout.contains("iteration") || stdout.contains("move"),
+    assert!(stdout.contains("Use after move in loop"),
             "Should detect use-after-move in loop. stdout: {}, stderr: {}", stdout, stderr);
 
     // Clean up
@@ -85,9 +87,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     Box ptr;
     int count = 0;
@@ -109,7 +112,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should find the use-after-move error in loop
-    assert!(stdout.contains("loop") || stdout.contains("iteration") || stdout.contains("move"),
+    assert!(stdout.contains("Use after move in loop"),
             "Should detect use-after-move in while loop. Output: {}", stdout);
 
     // Clean up
@@ -159,9 +162,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     Box ptr;
 
@@ -184,12 +188,10 @@ void test() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // The checker should either:
-    // 1. Detect use-after-move in the loop (ptr moved in if, used in second iteration)
-    // 2. Or pass if the conservative analysis doesn't flag it
-    // This is a complex case - we just verify it doesn't crash
-    assert!(!stdout.contains("panic") && !stdout.contains("error:"),
-            "Should not crash on conditional move in loop. Output: {}", stdout);
+    // Outer variable `ptr` is moved in the loop (inside conditional).
+    // The 2-iteration simulation should detect this as a use-after-move on second iteration.
+    assert!(stdout.contains("Use after move in loop"),
+            "Should detect outer variable moved in conditional inside loop. Output: {}", stdout);
 
     // Clean up
     let _ = fs::remove_file("test_conditional_move.cpp");
@@ -211,9 +213,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     for (int i = 0; i < 10; i++) {
         // This is a FRESH variable each iteration
@@ -248,9 +251,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     int count = 0;
     while (count < 10) {
@@ -287,9 +291,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     for (int i = 0; i < 5; i++) {
         // Fresh outer local each iteration
@@ -331,9 +336,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     // Declared OUTSIDE the loop
     Box outer;
@@ -354,7 +360,7 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // SHOULD find violation - outer variable is moved in loop
-    assert!(stdout.contains("move") || stdout.contains("iteration") || stdout.contains("violation"),
+    assert!(stdout.contains("Use after move in loop"),
             "Should detect outer variable moved in loop. Output: {}", stdout);
 
     // Clean up
@@ -369,9 +375,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     for (int i = 0; i < 5; i++) {
         // Multiple fresh variables each iteration
@@ -409,9 +416,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     int count = 0;
     do {
@@ -448,9 +456,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     for (int i = 0; i < 10; i++) {
         Box local;  // Fresh each iteration
@@ -488,9 +497,10 @@ namespace std {
     template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
 }
 
+// @safe
 struct Box { int* ptr; };
 
-// @unsafe
+// @safe
 void test() {
     for (int i = 0; i < 10; i++) {
         Box local;  // Fresh each iteration
@@ -515,4 +525,253 @@ void test() {
 
     // Clean up
     let _ = fs::remove_file("test_loop_reassign_ok.cpp");
+}
+
+// ============================================================================
+// Nested block tests (bug fix December 2025)
+// These tests verify that variables declared in nested if/else blocks inside
+// loops are correctly tracked as loop-local and don't trigger false positives.
+// Bug: docs/BUG_LOOP_NESTED_VARDECL.md
+// ============================================================================
+
+#[test]
+fn test_nested_if_block_local_variable_ok() {
+    // Variable declared in nested if block - should be OK (loop-local)
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    for (int i = 0; i < 3; i++) {
+        if (i > 0) {
+            Box x;  // Loop-local (in nested block)
+            Box moved = std::move(x);  // Should be OK
+        }
+    }
+}
+"#;
+
+    fs::write("test_nested_if_local_ok.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nested_if_local_ok.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT find any violations - variable is loop-local in nested block
+    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
+            "Variable in nested if block should be OK. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nested_if_local_ok.cpp");
+}
+
+#[test]
+fn test_nested_else_block_local_variable_ok() {
+    // Variable declared in else block - should be OK (loop-local)
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    for (int i = 0; i < 3; i++) {
+        if (i == 0) {
+            int dummy = 1;
+        } else {
+            Box x;  // Loop-local (in else block)
+            Box moved = std::move(x);  // Should be OK
+        }
+    }
+}
+"#;
+
+    fs::write("test_nested_else_local_ok.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nested_else_local_ok.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT find any violations
+    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
+            "Variable in else block should be OK. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nested_else_local_ok.cpp");
+}
+
+#[test]
+fn test_outer_variable_in_nested_if_error() {
+    // Outer variable moved in nested if block - should FAIL
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    Box outer;
+    for (int i = 0; i < 3; i++) {
+        if (i > 0) {
+            Box moved = std::move(outer);  // ERROR: outer moved repeatedly
+        }
+    }
+}
+"#;
+
+    fs::write("test_outer_in_if_error.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_outer_in_if_error.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // SHOULD find violation - outer variable is moved in loop
+    assert!(stdout.contains("Use after move in loop"),
+            "Should detect outer variable moved in nested if. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_outer_in_if_error.cpp");
+}
+
+#[test]
+fn test_deeply_nested_blocks_local_ok() {
+    // Variable in deeply nested blocks - should be OK (loop-local)
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    for (int i = 0; i < 3; i++) {
+        if (i > 0) {
+            if (i > 1) {
+                Box x;  // Deeply nested loop-local
+                Box moved = std::move(x);  // Should be OK
+            }
+        }
+    }
+}
+"#;
+
+    fs::write("test_deeply_nested_local_ok.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_deeply_nested_local_ok.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT find any violations
+    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
+            "Variable in deeply nested blocks should be OK. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_deeply_nested_local_ok.cpp");
+}
+
+#[test]
+fn test_mixed_outer_and_nested_local() {
+    // Mix of outer variable (error) and nested local (ok)
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    Box outer;  // Outer - will be error
+    for (int i = 0; i < 3; i++) {
+        if (i > 0) {
+            Box local;  // Loop-local - should be OK
+            Box moved_local = std::move(local);  // OK
+            Box moved_outer = std::move(outer);  // ERROR
+        }
+    }
+}
+"#;
+
+    fs::write("test_mixed_outer_nested.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_mixed_outer_nested.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should find violation for outer, but not for local
+    assert!(stdout.contains("Use after move in loop"),
+            "Should detect outer variable error but not nested local. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_mixed_outer_nested.cpp");
+}
+
+#[test]
+fn test_while_loop_nested_if_local_ok() {
+    // While loop with nested if block local variable - should be OK
+    let test_code = r#"
+namespace std {
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+}
+
+// @safe
+struct Box { int* ptr; };
+
+// @safe
+void test() {
+    int count = 0;
+    while (count < 5) {
+        if (count > 0) {
+            Box x;  // Loop-local in nested if
+            Box moved = std::move(x);  // OK
+        }
+        count++;
+    }
+}
+"#;
+
+    fs::write("test_while_nested_if_ok.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_while_nested_if_ok.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT find any violations
+    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
+            "While loop with nested if local should be OK. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_while_nested_if_ok.cpp");
 }

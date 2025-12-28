@@ -377,34 +377,12 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
                 // First iteration
                 ownership_tracker.enter_loop();
                 
-                // Track variables declared in the loop
+                // Track variables declared in the loop (including nested If/else blocks)
                 let mut loop_local_vars = HashSet::new();
-                
+                collect_loop_local_vars(&loop_body, &mut loop_local_vars);
+
+                // First iteration: process all statements
                 for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
-                    // Track variable declarations in the loop
-                    // Variables declared inside loop body are fresh each iteration
-                    match loop_stmt {
-                        crate::ir::IrStatement::VarDecl { name, .. } => {
-                            // Variable declaration: the variable is fresh each iteration
-                            loop_local_vars.insert(name.clone());
-                        }
-                        crate::ir::IrStatement::Borrow { to, .. } => {
-                            loop_local_vars.insert(to.clone());
-                        }
-                        crate::ir::IrStatement::Move { to, .. } => {
-                            // Move-initialization creates a new variable (e.g., unique_ptr<T> x = std::move(y))
-                            loop_local_vars.insert(to.clone());
-                        }
-                        crate::ir::IrStatement::Assign { lhs, .. } => {
-                            // Assignment to new variable (e.g., auto x = make_unique<T>())
-                            loop_local_vars.insert(lhs.clone());
-                        }
-                        crate::ir::IrStatement::CallExpr { result: Some(var), .. } => {
-                            // Function call with result stored in a variable (e.g., auto x = make_unique<T>())
-                            loop_local_vars.insert(var.clone());
-                        }
-                        _ => {}
-                    }
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors, header_cache, function);
 
                     // NEW: Check for last uses (after processing statement)
@@ -451,7 +429,40 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
     Ok(errors)
 }
 
-// Helper function to check for loop-specific errors in second iteration
+/// Recursively collect loop-local variables from statements, including nested If/else blocks.
+/// A loop-local variable is any variable declared/initialized inside the loop body.
+fn collect_loop_local_vars(statements: &[crate::ir::IrStatement], loop_local_vars: &mut HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            crate::ir::IrStatement::VarDecl { name, .. } => {
+                loop_local_vars.insert(name.clone());
+            }
+            crate::ir::IrStatement::Borrow { to, .. } => {
+                loop_local_vars.insert(to.clone());
+            }
+            crate::ir::IrStatement::Move { to, .. } => {
+                loop_local_vars.insert(to.clone());
+            }
+            crate::ir::IrStatement::Assign { lhs, .. } => {
+                loop_local_vars.insert(lhs.clone());
+            }
+            crate::ir::IrStatement::CallExpr { result: Some(var), .. } => {
+                loop_local_vars.insert(var.clone());
+            }
+            // Recursively search nested blocks
+            crate::ir::IrStatement::If { then_branch, else_branch } => {
+                collect_loop_local_vars(then_branch, loop_local_vars);
+                if let Some(else_stmts) = else_branch {
+                    collect_loop_local_vars(else_stmts, loop_local_vars);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Helper function to check for loop-specific errors in second iteration.
+/// Recursively checks nested If/else blocks.
 fn check_statement_for_loop_errors(
     statement: &crate::ir::IrStatement,
     state_after_first: &HashMap<String, OwnershipState>,
@@ -488,6 +499,17 @@ fn check_statement_for_loop_errors(
                             var
                         ));
                     }
+                }
+            }
+        }
+        // Recursively check nested If/else blocks
+        crate::ir::IrStatement::If { then_branch, else_branch } => {
+            for stmt in then_branch {
+                check_statement_for_loop_errors(stmt, state_after_first, loop_local_vars, errors);
+            }
+            if let Some(else_stmts) = else_branch {
+                for stmt in else_stmts {
+                    check_statement_for_loop_errors(stmt, state_after_first, loop_local_vars, errors);
                 }
             }
         }
