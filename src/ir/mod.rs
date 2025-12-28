@@ -279,6 +279,11 @@ pub enum IrStatement {
     LambdaCapture {
         captures: Vec<LambdaCaptureInfo>,
     },
+    // Variable declaration (for loop-local tracking)
+    VarDecl {
+        name: String,
+        type_name: String,
+    },
 }
 
 /// Information about a lambda capture
@@ -738,7 +743,11 @@ fn convert_statement(
                     declaration_index,  // NEW: Track declaration order
                 },
             );
-            Ok(None)
+            // Generate VarDecl IR statement for loop-local tracking
+            Ok(Some(vec![IrStatement::VarDecl {
+                name: var.name.clone(),
+                type_name: var.type_name.clone(),
+            }]))
         }
         Statement::ReferenceBinding { name, target, is_mutable, .. } => {
             let mut statements = Vec::new();

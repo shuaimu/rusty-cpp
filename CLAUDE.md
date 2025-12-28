@@ -134,6 +134,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Simulates 2 iterations to catch errors on second pass
   - Properly clears loop-local borrows between iterations
   - Tracks moved state across loop iterations
+  - **Fixed (Dec 2025)**: Variables declared in loop body (`Box x;`) are now correctly tracked as loop-local
 - ✅ **If/else conditional analysis with path-sensitivity**
   - Parses if/else statements and conditions
   - Conservative path-sensitive analysis

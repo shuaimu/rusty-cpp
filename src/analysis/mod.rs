@@ -384,6 +384,10 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
                     // Track variable declarations in the loop
                     // Variables declared inside loop body are fresh each iteration
                     match loop_stmt {
+                        crate::ir::IrStatement::VarDecl { name, .. } => {
+                            // Variable declaration: the variable is fresh each iteration
+                            loop_local_vars.insert(name.clone());
+                        }
                         crate::ir::IrStatement::Borrow { to, .. } => {
                             loop_local_vars.insert(to.clone());
                         }
