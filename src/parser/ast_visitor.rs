@@ -12,9 +12,49 @@ use crate::debug_println;
 /// This means deleted/defaulted methods will be treated as regular methods
 /// for now, which may cause false positive @interface violations.
 #[allow(dead_code)]
-fn is_deleted_or_defaulted_method(_entity: &Entity) -> bool {
-    // TODO: Re-enable when we have a safe way to tokenize
-    // See: clang crate's source.rs line 449 - slice::from_raw_parts can fail
+fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
+    // Check if this is a special member function (constructor, copy/move ops, destructor)
+    // that is defaulted (= default) or deleted (= delete).
+    //
+    // These don't count as regular methods for @interface validation because:
+    // 1. They're compiler-generated or explicitly disabled
+    // 2. They can't be pure virtual (no virtual dispatch needed)
+    // 3. They're boilerplate, not part of the interface contract
+
+    let kind = entity.get_kind();
+    let name = entity.get_name().unwrap_or_default();
+
+    // Constructors and destructors with = default or = delete
+    if kind == EntityKind::Constructor || kind == EntityKind::Destructor {
+        // Check if it has no definition body (defaulted/deleted have no body)
+        // entity.is_definition() returns false for = default and = delete
+        if !entity.is_definition() {
+            return true;
+        }
+        // Also check for definitions that are empty (implicit default)
+        let children = entity.get_children();
+        if children.is_empty() {
+            return true;
+        }
+    }
+
+    // Check for copy/move assignment operators (operator=)
+    if kind == EntityKind::Method && name == "operator=" {
+        // Check if it has no body (defaulted/deleted)
+        if !entity.is_definition() {
+            return true;
+        }
+        let children = entity.get_children();
+        // An empty operator= or one with only ParmDecl children is defaulted/deleted
+        let has_body = children.iter().any(|c| {
+            let k = c.get_kind();
+            k != EntityKind::ParmDecl && k != EntityKind::TypeRef
+        });
+        if !has_body {
+            return true;
+        }
+    }
+
     false
 }
 
