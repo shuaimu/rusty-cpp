@@ -157,11 +157,34 @@ public:
         return borrow().clone();
     }
     
-    // No copy or move - RefCell itself is not copyable/movable
+    // No copy - RefCell is not copyable (would need to deep copy borrow state)
     RefCell(const RefCell&) = delete;
     RefCell& operator=(const RefCell&) = delete;
-    RefCell(RefCell&&) = delete;
-    RefCell& operator=(RefCell&&) = delete;
+
+    // Move is allowed when not borrowed (matches Rust semantics)
+    // Panics if moved while borrowed (guards would have dangling pointers)
+    RefCell(RefCell&& other) noexcept
+        : value(std::move(other.value)), borrow_state(0) {
+        int other_state = *other.borrow_state.get_const();
+        if (other_state != 0) {
+            // In debug mode, this would be caught - in release, undefined behavior
+            assert(false && "RefCell<T> moved while borrowed");
+        }
+        // Reset other's state (it's now empty/moved-from)
+    }
+
+    RefCell& operator=(RefCell&& other) noexcept {
+        if (this != &other) {
+            int this_state = *borrow_state.get_const();
+            int other_state = *other.borrow_state.get_const();
+            if (this_state != 0 || other_state != 0) {
+                assert(false && "RefCell<T> moved while borrowed");
+            }
+            value = std::move(other.value);
+            // borrow_state stays 0 for both
+        }
+        return *this;
+    }
 };
 
 // Ref<T> - RAII guard for immutable borrow

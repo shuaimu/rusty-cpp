@@ -5,18 +5,16 @@ use crate::debug_println;
 /// These special member functions don't count as regular methods for @interface validation.
 /// Since libclang 16.0+ is required for clang_CXXMethod_isDeleted,
 /// we detect this by tokenizing the method declaration.
-fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
-    if let Some(range) = entity.get_range() {
-        let tokens = range.tokenize();
-        // Look for the pattern: "=" followed by "delete" or "default"
-        for i in 0..tokens.len().saturating_sub(1) {
-            let spelling = tokens[i].get_spelling();
-            let next_spelling = tokens[i + 1].get_spelling();
-            if spelling == "=" && (next_spelling == "delete" || next_spelling == "default") {
-                return true;
-            }
-        }
-    }
+///
+/// NOTE: Tokenization is currently disabled because range.tokenize() can crash
+/// in debug builds when processing temp files or certain source locations.
+/// The clang crate's tokenize() has UB issues with slice::from_raw_parts.
+/// This means deleted/defaulted methods will be treated as regular methods
+/// for now, which may cause false positive @interface violations.
+#[allow(dead_code)]
+fn is_deleted_or_defaulted_method(_entity: &Entity) -> bool {
+    // TODO: Re-enable when we have a safe way to tokenize
+    // See: clang crate's source.rs line 449 - slice::from_raw_parts can fail
     false
 }
 

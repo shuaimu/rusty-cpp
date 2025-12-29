@@ -101,12 +101,19 @@ public:
         return old;
     }
 
-    // No copy or move - UnsafeCell itself is not copyable/movable
-    // (This prevents accidental aliasing of the inner pointer)
+    // No copy - UnsafeCell is not copyable (would alias the inner value)
     UnsafeCell(const UnsafeCell&) = delete;
     UnsafeCell& operator=(const UnsafeCell&) = delete;
-    UnsafeCell(UnsafeCell&&) = delete;
-    UnsafeCell& operator=(UnsafeCell&&) = delete;
+
+    // Move is allowed (matches Rust semantics)
+    // SAFETY: Any existing pointers to the old location become invalid
+    UnsafeCell(UnsafeCell&& other) noexcept : value(std::move(other.value)) {}
+    UnsafeCell& operator=(UnsafeCell&& other) noexcept {
+        if (this != &other) {
+            value = std::move(other.value);
+        }
+        return *this;
+    }
 };
 
 // Helper function to create an UnsafeCell
