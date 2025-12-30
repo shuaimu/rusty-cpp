@@ -408,11 +408,12 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
         Expression::AddressOf(inner) => {
             // Check what we're taking the address of
             match inner.as_ref() {
-                // &ClassName::method - taking address of member function is safe
-                // Member function pointers don't involve object lifetimes
-                Expression::MemberAccess { .. } => None,
+                // For MemberAccess, recursively check if the object contains unsafe operations
+                // e.g., &(ptr->field) has a Dereference inside which is unsafe
+                // e.g., &(static_cast<T*>(p)->field) has both Cast and Dereference
+                Expression::MemberAccess { object, .. } => contains_pointer_operation(object),
                 // &ClassName::method often appears as Variable("ClassName::method")
-                // due to how C++ qualified names are parsed
+                // due to how C++ qualified names are parsed - this is safe (member function pointer)
                 Expression::Variable(name) if name.contains("::") => None,
                 // &variable - taking address of a local variable is unsafe (could create dangling pointers)
                 _ => Some("address-of")
