@@ -191,6 +191,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function, function_safety);
             violations.extend(pointer_errors);
 
+            // Check for std::move on references (forbidden in @safe code)
+            let std_move_errors = analysis::pointer_safety::check_std_move_on_references(function, function_safety);
+            violations.extend(std_move_errors);
+
             // Check for lambda capture safety (reference captures forbidden in @safe)
             let lambda_errors = analysis::lambda_capture_safety::check_lambda_capture_safety(function, function_safety);
             violations.extend(lambda_errors);

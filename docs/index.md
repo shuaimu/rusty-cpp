@@ -35,6 +35,14 @@ Complete implementation summaries for major features:
 
 ### Root Documentation Files
 
+- **[reference_semantics.md](reference_semantics.md)** - ⭐ **C++ Reference Semantics in RustyCpp**
+  - The fundamental difference between C++ and Rust references
+  - Reference assignment semantics (mutable refs move, const refs copy)
+  - `rusty::move` - Rust-like move for references
+  - `rusty::copy` - Explicit copies
+  - `std::move` restrictions in @safe code
+  - Complete API reference for `rusty/move.hpp`
+
 - **[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)** - ⭐ Known limitations and workarounds
   - Loop-local variable move detection (false positive)
   - Minimal examples and workarounds

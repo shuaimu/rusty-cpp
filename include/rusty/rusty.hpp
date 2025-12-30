@@ -31,6 +31,9 @@
 #include "rusty/btreemap.hpp"
 #include "rusty/btreeset.hpp"
 
+// Move semantics (Rust-like reference handling)
+#include "rusty/move.hpp"
+
 // Synchronization primitives (std::sync equivalent)
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"

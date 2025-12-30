@@ -589,7 +589,7 @@ fn extract_return_source(
             extract_return_source(inner, statements)
         }
 
-        Expression::Move(inner) => {
+        Expression::Move { inner, .. } => {
             // Move: return std::move(x);
             debug_println!("DEBUG IR: Processing Move in return statement");
             match inner.as_ref() {
@@ -634,7 +634,7 @@ fn extract_return_source(
             // Check if any argument is a Move expression (e.g., return Constructor(std::move(x)))
             // This handles cases like: return std::move(data); where the move is wrapped in a constructor
             for arg in args.iter() {
-                if let Expression::Move(inner) = arg {
+                if let Expression::Move { .. } = arg {
                     debug_println!("DEBUG IR: Found Move inside function call argument");
                     // Recursively extract from the Move
                     return extract_return_source(arg, statements);
@@ -794,7 +794,7 @@ fn convert_statement(
                             crate::parser::Expression::Variable(var) => {
                                 arg_names.push(var.clone());
                             }
-                            crate::parser::Expression::Move(inner) => {
+                            crate::parser::Expression::Move { inner, .. } => {
                                 if let crate::parser::Expression::Variable(var) = inner.as_ref() {
                                     statements.push(IrStatement::Move {
                                         from: var.clone(),
@@ -1039,7 +1039,7 @@ fn convert_statement(
                 // We need to check if LHS is borrowed before allowing this.
 
                 // Handle Move expression: box = std::move(other)
-                if let crate::parser::Expression::Move(inner) = rhs {
+                if let crate::parser::Expression::Move { inner, .. } = rhs {
                     match inner.as_ref() {
                         crate::parser::Expression::Variable(from_var) => {
                             debug_println!("DEBUG IR: RAII assignment with std::move: generating Move from '{}' to '{}'", from_var, lhs_var);
@@ -1122,7 +1122,7 @@ fn convert_statement(
                         Ok(None)
                     }
                 }
-                crate::parser::Expression::Move(inner) => {
+                crate::parser::Expression::Move { inner, .. } => {
                     debug_println!("DEBUG IR: Processing Move expression in assignment");
                     // This is an explicit std::move call
                     match inner.as_ref() {
@@ -1210,7 +1210,7 @@ fn convert_statement(
                                 }
                                 arg_names.push(var.clone());
                             }
-                            crate::parser::Expression::Move(inner) => {
+                            crate::parser::Expression::Move { inner, .. } => {
                                 // Handle std::move in constructor/function arguments
                                 debug_println!("DEBUG IR: Processing Move in assignment RHS function call");
                                 match inner.as_ref() {
@@ -1269,7 +1269,7 @@ fn convert_statement(
                                 }
                                 arg_names.push(format!("_result_of_{}", recv_name));
                             }
-                            crate::parser::Expression::Move(inner) => {
+                            crate::parser::Expression::Move { inner, .. } => {
                                 if let crate::parser::Expression::Variable(var) = inner.as_ref() {
                                     // Mark as moved before the call
                                     statements.push(IrStatement::Move {
@@ -1423,7 +1423,7 @@ fn convert_statement(
                         };
 
                         // Handle Move RHS
-                        if let crate::parser::Expression::Move(rhs_inner) = &args[1] {
+                        if let crate::parser::Expression::Move { inner: rhs_inner, .. } = &args[1] {
                             debug_println!("DEBUG IR: operator= with Move: {} = Move(...)", lhs);
                             if let crate::parser::Expression::Variable(rhs) = rhs_inner.as_ref() {
                                 debug_println!("DEBUG IR: Creating Move from '{}' to '{}' for operator=", rhs, lhs);
@@ -1464,7 +1464,7 @@ fn convert_statement(
                         }
                         arg_names.push(var.clone());
                     }
-                    crate::parser::Expression::Move(inner) => {
+                    crate::parser::Expression::Move { inner, .. } => {
                         // Handle std::move in function arguments
                         match inner.as_ref() {
                             crate::parser::Expression::Variable(var) => {
@@ -1525,7 +1525,7 @@ fn convert_statement(
 
                         // Recursively check for moves in nested function call
                         for inner_arg in inner_args {
-                            if let crate::parser::Expression::Move(move_inner) = inner_arg {
+                            if let crate::parser::Expression::Move { inner: move_inner, .. } = inner_arg {
                                 match move_inner.as_ref() {
                                     crate::parser::Expression::Variable(var) => {
                                         debug_println!("DEBUG IR: Found Move(Variable) in nested call: {}", var);

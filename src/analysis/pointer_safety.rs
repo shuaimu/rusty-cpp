@@ -1,5 +1,6 @@
-use crate::parser::{Statement, Expression, Function};
+use crate::parser::{Statement, Expression, Function, MoveKind};
 use crate::parser::safety_annotations::SafetyMode;
+use std::collections::HashSet;
 
 /// Check if a type is a char pointer type (char*, const char*, wchar_t*, etc.)
 /// These types are unsafe in @safe code because they represent raw pointers
@@ -80,6 +81,187 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
     }
 
     errors
+}
+
+/// Check for std::move on references in @safe code
+///
+/// In @safe code, using std::move on a reference is forbidden because:
+/// - std::move on a reference moves the underlying object, not the reference
+/// - This differs from Rust's semantics where references are first-class types
+/// - Users should use rusty::move for Rust-like reference move semantics
+///
+/// This check tracks reference variables and reports errors when std::move is called on them.
+pub fn check_std_move_on_references(function: &Function, function_safety: SafetyMode) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Only check @safe functions
+    if function_safety != SafetyMode::Safe {
+        return errors;
+    }
+
+    // Track reference variables (including function parameters)
+    let mut reference_vars: HashSet<String> = HashSet::new();
+
+    // Add reference parameters
+    for param in &function.parameters {
+        if param.is_reference {
+            reference_vars.insert(param.name.clone());
+        }
+    }
+
+    // Process function body
+    let mut unsafe_depth = 0;
+    check_statements_for_std_move_on_ref(
+        &function.body,
+        &function.name,
+        &mut reference_vars,
+        &mut unsafe_depth,
+        &mut errors,
+    );
+
+    errors
+}
+
+fn check_statements_for_std_move_on_ref(
+    statements: &[Statement],
+    function_name: &str,
+    reference_vars: &mut HashSet<String>,
+    unsafe_depth: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    for stmt in statements {
+        // Track unsafe scope depth
+        match stmt {
+            Statement::EnterUnsafe => {
+                *unsafe_depth += 1;
+                continue;
+            }
+            Statement::ExitUnsafe => {
+                if *unsafe_depth > 0 {
+                    *unsafe_depth -= 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Skip checking if we're in an unsafe block
+        if *unsafe_depth > 0 {
+            // Still need to track variable declarations
+            if let Statement::VariableDecl(var) = stmt {
+                if var.is_reference {
+                    reference_vars.insert(var.name.clone());
+                }
+            }
+            continue;
+        }
+
+        match stmt {
+            Statement::VariableDecl(var) => {
+                // Track reference variable declarations
+                if var.is_reference {
+                    reference_vars.insert(var.name.clone());
+                }
+                // Note: Variable struct doesn't have an initializer field to check
+                // The initialization is handled via Assignment or ReferenceBinding statements
+            }
+            Statement::Assignment { rhs, location, .. } => {
+                if let Some(error) = check_expression_for_std_move_on_ref(rhs, reference_vars, location.line) {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+            }
+            Statement::ReferenceBinding { target, location, .. } => {
+                if let Some(error) = check_expression_for_std_move_on_ref(target, reference_vars, location.line) {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+            }
+            Statement::FunctionCall { args, location, .. } => {
+                for arg in args {
+                    if let Some(error) = check_expression_for_std_move_on_ref(arg, reference_vars, location.line) {
+                        errors.push(format!("In function '{}': {}", function_name, error));
+                    }
+                }
+            }
+            Statement::Return(Some(expr)) => {
+                // Use line 0 for returns (we don't have location info here)
+                if let Some(error) = check_expression_for_std_move_on_ref(expr, reference_vars, 0) {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+            }
+            Statement::If { condition, then_branch, else_branch, .. } => {
+                // Check condition
+                if let Some(error) = check_expression_for_std_move_on_ref(condition, reference_vars, 0) {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+
+                // Check branches
+                check_statements_for_std_move_on_ref(then_branch, function_name, reference_vars, unsafe_depth, errors);
+                if let Some(else_stmts) = else_branch {
+                    check_statements_for_std_move_on_ref(else_stmts, function_name, reference_vars, unsafe_depth, errors);
+                }
+            }
+            Statement::Block(statements) => {
+                check_statements_for_std_move_on_ref(statements, function_name, reference_vars, unsafe_depth, errors);
+            }
+            Statement::ExpressionStatement { expr, location } => {
+                if let Some(error) = check_expression_for_std_move_on_ref(expr, reference_vars, location.line) {
+                    errors.push(format!("In function '{}': {}", function_name, error));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_expression_for_std_move_on_ref(
+    expr: &Expression,
+    reference_vars: &HashSet<String>,
+    line: u32,
+) -> Option<String> {
+    match expr {
+        Expression::Move { inner, kind } => {
+            // Only check std::move, not rusty::move
+            if *kind == MoveKind::StdMove {
+                // Check if the inner expression is a reference variable
+                if let Expression::Variable(var_name) = inner.as_ref() {
+                    if reference_vars.contains(var_name) {
+                        return Some(format!(
+                            "std::move on reference '{}' at line {}: \
+                             In @safe code, std::move on references is forbidden because it moves the underlying object, not the reference. \
+                             Use rusty::move for Rust-like reference semantics, or use @unsafe block if you need C++ behavior.",
+                            var_name, line
+                        ));
+                    }
+                }
+            }
+            // Recursively check inner expression
+            check_expression_for_std_move_on_ref(inner, reference_vars, line)
+        }
+        Expression::FunctionCall { args, .. } => {
+            for arg in args {
+                if let Some(error) = check_expression_for_std_move_on_ref(arg, reference_vars, line) {
+                    return Some(error);
+                }
+            }
+            None
+        }
+        Expression::BinaryOp { left, right, .. } => {
+            if let Some(error) = check_expression_for_std_move_on_ref(left, reference_vars, line) {
+                return Some(error);
+            }
+            check_expression_for_std_move_on_ref(right, reference_vars, line)
+        }
+        Expression::Dereference(inner) | Expression::AddressOf(inner) => {
+            check_expression_for_std_move_on_ref(inner, reference_vars, line)
+        }
+        Expression::MemberAccess { object, .. } => {
+            check_expression_for_std_move_on_ref(object, reference_vars, line)
+        }
+        Expression::Cast(inner) => {
+            check_expression_for_std_move_on_ref(inner, reference_vars, line)
+        }
+        _ => None,
+    }
 }
 
 /// Process a list of statements while tracking unsafe depth for pointer safety
@@ -289,7 +471,7 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // Lambda safety is checked elsewhere (capture analysis)
             None
         }
-        Expression::Move(inner) => {
+        Expression::Move { inner, .. } => {
             // Check inner expression for pointer operations
             contains_pointer_operation(inner)
         }

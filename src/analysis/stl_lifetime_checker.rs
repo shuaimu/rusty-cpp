@@ -290,7 +290,7 @@ fn infer_object_type(object_name: &str) -> String {
 fn is_std_move(expr: &Expression) -> bool {
     match expr {
         Expression::FunctionCall { name, .. } => {
-            name == "std::move" || name == "move"
+            name == "std::move" || name == "move" || name == "rusty::move"
         }
         _ => false
     }

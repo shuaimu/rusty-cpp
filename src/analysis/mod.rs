@@ -939,19 +939,35 @@ fn process_statement(
                 return;
             }
 
-            // Phase 3: Check for borrow conflicts using helper function
-            if !check_borrow_conflicts(from, kind, ownership_tracker, errors) {
-                return;
-            }
+            // Rust-like reference assignment semantics:
+            // - Mutable references (&mut T) are NOT Copy - assigning moves the reference
+            // - Immutable references (&T) ARE Copy - assigning copies the reference
+            let from_is_mutable_ref = ownership_tracker.is_mutable_reference(from);
+            let from_is_immutable_ref = ownership_tracker.is_reference(from) && !from_is_mutable_ref;
 
-            // NEW: Check if whole-object borrow conflicts with existing field borrows
-            if !check_whole_object_vs_field_borrows(from, kind, ownership_tracker, errors) {
-                return;
+            // Phase 3: Check for borrow conflicts using helper function
+            // Skip conflict checking for reference-to-reference assignments (they don't create new borrows on the underlying object)
+            if !from_is_mutable_ref && !from_is_immutable_ref {
+                if !check_borrow_conflicts(from, kind, ownership_tracker, errors) {
+                    return;
+                }
+
+                // NEW: Check if whole-object borrow conflicts with existing field borrows
+                if !check_whole_object_vs_field_borrows(from, kind, ownership_tracker, errors) {
+                    return;
+                }
             }
 
             // Record the borrow
             ownership_tracker.add_borrow(from.clone(), to.clone(), kind.clone());
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
+
+            // If `from` is a mutable reference, mark it as moved (mutable refs are not Copy)
+            // If `from` is an immutable reference, it remains valid (immutable refs are Copy)
+            if from_is_mutable_ref {
+                ownership_tracker.set_ownership(from.clone(), OwnershipState::Moved);
+            }
+            // Immutable references are Copy - from remains valid
         }
         
         crate::ir::IrStatement::Assign { lhs, rhs } => {

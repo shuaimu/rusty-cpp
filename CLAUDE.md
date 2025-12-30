@@ -11,6 +11,16 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 ### What's Fully Implemented ✅
 
 **Latest Features (December 2025):**
+- ✅ **rusty::move** - Rust-like move semantics for C++ references (**newly implemented!**)
+  - `rusty::move` for values: same as std::move, transfers ownership
+  - `rusty::move` for mutable references: invalidates the reference itself (Rust-like)
+  - `rusty::move` for const references: compile error (use = to copy)
+  - `rusty::copy` for explicit copies
+  - Zero runtime overhead (identical to std::move at runtime)
+  - **std::move on references forbidden in @safe code** - use rusty::move instead
+  - **Reference assignment semantics**: mutable refs move (like `&mut T`), const refs copy (like `&T`)
+  - See `docs/reference_semantics.md` and `include/rusty/move.hpp`
+
 - ✅ **Function Pointer Safety** - Type-safe function pointer wrappers (**newly implemented!**)
   - `rusty::SafeFn<Sig>` - holds pointers to @safe functions, safe to call
   - `rusty::UnsafeFn<Sig>` - holds any function, requires @unsafe to call

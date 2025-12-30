@@ -3,64 +3,72 @@ use crate::debug_println;
 
 /// Check if a C++ method is deleted (= delete) or defaulted (= default)
 /// These special member functions don't count as regular methods for @interface validation.
-/// Since libclang 16.0+ is required for clang_CXXMethod_isDeleted,
-/// we detect this by tokenizing the method declaration.
 ///
-/// NOTE: Tokenization is currently disabled because range.tokenize() can crash
-/// in debug builds when processing temp files or certain source locations.
-/// The clang crate's tokenize() has UB issues with slice::from_raw_parts.
-/// This means deleted/defaulted methods will be treated as regular methods
-/// for now, which may cause false positive @interface violations.
-#[allow(dead_code)]
+/// Uses libclang's native APIs:
+/// - `is_defaulted()` for `= default` detection (libclang 3.9+)
+/// - `clang_CXXMethod_isDeleted()` for `= delete` detection (libclang 16.0+)
+///
+/// No source file parsing needed - works with temp files and multi-line declarations.
 fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
-    // Check if this is a special member function (constructor, copy/move ops, destructor)
-    // that is defaulted (= default) or deleted (= delete).
-    //
-    // These don't count as regular methods for @interface validation because:
-    // 1. They're compiler-generated or explicitly disabled
-    // 2. They can't be pure virtual (no virtual dispatch needed)
-    // 3. They're boilerplate, not part of the interface contract
-
-    let kind = entity.get_kind();
-    let name = entity.get_name().unwrap_or_default();
-
-    // Constructors and destructors with = default or = delete
-    if kind == EntityKind::Constructor || kind == EntityKind::Destructor {
-        // Check if it has no definition body (defaulted/deleted have no body)
-        // entity.is_definition() returns false for = default and = delete
-        if !entity.is_definition() {
-            return true;
-        }
-        // Also check for definitions that are empty (implicit default)
-        let children = entity.get_children();
-        if children.is_empty() {
-            return true;
-        }
+    // Check for = default using clang crate's wrapper
+    if entity.is_defaulted() {
+        debug_println!("DEBUG PARSE: Method {:?} is defaulted via libclang", entity.get_name());
+        return true;
     }
 
-    // Check for copy/move assignment operators (operator=)
-    if kind == EntityKind::Method && name == "operator=" {
-        // Check if it has no body (defaulted/deleted)
-        if !entity.is_definition() {
-            return true;
-        }
-        let children = entity.get_children();
-        // An empty operator= or one with only ParmDecl children is defaulted/deleted
-        let has_body = children.iter().any(|c| {
-            let k = c.get_kind();
-            k != EntityKind::ParmDecl && k != EntityKind::TypeRef
-        });
-        if !has_body {
-            return true;
-        }
+    // Check for = delete using libclang 16+ native API
+    if is_deleted_via_libclang(entity) {
+        debug_println!("DEBUG PARSE: Method {:?} is deleted via libclang", entity.get_name());
+        return true;
     }
 
     false
 }
 
-/// Check if a function name is std::move or a namespace-qualified move
+/// Check if method is deleted (= delete) using libclang's native API.
+///
+/// Uses clang_CXXMethod_isDeleted from libclang 16+.
+/// The clang crate doesn't wrap this function, so we call clang-sys directly.
+fn is_deleted_via_libclang(entity: &Entity) -> bool {
+    // Entity layout: { raw: CXCursor, tu: &'tu TranslationUnit<'tu> }
+    // We extract the CXCursor (first field) to call the FFI function directly.
+    //
+    // SAFETY:
+    // - Entity is Copy, Clone
+    // - CXCursor is Copy, Clone
+    // - CXCursor is the first field of Entity
+    // - We're only reading, not modifying
+    let raw_cursor: clang_sys::CXCursor = unsafe {
+        let entity_copy = *entity;
+        let ptr = &entity_copy as *const Entity as *const clang_sys::CXCursor;
+        *ptr
+    };
+
+    // Call the libclang 16+ function directly
+    unsafe {
+        clang_sys::clang_CXXMethod_isDeleted(raw_cursor) != 0
+    }
+}
+
+/// Check if a function name is std::move, rusty::move, or a namespace-qualified move
+///
+/// rusty::move provides Rust-like move semantics where moving a reference
+/// invalidates the reference variable itself (not just the underlying object).
 fn is_move_function(name: &str) -> bool {
-    name == "move" || name == "std::move" || name.ends_with("::move")
+    name == "move"
+        || name == "std::move"
+        || name == "rusty::move"
+        || name.ends_with("::move")
+}
+
+/// Determine the kind of move function (std::move vs rusty::move)
+fn get_move_kind(name: &str) -> MoveKind {
+    if name == "rusty::move" || name.ends_with("::rusty::move") {
+        MoveKind::RustyMove
+    } else {
+        // std::move, move, or any other ::move variant is treated as std::move
+        MoveKind::StdMove
+    }
 }
 
 /// Check if a function name is std::forward or a namespace-qualified forward
@@ -441,11 +449,23 @@ pub enum LambdaCaptureKind {
     ThisCopy,
 }
 
+/// Indicates which move function was used
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveKind {
+    /// std::move - standard C++ move, unsafe for references in @safe code
+    StdMove,
+    /// rusty::move - Rust-like move semantics, safe for all types
+    RustyMove,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Expression {
     Variable(String),
-    Move(Box<Expression>),
+    Move {
+        inner: Box<Expression>,
+        kind: MoveKind,
+    },
     Dereference(Box<Expression>),
     AddressOf(Box<Expression>),
     FunctionCall {
@@ -1689,10 +1709,14 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             if is_move_function(&name) {
                 debug_println!("DEBUG: Detected move function!");
-                // std::move takes one argument and we treat it as a Move expression
+                // std::move/rusty::move takes one argument and we treat it as a Move expression
                 if args.len() == 1 {
-                    debug_println!("DEBUG: Creating Move expression");
-                    return Some(Expression::Move(Box::new(args.into_iter().next().unwrap())));
+                    let kind = get_move_kind(&name);
+                    debug_println!("DEBUG: Creating Move expression with kind {:?}", kind);
+                    return Some(Expression::Move {
+                        inner: Box::new(args.into_iter().next().unwrap()),
+                        kind,
+                    });
                 }
             }
             

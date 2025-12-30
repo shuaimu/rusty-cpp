@@ -436,7 +436,7 @@ fn find_unsafe_function_call_with_external(
                 return Some(unsafe_func);
             }
         }
-        Expression::Move(inner) | Expression::Dereference(inner) | Expression::AddressOf(inner) => {
+        Expression::Move { inner, .. } | Expression::Dereference(inner) | Expression::AddressOf(inner) => {
             // Check inner expression
             if let Some(unsafe_func) = find_unsafe_function_call_with_external(inner, safety_context, known_safe_functions, external_annotations, template_params, callable_params) {
                 return Some(unsafe_func);

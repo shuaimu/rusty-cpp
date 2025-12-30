@@ -386,7 +386,7 @@ fn check_expression_safety(
             // For now, just check the inner expression
             errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
         }
-        Expression::Move(inner) => {
+        Expression::Move { inner, .. } => {
             errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
         }
         Expression::Lambda { .. } => {

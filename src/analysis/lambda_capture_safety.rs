@@ -281,7 +281,7 @@ fn check_expression_for_this_capture(
                 check_expression_for_this_capture(arg, _function_name, location, errors);
             }
         }
-        Expression::Move(inner) |
+        Expression::Move { inner, .. } |
         Expression::Dereference(inner) |
         Expression::AddressOf(inner) => {
             check_expression_for_this_capture(inner, _function_name, location, errors);
@@ -355,7 +355,7 @@ fn extract_lambda_captures(expr: &Expression) -> Option<(Vec<String>, bool)> {
 fn extract_variable_name(expr: &Expression) -> Option<String> {
     match expr {
         Expression::Variable(name) => Some(name.clone()),
-        Expression::Move(inner) => extract_variable_name(inner),
+        Expression::Move { inner, .. } => extract_variable_name(inner),
         _ => None,
     }
 }
