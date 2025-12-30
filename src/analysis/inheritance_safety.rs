@@ -449,6 +449,11 @@ pub fn check_inheritance_safety(classes: &[Class]) -> Vec<String> {
         errors.extend(check_method_safety_contracts(class, &interface_map));
     }
 
+    // Step 6: Check that @safe classes don't have non-deleted copy operations
+    for class in classes {
+        errors.extend(check_safe_class_copy_semantics(class));
+    }
+
     errors
 }
 
@@ -460,6 +465,50 @@ fn strip_template_params(type_name: &str) -> String {
     } else {
         type_name.to_string()
     }
+}
+
+/// Check that @safe classes don't have non-deleted copy operations
+///
+/// In Rust, types are moved by default - copying requires explicit Clone trait.
+/// Similarly, @safe classes in C++ should not have implicit copy operations.
+/// Classes should either:
+/// 1. Delete copy constructor and copy assignment (like Rust's default)
+/// 2. Use @unsafe if copy semantics are intentionally needed
+///
+/// This enforces move-by-default semantics for @safe classes, matching Rust's
+/// ownership model where types are moved unless explicitly cloned.
+pub fn check_safe_class_copy_semantics(class: &Class) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Only check @safe classes
+    let class_safety = class.safety_annotation.unwrap_or(SafetyMode::Unsafe);
+    if class_safety != SafetyMode::Safe {
+        return errors;
+    }
+
+    debug_println!("COPY CHECK: Checking copy semantics for @safe class '{}'", class.name);
+
+    // Check for non-deleted copy constructor
+    if class.has_copy_constructor && !class.copy_constructor_deleted {
+        errors.push(format!(
+            "@safe class '{}' cannot have a copy constructor. \
+             Use '= delete' to disable copying, or mark the class @unsafe. \
+             Rust-like move semantics require types to be moved, not copied.",
+            class.name
+        ));
+    }
+
+    // Check for non-deleted copy assignment operator
+    if class.has_copy_assignment && !class.copy_assignment_deleted {
+        errors.push(format!(
+            "@safe class '{}' cannot have a copy assignment operator. \
+             Use '= delete' to disable copying, or mark the class @unsafe. \
+             Rust-like move semantics require types to be moved, not copied.",
+            class.name
+        ));
+    }
+
+    errors
 }
 
 #[cfg(test)]
@@ -490,6 +539,10 @@ mod tests {
             all_methods_pure_virtual: true,
             has_non_virtual_methods: false,
             safety_annotation: None,
+            has_copy_constructor: false,
+            has_copy_assignment: false,
+            copy_constructor_deleted: false,
+            copy_assignment_deleted: false,
         }
     }
 
@@ -508,6 +561,10 @@ mod tests {
             all_methods_pure_virtual: false,
             has_non_virtual_methods: false,
             safety_annotation: None,
+            has_copy_constructor: false,
+            has_copy_assignment: false,
+            copy_constructor_deleted: false,
+            copy_assignment_deleted: false,
         }
     }
 

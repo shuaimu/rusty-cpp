@@ -20,7 +20,7 @@ set(RUSTYCPP_BUILD_TYPE "release" CACHE STRING "Build type for rusty-cpp-checker
 set_property(CACHE RUSTYCPP_BUILD_TYPE PROPERTY STRINGS "debug" "release")
 
 # Option to enable/disable borrow checking
-option(ENABLE_BORROW_CHECKING "Enable C++ Borrow Checking" OFF)
+option(ENABLE_BORROW_CHECKING "Enable C++ Borrow Checking" ON)
 option(BORROW_CHECK_FATAL "Make borrow check failures fatal" OFF)
 option(RUSTYCPP_SKIP_DEPENDENCY_CHECK "Skip dependency checking for RustyCpp" OFF)
 

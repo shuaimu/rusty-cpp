@@ -16,9 +16,16 @@ fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
         return true;
     }
 
-    // Check for = delete using libclang 16+ native API
+    // Check for = delete using availability
+    // Deleted methods have Unavailable availability
+    if entity.get_availability() == clang::Availability::Unavailable {
+        debug_println!("DEBUG PARSE: Method {:?} is deleted (Unavailable)", entity.get_name());
+        return true;
+    }
+
+    // Fallback: Check for = delete using libclang 16+ native API
     if is_deleted_via_libclang(entity) {
-        debug_println!("DEBUG PARSE: Method {:?} is deleted via libclang", entity.get_name());
+        debug_println!("DEBUG PARSE: Method {:?} is deleted via libclang FFI", entity.get_name());
         return true;
     }
 
@@ -34,20 +41,23 @@ fn is_deleted_via_libclang(entity: &Entity) -> bool {
     // We extract the CXCursor (first field) to call the FFI function directly.
     //
     // SAFETY:
-    // - Entity is Copy, Clone
+    // - Entity is repr(Rust), but raw is the first field
     // - CXCursor is Copy, Clone
-    // - CXCursor is the first field of Entity
     // - We're only reading, not modifying
+    //
+    // Use transmute_copy to extract the raw cursor bytes
     let raw_cursor: clang_sys::CXCursor = unsafe {
-        let entity_copy = *entity;
-        let ptr = &entity_copy as *const Entity as *const clang_sys::CXCursor;
-        *ptr
+        // CXCursor is 32 bytes (kind: c_int, xdata: c_int, data: [*const c_void; 3])
+        // Entity starts with the raw CXCursor field
+        std::mem::transmute_copy(entity)
     };
 
     // Call the libclang 16+ function directly
-    unsafe {
-        clang_sys::clang_CXXMethod_isDeleted(raw_cursor) != 0
-    }
+    let result = unsafe {
+        clang_sys::clang_CXXMethod_isDeleted(raw_cursor)
+    };
+
+    result != 0
 }
 
 /// Check if a function name is std::move, rusty::move, or a namespace-qualified move
@@ -307,6 +317,11 @@ pub struct Class {
     pub all_methods_pure_virtual: bool,    // All methods are = 0 (pure virtual)
     pub has_non_virtual_methods: bool,     // Has any non-virtual methods (excluding destructor)
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>, // @safe or @unsafe on class
+    // Copy semantics: @safe classes should not have copy operations (Rust-like move semantics)
+    pub has_copy_constructor: bool,        // True if class has ClassName(const ClassName&)
+    pub has_copy_assignment: bool,         // True if class has operator=(const ClassName&)
+    pub copy_constructor_deleted: bool,    // True if copy constructor is explicitly deleted
+    pub copy_assignment_deleted: bool,     // True if copy assignment is explicitly deleted
 }
 
 #[derive(Debug, Clone)]
@@ -660,6 +675,11 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut has_non_virtual_methods = false;
     let mut all_methods_pure_virtual = true;  // Start true, set false if we find non-pure method
     let mut has_any_method = false;  // Track if there are any methods to check
+    // Copy semantics tracking
+    let mut has_copy_constructor = false;
+    let mut has_copy_assignment = false;
+    let mut copy_constructor_deleted = false;
+    let mut copy_assignment_deleted = false;
 
     // LibClang's get_children() flattens the hierarchy and returns class members directly
     // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
@@ -700,26 +720,70 @@ pub fn extract_class(entity: &Entity) -> Class {
             EntityKind::Method | EntityKind::Constructor => {
                 // Member method
                 let method = extract_function(&child);
+                let is_deleted = is_deleted_or_defaulted_method(&child);
+
+                // Check for copy constructor
+                if child.get_kind() == EntityKind::Constructor {
+                    if child.is_copy_constructor() {
+                        has_copy_constructor = true;
+                        if is_deleted {
+                            copy_constructor_deleted = true;
+                            debug_println!("DEBUG PARSE: Class '{}' has deleted copy constructor", name);
+                        } else {
+                            debug_println!("DEBUG PARSE: Class '{}' has copy constructor", name);
+                        }
+                    }
+                }
 
                 // Skip constructors for pure virtual check
                 if child.get_kind() == EntityKind::Method {
                     has_any_method = true;
 
+                    // Check for copy assignment operator: operator=(const ClassName&)
+                    if let Some(method_name) = child.get_name() {
+                        if method_name == "operator=" {
+                            // Check if parameter is const reference to same class type
+                            let children = child.get_children();
+                            for param_child in &children {
+                                if param_child.get_kind() == EntityKind::ParmDecl {
+                                    if let Some(param_type) = param_child.get_type() {
+                                        let type_str = type_to_string(&param_type);
+                                        // Copy assignment takes const ClassName& or ClassName const&
+                                        // Get the unqualified class name for comparison
+                                        let simple_name = name.split("::").last().unwrap_or(&name);
+                                        if type_str.contains(simple_name) &&
+                                           type_str.contains("const") &&
+                                           type_str.contains("&") &&
+                                           !type_str.contains("&&") {
+                                            has_copy_assignment = true;
+                                            if is_deleted {
+                                                copy_assignment_deleted = true;
+                                                debug_println!("DEBUG PARSE: Class '{}' has deleted copy assignment", name);
+                                            } else {
+                                                debug_println!("DEBUG PARSE: Class '{}' has copy assignment", name);
+                                            }
+                                        }
+                                    }
+                                    break;  // Only check first parameter
+                                }
+                            }
+                        }
+                    }
+
                     // Check if method is virtual, deleted, or defaulted
                     let is_virtual = child.is_virtual_method();
                     let is_pure_virtual = child.is_pure_virtual_method();
-                    let is_special = is_deleted_or_defaulted_method(&child);
 
                     // Deleted/defaulted methods (= delete, = default) don't count as
                     // non-virtual methods for @interface validation. They are special
                     // member functions, not regular callable methods.
-                    if !is_virtual && !is_special {
+                    if !is_virtual && !is_deleted {
                         has_non_virtual_methods = true;
                         debug_println!("DEBUG PARSE: Class '{}' has non-virtual method: {:?}", name, child.get_name());
                     }
 
                     // Deleted/defaulted methods also don't count for pure virtual check
-                    if !is_pure_virtual && !is_special {
+                    if !is_pure_virtual && !is_deleted {
                         all_methods_pure_virtual = false;
                         debug_println!("DEBUG PARSE: Class '{}' has non-pure-virtual method: {:?}", name, child.get_name());
                     }
@@ -755,8 +819,9 @@ pub fn extract_class(entity: &Entity) -> Class {
         all_methods_pure_virtual = true;
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, all_methods_pure_virtual={}, has_non_virtual_methods={}",
-        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, all_methods_pure_virtual, has_non_virtual_methods);
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={})",
+        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, all_methods_pure_virtual, has_non_virtual_methods,
+        has_copy_constructor, copy_constructor_deleted, has_copy_assignment, copy_assignment_deleted);
 
     Class {
         name,
@@ -773,6 +838,11 @@ pub fn extract_class(entity: &Entity) -> Class {
         all_methods_pure_virtual,
         has_non_virtual_methods,
         safety_annotation,
+        // Copy semantics
+        has_copy_constructor,
+        has_copy_assignment,
+        copy_constructor_deleted,
+        copy_assignment_deleted,
     }
 }
 
