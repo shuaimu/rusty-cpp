@@ -97,7 +97,8 @@ pub fn validate_interface_inheritance(
         // Strip any template parameters for lookup
         let base_name = strip_template_params(base);
 
-        if !interfaces.contains(&base_name) && !interfaces.contains(base) {
+        // Use namespace-aware matching to handle qualified/unqualified names
+        if !is_interface_base(&base_name, interfaces, &class.name) {
             errors.push(format!(
                 "@interface '{}' can only inherit from other @interface classes, not '{}'",
                 class.name, base
@@ -132,7 +133,8 @@ pub fn check_safe_inheritance(
         // Strip template parameters for lookup
         let base_name = strip_template_params(base);
 
-        if !interfaces.contains(&base_name) && !interfaces.contains(base) {
+        // Use namespace-aware matching to handle qualified/unqualified names
+        if !is_interface_base(&base_name, interfaces, &class.name) {
             errors.push(format!(
                 "In @safe code, class '{}' can only inherit from @interface classes. \
                  '{}' is not an @interface. Use @unsafe context for regular inheritance.",
@@ -158,7 +160,8 @@ pub fn check_method_safety_contracts(
     for base_name in &class.base_classes {
         let base_stripped = strip_template_params(base_name);
 
-        let interface = match interfaces.get(&base_stripped).or_else(|| interfaces.get(base_name)) {
+        // Use namespace-aware matching to find the interface
+        let interface = match find_matching_interface(&base_stripped, interfaces, &class.name) {
             Some(i) => i,
             None => continue, // Not an interface, skip
         };
@@ -476,6 +479,58 @@ fn strip_template_params(type_name: &str) -> String {
     }
 }
 
+/// Resolve an unqualified base class name to a fully qualified name.
+///
+/// Uses C++ name lookup rules: an unqualified name in namespace `foo` resolves
+/// to `foo::Name` first (same namespace lookup).
+///
+/// Examples:
+/// - base "IDrawable", derived "myapp::Circle" -> "myapp::IDrawable"
+/// - base "other::IDrawable", derived "myapp::Circle" -> "other::IDrawable" (already qualified)
+/// - base "IDrawable", derived "Circle" -> "IDrawable" (no namespace context)
+fn resolve_qualified_name(base_name: &str, derived_class_name: &str) -> String {
+    // If base is already qualified, return as-is
+    if base_name.contains("::") {
+        return base_name.to_string();
+    }
+
+    // Extract namespace from derived class name
+    // "myapp::Circle" -> "myapp::"
+    // "myapp::inner::Circle" -> "myapp::inner::"
+    if let Some(pos) = derived_class_name.rfind("::") {
+        let namespace_prefix = &derived_class_name[..=pos+1]; // Include "::"
+        format!("{}{}", namespace_prefix, base_name)
+    } else {
+        // Derived class has no namespace, so base stays unqualified
+        base_name.to_string()
+    }
+}
+
+/// Check if a base class name matches any interface in the set.
+///
+/// First resolves the base class name to a qualified name using the derived class's
+/// namespace context, then does exact matching against the interfaces set.
+fn is_interface_base(
+    base_name: &str,
+    interfaces: &HashSet<String>,
+    derived_class_name: &str,
+) -> bool {
+    let qualified_base = resolve_qualified_name(base_name, derived_class_name);
+    interfaces.contains(&qualified_base)
+}
+
+/// Find matching interface for a base class name, returning the interface class if found.
+///
+/// First resolves the base class name to a qualified name, then looks it up in the map.
+fn find_matching_interface<'a>(
+    base_name: &str,
+    interface_map: &'a HashMap<String, Class>,
+    derived_class_name: &str,
+) -> Option<&'a Class> {
+    let qualified_base = resolve_qualified_name(base_name, derived_class_name);
+    interface_map.get(&qualified_base)
+}
+
 /// Check that @safe classes don't have non-deleted copy operations
 ///
 /// In Rust, types are moved by default - copying requires explicit Clone trait.
@@ -669,5 +724,121 @@ mod tests {
         let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("can only inherit from @interface"));
+    }
+
+    // ========================================================================
+    // Namespace resolution and interface matching tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_qualified_name_already_qualified() {
+        // Already qualified names are returned as-is
+        assert_eq!(
+            resolve_qualified_name("other::IDrawable", "myapp::Circle"),
+            "other::IDrawable"
+        );
+        assert_eq!(
+            resolve_qualified_name("foo::bar::IDrawable", "myapp::Circle"),
+            "foo::bar::IDrawable"
+        );
+    }
+
+    #[test]
+    fn test_resolve_qualified_name_from_namespace() {
+        // Unqualified name gets namespace from derived class
+        assert_eq!(
+            resolve_qualified_name("IDrawable", "myapp::Circle"),
+            "myapp::IDrawable"
+        );
+        // Nested namespace
+        assert_eq!(
+            resolve_qualified_name("IDrawable", "myapp::inner::Circle"),
+            "myapp::inner::IDrawable"
+        );
+    }
+
+    #[test]
+    fn test_resolve_qualified_name_no_namespace() {
+        // If derived class has no namespace, base stays unqualified
+        assert_eq!(
+            resolve_qualified_name("IDrawable", "Circle"),
+            "IDrawable"
+        );
+    }
+
+    #[test]
+    fn test_is_interface_base_exact_match() {
+        let interfaces: HashSet<String> = vec![
+            "myapp::IDrawable".to_string(),
+            "myapp::ISerializable".to_string(),
+        ].into_iter().collect();
+
+        // Unqualified base resolved to same namespace -> matches
+        assert!(is_interface_base("IDrawable", &interfaces, "myapp::Circle"));
+        assert!(is_interface_base("ISerializable", &interfaces, "myapp::Widget"));
+
+        // Non-existent interface -> no match
+        assert!(!is_interface_base("NonExistent", &interfaces, "myapp::Circle"));
+    }
+
+    #[test]
+    fn test_is_interface_base_wrong_namespace_no_match() {
+        let interfaces: HashSet<String> = vec![
+            "myapp::IDrawable".to_string(),
+        ].into_iter().collect();
+
+        // Same unqualified name but different namespace context -> no match
+        // "IDrawable" in "other::Circle" resolves to "other::IDrawable", not "myapp::IDrawable"
+        assert!(!is_interface_base("IDrawable", &interfaces, "other::Circle"));
+
+        // Explicitly qualified with wrong namespace -> no match
+        assert!(!is_interface_base("other::IDrawable", &interfaces, "myapp::Circle"));
+    }
+
+    #[test]
+    fn test_safe_inheritance_with_namespaced_interface() {
+        // Interface with qualified name (as parsed from source)
+        let _interface = make_interface("myapp::IDrawable");
+
+        // Derived class with unqualified base class reference
+        let mut derived = make_class("myapp::Circle", vec!["IDrawable".to_string()]);
+        derived.safety_annotation = Some(SafetyMode::Safe);
+
+        let interfaces: HashSet<String> = vec!["myapp::IDrawable".to_string()].into_iter().collect();
+
+        let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
+        assert!(errors.is_empty(), "Safe inheritance from namespaced interface should be allowed. Errors: {:?}", errors);
+    }
+
+    #[test]
+    fn test_safe_inheritance_wrong_namespace_fails() {
+        // Interface in myapp namespace
+        let _interface = make_interface("myapp::IDrawable");
+
+        // Derived class in DIFFERENT namespace
+        let mut derived = make_class("other::Circle", vec!["IDrawable".to_string()]);
+        derived.safety_annotation = Some(SafetyMode::Safe);
+
+        // Only myapp::IDrawable exists, not other::IDrawable
+        let interfaces: HashSet<String> = vec!["myapp::IDrawable".to_string()].into_iter().collect();
+
+        let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
+        assert_eq!(errors.len(), 1, "Should fail: IDrawable resolves to other::IDrawable which is not an interface");
+        assert!(errors[0].contains("not an @interface"));
+    }
+
+    #[test]
+    fn test_interface_inheritance_with_namespace() {
+        // Interface inheriting from another interface in same namespace
+        let mut child_interface = make_interface("myapp::IExtendedDrawable");
+        child_interface.base_classes = vec!["IDrawable".to_string()];
+
+        let interfaces: HashSet<String> = vec![
+            "myapp::IDrawable".to_string(),
+            "myapp::IExtendedDrawable".to_string(),
+        ].into_iter().collect();
+
+        let errors = validate_interface_inheritance(&child_interface, &interfaces);
+        assert!(errors.is_empty(), "Interface inheritance from namespaced interface should be allowed. Errors: {:?}", errors);
     }
 }

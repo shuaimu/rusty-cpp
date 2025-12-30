@@ -50,7 +50,7 @@ public:
             new (&value) T(other.value);
         }
     }
-    
+
     // Move constructor
     Option(Option&& other) noexcept : has_value(other.has_value) {
         if (has_value) {
@@ -72,7 +72,7 @@ public:
         }
         return *this;
     }
-    
+
     // Move assignment
     Option& operator=(Option&& other) noexcept {
         if (this != &other) {
