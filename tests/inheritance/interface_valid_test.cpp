@@ -12,7 +12,7 @@ public:
 // @interface
 class ISerializable {
 public:
-    virtual ~ISerializable() {}
+    virtual ~ISerializable() = default;
     virtual void serialize() const = 0;
     virtual void deserialize() = 0;
 };

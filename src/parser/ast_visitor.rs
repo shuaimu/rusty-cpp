@@ -314,6 +314,7 @@ pub struct Class {
     // Inheritance safety: Interface-related fields
     pub is_interface: bool,                // Has @interface annotation
     pub has_virtual_destructor: bool,      // virtual ~Class() or virtual ~Class() = default
+    pub destructor_is_defaulted: bool,     // True if destructor is = default
     pub all_methods_pure_virtual: bool,    // All methods are = 0 (pure virtual)
     pub has_non_virtual_methods: bool,     // Has any non-virtual methods (excluding destructor)
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>, // @safe or @unsafe on class
@@ -672,6 +673,7 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut base_classes = Vec::new();
     let mut has_destructor = false;  // RAII Phase 2: Track destructors
     let mut has_virtual_destructor = false;
+    let mut destructor_is_defaulted = false;
     let mut has_non_virtual_methods = false;
     let mut all_methods_pure_virtual = true;  // Start true, set false if we find non-pure method
     let mut has_any_method = false;  // Track if there are any methods to check
@@ -712,6 +714,12 @@ pub fn extract_class(entity: &Entity) -> Class {
                 if child.is_virtual_method() {
                     has_virtual_destructor = true;
                     debug_println!("DEBUG PARSE: Class '{}' has virtual destructor", name);
+                }
+
+                // Check if destructor is defaulted (= default)
+                if child.is_defaulted() {
+                    destructor_is_defaulted = true;
+                    debug_println!("DEBUG PARSE: Class '{}' has defaulted destructor", name);
                 }
 
                 let method = extract_function(&child);
@@ -819,8 +827,8 @@ pub fn extract_class(entity: &Entity) -> Class {
         all_methods_pure_virtual = true;
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={})",
-        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, all_methods_pure_virtual, has_non_virtual_methods,
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, destructor_is_defaulted={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={})",
+        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, destructor_is_defaulted, all_methods_pure_virtual, has_non_virtual_methods,
         has_copy_constructor, copy_constructor_deleted, has_copy_assignment, copy_assignment_deleted);
 
     Class {
@@ -835,6 +843,7 @@ pub fn extract_class(entity: &Entity) -> Class {
         // Inheritance safety fields
         is_interface,
         has_virtual_destructor,
+        destructor_is_defaulted,
         all_methods_pure_virtual,
         has_non_virtual_methods,
         safety_annotation,

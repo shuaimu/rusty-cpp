@@ -53,12 +53,21 @@ pub fn validate_interface(class: &Class) -> Vec<String> {
         ));
     }
 
-    // Check 3: Must have virtual destructor (or no destructor at all for implicit virtual)
-    // If class has a destructor, it must be virtual
-    if class.has_destructor && !class.has_virtual_destructor {
+    // Check 3: Must have an explicit virtual destructor that is defaulted
+    // Interface classes MUST have a virtual destructor to ensure proper cleanup
+    // when deleting through a base pointer. Without it, deleting a derived object
+    // through an interface pointer causes undefined behavior.
+    // The destructor must also be = default since interfaces should not have
+    // custom cleanup logic (they have no data members to clean up).
+    if !class.has_virtual_destructor {
         errors.push(format!(
-            "@interface '{}' must have a virtual destructor",
-            class.name
+            "@interface '{}' must have a virtual destructor (e.g., virtual ~{}() = default;)",
+            class.name, class.name
+        ));
+    } else if !class.destructor_is_defaulted {
+        errors.push(format!(
+            "@interface '{}' virtual destructor must be defaulted (use virtual ~{}() = default;)",
+            class.name, class.name
         ));
     }
 
@@ -536,6 +545,7 @@ mod tests {
             has_destructor: true,
             is_interface: true,
             has_virtual_destructor: true,
+            destructor_is_defaulted: true,
             all_methods_pure_virtual: true,
             has_non_virtual_methods: false,
             safety_annotation: None,
@@ -558,6 +568,7 @@ mod tests {
             has_destructor: false,
             is_interface: false,
             has_virtual_destructor: false,
+            destructor_is_defaulted: false,
             all_methods_pure_virtual: false,
             has_non_virtual_methods: false,
             safety_annotation: None,
@@ -599,13 +610,40 @@ mod tests {
     }
 
     #[test]
-    fn test_interface_without_virtual_destructor() {
+    fn test_interface_with_non_virtual_destructor() {
         let mut interface = make_interface("IBadInterface");
+        interface.has_destructor = true;
         interface.has_virtual_destructor = false;
 
         let errors = validate_interface(&interface);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("virtual destructor"));
+    }
+
+    #[test]
+    fn test_interface_without_any_destructor() {
+        // Interface with no destructor at all - should require virtual destructor
+        let mut interface = make_interface("IBadInterface");
+        interface.has_destructor = false;
+        interface.has_virtual_destructor = false;
+        interface.destructor_is_defaulted = false;
+
+        let errors = validate_interface(&interface);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("virtual destructor"));
+    }
+
+    #[test]
+    fn test_interface_with_non_defaulted_virtual_destructor() {
+        // Interface with virtual destructor that has a body (not = default)
+        let mut interface = make_interface("IBadInterface");
+        interface.has_destructor = true;
+        interface.has_virtual_destructor = true;
+        interface.destructor_is_defaulted = false;
+
+        let errors = validate_interface(&interface);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("must be defaulted"));
     }
 
     #[test]
