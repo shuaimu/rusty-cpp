@@ -44,12 +44,9 @@ public:
     
     Option(T val) : has_value(true), value(std::move(val)) {}
     
-    // Copy constructor
-    Option(const Option& other) : has_value(other.has_value) {
-        if (has_value) {
-            new (&value) T(other.value);
-        }
-    }
+    // Copy constructor - deleted to enforce Rust-like move semantics
+    // Use clone() for explicit copying
+    Option(const Option& other) = delete;
 
     // Move constructor
     Option(Option&& other) noexcept : has_value(other.has_value) {
@@ -58,20 +55,10 @@ public:
             other.has_value = false;
         }
     }
-    
-    // Copy assignment
-    Option& operator=(const Option& other) {
-        if (this != &other) {
-            if (has_value) {
-                value.~T();
-            }
-            has_value = other.has_value;
-            if (has_value) {
-                new (&value) T(other.value);
-            }
-        }
-        return *this;
-    }
+
+    // Copy assignment - deleted to enforce Rust-like move semantics
+    // Use clone() for explicit copying
+    Option& operator=(const Option& other) = delete;
 
     // Move assignment
     Option& operator=(Option&& other) noexcept {
@@ -98,7 +85,16 @@ public:
     // Check if Option contains a value
     bool is_some() const { return has_value; }
     bool is_none() const { return !has_value; }
-    
+
+    // Clone the Option (explicit copy) - Rust style
+    // Requires T to be copyable
+    Option clone() const {
+        if (has_value) {
+            return Option(T(value));  // Copy construct T
+        }
+        return Option();
+    }
+
     // Explicit bool conversion
     explicit operator bool() const { return has_value; }
     
@@ -224,19 +220,16 @@ public:
     // @safe
     Option(T& ref) : ptr(&ref) {}
 
-    // @safe - Copy constructor
-    Option(const Option& other) : ptr(other.ptr) {}
+    // Copy constructor - deleted to enforce Rust-like move semantics
+    Option(const Option& other) = delete;
 
     // @safe - Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
 
-    // @safe - Copy assignment
-    Option& operator=(const Option& other) {
-        ptr = other.ptr;
-        return *this;
-    }
+    // Copy assignment - deleted to enforce Rust-like move semantics
+    Option& operator=(const Option& other) = delete;
 
     // @safe - Move assignment
     Option& operator=(Option&& other) noexcept {
@@ -252,6 +245,14 @@ public:
     bool is_some() const { return ptr != nullptr; }
     // @safe
     bool is_none() const { return !ptr; }
+
+    // Clone the Option (explicit copy) - Rust style
+    Option clone() const {
+        if (ptr) {
+            return Option(*ptr);
+        }
+        return Option();
+    }
 
     // @safe - Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
@@ -355,19 +356,16 @@ public:
     // @safe
     Option(const T& ref) : ptr(&ref) {}
 
-    // @safe - Copy constructor
-    Option(const Option& other) : ptr(other.ptr) {}
+    // Copy constructor - deleted to enforce Rust-like move semantics
+    Option(const Option& other) = delete;
 
     // @safe - Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
 
-    // @safe - Copy assignment
-    Option& operator=(const Option& other) {
-        ptr = other.ptr;
-        return *this;
-    }
+    // Copy assignment - deleted to enforce Rust-like move semantics
+    Option& operator=(const Option& other) = delete;
 
     // @safe - Move assignment
     Option& operator=(Option&& other) noexcept {
@@ -383,6 +381,14 @@ public:
     bool is_some() const { return ptr != nullptr; }
     // @safe
     bool is_none() const { return !ptr; }
+
+    // Clone the Option (explicit copy) - Rust style
+    Option clone() const {
+        if (ptr) {
+            return Option(*ptr);
+        }
+        return Option();
+    }
 
     // @safe - Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
