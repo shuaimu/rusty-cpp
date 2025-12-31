@@ -1,151 +1,339 @@
 #!/bin/bash
+#
+# rusty-cpp installer
+#
+# This script installs system dependencies and builds rusty-cpp from source.
+#
+# Supported platforms:
+#   - macOS (via Homebrew)
+#   - Debian/Ubuntu (apt)
+#   - Fedora/CentOS/RHEL (dnf/yum)
+#   - Arch Linux (pacman)
+#
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/shuaimu/rusty-cpp/main/install.sh | bash
+#
+# Or clone and run locally:
+#   git clone https://github.com/shuaimu/rusty-cpp
+#   cd rusty-cpp
+#   ./install.sh
+#
 
-# Rusty-CPP Installation Script
-# This script builds and installs Rusty-CPP for use with CMake and other build systems
+set -e
 
-set -e  # Exit on error
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
-BUILD_TYPE="${BUILD_TYPE:-release}"
+print_banner() {
+    echo -e "${BLUE}"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║                    rusty-cpp installer                        ║"
+    echo "║     Rust's borrow checker rules applied to C++ code           ║"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
 
-echo "Rusty-CPP Installation"
-echo "=============================="
-echo "Install prefix: $INSTALL_PREFIX"
-echo "Build type: $BUILD_TYPE"
-echo
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
 
-# Check for required tools
-check_requirement() {
-    if ! command -v "$1" &> /dev/null; then
-        echo "Error: $1 is required but not installed."
-        echo "Please install $1 and try again."
-        exit 1
+success() {
+    echo -e "${GREEN}[OK]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+    exit 1
+}
+
+# Detect OS and distribution
+detect_os() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="macos"
+        return
+    fi
+
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            ubuntu|debian|linuxmint|pop)
+                OS="debian"
+                ;;
+            fedora)
+                OS="fedora"
+                ;;
+            centos|rhel|rocky|almalinux)
+                OS="centos"
+                ;;
+            arch|manjaro|endeavouros)
+                OS="arch"
+                ;;
+            *)
+                # Check for derivatives
+                if [[ "$ID_LIKE" == *"debian"* ]]; then
+                    OS="debian"
+                elif [[ "$ID_LIKE" == *"fedora"* ]] || [[ "$ID_LIKE" == *"rhel"* ]]; then
+                    OS="fedora"
+                elif [[ "$ID_LIKE" == *"arch"* ]]; then
+                    OS="arch"
+                else
+                    OS="unknown"
+                fi
+                ;;
+        esac
+    else
+        OS="unknown"
     fi
 }
 
-check_requirement cargo
-check_requirement rustc
+# Check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-# Platform detection
-PLATFORM=$(uname -s)
-case "$PLATFORM" in
-    Darwin*)
-        echo "Detected macOS"
-        # Check for Homebrew packages
-        if ! brew list llvm &> /dev/null; then
-            echo "Warning: LLVM not found. Install with: brew install llvm"
+# Check if running as root (for package installation)
+check_sudo() {
+    if [[ $EUID -eq 0 ]]; then
+        SUDO=""
+    elif command_exists sudo; then
+        SUDO="sudo"
+    else
+        error "This script requires sudo privileges to install packages"
+    fi
+}
+
+# Install dependencies on macOS
+install_macos() {
+    info "Detected macOS"
+
+    if ! command_exists brew; then
+        error "Homebrew is required. Install it from https://brew.sh"
+    fi
+
+    info "Installing LLVM and Z3 via Homebrew..."
+    brew install llvm z3
+
+    # Set up environment for clang
+    LLVM_PREFIX=$(brew --prefix llvm)
+    export LLVM_CONFIG_PATH="$LLVM_PREFIX/bin/llvm-config"
+    export LIBCLANG_PATH="$LLVM_PREFIX/lib"
+
+    success "Dependencies installed"
+
+    echo ""
+    warn "Add these to your shell profile (~/.zshrc or ~/.bashrc):"
+    echo "  export LLVM_CONFIG_PATH=\"$LLVM_PREFIX/bin/llvm-config\""
+    echo "  export LIBCLANG_PATH=\"$LLVM_PREFIX/lib\""
+    echo ""
+}
+
+# Install dependencies on Debian/Ubuntu
+install_debian() {
+    info "Detected Debian/Ubuntu-based system"
+    check_sudo
+
+    info "Updating package lists..."
+    $SUDO apt-get update -qq
+
+    # Try to find the best available LLVM version (minimum 16)
+    LLVM_VERSION=""
+    for v in 19 18 17 16; do
+        if apt-cache show "libclang-${v}-dev" >/dev/null 2>&1; then
+            LLVM_VERSION=$v
+            break
         fi
-        if ! brew list z3 &> /dev/null; then
-            echo "Warning: Z3 not found. Install with: brew install z3"
-        fi
-        
-        # Set environment variables for macOS
-        export Z3_SYS_Z3_HEADER="/opt/homebrew/include/z3.h"
-        if [ ! -f "$Z3_SYS_Z3_HEADER" ]; then
-            # Try alternative location
-            export Z3_SYS_Z3_HEADER="/usr/local/include/z3.h"
-        fi
-        ;;
-    Linux*)
-        echo "Detected Linux"
-        # Check for required packages
-        if ! ldconfig -p | grep -q libclang; then
-            echo "Warning: libclang not found. Install with:"
-            echo "  Ubuntu/Debian: sudo apt-get install libclang-dev"
-            echo "  Fedora: sudo dnf install clang-devel"
-        fi
-        if ! ldconfig -p | grep -q libz3; then
-            echo "Warning: Z3 not found. Install with:"
-            echo "  Ubuntu/Debian: sudo apt-get install libz3-dev"
-            echo "  Fedora: sudo dnf install z3-devel"
-        fi
-        
-        # Set environment variables for Linux
-        export Z3_SYS_Z3_HEADER="/usr/include/z3.h"
-        ;;
-    *)
-        echo "Warning: Unknown platform $PLATFORM"
-        ;;
-esac
+    done
 
-# Build the project
-echo
-echo "Building Rusty-CPP..."
-cd "$SCRIPT_DIR"
+    if [[ -z "$LLVM_VERSION" ]]; then
+        error "Could not find a suitable LLVM version (16+). Please install LLVM 16 or later manually.
 
-if [ "$BUILD_TYPE" = "release" ]; then
-    cargo build --release
-    BINARY_PATH="target/release/rusty-cpp-checker"
-else
-    cargo build
-    BINARY_PATH="target/debug/rusty-cpp-checker"
-fi
+  On Ubuntu 22.04+, you can add the LLVM apt repository:
+    wget https://apt.llvm.org/llvm.sh
+    chmod +x llvm.sh
+    sudo ./llvm.sh 16"
+    fi
 
-if [ ! -f "$BINARY_PATH" ]; then
-    echo "Error: Build failed. Binary not found at $BINARY_PATH"
-    exit 1
-fi
+    info "Installing LLVM $LLVM_VERSION and Z3..."
+    $SUDO apt-get install -y \
+        llvm-${LLVM_VERSION}-dev \
+        libclang-${LLVM_VERSION}-dev \
+        clang-${LLVM_VERSION} \
+        libz3-dev \
+        pkg-config \
+        build-essential
 
-echo "Build successful!"
+    # Set up environment
+    export LLVM_CONFIG_PATH="/usr/bin/llvm-config-${LLVM_VERSION}"
+    export LIBCLANG_PATH="/usr/lib/llvm-${LLVM_VERSION}/lib"
 
-# Install the binary
-echo
-echo "Installing binary to $INSTALL_PREFIX/bin..."
-if [ -w "$INSTALL_PREFIX/bin" ]; then
-    cp "$BINARY_PATH" "$INSTALL_PREFIX/bin/"
-else
-    echo "Need sudo access to install to $INSTALL_PREFIX/bin"
-    sudo cp "$BINARY_PATH" "$INSTALL_PREFIX/bin/"
-fi
+    success "Dependencies installed (LLVM $LLVM_VERSION)"
+}
 
-# Install CMake module
-CMAKE_MODULE_DIR="$INSTALL_PREFIX/share/cmake/Modules"
-echo "Installing CMake module to $CMAKE_MODULE_DIR..."
+# Install dependencies on Fedora
+install_fedora() {
+    info "Detected Fedora"
+    check_sudo
 
-if [ -w "$CMAKE_MODULE_DIR" ] || [ -w "$(dirname "$CMAKE_MODULE_DIR")" ]; then
-    mkdir -p "$CMAKE_MODULE_DIR"
-    cp "$SCRIPT_DIR/cmake/CppBorrowChecker.cmake" "$CMAKE_MODULE_DIR/"
-else
-    echo "Need sudo access to install CMake module"
-    sudo mkdir -p "$CMAKE_MODULE_DIR"
-    sudo cp "$SCRIPT_DIR/cmake/CppBorrowChecker.cmake" "$CMAKE_MODULE_DIR/"
-fi
+    info "Installing LLVM and Z3..."
+    $SUDO dnf install -y \
+        llvm-devel \
+        clang-devel \
+        clang-libs \
+        z3-devel \
+        pkg-config \
+        gcc \
+        gcc-c++
+
+    success "Dependencies installed"
+}
+
+# Install dependencies on CentOS/RHEL
+install_centos() {
+    info "Detected CentOS/RHEL"
+    check_sudo
+
+    # Check CentOS version
+    if [[ -f /etc/centos-release ]]; then
+        CENTOS_VERSION=$(rpm -E %{rhel})
+    else
+        CENTOS_VERSION=$(rpm -E %{rhel} 2>/dev/null || echo "8")
+    fi
+
+    if [[ "$CENTOS_VERSION" -ge 8 ]]; then
+        info "Enabling PowerTools/CRB repository..."
+        $SUDO dnf install -y epel-release
+        # CentOS 8 Stream / RHEL 8
+        $SUDO dnf config-manager --set-enabled powertools 2>/dev/null || \
+        $SUDO dnf config-manager --set-enabled crb 2>/dev/null || \
+        warn "Could not enable PowerTools/CRB repo"
+
+        info "Installing LLVM and Z3..."
+        $SUDO dnf install -y \
+            llvm-devel \
+            clang-devel \
+            clang-libs \
+            z3-devel \
+            pkg-config \
+            gcc \
+            gcc-c++
+    else
+        error "CentOS/RHEL 7 or earlier is not supported. Please upgrade to version 8+."
+    fi
+
+    success "Dependencies installed"
+}
+
+# Install dependencies on Arch Linux
+install_arch() {
+    info "Detected Arch Linux"
+    check_sudo
+
+    info "Installing LLVM and Z3..."
+    $SUDO pacman -Sy --needed --noconfirm \
+        llvm \
+        clang \
+        z3 \
+        pkgconf \
+        base-devel
+
+    success "Dependencies installed"
+}
+
+# Check if Rust/Cargo is installed
+check_rust() {
+    if ! command_exists cargo; then
+        warn "Rust/Cargo not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+        success "Rust installed"
+    else
+        success "Rust/Cargo found: $(cargo --version)"
+    fi
+}
+
+# Build and install rusty-cpp
+install_rusty_cpp() {
+    info "Building and installing rusty-cpp..."
+
+    # Check if we're in the rusty-cpp directory
+    if [[ -f "Cargo.toml" ]] && grep -q "rusty-cpp" Cargo.toml 2>/dev/null; then
+        info "Installing from local directory..."
+        cargo install --path .
+    else
+        info "Installing from crates.io..."
+        cargo install rusty-cpp
+    fi
+
+    success "rusty-cpp installed successfully!"
+}
 
 # Verify installation
-echo
-echo "Verifying installation..."
-if command -v rusty-cpp-checker &> /dev/null; then
-    echo "✓ Binary installed successfully"
-    echo "  Version: $(rusty-cpp-checker --version 2>&1 || echo 'version info not available')"
-else
-    echo "✗ Binary not found in PATH"
-    echo "  Make sure $INSTALL_PREFIX/bin is in your PATH"
-fi
+verify_installation() {
+    echo ""
+    info "Verifying installation..."
 
-if [ -f "$CMAKE_MODULE_DIR/CppBorrowChecker.cmake" ]; then
-    echo "✓ CMake module installed successfully"
-else
-    echo "✗ CMake module not found"
-fi
+    if command_exists rusty-cpp-checker; then
+        success "rusty-cpp-checker is available in PATH"
+        echo ""
+        echo -e "${GREEN}Installation complete!${NC}"
+        echo ""
+        echo "Usage:"
+        echo "  rusty-cpp-checker your_file.cpp"
+        echo ""
+        echo "For more information:"
+        echo "  rusty-cpp-checker --help"
+    else
+        warn "rusty-cpp-checker not found in PATH"
+        echo "Make sure ~/.cargo/bin is in your PATH:"
+        echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+    fi
+}
 
-# Print usage instructions
-echo
-echo "Installation complete!"
-echo
-echo "To use with CMake:"
-echo "  1. Add to your CMakeLists.txt:"
-echo "     include(CppBorrowChecker)"
-echo "     enable_borrow_checking()"
-echo
-echo "  2. Or for specific targets:"
-echo "     add_borrow_check_target(your_target)"
-echo
-echo "To use standalone:"
-echo "  rusty-cpp-checker your_file.cpp"
-echo
-echo "To uninstall:"
-echo "  rm $INSTALL_PREFIX/bin/rusty-cpp-checker"
-echo "  rm $CMAKE_MODULE_DIR/CppBorrowChecker.cmake"
-echo
-echo "For more information, see: $SCRIPT_DIR/README.md"
+# Main installation flow
+main() {
+    print_banner
+
+    detect_os
+    info "Detected OS: $OS"
+
+    case "$OS" in
+        macos)
+            install_macos
+            ;;
+        debian)
+            install_debian
+            ;;
+        fedora)
+            install_fedora
+            ;;
+        centos)
+            install_centos
+            ;;
+        arch)
+            install_arch
+            ;;
+        unknown)
+            error "Unsupported operating system. Please install dependencies manually:
+  - LLVM/Clang 16+ with development headers
+  - Z3 SMT solver with development headers
+  - Rust toolchain
+
+Then run: cargo install rusty-cpp"
+            ;;
+    esac
+
+    check_rust
+    install_rusty_cpp
+    verify_installation
+}
+
+# Run main function
+main "$@"

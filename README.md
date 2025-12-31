@@ -79,12 +79,35 @@ Cannot create mutable borrow 'mut_ref': 'value' is already borrowed by 'const_re
 
 ### 📦 Installation
 
-#### ⚠️ Build Requirements (IMPORTANT)
+#### Quick Install (Recommended)
 
-This tool requires the following native dependencies to be installed **before** building from source or installing via cargo:
+The easiest way to install rusty-cpp is using our install script, which automatically detects your OS and installs all dependencies:
+
+```bash
+# One-liner install (detects OS, installs deps, builds from source)
+curl -sSL https://raw.githubusercontent.com/shuaimu/rusty-cpp/main/install.sh | bash
+```
+
+Or clone and run locally:
+```bash
+git clone https://github.com/shuaimu/rusty-cpp
+cd rusty-cpp
+./install.sh
+```
+
+**Supported platforms:**
+- macOS (via Homebrew)
+- Ubuntu/Debian (apt)
+- Fedora (dnf)
+- CentOS/RHEL 8+ (dnf)
+- Arch Linux (pacman)
+
+#### ⚠️ Build Requirements (Manual Installation)
+
+If you prefer manual installation, this tool requires the following native dependencies to be installed **before** building from source or installing via cargo:
 
 - **Rust**: 1.70+ (for building the analyzer)
-- **LLVM/Clang**: 14+ (for parsing C++ - required by clang-sys)
+- **LLVM/Clang**: 16+ (for parsing C++ - required by clang-sys)
 - **Z3**: 4.8+ (for constraint solving - required by z3-sys)
 
 **Note**: These dependencies must be installed system-wide before running `cargo install rusty-cpp` or building from source. The build will fail without them.
@@ -134,9 +157,9 @@ export PATH="$PATH:$(pwd)/target/release"
 ##### Linux (Ubuntu/Debian)
 
 ```bash
-# Install dependencies
+# Install dependencies (LLVM 16+ required)
 sudo apt-get update
-sudo apt-get install llvm-14-dev libclang-14-dev libz3-dev
+sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
 
 # Clone and build
 git clone https://github.com/shuaimu/rusty-cpp

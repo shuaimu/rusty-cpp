@@ -353,7 +353,7 @@ export DYLD_LIBRARY_PATH=/opt/homebrew/Cellar/llvm/19.1.7/lib:$DYLD_LIBRARY_PATH
 
 # Linux
 export Z3_SYS_Z3_HEADER=/usr/include/z3.h
-export LD_LIBRARY_PATH=/usr/lib/llvm-14/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/lib/llvm-16/lib:$LD_LIBRARY_PATH
 
 # Optional: Include paths via environment
 export CPLUS_INCLUDE_PATH=/usr/include/c++:/usr/local/include
