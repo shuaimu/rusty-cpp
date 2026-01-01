@@ -93,14 +93,14 @@ impl LivenessAnalyzer {
                 self.record_use(to, UseType::Write);
             }
 
-            IrStatement::Move { from, to } => {
+            IrStatement::Move { from, to, .. } => {
                 // 'from' is being moved (read + consumed)
                 self.record_use(from, UseType::Read);
                 // 'to' is receiving the value (written to)
                 self.record_use(to, UseType::Write);
             }
 
-            IrStatement::Assign { lhs, rhs } => {
+            IrStatement::Assign { lhs, rhs, .. } => {
                 // RHS is being read
                 match rhs {
                     crate::ir::IrExpression::Variable(var) => {
@@ -123,7 +123,7 @@ impl LivenessAnalyzer {
                 self.record_use(lhs, UseType::Write);
             }
 
-            IrStatement::Return { value } => {
+            IrStatement::Return { value, .. } => {
                 // Returned variable escapes scope - VERY conservative
                 if let Some(var) = value {
                     self.record_use(var, UseType::Escape);

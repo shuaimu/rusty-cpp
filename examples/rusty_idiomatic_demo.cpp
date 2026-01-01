@@ -77,8 +77,8 @@ void demo_rc_rust_style() {
 
     // Try to get mutable (Rust pattern)
     auto rc4 = rusty::Rc<int>::make(200);
-    if (auto* mut_ref = rc4.get_mut()) {
-        *mut_ref = 250;
+    if (auto opt = rc4.get_mut(); opt.is_some()) {
+        opt.unwrap() = 250;
         printf("Modified unique Rc: %d\n", *rc4);
     }
 }

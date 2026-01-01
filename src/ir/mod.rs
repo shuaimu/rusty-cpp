@@ -209,15 +209,18 @@ pub enum IrStatement {
     Assign {
         lhs: String,
         rhs: IrExpression,
+        line: usize,
     },
     Move {
         from: String,
         to: String,
+        line: usize,
     },
     Borrow {
         from: String,
         to: String,
         kind: BorrowKind,
+        line: usize,
     },
     CallExpr {
         func: String,
@@ -226,6 +229,7 @@ pub enum IrStatement {
     },
     Return {
         value: Option<String>,
+        line: usize,
     },
     Drop(String),
     // Scope markers for tracking when blocks begin/end
@@ -257,6 +261,7 @@ pub enum IrStatement {
         object: String,      // "container"
         field: String,       // "data"
         to: String,          // "_moved_data"
+        line: usize,
     },
     UseField {
         object: String,
@@ -268,6 +273,7 @@ pub enum IrStatement {
         field: String,
         to: String,
         kind: BorrowKind,
+        line: usize,
     },
     // Implicit drop at scope end (for RAII types)
     ImplicitDrop {
@@ -599,6 +605,7 @@ fn extract_return_source(
                     statements.push(IrStatement::Move {
                         from: var.clone(),
                         to: format!("_returned_{}", var),
+                        line: 0,  // Line not available in this context
                     });
                     Some(var.clone())
                 }
@@ -612,6 +619,7 @@ fn extract_return_source(
                             object: obj_name.clone(),
                             field: field.clone(),
                             to: format!("_returned_{}", field),
+                            line: 0,
                         });
                         Some(format!("{}.{}", obj_name, field))
                     } else {
@@ -749,8 +757,9 @@ fn convert_statement(
                 type_name: var.type_name.clone(),
             }]))
         }
-        Statement::ReferenceBinding { name, target, is_mutable, .. } => {
+        Statement::ReferenceBinding { name, target, is_mutable, location } => {
             let mut statements = Vec::new();
+            let line = location.line as usize;
 
             match target {
                 // Reference to a variable: create a borrow
@@ -780,6 +789,7 @@ fn convert_statement(
                         from: target_var.clone(),
                         to: name.clone(),
                         kind,
+                        line,
                     });
                 },
 
@@ -799,6 +809,7 @@ fn convert_statement(
                                     statements.push(IrStatement::Move {
                                         from: var.clone(),
                                         to: format!("_moved_{}", var),
+                                        line,
                                     });
                                     arg_names.push(var.clone());
                                 }
@@ -843,6 +854,7 @@ fn convert_statement(
                                 from: first_arg.clone(),
                                 to: name.clone(),
                                 kind: kind.clone(),
+                                line,
                             });
 
                             // Update the reference variable's ownership state
@@ -909,6 +921,7 @@ fn convert_statement(
                             field: final_field,
                             to: name.clone(),
                             kind,
+                            line,
                         });
                     } else if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
                         // Fallback for simple Variable case
@@ -938,6 +951,7 @@ fn convert_statement(
                             field: field.clone(),
                             to: name.clone(),
                             kind,
+                            line,
                         });
                     }
                 },
@@ -947,7 +961,8 @@ fn convert_statement(
 
             Ok(Some(statements))
         }
-        Statement::Assignment { lhs, rhs, .. } => {
+        Statement::Assignment { lhs, rhs, location } => {
+            let line = location.line as usize;
             // Check if lhs is a dereference: *ptr = value
             if let crate::parser::Expression::Dereference(ptr_expr) = lhs {
                 // Dereference assignment: *ptr = value
@@ -1049,7 +1064,8 @@ fn convert_statement(
                             return Ok(Some(vec![IrStatement::Move {
                                 from: from_var.clone(),
                                 to: lhs_var.clone(),
-                            }]));
+                        line: 0,
+                    }]));
                         }
                         _ => {
                             // Move of complex expression - continue to regular handling
@@ -1087,14 +1103,16 @@ fn convert_statement(
                                 Ok(Some(vec![IrStatement::Move {
                                     from: rhs_var.clone(),
                                     to: lhs_var.clone(),
-                                }]))
+                        line: 0,
+                    }]))
                             }
                             _ => {
                                 // Regular assignment (copy)
                                 Ok(Some(vec![IrStatement::Assign {
                                     lhs: lhs_var.clone(),
                                     rhs: IrExpression::Variable(rhs_var.clone()),
-                                }]))
+                        line: 0,
+                    }]))
                             }
                         }
                     } else {
@@ -1115,6 +1133,7 @@ fn convert_statement(
                             IrStatement::Assign {
                                 lhs: lhs_var.clone(),
                                 rhs: IrExpression::Variable(format!("{}.{}", obj_path, field_name)),
+                                line,
                             }
                         ]))
                     } else {
@@ -1138,7 +1157,8 @@ fn convert_statement(
                             Ok(Some(vec![IrStatement::Move {
                                 from: var.clone(),
                                 to: lhs_var.clone(),
-                            }]))
+                        line: 0,
+                    }]))
                         }
                         // NEW: Handle std::move(obj.field) including nested fields
                         crate::parser::Expression::MemberAccess { .. } => {
@@ -1149,7 +1169,8 @@ fn convert_statement(
                                     object: obj_path,
                                     field: field_name,
                                     to: lhs_var.clone(),
-                                }]))
+                        line: 0,
+                    }]))
                             } else {
                                 debug_println!("DEBUG IR: MemberAccess could not be parsed");
                                 Ok(None)
@@ -1224,7 +1245,8 @@ fn convert_statement(
                                         statements.push(IrStatement::Move {
                                             from: var.clone(),
                                             to: temp_name.clone(),
-                                        });
+                        line: 0,
+                    });
 
                                         if is_method_call && i == 0 {
                                             // Use the temporary as the receiver for rvalue method calls
@@ -1243,6 +1265,7 @@ fn convert_statement(
                                                 object: obj_path.clone(),
                                                 field: field_name.clone(),
                                                 to: lhs_var.clone(),  // Move to the LHS variable
+                                                line: 0,  // Line not easily available in this nested context
                                             });
                                             arg_names.push(format!("{}.{}", obj_path, field_name));
                                         }
@@ -1275,6 +1298,7 @@ fn convert_statement(
                                     statements.push(IrStatement::Move {
                                         from: var.clone(),
                                         to: format!("_temp_move_{}", var),
+                                        line: 0,  // Line not easily available in this nested context
                                     });
                                     arg_names.push(var.clone());
                                 }
@@ -1312,6 +1336,7 @@ fn convert_statement(
                     Ok(Some(vec![IrStatement::Assign {
                         lhs: lhs_var.clone(),
                         rhs: IrExpression::Literal(value.clone()),
+                        line: 0,
                     }]))
                 }
                 // String literal assignment (e.g., const char* s = "hello")
@@ -1321,6 +1346,7 @@ fn convert_statement(
                     Ok(Some(vec![IrStatement::Assign {
                         lhs: lhs_var.clone(),
                         rhs: IrExpression::Literal(value.clone()),  // Treat as literal for IR
+                        line,
                     }]))
                 }
                 // Lambda expression: generate LambdaCapture statement for safety checking
@@ -1393,8 +1419,9 @@ fn convert_statement(
                 assignment_ir
             }
         }
-        Statement::FunctionCall { name, args, .. } => {
+        Statement::FunctionCall { name, args, location } => {
             debug_println!("DEBUG IR: Processing FunctionCall statement: {} with {} args", name, args.len());
+            let line = location.line as usize;
             // Standalone function call (no assignment)
             let mut statements = Vec::new();
             let mut arg_names = Vec::new();
@@ -1430,7 +1457,8 @@ fn convert_statement(
                                 return Ok(Some(vec![IrStatement::Move {
                                     from: rhs.clone(),
                                     to: lhs.clone(),
-                                }]));
+                        line: 0,
+                    }]));
                             }
                         }
 
@@ -1477,7 +1505,8 @@ fn convert_statement(
                                 statements.push(IrStatement::Move {
                                     from: var.clone(),
                                     to: temp_name.clone(),
-                                });
+                        line: 0,
+                    });
 
                                 if is_method_call && i == 0 {
                                     // Use the temporary as the receiver for rvalue method calls
@@ -1496,6 +1525,7 @@ fn convert_statement(
                                         object: obj_path.clone(),
                                         field: field_name.clone(),
                                         to: format!("_moved_{}", field_name),
+                                        line,
                                     });
                                     arg_names.push(format!("{}.{}", obj_path, field_name));
                                 }
@@ -1532,6 +1562,7 @@ fn convert_statement(
                                         statements.push(IrStatement::Move {
                                             from: var.clone(),
                                             to: format!("_moved_{}", var),
+                                            line,
                                         });
                                     }
                                     crate::parser::Expression::MemberAccess { .. } => {
@@ -1542,6 +1573,7 @@ fn convert_statement(
                                                 object: obj_path,
                                                 field: field_name.clone(),
                                                 to: format!("_moved_{}", field_name),
+                                                line,
                                             });
                                         }
                                     }
@@ -1603,7 +1635,7 @@ fn convert_statement(
                 extract_return_source(e, &mut statements)
             });
 
-            statements.push(IrStatement::Return { value });
+            statements.push(IrStatement::Return { value , line: 0 });
             Ok(Some(statements))
         }
         Statement::EnterScope => {

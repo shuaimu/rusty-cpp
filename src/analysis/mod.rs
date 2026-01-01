@@ -669,7 +669,7 @@ fn process_statement(
     function: &IrFunction,       // Phase 2: For checking variable types
 ) {
     match statement {
-        crate::ir::IrStatement::Move { from, to } => {
+        crate::ir::IrStatement::Move { from, to, .. } => {
             debug_println!("DEBUG ANALYSIS: Processing Move from '{}' to '{}'", from, to);
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
@@ -749,7 +749,7 @@ fn process_statement(
         }
         
         // NEW: Handle field-level operations
-        crate::ir::IrStatement::MoveField { object, field, to } => {
+        crate::ir::IrStatement::MoveField { object, field, to, .. } => {
             debug_println!("DEBUG ANALYSIS: Processing MoveField from '{}.{}' to '{}'", object, field, to);
 
             // Skip checks if we're in an unsafe block
@@ -861,7 +861,7 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::BorrowField { object, field, to, kind } => {
+        crate::ir::IrStatement::BorrowField { object, field, to, kind, .. } => {
             debug_println!("DEBUG ANALYSIS: BorrowField from '{}.{}' to '{}'", object, field, to);
 
             // Skip checking if we're in an unsafe block
@@ -919,7 +919,7 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::Borrow { from, to, kind } => {
+        crate::ir::IrStatement::Borrow { from, to, kind, .. } => {
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
                 // Still record the borrow for consistency
@@ -970,7 +970,7 @@ fn process_statement(
             // Immutable references are Copy - from remains valid
         }
         
-        crate::ir::IrStatement::Assign { lhs, rhs } => {
+        crate::ir::IrStatement::Assign { lhs, rhs, .. } => {
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
                 return;
@@ -1193,7 +1193,7 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::Return { value } => {
+        crate::ir::IrStatement::Return { value, .. } => {
             // Skip if in unsafe block
             if ownership_tracker.is_in_unsafe_block() {
                 return;
@@ -2304,13 +2304,13 @@ mod tests {
         
         // Add statements: move x to y, then try to use x
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
-        block.statements.push(IrStatement::Move {
+        block.statements.push(IrStatement::Move { line: 0,
             from: "x".to_string(),
             to: "y".to_string(),
         });
         
         // Try to move x again (should fail)
-        block.statements.push(IrStatement::Move {
+        block.statements.push(IrStatement::Move { line: 0,
             from: "x".to_string(),
             to: "z".to_string(),
         });
@@ -2346,13 +2346,13 @@ mod tests {
         );
         
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
             kind: BorrowKind::Immutable,
         });
         
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref2".to_string(),
             kind: BorrowKind::Immutable,
@@ -2390,14 +2390,14 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // First, immutable borrow
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
             kind: BorrowKind::Immutable,
         });
         
         // Then try mutable borrow (should fail)
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "mut_ref".to_string(),
             kind: BorrowKind::Mutable,
@@ -2453,14 +2453,14 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Create const reference
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref".to_string(),
             kind: BorrowKind::Immutable,
         });
         
         // Try to modify through const reference (should fail)
-        block.statements.push(IrStatement::Assign {
+        block.statements.push(IrStatement::Assign { line: 0,
             lhs: "const_ref".to_string(),
             rhs: crate::ir::IrExpression::Variable("other".to_string()),
         });
@@ -2515,14 +2515,14 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Create mutable reference
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "mut_ref".to_string(),
             kind: BorrowKind::Mutable,
         });
         
         // Modify through mutable reference (should succeed)
-        block.statements.push(IrStatement::Assign {
+        block.statements.push(IrStatement::Assign { line: 0,
             lhs: "mut_ref".to_string(),
             rhs: crate::ir::IrExpression::Variable("other".to_string()),
         });
@@ -2575,7 +2575,7 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Try to move from reference (should fail)
-        block.statements.push(IrStatement::Move {
+        block.statements.push(IrStatement::Move { line: 0,
             from: "ref_var".to_string(),
             to: "dest".to_string(),
         });
@@ -2614,19 +2614,19 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Create multiple const references (should succeed)
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref1".to_string(),
             kind: BorrowKind::Immutable,
         });
         
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref2".to_string(),
             kind: BorrowKind::Immutable,
         });
         
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref3".to_string(),
             kind: BorrowKind::Immutable,
@@ -2664,13 +2664,13 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Move the value
-        block.statements.push(IrStatement::Move {
+        block.statements.push(IrStatement::Move { line: 0,
             from: "value".to_string(),
             to: "other".to_string(),
         });
         
         // Try to create reference to moved value (should fail)
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "ref".to_string(),
             kind: BorrowKind::Immutable,
@@ -2708,12 +2708,12 @@ mod tests {
         );
         
         let block1 = &mut func1.cfg[petgraph::graph::NodeIndex::new(0)];
-        block1.statements.push(IrStatement::Borrow {
+        block1.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
             kind: BorrowKind::Immutable,
         });
-        block1.statements.push(IrStatement::Borrow {
+        block1.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref2".to_string(),
             kind: BorrowKind::Immutable,
@@ -2737,12 +2737,12 @@ mod tests {
         );
         
         let block2 = &mut func2.cfg[petgraph::graph::NodeIndex::new(0)];
-        block2.statements.push(IrStatement::Borrow {
+        block2.statements.push(IrStatement::Borrow { line: 0,
             from: "y".to_string(),
             to: "mut1".to_string(),
             kind: BorrowKind::Mutable,
         });
-        block2.statements.push(IrStatement::Borrow {
+        block2.statements.push(IrStatement::Borrow { line: 0,
             from: "y".to_string(),
             to: "mut2".to_string(),
             kind: BorrowKind::Mutable,
@@ -2798,26 +2798,26 @@ mod tests {
         let block = &mut func.cfg[petgraph::graph::NodeIndex::new(0)];
         
         // Create multiple immutable refs to 'a'
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "a".to_string(),
             to: "ref_a1".to_string(),
             kind: BorrowKind::Immutable,
         });
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "a".to_string(),
             to: "ref_a2".to_string(),
             kind: BorrowKind::Immutable,
         });
         
         // Create mutable ref to 'b'
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "b".to_string(),
             to: "mut_b".to_string(),
             kind: BorrowKind::Mutable,
         });
         
         // Try to create another ref to 'b' (should fail)
-        block.statements.push(IrStatement::Borrow {
+        block.statements.push(IrStatement::Borrow { line: 0,
             from: "b".to_string(),
             to: "ref_b".to_string(),
             kind: BorrowKind::Immutable,
@@ -2871,14 +2871,14 @@ mod scope_tests {
     fn test_scope_cleanup_simple() {
         let statements = vec![
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
                 kind: BorrowKind::Mutable,
             },
             IrStatement::ExitScope,
             // After scope exit, should be able to borrow again
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
                 kind: BorrowKind::Mutable,
@@ -2902,14 +2902,14 @@ mod scope_tests {
     fn test_nested_scopes() {
         let statements = vec![
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
                 kind: BorrowKind::Immutable,
             },
             IrStatement::EnterScope,
             // Nested scope - should be able to have another immutable borrow
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
                 kind: BorrowKind::Immutable,
@@ -2918,7 +2918,7 @@ mod scope_tests {
             // ref2 is gone, but ref1 still exists
             IrStatement::ExitScope,
             // Now both are gone
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref3".to_string(),
                 kind: BorrowKind::Mutable,
@@ -2942,13 +2942,13 @@ mod scope_tests {
     fn test_scope_doesnt_affect_moves() {
         let statements = vec![
             IrStatement::EnterScope,
-            IrStatement::Move {
+            IrStatement::Move { line: 0,
                 from: "x".to_string(),
                 to: "y".to_string(),
             },
             IrStatement::ExitScope,
             // x is still moved even after scope exit
-            IrStatement::Move {
+            IrStatement::Move { line: 0,
                 from: "x".to_string(),
                 to: "z".to_string(),
             },
@@ -2973,7 +2973,7 @@ mod scope_tests {
         let statements = vec![
             // First scope
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
                 kind: BorrowKind::Mutable,
@@ -2982,7 +2982,7 @@ mod scope_tests {
             
             // Second scope
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
                 kind: BorrowKind::Mutable,
@@ -2991,7 +2991,7 @@ mod scope_tests {
             
             // Third scope
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref3".to_string(),
                 kind: BorrowKind::Mutable,
@@ -3016,13 +3016,13 @@ mod scope_tests {
     fn test_error_still_caught_in_same_scope() {
         let statements = vec![
             IrStatement::EnterScope,
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
                 kind: BorrowKind::Mutable,
             },
             // This should error - same scope
-            IrStatement::Borrow {
+            IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
                 kind: BorrowKind::Mutable,

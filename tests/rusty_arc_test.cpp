@@ -71,17 +71,17 @@ void test_arc_get_mut() {
     printf("test_arc_get_mut: ");
     {
         auto arc1 = Arc<int>::make(42);
-        
+
         // Should get mutable reference when unique
-        int* mut_ref = arc1.get_mut();
-        assert(mut_ref != nullptr);
-        *mut_ref = 100;
+        auto opt = arc1.get_mut();
+        assert(opt.is_some());
+        opt.unwrap() = 100;
         assert(*arc1 == 100);
-        
+
         // Should not get mutable reference when shared
         auto arc2 = arc1.clone();
-        mut_ref = arc1.get_mut();
-        assert(mut_ref == nullptr);  // Can't mutate when shared
+        opt = arc1.get_mut();
+        assert(opt.is_none());  // Can't mutate when shared
     }
     printf("PASS\n");
 }

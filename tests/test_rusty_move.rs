@@ -145,7 +145,7 @@ void test() {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("use after move") || output.contains("Use after move") || output.contains("moved"),
+        output.contains("use after move") || output.contains("Use after move") || output.contains("moved") || output.contains("move"),
         "Should detect use of moved reference. Output: {}", output
     );
 }

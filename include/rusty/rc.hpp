@@ -315,13 +315,14 @@ public:
     }
 
     // Try to get mutable reference if we're the only owner
-    // Returns nullptr if there are other references
-    // @lifetime: (&'a mut) -> &'a mut
-    T* get_mut() {
+    // Returns None if there are other references (shared state)
+    // @safe
+    // @lifetime: (&'a mut self) -> Option<&'a mut T>
+    Option<T&> get_mut() {
         if (control_ && ptr_ && control_->strong_count == 1) {
-            return ptr_;
+            return SomeRef(*ptr_);
         }
-        return nullptr;
+        return None;
     }
 
     // Create a new Rc with the same value (deep copy)

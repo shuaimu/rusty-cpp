@@ -8,6 +8,7 @@
 //! - Phase 5: Member lifetime tracking
 //! - Phase 6: new/delete tracking
 //! - Phase 7: Constructor initialization order
+//! - Phase 8: Reference lifetime checking (use-after-free detection)
 
 use crate::ir::{IrFunction, IrStatement, BorrowKind, OwnershipState};
 use crate::parser::HeaderCache;
@@ -96,6 +97,27 @@ pub struct MemberBorrow {
     pub line: usize,
 }
 
+/// Track general reference borrows (Phase 8: Lifetime Checking)
+/// When a reference is created from a variable, track the relationship
+/// to detect use-after-free when source goes out of scope
+#[derive(Debug, Clone)]
+pub struct ReferenceBorrow {
+    /// The reference variable (e.g., "ref" in `int& ref = x;`)
+    pub reference: String,
+    /// The source variable being borrowed from (e.g., "x")
+    pub source: String,
+    /// Scope level where the reference was declared
+    pub reference_scope: usize,
+    /// Scope level where the source was declared
+    pub source_scope: usize,
+    /// Whether this is a mutable borrow
+    pub is_mutable: bool,
+    /// Line number for error reporting
+    pub line: usize,
+    /// Whether this reference was returned from a function
+    pub is_returned: bool,
+}
+
 /// Main RAII tracker that coordinates all RAII-related tracking
 #[derive(Debug)]
 pub struct RaiiTracker {
@@ -107,6 +129,8 @@ pub struct RaiiTracker {
     pub lambda_captures: Vec<LambdaCapture>,
     /// Member borrows: references to object fields (Phase 5)
     pub member_borrows: Vec<MemberBorrow>,
+    /// General reference borrows (Phase 8: Lifetime Checking)
+    pub reference_borrows: Vec<ReferenceBorrow>,
     /// Heap allocations for new/delete tracking
     pub heap_allocations: HashMap<String, HeapAllocation>,
     /// User-defined RAII types detected in this file
@@ -119,6 +143,8 @@ pub struct RaiiTracker {
     pub container_variables: HashSet<String>,
     /// Variables that are iterators
     pub iterator_variables: HashSet<String>,
+    /// Track which variables are currently borrowed (source -> list of borrowers)
+    pub active_borrows: HashMap<String, Vec<String>>,
 }
 
 impl RaiiTracker {
@@ -128,12 +154,14 @@ impl RaiiTracker {
             iterator_borrows: Vec::new(),
             lambda_captures: Vec::new(),
             member_borrows: Vec::new(),
+            reference_borrows: Vec::new(),
             heap_allocations: HashMap::new(),
             user_defined_raii_types: HashSet::new(),
             current_scope: 0,
             variable_scopes: HashMap::new(),
             container_variables: HashSet::new(),
             iterator_variables: HashSet::new(),
+            active_borrows: HashMap::new(),
         }
     }
 
@@ -264,6 +292,75 @@ impl RaiiTracker {
         });
     }
 
+    /// Record a general reference borrow (Phase 8: Lifetime Checking)
+    /// When `ref = source` or `ref = source.get_mut().unwrap()`, track the borrow
+    pub fn record_reference_borrow(&mut self, reference: &str, source: &str, is_mutable: bool, line: usize) {
+        let reference_scope = *self.variable_scopes.get(reference).unwrap_or(&self.current_scope);
+        let source_scope = *self.variable_scopes.get(source).unwrap_or(&0);
+
+        self.reference_borrows.push(ReferenceBorrow {
+            reference: reference.to_string(),
+            source: source.to_string(),
+            reference_scope,
+            source_scope,
+            is_mutable,
+            line,
+            is_returned: false,
+        });
+
+        // Track active borrows for detecting source reassignment
+        self.active_borrows
+            .entry(source.to_string())
+            .or_insert_with(Vec::new)
+            .push(reference.to_string());
+    }
+
+    /// Mark a reference as returned (escapes function scope)
+    pub fn mark_reference_returned(&mut self, reference: &str) {
+        for borrow in &mut self.reference_borrows {
+            if borrow.reference == reference {
+                borrow.is_returned = true;
+            }
+        }
+    }
+
+    /// Check if a variable is currently borrowed
+    pub fn is_borrowed(&self, var: &str) -> bool {
+        self.active_borrows.get(var).map(|v| !v.is_empty()).unwrap_or(false)
+    }
+
+    /// Get list of active borrowers for a variable
+    pub fn get_borrowers(&self, var: &str) -> Vec<String> {
+        self.active_borrows.get(var).cloned().unwrap_or_default()
+    }
+
+    /// Check if source is reassigned while borrowed (returns error message if violation)
+    pub fn check_reassignment_while_borrowed(&self, var: &str, _assign_line: usize) -> Option<String> {
+        if let Some(borrowers) = self.active_borrows.get(var) {
+            if !borrowers.is_empty() {
+                // Find the borrow line from reference_borrows
+                let borrow_lines: Vec<String> = borrowers.iter().filter_map(|borrower| {
+                    self.reference_borrows.iter()
+                        .find(|b| &b.reference == borrower && &b.source == var)
+                        .map(|b| format!("{} at line {}", borrower, b.line))
+                }).collect();
+
+                let borrower_info = if borrow_lines.is_empty() {
+                    borrowers.join(", ")
+                } else {
+                    borrow_lines.join(", ")
+                };
+
+                return Some(format!(
+                    "Cannot assign to '{}' because it is borrowed by {}",
+                    var,
+                    borrower_info
+                ));
+            }
+        }
+        None
+    }
+
     /// Record a new allocation
     pub fn record_allocation(&mut self, var: &str, line: usize) {
         self.heap_allocations.insert(var.to_string(), HeapAllocation {
@@ -354,6 +451,17 @@ impl RaiiTracker {
             }
         }
 
+        // Phase 8: Check for references that outlive their source
+        for borrow in &self.reference_borrows {
+            // If the source is in the dying scope but the reference is in an outer scope
+            if borrow.source_scope == dying_scope && borrow.reference_scope < dying_scope {
+                errors.push(format!(
+                    "Dangling reference: '{}' borrows from '{}' which goes out of scope (borrowed at line {})",
+                    borrow.reference, borrow.source, borrow.line
+                ));
+            }
+        }
+
         // Clean up borrows from dying scope
         // For container borrows: keep if pointee survives OR container dies with it
         self.container_borrows.retain(|b| b.pointee_scope != dying_scope || b.container_scope >= dying_scope);
@@ -361,6 +469,24 @@ impl RaiiTracker {
         self.iterator_borrows.retain(|b| b.container_scope != dying_scope || b.iterator_scope >= dying_scope);
         // For member borrows: remove if reference OR object dies (no longer needs tracking)
         self.member_borrows.retain(|b| b.reference_scope != dying_scope && b.object_scope != dying_scope);
+        // For reference borrows: remove if reference OR source dies
+        self.reference_borrows.retain(|b| b.reference_scope != dying_scope && b.source_scope != dying_scope);
+
+        // Clean up active borrows for dying references
+        for (source, borrowers) in self.active_borrows.iter_mut() {
+            // Remove borrowers that are in the dying scope
+            borrowers.retain(|b| self.variable_scopes.get(b) != Some(&dying_scope));
+            // Also check if this source is dying - but keep the entry for now
+            let _ = source; // Silence unused warning
+        }
+        // Remove sources that are in the dying scope
+        let dying_sources: Vec<_> = self.active_borrows.keys()
+            .filter(|s| self.variable_scopes.get(*s) == Some(&dying_scope))
+            .cloned()
+            .collect();
+        for source in dying_sources {
+            self.active_borrows.remove(&source);
+        }
 
         // Safely decrement scope level (avoid underflow)
         if self.current_scope > 0 {
@@ -466,10 +592,27 @@ fn process_raii_statement(
             }
         }
 
-        IrStatement::Return { value } => {
+        IrStatement::Return { value, .. } => {
             // Check if returning a lambda that captures local references
             if let Some(val) = value {
                 tracker.mark_lambda_escaped(val);
+                // Phase 8: Check if returning a reference to a local variable
+                tracker.mark_reference_returned(val);
+
+                // Check if this reference borrows from a local that will die
+                for borrow in &tracker.reference_borrows {
+                    if borrow.reference == *val {
+                        // Check if the source is a local variable (not a parameter)
+                        if let Some(var_info) = function.variables.get(&borrow.source) {
+                            if !var_info.is_parameter && !var_info.is_static {
+                                errors.push(format!(
+                                    "Returning reference to local variable: '{}' borrows from local '{}' which will be destroyed",
+                                    val, borrow.source
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -487,10 +630,33 @@ fn process_raii_statement(
             }
         }
 
+        // Phase 8: Track general borrows
+        IrStatement::Borrow { from, to, kind, line } => {
+            let is_mutable = matches!(kind, BorrowKind::Mutable);
+            tracker.record_reference_borrow(to, from, is_mutable, *line);
+        }
+
+        // Phase 8: Check for assignment to borrowed variable
+        IrStatement::Assign { lhs, line, .. } => {
+            if let Some(err) = tracker.check_reassignment_while_borrowed(lhs, *line) {
+                errors.push(err);
+            }
+        }
+
+        // Phase 8: Check for move of borrowed variable
+        IrStatement::Move { from, line, .. } => {
+            if let Some(err) = tracker.check_reassignment_while_borrowed(from, *line) {
+                errors.push(format!(
+                    "Cannot move '{}' at line {} because it is borrowed",
+                    from, line
+                ));
+            }
+        }
+
         // Phase 5: Track borrows from object fields
-        IrStatement::BorrowField { object, field, to, .. } => {
+        IrStatement::BorrowField { object, field, to, line, .. } => {
             // When we see `to = &object.field`, record that `to` borrows from `object`
-            tracker.record_member_borrow(to, object, field, 0);
+            tracker.record_member_borrow(to, object, field, *line);
         }
 
         _ => {}

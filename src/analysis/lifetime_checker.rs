@@ -301,7 +301,7 @@ fn check_function_lifetimes(
                     }
                 }
                 
-                IrStatement::Return { value } => {
+                IrStatement::Return { value, .. } => {
                     // Check that returned references have appropriate lifetimes
                     if let Some(value) = value {
                         let return_errors = check_return_lifetime(value, function, scope);

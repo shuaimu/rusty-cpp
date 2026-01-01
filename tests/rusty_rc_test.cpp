@@ -69,17 +69,17 @@ void test_rc_get_mut() {
     printf("test_rc_get_mut: ");
     {
         auto rc1 = Rc<int>::make(42);
-        
+
         // Should get mutable reference when unique
-        int* mut_ref = rc1.get_mut();
-        assert(mut_ref != nullptr);
-        *mut_ref = 100;
+        auto opt = rc1.get_mut();
+        assert(opt.is_some());
+        opt.unwrap() = 100;
         assert(*rc1 == 100);
-        
+
         // Should not get mutable reference when shared
         auto rc2 = rc1.clone();
-        mut_ref = rc1.get_mut();
-        assert(mut_ref == nullptr);  // Can't mutate when shared
+        opt = rc1.get_mut();
+        assert(opt.is_none());  // Can't mutate when shared
     }
     printf("PASS\n");
 }

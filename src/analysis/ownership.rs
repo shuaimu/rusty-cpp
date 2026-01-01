@@ -17,7 +17,7 @@ impl OwnershipAnalyzer {
     #[allow(dead_code)]
     pub fn analyze_statement(&mut self, stmt: &IrStatement) -> Result<(), String> {
         match stmt {
-            IrStatement::Assign { lhs, rhs } => {
+            IrStatement::Assign { lhs, rhs, .. } => {
                 match rhs {
                     IrExpression::Move(from) => {
                         // Check if source is available

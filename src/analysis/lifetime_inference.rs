@@ -51,13 +51,10 @@ impl LifetimeInferencer {
     
     /// Infer lifetimes for all variables in a function
     pub fn infer_function_lifetimes(&mut self, function: &IrFunction) -> HashMap<String, InferredLifetime> {
-        // REASSIGNMENT FIX: Initialize all declared variables with first_def = 0
-        // This ensures variables exist in the lifetime tracking even if their
-        // declaration doesn't generate IR (e.g., int x = 42 with literal)
-        for (var_name, _var_info) in &function.variables {
-            self.first_def.entry(var_name.clone()).or_insert(0);
-            self.last_use.entry(var_name.clone()).or_insert(0);
-        }
+        // NOTE: We no longer pre-initialize all variables to first_def = 0
+        // This was causing scope-based borrow checking to fail because all
+        // references appeared to start at statement 0.
+        // Variables are now only tracked when they appear in IR statements.
 
         // First pass: collect all variable definitions and uses from IR statements
         let mut statement_index = 0;
@@ -103,7 +100,7 @@ impl LifetimeInferencer {
     /// Process a statement to track variable definitions and uses
     fn process_statement(&mut self, statement: &IrStatement, index: usize) {
         match statement {
-            IrStatement::Assign { lhs, rhs } => {
+            IrStatement::Assign { lhs, rhs, .. } => {
                 self.first_def.entry(lhs.clone()).or_insert(index);
                 self.last_use.insert(lhs.clone(), index);
                 // REASSIGNMENT FIX: Also track usage of RHS variable
@@ -113,7 +110,7 @@ impl LifetimeInferencer {
                 }
             }
             
-            IrStatement::Move { from, to } => {
+            IrStatement::Move { from, to, .. } => {
                 self.last_use.insert(from.clone(), index);
                 self.first_def.entry(to.clone()).or_insert(index);
                 self.last_use.insert(to.clone(), index);
@@ -135,7 +132,7 @@ impl LifetimeInferencer {
                 }
             }
             
-            IrStatement::Return { value } => {
+            IrStatement::Return { value, .. } => {
                 if let Some(val) = value {
                     self.last_use.insert(val.clone(), index);
                 }
@@ -148,7 +145,7 @@ impl LifetimeInferencer {
     /// Infer dependencies between lifetimes based on borrows and moves
     fn infer_dependencies(&mut self, statement: &IrStatement, _index: usize) {
         match statement {
-            IrStatement::Borrow { from, to, kind } => {
+            IrStatement::Borrow { from, to, kind, .. } => {
                 // The lifetime of 'to' depends on 'from'
                 if let Some(to_lifetime) = self.lifetimes.get_mut(to) {
                     to_lifetime.dependencies.insert(from.clone());
@@ -161,7 +158,7 @@ impl LifetimeInferencer {
                 }
             }
             
-            IrStatement::Move { from, to } => {
+            IrStatement::Move { from, to, .. } => {
                 // After a move, 'from' lifetime ends and 'to' lifetime begins
                 if let Some(from_lifetime) = self.lifetimes.get(from).cloned() {
                     if let Some(to_lifetime) = self.lifetimes.get_mut(to) {
@@ -214,7 +211,7 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
 
         for statement in &block.statements {
             match statement {
-                IrStatement::Borrow { from, to, kind } => {
+                IrStatement::Borrow { from, to, kind, .. } => {
                     // Check that 'from' is alive when borrowed
                     // Note: We should only check this if we have actually tracked the variable
                     if inferencer.lifetimes.contains_key(from) && !inferencer.is_alive_at(from, statement_index) {
@@ -228,6 +225,11 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     if matches!(kind, BorrowKind::Mutable) {
                         // Check if there are other borrows of 'from' that overlap with 'to'
                         for (other_var, other_lifetime) in &lifetimes {
+                            // Only check against variables that have been defined before or at current statement
+                            // This prevents false positives from variables defined in later scopes
+                            if other_lifetime.start > statement_index {
+                                continue;
+                            }
                             if other_var != to && other_lifetime.dependencies.contains(from) {
                                 if inferencer.lifetimes_overlap(to, other_var) {
                                     // Only error if the other borrow is also mutable or we have a mutable borrow
@@ -242,7 +244,7 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     }
                 }
                 
-                IrStatement::Move { from, to } => {
+                IrStatement::Move { from, to, .. } => {
                     // Check that 'from' is alive when moved
                     if inferencer.lifetimes.contains_key(from) && !inferencer.is_alive_at(from, statement_index) {
                         errors.push(format!(
@@ -252,7 +254,7 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     }
                 }
                 
-                IrStatement::Return { value } => {
+                IrStatement::Return { value, .. } => {
                     // PHASE 2: If function returns a reference but return value is None,
                     // it's returning a temporary (e.g., return 42;)
                     if value.is_none() && returns_reference(&function.return_type) {
@@ -332,18 +334,18 @@ mod tests {
         let mut inferencer = LifetimeInferencer::new();
         
         // Simulate processing statements
-        inferencer.process_statement(&IrStatement::Assign {
+        inferencer.process_statement(&IrStatement::Assign { line: 0,
             lhs: "x".to_string(),
             rhs: crate::ir::IrExpression::Variable("temp".to_string()),
         }, 0);
         
-        inferencer.process_statement(&IrStatement::Borrow {
+        inferencer.process_statement(&IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref_x".to_string(),
             kind: BorrowKind::Immutable,
         }, 1);
         
-        inferencer.process_statement(&IrStatement::Return {
+        inferencer.process_statement(&IrStatement::Return { line: 0,
             value: Some("ref_x".to_string()),
         }, 2);
         

@@ -325,7 +325,7 @@ fn analyze_block(
                 }
             }
             
-            IrStatement::Return { value } => {
+            IrStatement::Return { value, .. } => {
                 if let Some(val) = value {
                     // Check for dangling references
                     if let Some(var_scope) = tracker.variable_scope.get(val) {

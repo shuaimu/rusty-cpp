@@ -177,20 +177,20 @@ void test_get_mut_exclusivity() {
 
     auto arc = Arc<int>::make(100);
 
-    int* mut_ptr = arc.get_mut();
-    assert(mut_ptr != nullptr);
-    *mut_ptr = 200;
+    auto opt = arc.get_mut();
+    assert(opt.is_some());
+    opt.unwrap() = 200;
 
     auto clone = arc.clone();
-    assert(arc.get_mut() == nullptr);
+    assert(arc.get_mut().is_none());
 
     std::atomic<bool> all_checked{false};
     std::thread checker([clone, &all_checked]() mutable {
-        assert(clone.get_mut() == nullptr);
+        assert(clone.get_mut().is_none());
         all_checked.store(true, std::memory_order_release);
     });
 
-    assert(arc.get_mut() == nullptr);
+    assert(arc.get_mut().is_none());
     checker.join();
 
     printf("PASS\n");
@@ -246,9 +246,9 @@ void test_cross_thread_transfer() {
 
     std::thread worker([arc = std::move(arc), &received, &final_value]() mutable {
         assert(arc.is_valid());
-        int* mut = arc.get_mut();
-        assert(mut != nullptr);
-        *mut = 456;
+        auto opt = arc.get_mut();
+        assert(opt.is_some());
+        opt.unwrap() = 456;
         final_value.store(*arc, std::memory_order_release);
         received.store(true, std::memory_order_release);
     });
@@ -275,7 +275,7 @@ void test_arc_mutex_pattern() {
     for (int i = 0; i < NUM_THREADS; ++i) {
         threads.emplace_back([counter]() {
             for (int j = 0; j < INCREMENTS; ++j) {
-                auto guard = counter->lock();
+                auto guard = counter->lock().unwrap();
                 *guard += 1;
             }
         });
@@ -285,7 +285,7 @@ void test_arc_mutex_pattern() {
         t.join();
     }
 
-    auto final_guard = counter->lock();
+    auto final_guard = counter->lock().unwrap();
     assert(*final_guard == NUM_THREADS * INCREMENTS);
 
     printf("PASS\n");

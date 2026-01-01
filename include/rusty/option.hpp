@@ -446,12 +446,29 @@ public:
     }
 };
 
-// Helper function to create Some variant
+// Helper function to create Some variant (owned value)
 // @safe
 template<typename T>
 // @lifetime: owned
 Option<T> Some(T value) {
     return Option<T>(std::move(value));
+}
+
+// Helper function to create Some variant (mutable reference)
+// No std::move - references don't transfer ownership
+// @safe
+template<typename T>
+// @lifetime: (&'a mut) -> Option<&'a mut>
+Option<T&> SomeRef(T& ref) {
+    return Option<T&>(ref);
+}
+
+// Helper function to create Some variant (const reference)
+// @safe
+template<typename T>
+// @lifetime: (&'a) -> Option<&'a>
+Option<const T&> SomeRef(const T& ref) {
+    return Option<const T&>(ref);
 }
 
 // Equality operators

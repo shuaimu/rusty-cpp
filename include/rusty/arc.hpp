@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstddef>
 #include <utility>
+#include "option.hpp"  // For Option<T&> and SomeRef()
 
 // Arc<T> - Atomically Reference Counted pointer
 // Equivalent to Rust's Arc<T>
@@ -233,16 +234,22 @@ public:
     }
 
     // Try to get mutable reference if we're the only owner
-    // Returns nullptr if there are other references
-    // @unsafe
-    // @lifetime: (&'a mut) -> &'a mut
-    T* get_mut() {
-        // @unsafe {
+    // Returns None if there are other references (shared state)
+    // @safe
+    // @lifetime: (&'a mut self) -> Option<&'a mut T>
+    Option<T&> get_mut() {
         if (ptr && ptr->value && ptr->strong_count.load(std::memory_order_relaxed) == 1) {
-            return ptr->value;
+            return SomeRef(*ptr->value);
         }
-        return nullptr;
-        // }
+        return None;
+    }
+
+    // Get raw pointer to the value (for legacy code)
+    // Unlike get_mut(), this works even with multiple references
+    // @unsafe - Returns mutable pointer to potentially shared data
+    // @lifetime: (&'a self) -> *'a T
+    T* as_ptr() const {
+        return ptr ? ptr->value : nullptr;
     }
 };
 

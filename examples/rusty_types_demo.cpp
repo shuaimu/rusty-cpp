@@ -163,14 +163,14 @@ void demo_rc() {
     
     // Get mutable reference if unique
     auto rc3 = rusty::make_rc<int>(75);
-    if (auto* mut_ref = rc3.get_mut()) {
-        *mut_ref = 80;
+    if (auto opt = rc3.get_mut(); opt.is_some()) {
+        opt.unwrap() = 80;
         printf("Modified unique Rc: %d\n", *rc3);
     }
-    
+
     // Can't modify when shared
     auto rc4 = rc3.clone();
-    if (rc3.get_mut() == nullptr) {
+    if (rc3.get_mut().is_none()) {
         printf("Cannot modify shared Rc\n");
     }
 }

@@ -36,18 +36,18 @@ void test_vec_use_after_move() {
 // @safe
 void test_rc_get_mut_safety() {
     auto rc1 = rusty::make_rc<int>(100);
-    
+
     // Get mutable reference when unique - OK
-    if (auto* mut_ref = rc1.get_mut()) {
-        *mut_ref = 200;
+    if (auto opt = rc1.get_mut(); opt.is_some()) {
+        opt.unwrap() = 200;
     }
-    
+
     // Create another reference
     auto rc2 = rc1.clone();
-    
-    // Try to get mutable when shared - returns nullptr, safe
-    if (auto* mut_ref = rc1.get_mut()) {
-        *mut_ref = 300;  // This won't execute
+
+    // Try to get mutable when shared - returns None, safe
+    if (auto opt = rc1.get_mut(); opt.is_some()) {
+        opt.unwrap() = 300;  // This won't execute
     }
 }
 
