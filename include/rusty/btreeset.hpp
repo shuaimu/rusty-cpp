@@ -61,9 +61,9 @@ public:
     
     // Insert element
     bool insert(T value) {
-        bool existed = map_.contains_key(value);
+        size_t old_len = map_.len();
         map_.insert(std::move(value), Unit{});
-        return !existed;  // Return true if newly inserted
+        return map_.len() > old_len;  // Return true if newly inserted
     }
     
     // Remove element
