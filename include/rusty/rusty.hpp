@@ -21,6 +21,7 @@
 // #include "rusty/rc/weak.hpp"  // Namespace-organized: rusty::rc_impl::Weak<T>
 // #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
 #include "rusty/vec.hpp"
+#include "rusty/vecdeque.hpp"
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/cell.hpp"

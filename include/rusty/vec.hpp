@@ -8,6 +8,7 @@
 #include <utility>  // for std::move, std::forward
 #include <cstddef>  // for size_t
 #include <cstring>  // for memcpy
+#include <rusty/function.hpp>
 
 // Vec<T> - A growable array with owned elements
 // Equivalent to Rust's Vec<T>
@@ -239,9 +240,57 @@ public:
         }
         return true;
     }
-    
+
     bool operator!=(const Vec& other) const {
         return !(*this == other);
+    }
+
+    // Retain only elements where predicate returns true
+    // Similar to Rust's Vec::retain
+    // Uses rusty::Function for type-erased, move-only callable (no ref captures)
+    // Predicate signature: bool(const T&) - takes immutable borrow of element
+    void retain(Function<bool(const T&)> predicate) {
+        size_t write = 0;
+        for (size_t read = 0; read < size_; ++read) {
+            if (predicate(static_cast<const T&>(data_[read]))) {
+                if (write != read) {
+                    // Move element to new position
+                    new (&data_[write]) T(std::move(data_[read]));
+                    data_[read].~T();
+                }
+                ++write;
+            } else {
+                // Destroy element that doesn't match predicate
+                data_[read].~T();
+            }
+        }
+        size_ = write;
+    }
+
+    // Extract elements where predicate returns true, removing them from this Vec
+    // Similar to Rust's Vec::extract_if (formerly drain_filter)
+    // Returns a new Vec containing the extracted elements
+    // Uses rusty::Function for type-erased, move-only callable (no ref captures)
+    // Predicate signature: bool(const T&) - takes immutable borrow of element
+    Vec<T> extract_if(Function<bool(const T&)> predicate) {
+        Vec<T> extracted = Vec<T>::with_capacity(size_ / 2);  // Reasonable initial guess
+        size_t write = 0;
+        for (size_t read = 0; read < size_; ++read) {
+            if (predicate(static_cast<const T&>(data_[read]))) {
+                // Move to extracted Vec
+                extracted.push(std::move(data_[read]));
+                data_[read].~T();
+            } else {
+                // Keep in this Vec
+                if (write != read) {
+                    new (&data_[write]) T(std::move(data_[read]));
+                    data_[read].~T();
+                }
+                ++write;
+            }
+        }
+        size_ = write;
+        return extracted;
     }
 };
 
