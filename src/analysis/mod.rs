@@ -911,6 +911,22 @@ fn process_statement(
                 return;
             }
 
+            // NEW: Check for borrow conflicts when calling methods on fields
+            // Method calls (except const methods) need mutable access
+            // If the field is already borrowed, we have a conflict
+            if operation.contains("call method") && !operation.contains("const") {
+                // Check if field has existing borrows
+                let borrow_info = ownership_tracker.get_field_borrows(object, field);
+                if !borrow_info.borrowers.is_empty() {
+                    let borrowers: Vec<String> = borrow_info.borrowers.iter().cloned().collect();
+                    errors.push(format!(
+                        "Cannot call method on '{}.{}': field is borrowed by {}",
+                        object, field, borrowers.join(", ")
+                    ));
+                    return;
+                }
+            }
+
             // NEW: Check method qualifier restrictions on field usage
             if let Some(tracker) = this_tracker {
                 if object == "this" {

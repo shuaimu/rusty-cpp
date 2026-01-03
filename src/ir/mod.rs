@@ -1795,12 +1795,26 @@ fn convert_statement(
                         // Use helper to extract full path for nested member access
                         if let Some((obj_path, field_name)) = extract_member_path(arg) {
                             debug_println!("DEBUG IR: MemberAccess as function argument: {}.{}", obj_path, field_name);
-                            // Generate UseField statement to check if field is valid
-                            statements.push(IrStatement::UseField {
-                                object: obj_path.clone(),
-                                field: field_name.clone(),
-                                operation: "use in function call".to_string(),
-                            });
+
+                            // When field is receiver of a method call, we need to check for conflicts
+                            // with existing borrows but NOT create a persistent borrow
+                            // (method receiver borrows are temporary, ending when the call returns)
+                            if is_method_call && i == 0 {
+                                // For method receiver: generate UseField with method name for better error messages
+                                // Also check for conflicts with existing borrows of this field
+                                statements.push(IrStatement::UseField {
+                                    object: obj_path.clone(),
+                                    field: field_name.clone(),
+                                    operation: format!("call method '{}' on field", name),
+                                });
+                            } else {
+                                // For regular function argument: just check if field is valid
+                                statements.push(IrStatement::UseField {
+                                    object: obj_path.clone(),
+                                    field: field_name.clone(),
+                                    operation: "use in function call".to_string(),
+                                });
+                            }
                             arg_names.push(format!("{}.{}", obj_path, field_name));
                         }
                     }
