@@ -1,4 +1,18 @@
 # RustyCpp TODO
+<!--
+This comment block is the prompt content in case you forget.
+
+Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until interrupted. Don’t ask me for advice, just pick the best option you think that is honest, complete, and not corner-cutting: 
+
+1. Pick the top high-priority undone task, choose its first leaf task.  If there are no undone TODO items left, sleep a minute and git pull and restart step 1 (so this step is a dead loop until you find a todo item).
+2. Analyze the task, check if this can be done with not too many LOC (i.e., smaller than 500 lines code give or take). If not, try to analyze this task and break it down into several smaller tasks, expanding it in the TODO.md. The breakdown can be nested and hierarchical. Try to make each leaf task small enough (<500 lines LOC). You can document your analysis in the doc folder for future reference. 
+3. Try to execute the first leaf task. Make a plan for the task before execute, put the plan in the docs folder, and add the file name in the item in TODO.md for reference. You can all write your key findings as a few sentences in the TODO item. 
+4. Make sure to add comprehensive test for the task executed. Run the whole test suites to make sure no regression happens. If tests fail, fix them using the best, honest, complete approach, run test suites again to verify fixes work. Repeat this step until no tests fail. 
+5. Prepare for git commit, remove all temporary files, especially not to commit any binary files. For plan files, extract from implementation plan the design rational and user manual and put it in the docs folder.
+6. Git commit the changes. First do git pull --rebase, and fix conflicts if any. Then do git push.
+7. Go back to step 1. (The TODO.md file is possibly updated, so make sure you read the updated TODO.)
+
+-->
 
 - [ ] Bring Rust's memory safety guarantees to C++ through static analysis and safe type wrappers
   - [ ] Static borrow checking - analyze C++ code to detect use-after-free, dangling references, and double-free at compile time
