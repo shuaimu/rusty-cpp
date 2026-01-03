@@ -1678,20 +1678,24 @@ fn convert_statement(
             for (i, arg) in args.iter().enumerate() {
                 match arg {
                     crate::parser::Expression::Variable(var) => {
-                        // For method calls, the first arg is the receiver object
-                        if is_method_call && i == 0 {
-                            // Check if this is operator* (dereference)
-                            let operation = if is_dereference_operator(&name) {
+                        // Generate UseVariable for all function call arguments
+                        // This enables use-after-move detection for any variable passed to a function
+                        let operation = if is_method_call && i == 0 {
+                            // For method receivers, check if this is operator* (dereference)
+                            if is_dereference_operator(&name) {
                                 "dereference (via operator*)".to_string()
                             } else {
                                 format!("call method '{}'", name)
-                            };
+                            }
+                        } else {
+                            // For regular function arguments
+                            format!("pass to function '{}'", name)
+                        };
 
-                            statements.push(IrStatement::UseVariable {
-                                var: var.clone(),
-                                operation,
-                            });
-                        }
+                        statements.push(IrStatement::UseVariable {
+                            var: var.clone(),
+                            operation,
+                        });
                         arg_names.push(var.clone());
                     }
                     crate::parser::Expression::Move { inner, .. } => {

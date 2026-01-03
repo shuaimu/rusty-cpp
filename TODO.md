@@ -4,7 +4,7 @@ This comment block is the prompt content in case you forget.
 
 Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until interrupted. Don’t ask me for advice, just pick the best option you think that is honest, complete, and not corner-cutting: 
 
-1. Pick the top high-priority undone task, choose its first leaf task.  If there are no undone TODO items left, sleep a minute and git pull and restart step 1 (so this step is a dead loop until you find a todo item).
+1. Pick the top undone task with highest priority (high-medium-low), choose its first leaf task.  If there are no undone TODO items left, sleep a minute and git pull and restart step 1 (so this step is a dead loop until you find a todo item).
 2. Analyze the task, check if this can be done with not too many LOC (i.e., smaller than 500 lines code give or take). If not, try to analyze this task and break it down into several smaller tasks, expanding it in the TODO.md. The breakdown can be nested and hierarchical. Try to make each leaf task small enough (<500 lines LOC). You can document your analysis in the doc folder for future reference. 
 3. Try to execute the first leaf task. Make a plan for the task before execute, put the plan in the docs folder, and add the file name in the item in TODO.md for reference. You can all write your key findings as a few sentences in the TODO item. 
 4. Make sure to add comprehensive test for the task executed. Run the whole test suites to make sure no regression happens. If tests fail, fix them using the best, honest, complete approach, run test suites again to verify fixes work. Repeat this step until no tests fail. 
@@ -22,7 +22,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* Detect reference use after container modification (e.g., holding ref to vec[0] then calling push_back)
     - [x] *done* Detect use of reference obtained from unique_ptr after calling reset() or release()
     - [x] *done* Detect returning ptr.get() from a function where the unique_ptr is a local variable
-    - [ ] *medium* Fix use-after-move detection for STL types like std::string in non-template code
+    - [x] *done* Fix use-after-move detection for STL types like std::string in non-template code (now detects use-after-move when passing moved variables to function calls)
     - [ ] *low* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
