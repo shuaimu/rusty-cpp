@@ -404,9 +404,34 @@ fn check_expression_safety(
         Expression::Lambda { .. } => {
             // Lambda captures are checked elsewhere
         }
-        // Variable references, literals, and string literals are safe
+        Expression::New(inner) => {
+            // new expression is unsafe
+            errors.push(format!(
+                "Method '{}::{}' violates @safe contract from interface '{}': 'new' operator in @safe context",
+                class_name, method_name, strip_template_params(interface_name)
+            ));
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::Delete(inner) => {
+            // delete expression is unsafe
+            errors.push(format!(
+                "Method '{}::{}' violates @safe contract from interface '{}': 'delete' operator in @safe context",
+                class_name, method_name, strip_template_params(interface_name)
+            ));
+            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+        }
+        Expression::PointerArithmetic { pointer, .. } => {
+            // Pointer arithmetic is unsafe
+            errors.push(format!(
+                "Method '{}::{}' violates @safe contract from interface '{}': pointer arithmetic in @safe context",
+                class_name, method_name, strip_template_params(interface_name)
+            ));
+            errors.extend(check_expression_safety(pointer, method_name, class_name, interface_name));
+        }
+        // Variable references, literals, string literals, and nullptr are safe expressions
         // String literals have static lifetime and cannot dangle
-        Expression::Variable(_) | Expression::Literal(_) | Expression::StringLiteral(_) => {}
+        // Nullptr is a literal value (null check is done separately)
+        Expression::Variable(_) | Expression::Literal(_) | Expression::StringLiteral(_) | Expression::Nullptr => {}
     }
 
     errors

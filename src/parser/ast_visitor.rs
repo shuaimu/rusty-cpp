@@ -510,6 +510,21 @@ pub enum Expression {
     // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
     // All casts are considered unsafe operations in @safe code
     Cast(Box<Expression>),
+    /// Null pointer literal (nullptr, NULL, 0 in pointer context)
+    /// This is forbidden in @safe code - use Option<T*> for nullable pointers
+    Nullptr,
+    /// new expression (new T, new T(), new T[n])
+    /// This is forbidden in @safe code - use smart pointers (Box, unique_ptr)
+    New(Box<Expression>),
+    /// delete expression (delete ptr, delete[] ptr)
+    /// This is forbidden in @safe code - use smart pointers that handle deallocation
+    Delete(Box<Expression>),
+    /// Pointer arithmetic expression (p + n, p - n, p++, p--, p += n, p -= n, p[n])
+    /// This is forbidden in @safe code - use iterators or safe containers
+    PointerArithmetic {
+        pointer: Box<Expression>,
+        op: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1453,6 +1468,24 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 }
             }
+            EntityKind::NewExpr => {
+                // Handle standalone new expressions (rare but possible)
+                if let Some(expr) = extract_expression(&child) {
+                    statements.push(Statement::ExpressionStatement {
+                        expr,
+                        location: extract_location(&child),
+                    });
+                }
+            }
+            EntityKind::DeleteExpr => {
+                // Handle delete expressions (delete p; or delete[] arr;)
+                if let Some(expr) = extract_expression(&child) {
+                    statements.push(Statement::ExpressionStatement {
+                        expr,
+                        location: extract_location(&child),
+                    });
+                }
+            }
             EntityKind::UnexposedExpr => {
                 // UnexposedExpr can contain function calls or other expressions
                 // Also check if this contains a PackExpansionExpr (fold expression)
@@ -1539,6 +1572,34 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         EntityKind::ThisExpr => {
             // The 'this' pointer in C++ methods
             Some(Expression::Variable("this".to_string()))
+        }
+        EntityKind::FunctionalCastExpr => {
+            // Functional cast expression like Holder{x} or int(42)
+            // This is a constructor/conversion call
+            // Get the type name for the constructor
+            let type_name = entity.get_type()
+                .map(|t| type_to_string(&t))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Extract arguments from InitListExpr or other children
+            let mut args = Vec::new();
+            for child in entity.get_children() {
+                // InitListExpr contains the initialization values
+                if child.get_kind() == EntityKind::InitListExpr {
+                    for init_child in child.get_children() {
+                        if let Some(expr) = extract_expression(&init_child) {
+                            args.push(expr);
+                        }
+                    }
+                } else if let Some(expr) = extract_expression(&child) {
+                    args.push(expr);
+                }
+            }
+
+            Some(Expression::FunctionCall {
+                name: type_name,
+                args,
+            })
         }
         EntityKind::CallExpr => {
             // Extract function call as expression
@@ -1852,10 +1913,46 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // Extract binary operation (e.g., i < 2, x == 0)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if children.len() == 2 {
-                if let (Some(left), Some(right)) = 
+                if let (Some(left), Some(right)) =
                     (extract_expression(&children[0]), extract_expression(&children[1])) {
                     // Try to get the operator from the entity's spelling
                     let op = entity.get_name().unwrap_or_else(|| "==".to_string());
+
+                    // Check for pointer arithmetic (p + n, p - n, p += n, p -= n)
+                    // Pointer arithmetic is when one operand is a pointer and the operator is +, -, +=, -=
+                    if matches!(op.as_str(), "+" | "-" | "+=" | "-=") {
+                        let left_type = children[0].get_type().map(|t| type_to_string(&t));
+                        let right_type = children[1].get_type().map(|t| type_to_string(&t));
+
+                        let left_is_pointer = left_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
+                        let right_is_pointer = right_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
+
+                        // p + n, p - n, p += n, p -= n (left is pointer)
+                        if left_is_pointer && !right_is_pointer {
+                            debug_println!("DEBUG: Detected pointer arithmetic: {:?} {} {:?}", left, op, right);
+                            return Some(Expression::PointerArithmetic {
+                                pointer: Box::new(left),
+                                op: op.clone(),
+                            });
+                        }
+                        // n + p (right is pointer, only for + operator)
+                        if right_is_pointer && !left_is_pointer && op == "+" {
+                            debug_println!("DEBUG: Detected pointer arithmetic: {:?} {} {:?}", left, op, right);
+                            return Some(Expression::PointerArithmetic {
+                                pointer: Box::new(right),
+                                op: op.clone(),
+                            });
+                        }
+                        // p - q (pointer difference)
+                        if left_is_pointer && right_is_pointer && op == "-" {
+                            debug_println!("DEBUG: Detected pointer difference: {:?} - {:?}", left, right);
+                            return Some(Expression::PointerArithmetic {
+                                pointer: Box::new(left),
+                                op: "pointer difference".to_string(),
+                            });
+                        }
+                    }
+
                     return Some(Expression::BinaryOp {
                         left: Box::new(left),
                         op,
@@ -1891,6 +1988,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 Some(Expression::StringLiteral("<string literal>".to_string()))
             }
         }
+        // C++ nullptr literal - forbidden in @safe code
+        EntityKind::NullPtrLiteralExpr => {
+            debug_println!("DEBUG: Found NullPtrLiteralExpr (nullptr)");
+            Some(Expression::Nullptr)
+        }
+        // GNU __null extension - treated same as nullptr
+        EntityKind::GNUNullExpr => {
+            debug_println!("DEBUG: Found GNUNullExpr (__null)");
+            Some(Expression::Nullptr)
+        }
         EntityKind::ParenExpr => {
             // Parenthesized expression - just extract the inner expression
             // e.g., (*n) in (*n).value_ - we want to get the Dereference(n) inside
@@ -1924,7 +2031,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             None
         }
         EntityKind::UnaryOperator => {
-            // Check if it's address-of (&) or dereference (*)
+            // Check if it's address-of (&), dereference (*), or pointer increment/decrement (++, --)
             // Other unary operators (!, ~, -, +) should be treated as simple expressions
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
@@ -1944,6 +2051,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             // If child is not pointer but result is, it's address-of (&)
                             else if !child_type_str.contains('*') && type_str.contains('*') {
                                 return Some(Expression::AddressOf(Box::new(inner)));
+                            }
+                            // Check for pointer increment/decrement (p++, p--, ++p, --p)
+                            // Both operand and result are pointers, but the operation modifies the pointer
+                            else if child_type_str.contains('*') && type_str.contains('*') {
+                                // This is pointer increment or decrement
+                                debug_println!("DEBUG: Detected pointer increment/decrement on {:?}", inner);
+                                return Some(Expression::PointerArithmetic {
+                                    pointer: Box::new(inner),
+                                    op: "++/--".to_string(),
+                                });
                             }
                             // Otherwise, it's a non-pointer unary operator (!, ~, -, +)
                             // These don't affect ownership/borrowing, so just return the inner expression
@@ -2206,12 +2323,27 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             Some(Expression::Lambda { captures })
         }
         EntityKind::ArraySubscriptExpr => {
-            // Array subscript: arr[i], data[idx], etc.
+            // Array subscript: arr[i], data[idx], ptr[n], etc.
             // The first child is the array/pointer, second is the index
-            // For lifetime purposes, the source is the array (first child)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
-                // First child is the array or pointer being indexed
+                // Check if the base is a pointer type (pointer subscript = pointer arithmetic)
+                if let Some(base_type) = children[0].get_type() {
+                    let type_str = type_to_string(&base_type);
+                    // If base is a pointer (not an array), this is pointer arithmetic
+                    // Arrays have types like "int [10]" while pointers have "int *"
+                    if type_str.contains('*') && !type_str.contains('[') {
+                        if let Some(ptr_expr) = extract_expression(&children[0]) {
+                            debug_println!("DEBUG: Pointer subscript detected: {:?}[...]", ptr_expr);
+                            return Some(Expression::PointerArithmetic {
+                                pointer: Box::new(ptr_expr),
+                                op: "[]".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // For arrays, return the array expression as the source for lifetime tracking
                 if let Some(array_expr) = extract_expression(&children[0]) {
                     debug_println!("DEBUG: ArraySubscriptExpr - array/pointer source: {:?}", array_expr);
                     // Return the array expression as the source
@@ -2220,6 +2352,35 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             None
+        }
+        EntityKind::NewExpr => {
+            // C++ new expression: new T, new T(), new T[n]
+            // This is an unsafe operation in @safe code - use smart pointers
+            debug_println!("DEBUG: Found NewExpr (C++ new)");
+            // Extract the type or initializer expression if available
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if !children.is_empty() {
+                // First child is typically the type or initializer
+                if let Some(inner) = extract_expression(&children[0]) {
+                    return Some(Expression::New(Box::new(inner)));
+                }
+            }
+            // If no children, use a placeholder
+            Some(Expression::New(Box::new(Expression::Literal("type".to_string()))))
+        }
+        EntityKind::DeleteExpr => {
+            // C++ delete expression: delete ptr, delete[] ptr
+            // This is an unsafe operation in @safe code - use smart pointers
+            debug_println!("DEBUG: Found DeleteExpr (C++ delete)");
+            // Extract the pointer being deleted
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if !children.is_empty() {
+                if let Some(inner) = extract_expression(&children[0]) {
+                    return Some(Expression::Delete(Box::new(inner)));
+                }
+            }
+            // If no children, use a placeholder
+            Some(Expression::Delete(Box::new(Expression::Literal("ptr".to_string()))))
         }
         _ => None
     }

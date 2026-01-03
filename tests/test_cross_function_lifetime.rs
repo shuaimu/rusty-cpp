@@ -228,7 +228,6 @@ int main() { return 0; }
 // =============================================================================
 
 #[test]
-#[ignore = "TODO: Struct reference member lifetime tracking not yet implemented"]
 fn test_struct_ref_outlives_referent() {
     // Struct holds reference, but referent dies before struct
     let source = r#"
@@ -261,7 +260,6 @@ int main() { return 0; }
 }
 
 #[test]
-#[ignore = "TODO: Struct reference member lifetime tracking not yet implemented"]
 fn test_return_struct_with_dangling_ref() {
     // Returning a struct whose reference member points to local
     let source = r#"
@@ -449,7 +447,6 @@ int main() { return 0; }
 }
 
 #[test]
-#[ignore = "TODO: Temporary lifetime tracking in chained calls not yet implemented"]
 fn test_chained_method_call_dangling() {
     // Chained call creates temporary that dies
     let source = r#"
@@ -766,7 +763,6 @@ int main() { return 0; }
 }
 
 #[test]
-#[ignore = "TODO: Loop iteration lifetime tracking not yet implemented"]
 fn test_loop_accumulates_dangling_refs() {
     // Loop creates references that may dangle
     let source = r#"

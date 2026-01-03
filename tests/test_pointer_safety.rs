@@ -244,3 +244,204 @@ int test_unary_plus(int v) {
     // Clean up
     let _ = fs::remove_file("test_unary_non_pointer.cpp");
 }
+
+// ============================================================================
+// NULL POINTER DETECTION TESTS
+// ============================================================================
+
+#[test]
+fn test_nullptr_initialization_forbidden() {
+    // Initializing a pointer with nullptr should be an error in @safe code
+    let test_code = r#"
+// @safe
+void test() {
+    int* p = nullptr;  // ERROR: null pointer initialization
+}
+"#;
+
+    fs::write("test_nullptr_init.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_init.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should detect null pointer
+    assert!(stdout.contains("null") && stdout.contains("pointer"),
+            "Should detect nullptr initialization. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_init.cpp");
+}
+
+#[test]
+fn test_nullptr_assignment_forbidden() {
+    // Assigning nullptr to an existing pointer should be an error in @safe code
+    let test_code = r#"
+// @safe
+void test(int* p) {
+    p = nullptr;  // ERROR: null pointer assignment
+}
+"#;
+
+    fs::write("test_nullptr_assign.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_assign.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should detect null pointer assignment
+    assert!(stdout.contains("null") && stdout.contains("assignment") ||
+            stdout.contains("Null pointer"),
+            "Should detect nullptr assignment. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_assign.cpp");
+}
+
+#[test]
+fn test_nullptr_as_function_argument_forbidden() {
+    // Passing nullptr as a function argument should be an error in @safe code
+    let test_code = r#"
+// @safe
+void test() {
+    void func(int*);
+    func(nullptr);  // ERROR: null pointer as argument
+}
+"#;
+
+    fs::write("test_nullptr_arg.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_arg.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should detect null pointer as argument
+    assert!(stdout.contains("null") && stdout.contains("argument") ||
+            stdout.contains("Null pointer passed"),
+            "Should detect nullptr as function argument. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_arg.cpp");
+}
+
+#[test]
+fn test_nullptr_return_forbidden() {
+    // Returning nullptr should be an error in @safe code
+    let test_code = r#"
+// @safe
+int* test() {
+    return nullptr;  // ERROR: returning null pointer
+}
+"#;
+
+    fs::write("test_nullptr_return.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_return.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should detect null pointer return
+    assert!(stdout.contains("null") && stdout.contains("return") ||
+            stdout.contains("Cannot return nullptr"),
+            "Should detect nullptr return. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_return.cpp");
+}
+
+#[test]
+fn test_uninitialized_pointer_forbidden() {
+    // Declaring a pointer without initialization should be an error in @safe code
+    let test_code = r#"
+// @safe
+void test() {
+    int* p;  // ERROR: uninitialized pointer
+}
+"#;
+
+    fs::write("test_uninit_ptr.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_uninit_ptr.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should detect uninitialized pointer
+    assert!(stdout.contains("uninitialized") || stdout.contains("Uninitialized"),
+            "Should detect uninitialized pointer. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_uninit_ptr.cpp");
+}
+
+#[test]
+fn test_nullptr_allowed_in_unsafe_function() {
+    // nullptr should be allowed in @unsafe functions
+    let test_code = r#"
+// @unsafe
+void test() {
+    int* p = nullptr;  // OK: function is unsafe
+    p = nullptr;       // OK: function is unsafe
+}
+"#;
+
+    fs::write("test_nullptr_unsafe_func.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_unsafe_func.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT detect null pointer violations in unsafe function
+    assert!(!stdout.contains("null pointer") || stdout.contains("no violations") || stdout.contains("✓"),
+            "Should allow nullptr in unsafe functions. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_unsafe_func.cpp");
+}
+
+#[test]
+fn test_nullptr_allowed_in_unsafe_block() {
+    // nullptr should be allowed in @unsafe blocks within @safe functions
+    let test_code = r#"
+// @safe
+void test() {
+    // @unsafe
+    {
+        int* p = nullptr;  // OK: in @unsafe block
+    }
+}
+"#;
+
+    fs::write("test_nullptr_unsafe_block.cpp", test_code).unwrap();
+
+    let output = Command::new("cargo")
+        .args(&["run", "--", "test_nullptr_unsafe_block.cpp"])
+        .output()
+        .expect("Failed to run borrow checker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should NOT detect null pointer violations in unsafe block
+    assert!(!stdout.contains("null pointer") || stdout.contains("no violations") || stdout.contains("✓"),
+            "Should allow nullptr in unsafe blocks. Output: {}", stdout);
+
+    // Clean up
+    let _ = fs::remove_file("test_nullptr_unsafe_block.cpp");
+}

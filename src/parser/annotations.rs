@@ -7,8 +7,12 @@ pub enum LifetimeAnnotation {
     Lifetime(String),
     // &'a T - immutable reference with lifetime
     Ref(String),
-    // &'a mut T - mutable reference with lifetime  
+    // &'a mut T - mutable reference with lifetime
     MutRef(String),
+    // T* 'a - mutable pointer with lifetime (like &mut T in Rust)
+    Ptr(String),
+    // const T* 'a - const pointer with lifetime (like &T in Rust)
+    ConstPtr(String),
     // owned - for ownership transfer
     Owned,
 }
@@ -212,6 +216,17 @@ fn parse_single_lifetime(lifetime_str: &str) -> Option<LifetimeAnnotation> {
         // &'a T
         let lifetime_name = extract_lifetime_name(trimmed);
         lifetime_name.map(|name| LifetimeAnnotation::Ref(name))
+    } else if trimmed.contains("*") && trimmed.contains("'") {
+        // Pointer with lifetime: T* 'a, int* 'a, const T* 'a, const int* 'a
+        // Also handles: (int* 'a), (const int* 'a, int* 'b)
+        let lifetime_name = extract_lifetime_name(trimmed);
+        if trimmed.contains("const") {
+            // const T* 'a - immutable pointer (like &T in Rust)
+            lifetime_name.map(|name| LifetimeAnnotation::ConstPtr(name))
+        } else {
+            // T* 'a - mutable pointer (like &mut T in Rust)
+            lifetime_name.map(|name| LifetimeAnnotation::Ptr(name))
+        }
     } else if trimmed.starts_with('\'') {
         // Just 'a
         Some(LifetimeAnnotation::Lifetime(trimmed.to_string()))
@@ -224,6 +239,14 @@ fn parse_single_lifetime(lifetime_str: &str) -> Option<LifetimeAnnotation> {
         } else {
             let lifetime_name = extract_lifetime_name(trimmed);
             lifetime_name.map(|name| LifetimeAnnotation::Ref(name))
+        }
+    } else if trimmed.contains("<") && trimmed.contains("*") && trimmed.contains("'") {
+        // Handle complex pointer types like Option<T* 'a> or Result<int* 'a, E>
+        let lifetime_name = extract_lifetime_name(trimmed);
+        if trimmed.contains("const") {
+            lifetime_name.map(|name| LifetimeAnnotation::ConstPtr(name))
+        } else {
+            lifetime_name.map(|name| LifetimeAnnotation::Ptr(name))
         }
     } else {
         None
@@ -295,7 +318,61 @@ mod tests {
     fn test_parse_mut_ref() {
         let comment = "// @lifetime: &'a mut";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
-        
+
         assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::MutRef("a".to_string())));
+    }
+
+    #[test]
+    fn test_parse_pointer_lifetime() {
+        // Test: int* 'a
+        let comment = "// @lifetime: int* 'a";
+        let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
+
+        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("a".to_string())));
+    }
+
+    #[test]
+    fn test_parse_const_pointer_lifetime() {
+        // Test: const int* 'a
+        let comment = "// @lifetime: const int* 'a";
+        let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
+
+        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::ConstPtr("a".to_string())));
+    }
+
+    #[test]
+    fn test_parse_pointer_params_and_return() {
+        // Test: (int* 'a) -> int* 'a
+        let comment = "// @lifetime: (int* 'a) -> int* 'a";
+        let sig = parse_lifetime_annotations(comment, "identity".to_string()).unwrap();
+
+        assert_eq!(sig.param_lifetimes.len(), 1);
+        assert_eq!(sig.param_lifetimes[0], Some(LifetimeAnnotation::Ptr("a".to_string())));
+        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("a".to_string())));
+    }
+
+    #[test]
+    fn test_parse_mixed_pointer_params() {
+        // Test: (const int* 'a, int* 'b) -> const int* 'a where 'a: 'b
+        let comment = "// @lifetime: (const int* 'a, int* 'b) -> const int* 'a where 'a: 'b";
+        let sig = parse_lifetime_annotations(comment, "longer".to_string()).unwrap();
+
+        assert_eq!(sig.param_lifetimes.len(), 2);
+        assert_eq!(sig.param_lifetimes[0], Some(LifetimeAnnotation::ConstPtr("a".to_string())));
+        assert_eq!(sig.param_lifetimes[1], Some(LifetimeAnnotation::Ptr("b".to_string())));
+        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::ConstPtr("a".to_string())));
+        assert_eq!(sig.lifetime_bounds.len(), 1);
+        assert_eq!(sig.lifetime_bounds[0].longer, "a");
+        assert_eq!(sig.lifetime_bounds[0].shorter, "b");
+    }
+
+    #[test]
+    fn test_parse_static_pointer_lifetime() {
+        // Test: () -> int* 'static
+        let comment = "// @lifetime: () -> int* 'static";
+        let sig = parse_lifetime_annotations(comment, "get_global".to_string()).unwrap();
+
+        assert_eq!(sig.param_lifetimes.len(), 1); // empty parens results in one empty param
+        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("static".to_string())));
     }
 }

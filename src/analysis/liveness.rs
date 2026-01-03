@@ -209,6 +209,12 @@ impl LivenessAnalyzer {
                 self.record_use(pack_name, use_type);
             }
 
+            IrStatement::StructBorrow { struct_var, borrowed_from, .. } => {
+                // Struct is being created (written to) and borrows from another variable (read)
+                self.record_use(struct_var, UseType::Write);
+                self.record_use(borrowed_from, UseType::Read);
+            }
+
             // These don't use variables
             IrStatement::EnterScope |
             IrStatement::ExitScope |

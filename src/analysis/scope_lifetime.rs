@@ -359,7 +359,7 @@ fn analyze_block(
                 }
             }
             
-            IrStatement::CallExpr { func, args, result } => {
+            IrStatement::CallExpr { func, args, result, .. } => {
                 // Check function signature if available
                 if let Some(signature) = header_cache.get_signature(func) {
                     let call_errors = check_call_lifetimes(

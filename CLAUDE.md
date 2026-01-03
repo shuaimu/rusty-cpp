@@ -6,12 +6,29 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
 
 **Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
 
-## Current State (Updated: December 2025 - Function Pointer Safety!)
+## Current State (Updated: January 2026 - Chained Method Temporaries!)
 
 ### What's Fully Implemented ✅
 
-**Latest Features (December 2025):**
-- ✅ **rusty::move** - Rust-like move semantics for C++ references (**newly implemented!**)
+**Latest Features (January 2026):**
+- ✅ **Chained Method Temporary Detection** - Detects dangling references from method chains (**newly implemented!**)
+  - Detects `Builder().method().get_ref()` patterns where temporary dies
+  - Tracks constructor calls creating temporary objects
+  - Detects when method returns reference tied to `'self` lifetime
+  - Reports error when temporary-tied reference escapes statement
+  - Uses `@lifetime: (&'self) -> &'self` annotation to track self-referencing returns
+  - Example error: `int& ref = Builder().set(42).get_value();` - Builder() is temporary
+  - See `tests/test_cross_function_lifetime.rs::test_chained_method_call_dangling`
+
+- ✅ **Loop Dangling Reference Detection** - Detects references to loop-local variables that escape iteration (**newly implemented!**)
+  - Detects when loop-local variable's reference is stored in non-loop-local container
+  - Tracks loop-local variables (declared inside loop body)
+  - Reports error when reference to loop-local escapes via function call
+  - Example error: `refs[i] = &identity(temp);` where `temp` is loop-local
+  - See `tests/test_cross_function_lifetime.rs::test_loop_accumulates_dangling_refs`
+
+**Previous Features (December 2025):**
+- ✅ **rusty::move** - Rust-like move semantics for C++ references
   - `rusty::move` for values: same as std::move, transfers ownership
   - `rusty::move` for mutable references: invalidates the reference itself (Rust-like)
   - `rusty::move` for const references: compile error (use = to copy)

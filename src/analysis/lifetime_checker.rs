@@ -164,9 +164,8 @@ pub fn check_lifetimes_with_annotations(
         if !safety_context.should_check_function(&function.name) {
             continue;
         }
-
         let mut scope = LifetimeScope::new();
-        let function_errors = check_function_lifetimes(function, &mut scope, header_cache)?;
+        let function_errors = check_function_lifetimes(function, &mut scope, header_cache, &program.types_with_ref_members)?;
         errors.extend(function_errors);
     }
 
@@ -176,7 +175,8 @@ pub fn check_lifetimes_with_annotations(
 fn check_function_lifetimes(
     function: &IrFunction,
     scope: &mut LifetimeScope,
-    header_cache: &HeaderCache
+    header_cache: &HeaderCache,
+    types_with_ref_members: &std::collections::HashSet<String>
 ) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
     
@@ -276,7 +276,7 @@ fn check_function_lifetimes(
                         scope_depth -= 1;
                     }
                 }
-                IrStatement::CallExpr { func, args, result } => {
+                IrStatement::CallExpr { func, args, result, receiver_is_temporary } => {
                     // Check if we have annotations for this function
                     if let Some(signature) = header_cache.get_signature(func) {
                         let call_errors = check_function_call(
@@ -284,7 +284,8 @@ fn check_function_lifetimes(
                             args,
                             result.as_ref(),
                             signature,
-                            scope
+                            scope,
+                            *receiver_is_temporary,
                         );
                         errors.extend(call_errors);
                     }
@@ -304,7 +305,7 @@ fn check_function_lifetimes(
                 IrStatement::Return { value, .. } => {
                     // Check that returned references have appropriate lifetimes
                     if let Some(value) = value {
-                        let return_errors = check_return_lifetime(value, function, scope);
+                        let return_errors = check_return_lifetime(value, function, scope, types_with_ref_members);
                         errors.extend(return_errors);
                     }
                 }
@@ -322,16 +323,17 @@ fn check_function_call(
     args: &[String],
     result: Option<&String>,
     signature: &FunctionSignature,
-    scope: &LifetimeScope
+    scope: &LifetimeScope,
+    receiver_is_temporary: bool,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    
+
     // Check that we have the right number of arguments
     if args.len() != signature.param_lifetimes.len() {
         // Signature doesn't match, skip lifetime checking
         return errors;
     }
-    
+
     // Collect the actual lifetimes of arguments
     let mut arg_lifetimes = Vec::new();
     for (i, arg) in args.iter().enumerate() {
@@ -341,6 +343,26 @@ fn check_function_call(
             arg_lifetimes.push(None); // Owned value
         } else {
             arg_lifetimes.push(Some(format!("'arg{}", i)));
+        }
+    }
+
+    // Check for temporary receiver with 'self lifetime in return
+    // If the method returns &'self and receiver is temporary, result is dangling
+    if receiver_is_temporary {
+        if let Some(return_lifetime) = &signature.return_lifetime {
+            let is_self_lifetime = match return_lifetime {
+                LifetimeAnnotation::Ref(lt) | LifetimeAnnotation::MutRef(lt) => lt == "self",
+                LifetimeAnnotation::Ptr(lt) | LifetimeAnnotation::ConstPtr(lt) => lt == "self",
+                _ => false,
+            };
+            if is_self_lifetime {
+                if let Some(result_var) = result {
+                    errors.push(format!(
+                        "Reference '{}' is bound to a temporary object that will be destroyed at the end of the statement",
+                        result_var
+                    ));
+                }
+            }
         }
     }
     
@@ -354,6 +376,10 @@ fn check_function_call(
                     // In C++, you can pass owned values to reference parameters
                     // The compiler creates a temporary reference
                     // So we don't error here - just note that owned values will create temporaries
+                }
+                LifetimeAnnotation::Ptr(_expected) | LifetimeAnnotation::ConstPtr(_expected) => {
+                    // Pointer parameters work similarly to reference parameters
+                    // The pointer value is passed, lifetime is tracked
                 }
                 LifetimeAnnotation::Owned => {
                     // The argument should transfer ownership
@@ -399,6 +425,14 @@ fn check_function_call(
                     // In a real implementation, we'd need mutable access
                 }
             }
+            LifetimeAnnotation::Ptr(ret_lifetime) | LifetimeAnnotation::ConstPtr(ret_lifetime) => {
+                // The return value is a pointer that borrows from one of the parameters
+                // Same lifetime tracking as references
+                let actual_lifetime = map_lifetime_to_actual(ret_lifetime, &arg_lifetimes);
+                if let Some(_lifetime) = actual_lifetime {
+                    // The result pointer gets this lifetime
+                }
+            }
             LifetimeAnnotation::Owned => {
                 // The return value is owned, no lifetime constraints
             }
@@ -412,7 +446,8 @@ fn check_function_call(
 fn check_return_lifetime(
     value: &str,
     function: &IrFunction,
-    scope: &LifetimeScope
+    scope: &LifetimeScope,
+    types_with_ref_members: &std::collections::HashSet<String>
 ) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -454,6 +489,36 @@ fn check_return_lifetime(
             // Pointer types (Raw, UniquePtr, SharedPtr) are safe to return
             // The pointer value is copied, heap memory persists after function return
             _ => {}
+        }
+    }
+
+    // Check if the function returns a struct with reference members
+    // If the return type is a struct with ref members, and the value (constructor arg) is a local,
+    // then the struct's reference members will dangle after return
+    let return_type = &function.return_type;
+
+    // Extract base type name (strip qualifiers, namespaces, etc.)
+    let base_return_type = return_type
+        .trim()
+        .trim_start_matches("const ")
+        .trim_start_matches("struct ")
+        .split('<').next().unwrap_or(return_type)  // Handle templates
+        .split("::").last().unwrap_or(return_type)  // Handle namespaces
+        .trim();
+
+    if types_with_ref_members.contains(base_return_type) {
+        // The return type is a struct with reference members
+        // The 'value' passed to this function is the source of the constructor (e.g., "x" for Holder{x})
+        // If this source is a local owned variable, the struct's reference will dangle
+        if let Some(var_info) = function.variables.get(value) {
+            let is_local_owned = matches!(var_info.ty, VariableType::Owned(_)) && !var_info.is_parameter;
+            if is_local_owned {
+                errors.push(format!(
+                    "Returning struct '{}' with reference member initialized from local variable '{}' - \
+                    the struct's reference member will be dangling after function return",
+                    base_return_type, value
+                ));
+            }
         }
     }
 
@@ -546,7 +611,8 @@ mod tests {
         scope.set_lifetime("p".to_string(), "'p".to_string());
 
         // Returning a pointer should NOT produce any errors
-        let errors = check_return_lifetime("p", &function, &scope);
+        let empty_types = std::collections::HashSet::new();
+        let errors = check_return_lifetime("p", &function, &scope, &empty_types);
         assert!(errors.is_empty(), "Returning pointer value should be safe, got: {:?}", errors);
     }
 
@@ -601,7 +667,8 @@ mod tests {
         scope.set_lifetime("ref".to_string(), "'local".to_string());
 
         // Returning a reference to local should produce an error
-        let errors = check_return_lifetime("ref", &function, &scope);
+        let empty_types = std::collections::HashSet::new();
+        let errors = check_return_lifetime("ref", &function, &scope, &empty_types);
         assert!(!errors.is_empty(), "Returning reference to local should be flagged as unsafe");
         assert!(errors[0].contains("local"), "Error should mention the local variable");
     }
@@ -645,7 +712,8 @@ mod tests {
         scope.set_lifetime("ptr".to_string(), "'ptr".to_string());
 
         // Returning owned value should NOT produce any errors
-        let errors = check_return_lifetime("ptr", &function, &scope);
+        let empty_types = std::collections::HashSet::new();
+        let errors = check_return_lifetime("ptr", &function, &scope, &empty_types);
         assert!(errors.is_empty(), "Returning owned value should be safe, got: {:?}", errors);
     }
 }

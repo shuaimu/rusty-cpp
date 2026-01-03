@@ -43,6 +43,61 @@ fn is_member_access_operator(func_name: &str) -> bool {
     }
 }
 
+/// Check if an expression chain originates from a temporary (constructor call).
+/// This handles chained method calls like Builder().set(42).get_value().
+/// Returns true if the ultimate receiver is a constructor call (creating a temporary).
+fn is_receiver_temporary(expr: &crate::parser::Expression) -> bool {
+    match expr {
+        // A function call where the name looks like a constructor (ClassName or ClassName::ClassName)
+        crate::parser::Expression::FunctionCall { name, args } => {
+            // Check if this is a constructor call (name is just a type name, no :: or matches X::X pattern)
+            let is_constructor = if name.contains("::") {
+                // Check for explicit constructor like Builder::Builder
+                let parts: Vec<&str> = name.split("::").collect();
+                if parts.len() >= 2 {
+                    let last = parts[parts.len() - 1];
+                    let second_last = parts[parts.len() - 2];
+                    last == second_last  // X::X pattern
+                } else {
+                    false
+                }
+            } else {
+                // A standalone name like "Builder" is a constructor call
+                // if it starts with uppercase (convention for type names)
+                name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            };
+
+            if is_constructor {
+                return true;
+            }
+
+            // For method calls, check if the receiver (first arg) is a temporary
+            // Method call pattern: the function name is Class::method and first arg is receiver
+            if name.contains("::") && !args.is_empty() {
+                // The first argument is the receiver for method calls
+                return is_receiver_temporary(&args[0]);
+            }
+
+            false
+        }
+        // Member access on a temporary propagates the temporary status
+        crate::parser::Expression::MemberAccess { object, .. } => {
+            is_receiver_temporary(object)
+        }
+        // Dereference of a temporary propagates the temporary status
+        crate::parser::Expression::Dereference(inner) => {
+            is_receiver_temporary(inner)
+        }
+        // Variable references are NOT temporaries
+        crate::parser::Expression::Variable(_) => false,
+        // Literals are temporaries (but they're value types, so less important)
+        crate::parser::Expression::Literal(_) => true,
+        crate::parser::Expression::StringLiteral(_) => true, // Static lifetime though
+        // Other expressions are conservatively considered not temporary
+        _ => false,
+    }
+}
+
 /// Extract the full object path and final field from a nested MemberAccess expression
 /// For `o.inner.data`, returns Some(("o.inner", "data"))
 /// For `o.field`, returns Some(("o", "field"))
@@ -88,6 +143,9 @@ pub struct IrProgram {
     pub ownership_graph: OwnershipGraph,
     /// RAII Phase 2: Types with user-defined destructors
     pub user_defined_raii_types: std::collections::HashSet<String>,
+    /// Struct lifetime tracking: Classes that have reference members
+    /// These types implicitly "borrow" from the variables passed to their constructors
+    pub types_with_ref_members: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,11 +279,15 @@ pub enum IrStatement {
         to: String,
         kind: BorrowKind,
         line: usize,
+        is_pointer: bool,  // true if borrow via pointer (T* p = &x), false for references (T& r = x)
     },
     CallExpr {
         func: String,
         args: Vec<String>,
         result: Option<String>,
+        /// True if this is a method call where the receiver is a temporary expression
+        /// (e.g., `Builder().method()` where `Builder()` is a temporary)
+        receiver_is_temporary: bool,
     },
     Return {
         value: Option<String>,
@@ -289,6 +351,14 @@ pub enum IrStatement {
     VarDecl {
         name: String,
         type_name: String,
+    },
+    /// Struct with reference members borrows from constructor arguments
+    /// Like Rust's `Holder<'a>` where struct lifetime is tied to referenced data
+    StructBorrow {
+        struct_var: String,      // The struct instance (e.g., "h")
+        borrowed_from: String,   // Variable passed to constructor (e.g., "x")
+        struct_type: String,     // The struct type (e.g., "Holder")
+        line: usize,
     },
 }
 
@@ -422,10 +492,17 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
 
     // RAII Phase 2: Collect types with user-defined destructors
     let mut user_defined_raii_types = std::collections::HashSet::new();
+    // Struct lifetime tracking: Collect types with reference members
+    let mut types_with_ref_members = std::collections::HashSet::new();
     for class in &ast.classes {
         if class.has_destructor {
             user_defined_raii_types.insert(class.name.clone());
             debug_println!("RAII: Registered user-defined RAII type '{}'", class.name);
+        }
+        // Check if class has any reference members
+        if class.members.iter().any(|m| m.is_reference) {
+            types_with_ref_members.insert(class.name.clone());
+            debug_println!("STRUCT_LIFETIME: Type '{}' has reference members", class.name);
         }
     }
 
@@ -438,6 +515,7 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
         functions,
         ownership_graph,
         user_defined_raii_types,
+        types_with_ref_members,
     })
 }
 
@@ -450,10 +528,17 @@ pub fn build_ir_with_safety_context(
 
     // RAII Phase 2: Collect types with user-defined destructors
     let mut user_defined_raii_types = std::collections::HashSet::new();
+    // Struct lifetime tracking: Collect types with reference members
+    let mut types_with_ref_members = std::collections::HashSet::new();
     for class in &ast.classes {
         if class.has_destructor {
             user_defined_raii_types.insert(class.name.clone());
             debug_println!("RAII: Registered user-defined RAII type '{}'", class.name);
+        }
+        // Check if class has any reference members
+        if class.members.iter().any(|m| m.is_reference) {
+            types_with_ref_members.insert(class.name.clone());
+            debug_println!("STRUCT_LIFETIME: Type '{}' has reference members", class.name);
         }
     }
 
@@ -466,6 +551,7 @@ pub fn build_ir_with_safety_context(
         functions,
         ownership_graph,
         user_defined_raii_types,
+        types_with_ref_members,
     })
 }
 
@@ -689,6 +775,34 @@ fn extract_return_source(
             debug_println!("DEBUG IR: Return cast expression");
             extract_return_source(inner, statements)
         }
+
+        Expression::Nullptr => {
+            // Null pointer literal: return nullptr;
+            // No source variable to track
+            None
+        }
+
+        Expression::New(inner) => {
+            // new expression: return new T();
+            // This allocates memory - could recursively check inner, but typically
+            // new expressions create owned values with no source variable
+            debug_println!("DEBUG IR: Return new expression");
+            None
+        }
+
+        Expression::Delete(inner) => {
+            // delete expression: should not appear in return statements
+            // but if it does, recursively extract source
+            debug_println!("DEBUG IR: Return delete expression");
+            extract_return_source(inner, statements)
+        }
+
+        Expression::PointerArithmetic { pointer, .. } => {
+            // Pointer arithmetic: return p + n;
+            // The source is the pointer being manipulated
+            debug_println!("DEBUG IR: Return pointer arithmetic expression");
+            extract_return_source(pointer, statements)
+        }
     }
 }
 
@@ -790,6 +904,7 @@ fn convert_statement(
                         to: name.clone(),
                         kind,
                         line,
+                        is_pointer: false,  // Reference binding
                     });
                 },
 
@@ -797,6 +912,15 @@ fn convert_statement(
                 crate::parser::Expression::FunctionCall { name: func_name, args } => {
                     let mut arg_names = Vec::new();
                     let mut temp_counter = 0;
+
+                    // Check if the receiver (first arg for method calls) is a temporary
+                    // This detects patterns like Builder().set(42).get_value()
+                    let receiver_is_temp = if func_name.contains("::") && !args.is_empty() {
+                        // For method calls, check if the receiver (first arg) originates from a temporary
+                        is_receiver_temporary(&args[0])
+                    } else {
+                        false
+                    };
 
                     // Process arguments
                     for arg in args {
@@ -821,7 +945,7 @@ fn convert_statement(
                                 arg_names.push(temp_name);
                             }
                             // Track string literals - they have static lifetime
-                            crate::parser::Expression::StringLiteral(lit) => {
+                            crate::parser::Expression::StringLiteral(_lit) => {
                                 let temp_name = format!("_temp_string_literal_{}", temp_counter);
                                 temp_counter += 1;
                                 arg_names.push(temp_name);
@@ -830,6 +954,12 @@ fn convert_statement(
                             crate::parser::Expression::BinaryOp { .. } => {
                                 let temp_name = format!("_temp_expr_{}", temp_counter);
                                 temp_counter += 1;
+                                arg_names.push(temp_name);
+                            }
+                            // For chained method calls, the receiver might be a FunctionCall
+                            crate::parser::Expression::FunctionCall { name: inner_name, .. } => {
+                                // Use the function name as a placeholder for the temporary
+                                let temp_name = format!("_temp_call_{}", inner_name.replace("::", "_"));
                                 arg_names.push(temp_name);
                             }
                             _ => {}
@@ -855,6 +985,7 @@ fn convert_statement(
                                 to: name.clone(),
                                 kind: kind.clone(),
                                 line,
+                                is_pointer: false,  // Reference binding via operator*
                             });
 
                             // Update the reference variable's ownership state
@@ -869,10 +1000,12 @@ fn convert_statement(
                         }
                     } else {
                         // For other function calls, create CallExpr
+                        debug_println!("DEBUG IR: Creating CallExpr for '{}' with receiver_is_temporary={}", func_name, receiver_is_temp);
                         statements.push(IrStatement::CallExpr {
                             func: func_name.clone(),
                             args: arg_names,
                             result: Some(name.clone()),
+                            receiver_is_temporary: receiver_is_temp,
                         });
 
                         // Update the reference variable's ownership state
@@ -1325,6 +1458,7 @@ fn convert_statement(
                         func: name.clone(),
                         args: arg_names,
                         result: Some(lhs_var.clone()),
+                        receiver_is_temporary: false,  // TODO: detect temporaries
                     });
 
                     Ok(Some(statements))
@@ -1396,6 +1530,74 @@ fn convert_statement(
                     Ok(Some(vec![IrStatement::LambdaCapture {
                         captures: capture_infos,
                     }]))
+                }
+                // NEW: Handle pointer initialization from address-of: T* p = &x
+                // This creates a borrow from x to p (pointer borrows the address of x)
+                crate::parser::Expression::AddressOf(inner) => {
+                    debug_println!("DEBUG IR: AddressOf in assignment: {} = &...", lhs_var);
+                    match inner.as_ref() {
+                        crate::parser::Expression::Variable(target_var) => {
+                            debug_println!("DEBUG IR: Creating pointer borrow from '{}' to '{}'", target_var, lhs_var);
+
+                            // Determine mutability from LHS pointer type
+                            // If LHS is `const T*` -> Immutable, otherwise -> Mutable
+                            let kind = if let Some(var_info) = variables.get(lhs_var) {
+                                // Check if this is a const pointer (const T*)
+                                match &var_info.ty {
+                                    VariableType::Owned(type_name) if type_name.starts_with("const ") => {
+                                        BorrowKind::Immutable
+                                    }
+                                    _ => {
+                                        // Non-const pointer defaults to mutable borrow
+                                        // In safe C++, T* p = &x means we might modify *p
+                                        BorrowKind::Mutable
+                                    }
+                                }
+                            } else {
+                                // Default to mutable for unknown types
+                                BorrowKind::Mutable
+                            };
+
+                            Ok(Some(vec![IrStatement::Borrow {
+                                from: target_var.clone(),
+                                to: lhs_var.clone(),
+                                kind,
+                                line,
+                                is_pointer: true,  // Mark as pointer borrow
+                            }]))
+                        }
+                        // Handle &obj.field (address of a field)
+                        crate::parser::Expression::MemberAccess { object, field } => {
+                            if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
+                                debug_println!("DEBUG IR: Creating pointer borrow from '{}.{}' to '{}'", obj_name, field, lhs_var);
+
+                                // Same mutability logic as above
+                                let kind = if let Some(var_info) = variables.get(lhs_var) {
+                                    match &var_info.ty {
+                                        VariableType::Owned(type_name) if type_name.starts_with("const ") => {
+                                            BorrowKind::Immutable
+                                        }
+                                        _ => BorrowKind::Mutable
+                                    }
+                                } else {
+                                    BorrowKind::Mutable
+                                };
+
+                                // For field borrows, we track against the whole object
+                                // (partial borrow tracking is handled separately)
+                                Ok(Some(vec![IrStatement::Borrow {
+                                    from: obj_name.clone(),
+                                    to: lhs_var.clone(),
+                                    kind,
+                                    line,
+                                    is_pointer: true,
+                                }]))
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        _ => Ok(None)
+                    }
                 }
                 _ => Ok(None)
             };
@@ -1624,6 +1826,7 @@ fn convert_statement(
                 func: name.clone(),
                 args: arg_names,
                 result: None,
+                receiver_is_temporary: false,  // TODO: detect temporaries
             });
 
             Ok(Some(statements))
@@ -1961,6 +2164,22 @@ fn convert_param_lifetime(annotation: &crate::parser::annotations::LifetimeAnnot
                 is_owned: false,
             })
         }
+        LifetimeAnnotation::Ptr(lifetime_name) => {
+            // Mutable pointer - similar to MutRef
+            Some(ParameterLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: true,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::ConstPtr(lifetime_name) => {
+            // Const pointer - similar to Ref
+            Some(ParameterLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: false,
+                is_owned: false,
+            })
+        }
         LifetimeAnnotation::Owned => {
             Some(ParameterLifetime {
                 lifetime_name: String::new(),  // No specific lifetime for owned
@@ -1991,6 +2210,22 @@ fn convert_return_lifetime(annotation: &crate::parser::annotations::LifetimeAnno
             Some(ReturnLifetime {
                 lifetime_name: lifetime_name.clone(),
                 is_mutable: true,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::Ptr(lifetime_name) => {
+            // Mutable pointer return - similar to MutRef
+            Some(ReturnLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: true,
+                is_owned: false,
+            })
+        }
+        LifetimeAnnotation::ConstPtr(lifetime_name) => {
+            // Const pointer return - similar to Ref
+            Some(ReturnLifetime {
+                lifetime_name: lifetime_name.clone(),
+                is_mutable: false,
                 is_owned: false,
             })
         }
@@ -2091,6 +2326,8 @@ fn extract_lifetime_name_from_annotation(annotation: &crate::parser::annotations
     match annotation {
         LifetimeAnnotation::Ref(name) => Some(name.clone()),
         LifetimeAnnotation::MutRef(name) => Some(name.clone()),
+        LifetimeAnnotation::Ptr(name) => Some(name.clone()),
+        LifetimeAnnotation::ConstPtr(name) => Some(name.clone()),
         LifetimeAnnotation::Lifetime(name) => Some(name.trim_start_matches('\'').to_string()),
         LifetimeAnnotation::Owned => None,
     }

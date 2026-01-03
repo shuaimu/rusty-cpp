@@ -540,7 +540,7 @@ fn process_raii_statement(
             errors.extend(scope_errors);
         }
 
-        IrStatement::CallExpr { func, args, result } => {
+        IrStatement::CallExpr { func, args, result, .. } => {
             // Check for container store methods (push_back, insert, etc.)
             let method_name = func.split("::").last().unwrap_or(func);
 
@@ -631,7 +631,7 @@ fn process_raii_statement(
         }
 
         // Phase 8: Track general borrows
-        IrStatement::Borrow { from, to, kind, line } => {
+        IrStatement::Borrow { from, to, kind, line, .. } => {
             let is_mutable = matches!(kind, BorrowKind::Mutable);
             tracker.record_reference_borrow(to, from, is_mutable, *line);
         }

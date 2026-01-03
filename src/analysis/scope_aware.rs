@@ -201,7 +201,7 @@ impl ScopeAwareOwnershipTracker {
     
     fn process_statement(&mut self, stmt: IrStatement) -> Result<(), String> {
         match stmt {
-            IrStatement::Borrow { from, to, kind } => {
+            IrStatement::Borrow { from, to, kind, .. } => {
                 self.create_borrow(from, to, kind)
             }
             IrStatement::Move { from, to } => {

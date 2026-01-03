@@ -383,6 +383,9 @@ fn check_function_with_header_cache(function: &IrFunction, header_cache: &Header
 
                 // First iteration: process all statements
                 for (loop_idx, loop_stmt) in loop_body.iter().enumerate() {
+                    // Check for loop-local escape BEFORE processing (to catch the error early)
+                    check_loop_local_escape(loop_stmt, &loop_local_vars, header_cache, &mut errors);
+
                     process_statement(loop_stmt, &mut ownership_tracker, &mut this_tracker, &mut errors, header_cache, function);
 
                     // NEW: Check for last uses (after processing statement)
@@ -458,6 +461,74 @@ fn collect_loop_local_vars(statements: &[crate::ir::IrStatement], loop_local_var
             }
             _ => {}
         }
+    }
+}
+
+/// Check if a reference to a loop-local variable escapes the loop iteration.
+/// This detects patterns like: refs[i] = &identity(temp); where temp is loop-local
+fn check_loop_local_escape(
+    statement: &crate::ir::IrStatement,
+    loop_local_vars: &HashSet<String>,
+    header_cache: &HeaderCache,
+    errors: &mut Vec<String>,
+) {
+    match statement {
+        // Check CallExpr where result is stored and any arg is loop-local
+        crate::ir::IrStatement::CallExpr { func, args, result: Some(result_var), .. } => {
+            // Skip if target is loop-local (no escape)
+            if loop_local_vars.contains(result_var) {
+                return;
+            }
+
+            // Check if any argument is loop-local
+            let loop_local_arg = args.iter().find(|arg| {
+                // Direct loop-local variable
+                if loop_local_vars.contains(*arg) {
+                    return true;
+                }
+                // Also check for temp variables that might refer to loop-locals
+                // (e.g., _temp_literal_X where the literal was a loop-local expression)
+                false
+            });
+
+            if let Some(loop_local_arg) = loop_local_arg {
+                // Check if the function returns a reference tied to that argument
+                if let Some(signature) = header_cache.get_signature(func) {
+                    if let Some(return_lifetime) = &signature.return_lifetime {
+                        // Check if return is a reference type
+                        let is_ref_return = matches!(
+                            return_lifetime,
+                            crate::parser::annotations::LifetimeAnnotation::Ref(_) |
+                            crate::parser::annotations::LifetimeAnnotation::MutRef(_) |
+                            crate::parser::annotations::LifetimeAnnotation::Ptr(_) |
+                            crate::parser::annotations::LifetimeAnnotation::ConstPtr(_)
+                        );
+
+                        if is_ref_return {
+                            // The function returns a reference, and an argument is loop-local
+                            // This reference escapes to a non-loop-local target
+                            errors.push(format!(
+                                "Reference to loop-local variable '{}' escapes loop iteration via '{}'. \
+                                The loop-local variable dies at end of iteration, leaving '{}' dangling.",
+                                loop_local_arg, func, result_var
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Recursively check nested If/else blocks
+        crate::ir::IrStatement::If { then_branch, else_branch } => {
+            for stmt in then_branch {
+                check_loop_local_escape(stmt, loop_local_vars, header_cache, errors);
+            }
+            if let Some(else_stmts) = else_branch {
+                for stmt in else_stmts {
+                    check_loop_local_escape(stmt, loop_local_vars, header_cache, errors);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -919,7 +990,14 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::Borrow { from, to, kind, .. } => {
+        crate::ir::IrStatement::Borrow { from, to, kind, is_pointer, .. } => {
+            // REBINDING: Always clear any existing borrows from `to` before creating new one
+            // This handles pointer/reference rebinding: p = &y (where p was previously &x)
+            // The old borrow (p -> x) must be cleared before creating new borrow (p -> y)
+            // Even for first assignment, this is a no-op if there are no borrows
+            debug_println!("DEBUG ANALYSIS: Borrow {} -> {}, is_pointer={}, clearing old borrows", from, to, is_pointer);
+            ownership_tracker.clear_borrows_from(to);
+
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
                 // Still record the borrow for consistency
@@ -945,29 +1023,85 @@ fn process_statement(
             let from_is_mutable_ref = ownership_tracker.is_mutable_reference(from);
             let from_is_immutable_ref = ownership_tracker.is_reference(from) && !from_is_mutable_ref;
 
-            // Phase 3: Check for borrow conflicts using helper function
-            // Skip conflict checking for reference-to-reference assignments (they don't create new borrows on the underlying object)
-            if !from_is_mutable_ref && !from_is_immutable_ref {
-                if !check_borrow_conflicts(from, kind, ownership_tracker, errors) {
-                    return;
-                }
+            // Phase 4: Handle reference-to-reference assignment
+            // When we borrow from a reference, behavior depends on mutability:
+            // - Mutable refs: MOVE the borrow (from loses it, to gains it)
+            // - Immutable refs: COPY the borrow (both keep it)
+            if from_is_mutable_ref || from_is_immutable_ref {
+                debug_println!("DEBUG ANALYSIS: Reference assignment: {} = {} (is_mutable_ref={})",
+                    to, from, from_is_mutable_ref);
 
-                // NEW: Check if whole-object borrow conflicts with existing field borrows
-                if !check_whole_object_vs_field_borrows(from, kind, ownership_tracker, errors) {
+                // Get what `from` borrows from (the ultimate source)
+                let borrows_from = ownership_tracker.get_borrows_from(from);
+                debug_println!("DEBUG ANALYSIS: {} borrows from {:?}", from, borrows_from);
+
+                if !borrows_from.is_empty() {
+                    if from_is_mutable_ref {
+                        // MUTABLE REF: Move semantics - transfer borrow from `from` to `to`
+                        // First clear `from`'s borrows (this releases the borrow)
+                        ownership_tracker.clear_borrows_from(from);
+                        ownership_tracker.set_ownership(from.clone(), OwnershipState::Moved);
+
+                        // Then add the same borrow for `to` (no conflict check needed - we just released it)
+                        for (source, original_kind) in borrows_from {
+                            debug_println!("DEBUG ANALYSIS: Moving borrow: {} -> {} (was {})",
+                                source, to, from);
+                            ownership_tracker.add_borrow_with_source(
+                                source,
+                                to.clone(),
+                                original_kind,
+                                BorrowSource::PointerAlias { source_pointer: from.clone() }
+                            );
+                        }
+                    } else {
+                        // IMMUTABLE REF: Copy semantics - both keep the borrow
+                        for (source, _original_kind) in borrows_from {
+                            debug_println!("DEBUG ANALYSIS: Copying borrow: {} -> {} (shared with {})",
+                                source, to, from);
+
+                            // Check for conflicts (e.g., can't add immutable if mutable exists)
+                            if !check_borrow_conflicts(&source, kind, ownership_tracker, errors) {
+                                return;
+                            }
+
+                            ownership_tracker.add_borrow_with_source(
+                                source,
+                                to.clone(),
+                                kind.clone(),
+                                BorrowSource::PointerAlias { source_pointer: from.clone() }
+                            );
+                        }
+                    }
+
+                    ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
+                    return;
+                } else {
+                    // `from` doesn't borrow from anything we know (e.g., function parameter)
+                    // Just create a direct borrow from `from` to `to`
+                    debug_println!("DEBUG ANALYSIS: {} is a reference but doesn't borrow from tracked source", from);
+                    ownership_tracker.add_borrow(from.clone(), to.clone(), kind.clone());
+                    ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
+
+                    if from_is_mutable_ref {
+                        ownership_tracker.set_ownership(from.clone(), OwnershipState::Moved);
+                    }
                     return;
                 }
+            }
+
+            // Phase 3: Check for borrow conflicts for non-reference sources
+            if !check_borrow_conflicts(from, kind, ownership_tracker, errors) {
+                return;
+            }
+
+            // NEW: Check if whole-object borrow conflicts with existing field borrows
+            if !check_whole_object_vs_field_borrows(from, kind, ownership_tracker, errors) {
+                return;
             }
 
             // Record the borrow
             ownership_tracker.add_borrow(from.clone(), to.clone(), kind.clone());
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
-
-            // If `from` is a mutable reference, mark it as moved (mutable refs are not Copy)
-            // If `from` is an immutable reference, it remains valid (immutable refs are Copy)
-            if from_is_mutable_ref {
-                ownership_tracker.set_ownership(from.clone(), OwnershipState::Moved);
-            }
-            // Immutable references are Copy - from remains valid
         }
         
         crate::ir::IrStatement::Assign { lhs, rhs, .. } => {
@@ -975,7 +1109,7 @@ fn process_statement(
             if ownership_tracker.is_in_unsafe_block() {
                 return;
             }
-            
+
             // Check if we're trying to modify through a const reference
             if ownership_tracker.is_reference(lhs) && !ownership_tracker.is_mutable_reference(lhs) {
                 errors.push(format!(
@@ -983,7 +1117,7 @@ fn process_statement(
                     lhs
                 ));
             }
-            
+
             // Check if the rhs uses a moved variable
             if let crate::ir::IrExpression::Variable(rhs_var) = rhs {
                 if ownership_tracker.get_ownership(rhs_var) == Some(&OwnershipState::Moved) {
@@ -991,6 +1125,51 @@ fn process_statement(
                         "Use after move: variable '{}' has been moved",
                         rhs_var
                     ));
+                }
+
+                // Phase 4: Pointer Aliasing Detection
+                // If RHS is a pointer/reference AND LHS is also a pointer/reference,
+                // LHS becomes an alias and should borrow from the same source
+                // Example: int* p = &x; int* q = p; // q now also borrows from x
+                //
+                // NOTE: If RHS is a reference but LHS is a value type, this is a COPY,
+                // not an alias. Example: int x = r; (where r is int&) just copies the value.
+                let lhs_is_reference = ownership_tracker.is_reference(lhs);
+                if ownership_tracker.is_reference(rhs_var) && lhs_is_reference {
+                    debug_println!("DEBUG ANALYSIS: Pointer aliasing detected: {} = {} (aliasing)", lhs, rhs_var);
+
+                    // Clear any existing borrows from LHS before creating new ones
+                    ownership_tracker.clear_borrows_from(lhs);
+
+                    // Get what RHS borrows from
+                    let borrows_from = ownership_tracker.get_borrows_from(rhs_var);
+                    debug_println!("DEBUG ANALYSIS: {} borrows from {:?}", rhs_var, borrows_from);
+
+                    // For each source that RHS borrows from, create an aliasing borrow for LHS
+                    for (source, kind) in borrows_from {
+                        debug_println!("DEBUG ANALYSIS: Creating alias borrow: {} -> {} (via {}) kind={:?}",
+                            source, lhs, rhs_var, kind);
+
+                        // Check for borrow conflicts before adding
+                        if !check_borrow_conflicts(&source, &kind, ownership_tracker, errors) {
+                            // Borrow conflict detected - error already added
+                            return;
+                        }
+
+                        // Add the aliasing borrow with source tracking
+                        ownership_tracker.add_borrow_with_source(
+                            source,
+                            lhs.clone(),
+                            kind,
+                            BorrowSource::PointerAlias { source_pointer: rhs_var.clone() }
+                        );
+                    }
+
+                    // Mark LHS as a reference with same mutability as RHS
+                    let is_mutable = ownership_tracker.is_mutable_reference(rhs_var);
+                    ownership_tracker.mark_as_reference(lhs.clone(), is_mutable);
+
+                    return;
                 }
             }
 
@@ -1254,7 +1433,7 @@ fn process_statement(
         }
 
         // Phase 2: Handle CallExpr - detect return value borrows
-        crate::ir::IrStatement::CallExpr { func, args, result } => {
+        crate::ir::IrStatement::CallExpr { func, args, result, .. } => {
             debug_println!("DEBUG ANALYSIS PHASE2: CallExpr func='{}', args={:?}, result={:?}", func, args, result);
 
             // Skip if in unsafe block
@@ -1456,6 +1635,18 @@ struct OwnershipTracker {
     // NEW: Liveness analysis - track last use of variables
     // Key: variable name, Value: statement index of last use
     last_use_map: HashMap<String, usize>,
+    // Struct lifetime tracking: structs with reference members borrow from constructor args
+    // Key: struct instance variable, Value: (borrowed_from_var, struct_type, scope_level)
+    struct_borrows: HashMap<String, StructBorrowInfo>,
+}
+
+// Track struct borrows - when a struct with reference members is constructed,
+// the struct instance borrows from the constructor arguments
+#[derive(Clone, Debug)]
+struct StructBorrowInfo {
+    borrowed_from: String,  // Variable the struct borrows from
+    struct_type: String,    // Type name of the struct
+    scope: usize,           // Scope where struct was created
 }
 
 #[derive(Clone)]
@@ -1520,6 +1711,9 @@ enum BorrowSource {
         object: String,
         field: String,
     },
+    PointerAlias {            // T* q = p;  (q aliases what p borrows from)
+        source_pointer: String,  // The pointer being aliased (e.g., "p")
+    },
 }
 
 // Track method context: how is 'this' accessed in methods?
@@ -1550,6 +1744,7 @@ impl OwnershipTracker {
             field_borrows: HashMap::new(),    // NEW: Partial borrow tracking
             this_context: None,                // NEW
             last_use_map,                      // NEW: Liveness analysis
+            struct_borrows: HashMap::new(),   // Struct lifetime tracking
         };
         // Start with a root scope
         tracker.scope_stack.push(ScopeInfo::default());
@@ -1648,16 +1843,59 @@ impl OwnershipTracker {
         result
     }
 
-    // NEW: Clear all borrows FROM a variable (for liveness analysis)
-    // This clears borrows where 'var' is the borrower (e.g., a reference that's now dead)
+    /// Phase 4: Get what a variable borrows FROM
+    /// Returns a list of (source_variable, borrow_kind) pairs
+    /// This is the inverse of active_borrows - finding what 'var' borrows from (not who borrows from 'var')
+    fn get_borrows_from(&self, var: &str) -> Vec<(String, BorrowKind)> {
+        let mut result = Vec::new();
+
+        for (borrowed_var, borrows) in &self.active_borrows {
+            for borrow in borrows {
+                if borrow.borrower == var {
+                    result.push((borrowed_var.clone(), borrow.kind.clone()));
+                }
+            }
+        }
+
+        result
+    }
+
+    // NEW: Clear all borrows FROM a variable (for liveness analysis and rebinding)
+    // This clears borrows where 'var' is the borrower (e.g., a reference that's now dead or rebound)
     fn clear_borrows_from(&mut self, var: &str) {
         debug_println!("LIVENESS: Clearing borrows from '{}'", var);
 
-        // Remove all borrows where this variable is the borrower
+        // First, find what this variable was borrowing and update the borrow counts
+        // We need to decrement immutable_count or clear has_mutable for each source
+        for (borrowed_var, borrows) in &self.active_borrows {
+            for borrow in borrows {
+                if borrow.borrower == var {
+                    // Found a borrow from 'var' to 'borrowed_var'
+                    // Update the borrow info for 'borrowed_var'
+                    if let Some(borrow_info) = self.borrows.get_mut(borrowed_var) {
+                        match borrow.kind {
+                            BorrowKind::Immutable => {
+                                if borrow_info.immutable_count > 0 {
+                                    borrow_info.immutable_count -= 1;
+                                    debug_println!("LIVENESS: Decremented immutable count for '{}' to {}", borrowed_var, borrow_info.immutable_count);
+                                }
+                            }
+                            BorrowKind::Mutable => {
+                                borrow_info.has_mutable = false;
+                                debug_println!("LIVENESS: Cleared mutable borrow flag for '{}'", borrowed_var);
+                            }
+                        }
+                        borrow_info.borrowers.remove(var);
+                    }
+                }
+            }
+        }
+
+        // Remove all borrows where this variable is the borrower from active_borrows
         for (_borrowed_var, borrows) in &mut self.active_borrows {
             borrows.retain(|b| {
                 if b.borrower == var {
-                    debug_println!("LIVENESS: Removing borrow: '{}' → '{}'", var, _borrowed_var);
+                    debug_println!("LIVENESS: Removing active borrow: '{}' → '{}'", var, _borrowed_var);
                     false
                 } else {
                     true
@@ -2172,6 +2410,7 @@ mod tests {
             functions: vec![],
             ownership_graph: DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         }
     }
 
@@ -2349,13 +2588,13 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref2".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         program.functions.push(func);
@@ -2393,14 +2632,14 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         // Then try mutable borrow (should fail)
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "mut_ref".to_string(),
-            kind: BorrowKind::Mutable,
+            kind: BorrowKind::Mutable, is_pointer: false,
         });
         
         program.functions.push(func);
@@ -2456,7 +2695,7 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         // Try to modify through const reference (should fail)
@@ -2518,7 +2757,7 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "mut_ref".to_string(),
-            kind: BorrowKind::Mutable,
+            kind: BorrowKind::Mutable, is_pointer: false,
         });
         
         // Modify through mutable reference (should succeed)
@@ -2617,19 +2856,19 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref1".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref2".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "const_ref3".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         program.functions.push(func);
@@ -2673,7 +2912,7 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "value".to_string(),
             to: "ref".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         program.functions.push(func);
@@ -2711,12 +2950,12 @@ mod tests {
         block1.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref1".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         block1.statements.push(IrStatement::Borrow { line: 0,
             from: "x".to_string(),
             to: "ref2".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         // Second function with invalid refs
@@ -2740,12 +2979,12 @@ mod tests {
         block2.statements.push(IrStatement::Borrow { line: 0,
             from: "y".to_string(),
             to: "mut1".to_string(),
-            kind: BorrowKind::Mutable,
+            kind: BorrowKind::Mutable, is_pointer: false,
         });
         block2.statements.push(IrStatement::Borrow { line: 0,
             from: "y".to_string(),
             to: "mut2".to_string(),
-            kind: BorrowKind::Mutable,
+            kind: BorrowKind::Mutable, is_pointer: false,
         });
         
         program.functions.push(func1);
@@ -2801,26 +3040,26 @@ mod tests {
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "a".to_string(),
             to: "ref_a1".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "a".to_string(),
             to: "ref_a2".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         // Create mutable ref to 'b'
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "b".to_string(),
             to: "mut_b".to_string(),
-            kind: BorrowKind::Mutable,
+            kind: BorrowKind::Mutable, is_pointer: false,
         });
         
         // Try to create another ref to 'b' (should fail)
         block.statements.push(IrStatement::Borrow { line: 0,
             from: "b".to_string(),
             to: "ref_b".to_string(),
-            kind: BorrowKind::Immutable,
+            kind: BorrowKind::Immutable, is_pointer: false,
         });
         
         program.functions.push(func);
@@ -2874,14 +3113,14 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             IrStatement::ExitScope,
             // After scope exit, should be able to borrow again
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
         ];
         
@@ -2890,6 +3129,7 @@ mod scope_tests {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2905,14 +3145,14 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
-                kind: BorrowKind::Immutable,
+                kind: BorrowKind::Immutable, is_pointer: false,
             },
             IrStatement::EnterScope,
             // Nested scope - should be able to have another immutable borrow
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
-                kind: BorrowKind::Immutable,
+                kind: BorrowKind::Immutable, is_pointer: false,
             },
             IrStatement::ExitScope,
             // ref2 is gone, but ref1 still exists
@@ -2921,7 +3161,7 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref3".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
         ];
         
@@ -2930,6 +3170,7 @@ mod scope_tests {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2959,6 +3200,7 @@ mod scope_tests {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -2976,7 +3218,7 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             IrStatement::ExitScope,
             
@@ -2985,7 +3227,7 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             IrStatement::ExitScope,
             
@@ -2994,7 +3236,7 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref3".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             IrStatement::ExitScope,
         ];
@@ -3004,6 +3246,7 @@ mod scope_tests {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);
@@ -3019,13 +3262,13 @@ mod scope_tests {
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref1".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             // This should error - same scope
             IrStatement::Borrow { line: 0,
                 from: "value".to_string(),
                 to: "ref2".to_string(),
-                kind: BorrowKind::Mutable,
+                kind: BorrowKind::Mutable, is_pointer: false,
             },
             IrStatement::ExitScope,
         ];
@@ -3035,6 +3278,7 @@ mod scope_tests {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
             user_defined_raii_types: std::collections::HashSet::new(),
+            types_with_ref_members: std::collections::HashSet::new(),
         };
         
         let result = check_borrows(program);

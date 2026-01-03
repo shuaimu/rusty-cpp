@@ -56,7 +56,8 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
     // This enables the "safe wrapper" pattern:
     //   void Logger::log(const char* msg) { @unsafe { internal_log(msg); } }
 
-    for stmt in &function.body {
+    let stmts = &function.body;
+    for (i, stmt) in stmts.iter().enumerate() {
         // Track unsafe scope depth
         match stmt {
             Statement::EnterUnsafe => {
@@ -75,12 +76,65 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
         // Skip checking if we're in an unsafe block OR the function is not @safe
         let in_unsafe_scope = unsafe_depth > 0 || skip_pointer_checks;
 
+        // Check for uninitialized pointer declarations in @safe code
+        if !in_unsafe_scope {
+            if let Some(error) = check_uninitialized_pointer(stmt, stmts.get(i + 1)) {
+                errors.push(format!("In function '{}': {}", function.name, error));
+            }
+        }
+
         if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
     }
 
     errors
+}
+
+/// Check if a pointer variable is declared without initialization
+/// In @safe code, pointers must be initialized to prevent use of garbage values
+fn check_uninitialized_pointer(current_stmt: &Statement, next_stmt: Option<&Statement>) -> Option<String> {
+    use crate::parser::Statement;
+
+    // Check if current statement is a pointer variable declaration
+    if let Statement::VariableDecl(var) = current_stmt {
+        if !var.is_pointer {
+            return None;
+        }
+
+        // Skip char* types - they have their own check and may be used with string literals
+        if is_char_pointer_type(&var.type_name) {
+            return None;
+        }
+
+        // Check if next statement is an assignment to this variable
+        // If so, the pointer is being initialized
+        if let Some(Statement::Assignment { lhs, rhs, .. }) = next_stmt {
+            if let Expression::Variable(name) = lhs {
+                if name == &var.name {
+                    // The pointer is being initialized - check if with nullptr
+                    // (nullptr initialization is caught by the Assignment check)
+                    if is_null_pointer_expr(rhs) {
+                        return Some(format!(
+                            "Pointer '{}' initialized with nullptr at line {}: null pointers are forbidden in @safe code. \
+                             Use Option<T*> for nullable pointers.",
+                            var.name, var.location.line
+                        ));
+                    }
+                    return None; // Initialized with non-null value
+                }
+            }
+        }
+
+        // No initialization found - pointer is uninitialized
+        return Some(format!(
+            "Uninitialized pointer '{}' at line {}: pointers must be initialized in @safe code. \
+             Uninitialized pointers may contain garbage values.",
+            var.name, var.location.line
+        ));
+    }
+
+    None
 }
 
 /// Check for std::move on references in @safe code
@@ -298,6 +352,34 @@ fn check_statements_for_pointers_with_unsafe_tracking(
     errors
 }
 
+/// Check if an expression is a null pointer (nullptr, NULL, 0 in pointer context)
+fn is_null_pointer_expr(expr: &Expression) -> bool {
+    match expr {
+        Expression::Nullptr => true,
+        // Integer literal 0 can be null in pointer context - but we'll be conservative
+        // and only flag explicit nullptr for now
+        _ => false,
+    }
+}
+
+/// Check if a function name is an unsafe memory management function
+/// These are forbidden in @safe code - use smart pointers instead
+fn is_unsafe_memory_function(name: &str) -> bool {
+    // Get the base function name (strip namespace qualifiers)
+    let base_name = name.rsplit("::").next().unwrap_or(name);
+
+    matches!(base_name,
+        // C memory functions
+        "malloc" | "calloc" | "realloc" | "free" |
+        // C aligned memory functions
+        "aligned_alloc" | "posix_memalign" | "memalign" |
+        // C++ sized deallocation (rare but possible)
+        "operator new" | "operator delete" |
+        // Platform-specific allocators
+        "_aligned_malloc" | "_aligned_free" | "_aligned_realloc"
+    )
+}
+
 /// Check if a parsed statement contains pointer operations
 pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bool) -> Option<String> {
     use crate::parser::Statement;
@@ -309,6 +391,18 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
 
     match stmt {
         Statement::Assignment { lhs, rhs, location } => {
+            // Check for null pointer assignment: p = nullptr is forbidden in @safe
+            if is_null_pointer_expr(rhs) {
+                // Check if lhs is a pointer variable (simplified check)
+                if let Expression::Variable(_) = lhs {
+                    return Some(format!(
+                        "Null pointer assignment at line {}: null pointers are forbidden in @safe code. \
+                         Use Option<T*> for nullable pointers.",
+                        location.line
+                    ));
+                }
+            }
+
             // Check BOTH lhs and rhs for pointer operations
             // e.g., `n->value_ = val` has the dereference on lhs
             // e.g., `x = *ptr` has the dereference on rhs
@@ -340,8 +434,25 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
             // Other raw pointer declarations are allowed (dereferencing is still checked)
             return None;
         }
-        Statement::FunctionCall { args, location, .. } => {
+        Statement::FunctionCall { name, args, location, .. } => {
+            // Check for forbidden memory management functions
+            if is_unsafe_memory_function(name) {
+                return Some(format!(
+                    "Unsafe memory function '{}' at line {}: manual memory management is forbidden in @safe code. \
+                     Use smart pointers (Box, unique_ptr) instead.",
+                    name, location.line
+                ));
+            }
+
             for arg in args {
+                // Check for nullptr passed as argument - forbidden in @safe code
+                if is_null_pointer_expr(arg) {
+                    return Some(format!(
+                        "Null pointer passed as argument at line {}: null pointers are forbidden in @safe code. \
+                         Use Option<T*> for nullable pointers.",
+                        location.line
+                    ));
+                }
                 if let Some(op) = contains_pointer_operation(arg) {
                     return Some(format!(
                         "Unsafe pointer {} in function call at line {}: pointer operations require unsafe context",
@@ -351,6 +462,13 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
             }
         }
         Statement::Return(Some(expr)) => {
+            // Check for returning nullptr - forbidden in @safe code
+            if is_null_pointer_expr(expr) {
+                return Some(
+                    "Cannot return nullptr in @safe code: null pointers are forbidden. \
+                     Use Option<T*> for nullable pointers.".to_string()
+                );
+            }
             if let Some(op) = contains_pointer_operation(expr) {
                 return Some(format!(
                     "Unsafe pointer {} in return statement: pointer operations require unsafe context",
@@ -384,6 +502,15 @@ pub fn check_parsed_statement_for_pointers(stmt: &Statement, in_unsafe_scope: bo
             let block_errors = check_statements_for_pointers_with_unsafe_tracking(statements, 0);
             if !block_errors.is_empty() {
                 return Some(block_errors.into_iter().next().unwrap());
+            }
+        }
+        Statement::ExpressionStatement { expr, location } => {
+            // Check for pointer operations in standalone expressions (e.g., `delete p;`)
+            if let Some(op) = contains_pointer_operation(expr) {
+                return Some(format!(
+                    "Unsafe pointer {} at line {}: pointer operations require unsafe context",
+                    op, location.line
+                ));
             }
         }
         _ => {}
@@ -480,6 +607,26 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // Regular variable references (not 'this') are safe
             // Note: 'this' is handled above with a guard
             None
+        }
+        Expression::Nullptr => {
+            // Nullptr literal - not a pointer operation itself
+            // (null checks are handled separately by is_null_pointer_expr)
+            None
+        }
+        Expression::New(_) => {
+            // new expression - manual memory management is unsafe
+            // Use smart pointers (Box, unique_ptr) instead
+            Some("new")
+        }
+        Expression::Delete(_) => {
+            // delete expression - manual memory management is unsafe
+            // Use smart pointers that handle deallocation automatically
+            Some("delete")
+        }
+        Expression::PointerArithmetic { .. } => {
+            // Pointer arithmetic is unsafe - can cause out-of-bounds access
+            // Use iterators or safe containers instead
+            Some("pointer arithmetic")
         }
     }
 }
@@ -715,5 +862,236 @@ mod tests {
     fn test_string_literal_expression_is_safe() {
         let expr = Expression::StringLiteral("hello".to_string());
         assert_eq!(contains_pointer_operation(&expr), None, "String literal should be safe");
+    }
+
+    #[test]
+    fn test_new_expression_is_unsafe() {
+        let expr = Expression::New(Box::new(Expression::Literal("int".to_string())));
+        assert_eq!(contains_pointer_operation(&expr), Some("new"), "new expression should be unsafe");
+    }
+
+    #[test]
+    fn test_delete_expression_is_unsafe() {
+        let expr = Expression::Delete(Box::new(Expression::Variable("ptr".to_string())));
+        assert_eq!(contains_pointer_operation(&expr), Some("delete"), "delete expression should be unsafe");
+    }
+
+    #[test]
+    fn test_new_in_statement() {
+        let stmt = Statement::ExpressionStatement {
+            expr: Expression::New(Box::new(Expression::Literal("int".to_string()))),
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "new in statement should be detected");
+        assert!(error.unwrap().contains("new"), "Error should mention 'new'");
+    }
+
+    #[test]
+    fn test_delete_in_statement() {
+        let stmt = Statement::ExpressionStatement {
+            expr: Expression::Delete(Box::new(Expression::Variable("ptr".to_string()))),
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 20,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "delete in statement should be detected");
+        assert!(error.unwrap().contains("delete"), "Error should mention 'delete'");
+    }
+
+    #[test]
+    fn test_new_delete_allowed_in_unsafe() {
+        // new in unsafe context should be allowed
+        let stmt = Statement::ExpressionStatement {
+            expr: Expression::New(Box::new(Expression::Literal("int".to_string()))),
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, true);  // in_unsafe_scope = true
+        assert!(error.is_none(), "new should be allowed in unsafe context");
+
+        // delete in unsafe context should be allowed
+        let stmt2 = Statement::ExpressionStatement {
+            expr: Expression::Delete(Box::new(Expression::Variable("ptr".to_string()))),
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 20,
+                column: 5,
+            },
+        };
+
+        let error2 = check_parsed_statement_for_pointers(&stmt2, true);  // in_unsafe_scope = true
+        assert!(error2.is_none(), "delete should be allowed in unsafe context");
+    }
+
+    #[test]
+    fn test_pointer_arithmetic_is_unsafe() {
+        let expr = Expression::PointerArithmetic {
+            pointer: Box::new(Expression::Variable("ptr".to_string())),
+            op: "+".to_string(),
+        };
+        assert_eq!(contains_pointer_operation(&expr), Some("pointer arithmetic"), "Pointer arithmetic should be unsafe");
+    }
+
+    #[test]
+    fn test_pointer_arithmetic_in_statement() {
+        let stmt = Statement::ExpressionStatement {
+            expr: Expression::PointerArithmetic {
+                pointer: Box::new(Expression::Variable("ptr".to_string())),
+                op: "++".to_string(),
+            },
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "Pointer arithmetic should be detected");
+        assert!(error.unwrap().contains("pointer arithmetic"), "Error should mention pointer arithmetic");
+    }
+
+    #[test]
+    fn test_pointer_arithmetic_allowed_in_unsafe() {
+        let stmt = Statement::ExpressionStatement {
+            expr: Expression::PointerArithmetic {
+                pointer: Box::new(Expression::Variable("ptr".to_string())),
+                op: "++".to_string(),
+            },
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, true);  // in_unsafe_scope = true
+        assert!(error.is_none(), "Pointer arithmetic should be allowed in unsafe context");
+    }
+
+    #[test]
+    fn test_malloc_is_unsafe() {
+        let stmt = Statement::FunctionCall {
+            name: "malloc".to_string(),
+            args: vec![Expression::Literal("100".to_string())],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "malloc should be detected as unsafe");
+        assert!(error.unwrap().contains("malloc"), "Error should mention malloc");
+    }
+
+    #[test]
+    fn test_free_is_unsafe() {
+        let stmt = Statement::FunctionCall {
+            name: "free".to_string(),
+            args: vec![Expression::Variable("ptr".to_string())],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "free should be detected as unsafe");
+        assert!(error.unwrap().contains("free"), "Error should mention free");
+    }
+
+    #[test]
+    fn test_calloc_is_unsafe() {
+        let stmt = Statement::FunctionCall {
+            name: "calloc".to_string(),
+            args: vec![
+                Expression::Literal("10".to_string()),
+                Expression::Literal("4".to_string()),
+            ],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "calloc should be detected as unsafe");
+        assert!(error.unwrap().contains("calloc"), "Error should mention calloc");
+    }
+
+    #[test]
+    fn test_realloc_is_unsafe() {
+        let stmt = Statement::FunctionCall {
+            name: "realloc".to_string(),
+            args: vec![
+                Expression::Variable("ptr".to_string()),
+                Expression::Literal("200".to_string()),
+            ],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, false);
+        assert!(error.is_some(), "realloc should be detected as unsafe");
+        assert!(error.unwrap().contains("realloc"), "Error should mention realloc");
+    }
+
+    #[test]
+    fn test_malloc_allowed_in_unsafe() {
+        let stmt = Statement::FunctionCall {
+            name: "malloc".to_string(),
+            args: vec![Expression::Literal("100".to_string())],
+            location: SourceLocation {
+                file: "test.cpp".to_string(),
+                line: 10,
+                column: 5,
+            },
+        };
+
+        let error = check_parsed_statement_for_pointers(&stmt, true);  // in_unsafe_scope = true
+        assert!(error.is_none(), "malloc should be allowed in unsafe context");
+    }
+
+    #[test]
+    fn test_is_unsafe_memory_function() {
+        // Test all the memory functions
+        assert!(is_unsafe_memory_function("malloc"));
+        assert!(is_unsafe_memory_function("calloc"));
+        assert!(is_unsafe_memory_function("realloc"));
+        assert!(is_unsafe_memory_function("free"));
+        assert!(is_unsafe_memory_function("aligned_alloc"));
+        assert!(is_unsafe_memory_function("posix_memalign"));
+        assert!(is_unsafe_memory_function("memalign"));
+
+        // Test with namespace prefix
+        assert!(is_unsafe_memory_function("std::malloc"));
+        assert!(is_unsafe_memory_function("::free"));
+
+        // Test non-memory functions
+        assert!(!is_unsafe_memory_function("printf"));
+        assert!(!is_unsafe_memory_function("std::vector::push_back"));
+        assert!(!is_unsafe_memory_function("new_function"));  // Not "new"
+        assert!(!is_unsafe_memory_function("allocate"));  // Similar but not a memory function
     }
 }

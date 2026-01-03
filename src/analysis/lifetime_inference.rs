@@ -343,6 +343,7 @@ mod tests {
             from: "x".to_string(),
             to: "ref_x".to_string(),
             kind: BorrowKind::Immutable,
+            is_pointer: false,
         }, 1);
         
         inferencer.process_statement(&IrStatement::Return { line: 0,
