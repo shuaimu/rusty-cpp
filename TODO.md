@@ -33,7 +33,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* rusty::Option<T> - explicit optional value, forces handling of None case
     - [x] *done* rusty::Vec<T> - growable array with bounds checking and safe iterator invalidation
     - [x] *done* rusty::SafeFn / rusty::UnsafeFn - type-safe function pointer wrappers distinguishing safe vs unsafe callables
-    - [ ] *medium* rusty::Result<T, E> - error handling type that forces explicit error handling, no exceptions
-    - [ ] *medium* rusty::String - owned UTF-8 string with safe mutation and no null terminator assumptions
-    - [ ] *low* rusty::HashMap<K, V> - hash map with safe iteration and no iterator invalidation on lookup
-    - [ ] *low* rusty::HashSet<T> - hash set with safe iteration and no iterator invalidation on lookup
+    - [x] *done* rusty::Result<T, E> - error handling type that forces explicit error handling, no exceptions
+    - [x] *done* rusty::String - owned UTF-8 string with safe mutation and no null terminator assumptions
+    - [x] *done* rusty::HashMap<K, V> - hash map with safe iteration and no iterator invalidation on lookup
+    - [x] *done* rusty::HashSet<T> - hash set with safe iteration and no iterator invalidation on lookup
