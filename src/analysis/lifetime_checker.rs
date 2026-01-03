@@ -14,6 +14,8 @@ pub struct LifetimeScope {
     constraints: Vec<LifetimeBound>,
     /// Variables that own their data (not references)
     owned_variables: HashSet<String>,
+    /// Lifetimes that have expired (scope has ended)
+    expired_lifetimes: HashSet<String>,
 }
 
 impl LifetimeScope {
@@ -22,6 +24,7 @@ impl LifetimeScope {
             variable_lifetimes: HashMap::new(),
             constraints: Vec::new(),
             owned_variables: HashSet::new(),
+            expired_lifetimes: HashSet::new(),
         }
     }
     
@@ -50,7 +53,27 @@ impl LifetimeScope {
     pub fn add_constraint(&mut self, constraint: LifetimeBound) {
         self.constraints.push(constraint);
     }
-    
+
+    /// Mark a scope's lifetime as expired (when ExitScope is encountered)
+    pub fn expire_scope(&mut self, scope_depth: usize) {
+        let lifetime = format!("'scope_{}", scope_depth);
+        self.expired_lifetimes.insert(lifetime);
+    }
+
+    /// Check if a variable's lifetime has expired
+    pub fn is_lifetime_expired(&self, var: &str) -> bool {
+        if let Some(lifetime) = self.variable_lifetimes.get(var) {
+            self.expired_lifetimes.contains(lifetime)
+        } else {
+            false
+        }
+    }
+
+    /// Get the lifetime string for a variable (for error messages)
+    pub fn get_lifetime_for_error(&self, var: &str) -> Option<String> {
+        self.variable_lifetimes.get(var).cloned()
+    }
+
     /// Check if lifetime 'a outlives lifetime 'b
     pub fn check_outlives(&self, longer: &str, shorter: &str) -> bool {
         // If they're the same lifetime, it trivially outlives itself
@@ -196,42 +219,48 @@ fn check_function_lifetimes(
         }
     }
     
-    // Track scope depth for lifetime inference
-    let mut scope_depth = 0;
+    // Track scope using a unique scope ID (counter) instead of just depth
+    // This ensures sequential scopes at the same depth have different IDs
+    let mut scope_counter: usize = 0;  // Monotonically increasing scope ID
+    let mut scope_stack: Vec<usize> = vec![0];  // Stack of active scope IDs (starts with scope 0)
     let mut variable_scopes: HashMap<String, usize> = HashMap::new();
 
-    // First pass: assign scope depths to variables based on where they're declared/used
+    // First pass: assign unique scope IDs to variables based on where they're declared/used
     for node_idx in function.cfg.node_indices() {
         let block = &function.cfg[node_idx];
 
         for statement in &block.statements {
             match statement {
                 IrStatement::EnterScope => {
-                    scope_depth += 1;
+                    scope_counter += 1;
+                    scope_stack.push(scope_counter);
                 }
                 IrStatement::ExitScope => {
-                    if scope_depth > 0 {
-                        scope_depth -= 1;
+                    if scope_stack.len() > 1 {
+                        scope_stack.pop();
                     }
                 }
                 IrStatement::Assign { lhs, .. } |
                 IrStatement::Borrow { to: lhs, .. } => {
-                    // Record the scope depth where this variable is first assigned
+                    // Record the current scope ID where this variable is first assigned
                     if !variable_scopes.contains_key(lhs) {
-                        variable_scopes.insert(lhs.clone(), scope_depth);
+                        let current_scope = *scope_stack.last().unwrap_or(&0);
+                        variable_scopes.insert(lhs.clone(), current_scope);
                     }
                 }
                 IrStatement::CallExpr { args, result, .. } => {
                     // Record result variable if present
                     if let Some(lhs) = result {
                         if !variable_scopes.contains_key(lhs) {
-                            variable_scopes.insert(lhs.clone(), scope_depth);
+                            let current_scope = *scope_stack.last().unwrap_or(&0);
+                            variable_scopes.insert(lhs.clone(), current_scope);
                         }
                     }
                     // For arguments that don't have lifetimes yet, record their scope
                     for arg in args {
                         if !variable_scopes.contains_key(arg) && scope.is_owned(arg) {
-                            variable_scopes.insert(arg.clone(), scope_depth);
+                            let current_scope = *scope_stack.last().unwrap_or(&0);
+                            variable_scopes.insert(arg.clone(), current_scope);
                         }
                     }
                 }
@@ -240,15 +269,15 @@ fn check_function_lifetimes(
         }
     }
 
-    // Assign scope-based lifetimes to owned variables
+    // Assign scope-based lifetimes to owned variables using unique scope IDs
     // Variables not in variable_scopes must have been declared before any tracked statements (scope 0)
     // This includes function parameters and variables declared at the start of the function
-    for (var_name, var_info) in &function.variables {
+    for (var_name, _var_info) in &function.variables {
         if scope.is_owned(var_name) {
             // Check if this variable was assigned/declared in a tracked statement
-            if let Some(&depth) = variable_scopes.get(var_name) {
-                // Variable was assigned/declared, use that scope
-                let lifetime = format!("'scope_{}", depth);
+            if let Some(&scope_id) = variable_scopes.get(var_name) {
+                // Variable was assigned/declared, use that unique scope ID
+                let lifetime = format!("'scope_{}", scope_id);
                 scope.set_lifetime(var_name.clone(), lifetime.clone());
             } else {
                 // Variable exists but was never assigned/declared in statements
@@ -259,21 +288,27 @@ fn check_function_lifetimes(
         }
     }
 
-    // Reset scope depth for statement processing
-    scope_depth = 0;
+    // Reset for statement processing - use a new stack with scope ID tracking
+    scope_counter = 0;
+    scope_stack = vec![0];
 
     // Check each statement in the function
     for node_idx in function.cfg.node_indices() {
         let block = &function.cfg[node_idx];
 
-        for (idx, statement) in block.statements.iter().enumerate() {
+        for (_idx, statement) in block.statements.iter().enumerate() {
             match statement {
                 IrStatement::EnterScope => {
-                    scope_depth += 1;
+                    scope_counter += 1;
+                    scope_stack.push(scope_counter);
                 }
                 IrStatement::ExitScope => {
-                    if scope_depth > 0 {
-                        scope_depth -= 1;
+                    // Mark the current scope's lifetime as expired BEFORE popping
+                    if let Some(&current_scope_id) = scope_stack.last() {
+                        scope.expire_scope(current_scope_id);
+                    }
+                    if scope_stack.len() > 1 {
+                        scope_stack.pop();
                     }
                 }
                 IrStatement::CallExpr { func, args, result, receiver_is_temporary } => {
@@ -284,13 +319,13 @@ fn check_function_lifetimes(
                             args,
                             result.as_ref(),
                             signature,
-                            scope,
+                            scope,  // Pass mutable scope to set result lifetime
                             *receiver_is_temporary,
                         );
                         errors.extend(call_errors);
                     }
                 }
-                
+
                 IrStatement::Borrow { from, to, .. } => {
                     // When creating a reference, the new reference has the same lifetime
                     // as the source or a shorter one
@@ -301,7 +336,33 @@ fn check_function_lifetimes(
                         scope.set_lifetime(to.clone(), format!("'{}", to));
                     }
                 }
-                
+
+                IrStatement::UseVariable { var, operation } => {
+                    // Check if variable's lifetime has expired
+                    if scope.is_lifetime_expired(var) {
+                        if let Some(lifetime) = scope.get_lifetime_for_error(var) {
+                            errors.push(format!(
+                                "Use of '{}' after its lifetime has expired (lifetime {} is no longer valid) - {} operation",
+                                var, lifetime, operation
+                            ));
+                        }
+                    }
+                }
+
+                IrStatement::Assign { lhs, rhs, .. } => {
+                    // Check if RHS variable's lifetime has expired
+                    if let crate::ir::IrExpression::Variable(rhs_var) = rhs {
+                        if scope.is_lifetime_expired(rhs_var) {
+                            if let Some(lifetime) = scope.get_lifetime_for_error(rhs_var) {
+                                errors.push(format!(
+                                    "Use of '{}' in assignment to '{}' after its lifetime has expired (lifetime {})",
+                                    rhs_var, lhs, lifetime
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 IrStatement::Return { value, .. } => {
                     // Check that returned references have appropriate lifetimes
                     if let Some(value) = value {
@@ -309,7 +370,7 @@ fn check_function_lifetimes(
                         errors.extend(return_errors);
                     }
                 }
-                
+
                 _ => {}
             }
         }
@@ -323,7 +384,7 @@ fn check_function_call(
     args: &[String],
     result: Option<&String>,
     signature: &FunctionSignature,
-    scope: &LifetimeScope,
+    scope: &mut LifetimeScope,
     receiver_is_temporary: bool,
 ) -> Vec<String> {
     let mut errors = Vec::new();
@@ -412,34 +473,35 @@ fn check_function_call(
         }
     }
     
-    // Check return lifetime
-    if let (Some(_result_var), Some(return_lifetime)) = (result, &signature.return_lifetime) {
+    // Check return lifetime and set result variable's lifetime
+    if let (Some(result_var), Some(return_lifetime)) = (result, &signature.return_lifetime) {
         match return_lifetime {
             LifetimeAnnotation::Ref(ret_lifetime) | LifetimeAnnotation::MutRef(ret_lifetime) => {
                 // The return value is a reference that borrows from one of the parameters
                 // Map the return lifetime to the actual argument lifetime
                 let actual_lifetime = map_lifetime_to_actual(ret_lifetime, &arg_lifetimes);
-                if let Some(_lifetime) = actual_lifetime {
-                    // The result variable gets this lifetime
-                    // Note: We're not modifying scope here as it's borrowed
-                    // In a real implementation, we'd need mutable access
+                if let Some(lifetime) = actual_lifetime {
+                    // Set the result variable's lifetime to match the argument's lifetime
+                    scope.set_lifetime(result_var.clone(), lifetime);
                 }
             }
             LifetimeAnnotation::Ptr(ret_lifetime) | LifetimeAnnotation::ConstPtr(ret_lifetime) => {
                 // The return value is a pointer that borrows from one of the parameters
                 // Same lifetime tracking as references
                 let actual_lifetime = map_lifetime_to_actual(ret_lifetime, &arg_lifetimes);
-                if let Some(_lifetime) = actual_lifetime {
-                    // The result pointer gets this lifetime
+                if let Some(lifetime) = actual_lifetime {
+                    // Set the result pointer's lifetime to match the argument's lifetime
+                    scope.set_lifetime(result_var.clone(), lifetime);
                 }
             }
             LifetimeAnnotation::Owned => {
-                // The return value is owned, no lifetime constraints
+                // The return value is owned, mark it as owned in scope
+                scope.mark_owned(result_var.clone());
             }
             _ => {}
         }
     }
-    
+
     errors
 }
 

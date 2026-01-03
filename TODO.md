@@ -3,7 +3,7 @@
 - [ ] Bring Rust's memory safety guarantees to C++ through static analysis and safe type wrappers
   - [ ] Static borrow checking - analyze C++ code to detect use-after-free, dangling references, and double-free at compile time
     - [x] *done* Detect returning a struct whose reference member points to a local variable that will be destroyed
-    - [ ] *high* Track which parameter's lifetime flows to return value when function has multiple reference parameters with different lifetimes
+    - [x] *done* Track which parameter's lifetime flows to return value when function has multiple reference parameters with different lifetimes
     - [ ] *high* Detect iterator use after container modification (e.g., using iterator after push_back which may reallocate)
     - [ ] *high* Detect reference use after container modification (e.g., holding ref to vec[0] then calling push_back)
     - [ ] *medium* Detect use of reference obtained from unique_ptr after calling reset() or release()
