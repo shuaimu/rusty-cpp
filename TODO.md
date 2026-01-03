@@ -1,0 +1,25 @@
+# RustyCpp TODO
+
+- [ ] Bring Rust's memory safety guarantees to C++ through static analysis and safe type wrappers
+  - [ ] Static borrow checking - analyze C++ code to detect use-after-free, dangling references, and double-free at compile time
+    - [x] *done* Detect returning a struct whose reference member points to a local variable that will be destroyed
+    - [ ] *high* Track which parameter's lifetime flows to return value when function has multiple reference parameters with different lifetimes
+    - [ ] *high* Detect iterator use after container modification (e.g., using iterator after push_back which may reallocate)
+    - [ ] *high* Detect reference use after container modification (e.g., holding ref to vec[0] then calling push_back)
+    - [ ] *medium* Detect use of reference obtained from unique_ptr after calling reset() or release()
+    - [ ] *medium* Detect returning ptr.get() from a function where the unique_ptr is a local variable
+    - [ ] *medium* Fix use-after-move detection for STL types like std::string in non-template code
+    - [ ] *low* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements
+  - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
+    - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
+    - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
+    - [x] *done* rusty::Rc<T> - reference-counted pointer for single-threaded shared ownership
+    - [x] *done* rusty::Cell<T> - interior mutability for Copy types, allows mutation through const reference
+    - [x] *done* rusty::RefCell<T> - interior mutability with runtime borrow checking, panics on violation
+    - [x] *done* rusty::Option<T> - explicit optional value, forces handling of None case
+    - [x] *done* rusty::Vec<T> - growable array with bounds checking and safe iterator invalidation
+    - [x] *done* rusty::SafeFn / rusty::UnsafeFn - type-safe function pointer wrappers distinguishing safe vs unsafe callables
+    - [ ] *medium* rusty::Result<T, E> - error handling type that forces explicit error handling, no exceptions
+    - [ ] *medium* rusty::String - owned UTF-8 string with safe mutation and no null terminator assumptions
+    - [ ] *low* rusty::HashMap<K, V> - hash map with safe iteration and no iterator invalidation on lookup
+    - [ ] *low* rusty::HashSet<T> - hash set with safe iteration and no iterator invalidation on lookup
