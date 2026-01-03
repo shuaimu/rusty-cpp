@@ -84,6 +84,23 @@ pub struct UniquePtrRef {
     pub line: usize,
 }
 
+/// Track raw pointers obtained from unique_ptr::get()
+/// These pointers become dangling when the unique_ptr is destroyed
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct UniquePtrGetResult {
+    /// The variable holding the get() result (e.g., "raw_ptr")
+    pub result_var: String,
+    /// The unique_ptr it was obtained from (e.g., "ptr")
+    pub unique_ptr: String,
+    /// Scope level where the result was created
+    pub result_scope: usize,
+    /// Scope level where the unique_ptr was declared
+    pub unique_ptr_scope: usize,
+    /// Line number for error reporting
+    pub line: usize,
+}
+
 /// Track lambda captures and their escape potential
 #[derive(Debug, Clone)]
 pub struct LambdaCapture {
@@ -167,6 +184,8 @@ pub struct RaiiTracker {
     pub container_element_refs: Vec<ContainerElementRef>,
     /// References obtained by dereferencing unique_ptr
     pub unique_ptr_refs: Vec<UniquePtrRef>,
+    /// Raw pointers obtained via unique_ptr::get()
+    pub unique_ptr_get_results: Vec<UniquePtrGetResult>,
     /// Lambda captures with escape tracking
     pub lambda_captures: Vec<LambdaCapture>,
     /// Member borrows: references to object fields (Phase 5)
@@ -230,6 +249,7 @@ impl RaiiTracker {
             iterator_borrows: Vec::new(),
             container_element_refs: Vec::new(),
             unique_ptr_refs: Vec::new(),
+            unique_ptr_get_results: Vec::new(),
             lambda_captures: Vec::new(),
             member_borrows: Vec::new(),
             reference_borrows: Vec::new(),
@@ -341,6 +361,11 @@ impl RaiiTracker {
         method_name == "release" ||
         // std::move on unique_ptr also invalidates any refs to the pointed object
         method_name == "move"
+    }
+
+    /// Check if a method returns a raw pointer to the unique_ptr's managed object
+    pub fn is_unique_ptr_get_method(method_name: &str) -> bool {
+        method_name == "get"
     }
 
     /// Register a variable with its scope and type
@@ -471,6 +496,32 @@ impl RaiiTracker {
     /// Check if a variable is a unique_ptr
     pub fn is_unique_ptr(&self, var: &str) -> bool {
         self.unique_ptr_variables.contains(var)
+    }
+
+    /// Record that a get() was called on a unique_ptr and the result stored
+    /// Pattern: `T* raw_ptr = ptr.get();`
+    pub fn record_unique_ptr_get(&mut self, result_var: &str, unique_ptr: &str, line: usize) {
+        let result_scope = self.current_scope;
+        let unique_ptr_scope = *self.variable_scopes.get(unique_ptr).unwrap_or(&0);
+
+        self.unique_ptr_get_results.push(UniquePtrGetResult {
+            result_var: result_var.to_string(),
+            unique_ptr: unique_ptr.to_string(),
+            result_scope,
+            unique_ptr_scope,
+            line,
+        });
+    }
+
+    /// Get the unique_ptr that a variable's value came from via get()
+    /// Returns (unique_ptr_name, unique_ptr_scope)
+    pub fn get_unique_ptr_source(&self, var: &str) -> Option<(&str, usize)> {
+        for result in &self.unique_ptr_get_results {
+            if result.result_var == var {
+                return Some((&result.unique_ptr, result.unique_ptr_scope));
+            }
+        }
+        None
     }
 
     /// Record that a container was modified, invalidating all its iterators and element references
@@ -894,6 +945,16 @@ fn process_raii_statement(
                 }
             }
 
+            // Check for unique_ptr::get() calls
+            // Track the result so we can detect returning it from a function with local unique_ptr
+            if RaiiTracker::is_unique_ptr_get_method(method_name) {
+                if let (Some(result_var), Some(unique_ptr)) = (result, extract_receiver(func)) {
+                    if tracker.is_unique_ptr(&unique_ptr) {
+                        tracker.record_unique_ptr_get(result_var, &unique_ptr, 0);
+                    }
+                }
+            }
+
             // Check if any argument is an invalidated iterator
             for arg in args {
                 if tracker.is_iterator(arg) && tracker.is_iterator_invalidated(arg) {
@@ -1000,6 +1061,28 @@ fn process_raii_statement(
                                     val, borrow.source
                                 ));
                             }
+                        }
+                    }
+                }
+
+                // Check if returning a pointer obtained from unique_ptr::get() of a local unique_ptr
+                if let Some((unique_ptr, unique_ptr_scope)) = tracker.get_unique_ptr_source(val) {
+                    // Check if the unique_ptr is a local variable (not a parameter)
+                    if let Some(var_info) = function.variables.get(unique_ptr) {
+                        if !var_info.is_parameter && !var_info.is_static {
+                            errors.push(format!(
+                                "Returning dangling pointer: '{}' obtained from '{}' via get(), but unique_ptr is local and will be destroyed",
+                                val, unique_ptr
+                            ));
+                        }
+                    } else {
+                        // If not in function.variables, check by scope
+                        // Local variables have scope > 0 typically
+                        if unique_ptr_scope > 0 {
+                            errors.push(format!(
+                                "Returning dangling pointer: '{}' obtained from '{}' via get(), but unique_ptr is local and will be destroyed",
+                                val, unique_ptr
+                            ));
                         }
                     }
                 }

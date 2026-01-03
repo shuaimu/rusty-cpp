@@ -852,4 +852,70 @@ mod raii_tracker_tests {
         tracker.record_unique_ptr_dereference("ref", "box", "operator*", 10);
         assert!(tracker.is_unique_ptr_ref("ref"));
     }
+
+    // Tests for unique_ptr::get() tracking
+    #[test]
+    fn test_unique_ptr_get_method_detection() {
+        assert!(RaiiTracker::is_unique_ptr_get_method("get"));
+        assert!(!RaiiTracker::is_unique_ptr_get_method("reset"));
+        assert!(!RaiiTracker::is_unique_ptr_get_method("release"));
+        assert!(!RaiiTracker::is_unique_ptr_get_method("operator*"));
+    }
+
+    #[test]
+    fn test_unique_ptr_get_tracking() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register unique_ptr
+        tracker.register_variable("ptr", "std::unique_ptr<int>", 1);
+
+        // Record get() call (T* raw = ptr.get())
+        tracker.record_unique_ptr_get("raw", "ptr", 10);
+
+        // Check that we can trace raw back to ptr
+        let source = tracker.get_unique_ptr_source("raw");
+        assert!(source.is_some());
+        let (ptr_name, _scope) = source.unwrap();
+        assert_eq!(ptr_name, "ptr");
+    }
+
+    #[test]
+    fn test_multiple_get_from_same_ptr() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("ptr", "std::unique_ptr<int>", 1);
+
+        // Multiple get() calls
+        tracker.record_unique_ptr_get("raw1", "ptr", 10);
+        tracker.record_unique_ptr_get("raw2", "ptr", 11);
+
+        // Both should trace back to ptr
+        assert!(tracker.get_unique_ptr_source("raw1").is_some());
+        assert!(tracker.get_unique_ptr_source("raw2").is_some());
+    }
+
+    #[test]
+    fn test_get_from_different_ptrs() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("ptr1", "std::unique_ptr<int>", 1);
+        tracker.register_variable("ptr2", "std::unique_ptr<int>", 1);
+
+        tracker.record_unique_ptr_get("raw1", "ptr1", 10);
+        tracker.record_unique_ptr_get("raw2", "ptr2", 11);
+
+        // Each traces back to its own unique_ptr
+        let source1 = tracker.get_unique_ptr_source("raw1").unwrap();
+        let source2 = tracker.get_unique_ptr_source("raw2").unwrap();
+        assert_eq!(source1.0, "ptr1");
+        assert_eq!(source2.0, "ptr2");
+    }
+
+    #[test]
+    fn test_unknown_var_has_no_get_source() {
+        let tracker = RaiiTracker::new();
+
+        // Variable that wasn't recorded
+        assert!(tracker.get_unique_ptr_source("unknown").is_none());
+    }
 }

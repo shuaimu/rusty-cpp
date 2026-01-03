@@ -7,7 +7,7 @@
     - [x] *done* Detect iterator use after container modification (e.g., using iterator after push_back which may reallocate)
     - [x] *done* Detect reference use after container modification (e.g., holding ref to vec[0] then calling push_back)
     - [x] *done* Detect use of reference obtained from unique_ptr after calling reset() or release()
-    - [ ] *medium* Detect returning ptr.get() from a function where the unique_ptr is a local variable
+    - [x] *done* Detect returning ptr.get() from a function where the unique_ptr is a local variable
     - [ ] *medium* Fix use-after-move detection for STL types like std::string in non-template code
     - [ ] *low* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
