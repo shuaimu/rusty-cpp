@@ -912,6 +912,9 @@ fn convert_statement(
                 crate::parser::Expression::FunctionCall { name: func_name, args } => {
                     let mut arg_names = Vec::new();
                     let mut temp_counter = 0;
+                    // Track if the first argument (method receiver) is a field access
+                    // This is needed to create BorrowField when method result is assigned to reference
+                    let mut receiver_field: Option<(String, String)> = None; // (object_path, field_name)
 
                     // Check if the receiver (first arg for method calls) is a temporary
                     // This detects patterns like Builder().set(42).get_value()
@@ -923,7 +926,7 @@ fn convert_statement(
                     };
 
                     // Process arguments
-                    for arg in args {
+                    for (i, arg) in args.iter().enumerate() {
                         match arg {
                             crate::parser::Expression::Variable(var) => {
                                 arg_names.push(var.clone());
@@ -961,6 +964,17 @@ fn convert_statement(
                                 // Use the function name as a placeholder for the temporary
                                 let temp_name = format!("_temp_call_{}", inner_name.replace("::", "_"));
                                 arg_names.push(temp_name);
+                            }
+                            // Phase 3: Track MemberAccess as receiver for field borrow tracking
+                            crate::parser::Expression::MemberAccess { .. } => {
+                                if let Some((obj_path, field_name)) = extract_member_path(arg) {
+                                    // If this is the first arg (method receiver), track it for field borrowing
+                                    if i == 0 && func_name.contains("::") {
+                                        debug_println!("DEBUG IR: Method receiver is field access: {}.{}", obj_path, field_name);
+                                        receiver_field = Some((obj_path.clone(), field_name.clone()));
+                                    }
+                                    arg_names.push(format!("{}.{}", obj_path, field_name));
+                                }
                             }
                             _ => {}
                         }
@@ -1008,14 +1022,40 @@ fn convert_statement(
                             receiver_is_temporary: receiver_is_temp,
                         });
 
-                        // Update the reference variable's ownership state
-                        if let Some(var_info) = variables.get_mut(name) {
+                        // Phase 3: If method was called on a field and result is assigned to reference,
+                        // create BorrowField to track that the reference borrows from the field.
+                        // This detects patterns like: const string& ref = o.inner.get();
+                        // where 'ref' should borrow from 'o.inner'
+                        if let Some((obj_path, field_name)) = receiver_field {
                             let kind = if *is_mutable {
                                 BorrowKind::Mutable
                             } else {
                                 BorrowKind::Immutable
                             };
-                            var_info.ownership = OwnershipState::Borrowed(kind);
+
+                            debug_println!("DEBUG IR: Method result '{}' borrows from field '{}.{}'", name, obj_path, field_name);
+                            statements.push(IrStatement::BorrowField {
+                                object: obj_path,
+                                field: field_name,
+                                to: name.clone(),
+                                kind: kind.clone(),
+                                line,
+                            });
+
+                            // Update the reference variable's ownership state
+                            if let Some(var_info) = variables.get_mut(name) {
+                                var_info.ownership = OwnershipState::Borrowed(kind);
+                            }
+                        } else {
+                            // No receiver field - just update ownership state
+                            if let Some(var_info) = variables.get_mut(name) {
+                                let kind = if *is_mutable {
+                                    BorrowKind::Mutable
+                                } else {
+                                    BorrowKind::Immutable
+                                };
+                                var_info.ownership = OwnershipState::Borrowed(kind);
+                            }
                         }
                     }
                 },

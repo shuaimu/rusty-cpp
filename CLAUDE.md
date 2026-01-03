@@ -243,7 +243,7 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Build with `cargo build --release`
   - Embeds library paths (no env vars needed at runtime)
   - Platform-specific RPATH configuration
-- ✅ **Comprehensive test suite**: 660+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection, transitive borrows, and partial borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), partial moves/borrows, function pointer safety, string literal tracking, STL use-after-move, and comprehensive integration tests
+- ✅ **Comprehensive test suite**: 670+ tests covering templates, variadic templates, STL annotations, C++ casts, pointer safety, move detection, reassignment-after-move, borrow checking (including conflict detection, transitive borrows, partial borrows, and field method borrows), unsafe propagation, @unsafe blocks, cross-function lifetime, lambda capture safety, RAII tracking (containers, iterators, members, new/delete), partial moves/borrows, function pointer safety, string literal tracking, STL use-after-move, and comprehensive integration tests
 
 ### What's Partially Implemented ⚠️
 - ⚠️ Virtual function calls (basic method calls work)

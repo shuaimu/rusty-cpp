@@ -23,9 +23,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* Detect use of reference obtained from unique_ptr after calling reset() or release()
     - [x] *done* Detect returning ptr.get() from a function where the unique_ptr is a local variable
     - [x] *done* Fix use-after-move detection for STL types like std::string in non-template code (now detects use-after-move when passing moved variables to function calls)
-    - [ ] *low* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements
-      - [x] Phase 1+2 partial: Generate UseField for method calls on fields - When `field.method()` is called, generate UseField to check for borrow conflicts
-      - [ ] Phase 3: Track return value borrows from field - When method returns reference, track that return value borrows from the field (requires type info for method return types)
+    - [x] *done* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements
+      - [x] Phase 1+2: Generate UseField for method calls on fields - When `field.method()` is called, generate UseField to check for borrow conflicts
+      - [x] Phase 3: Track return value borrows from field - When method returns reference assigned to ref var, create BorrowField to track the borrow relationship
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
     - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
