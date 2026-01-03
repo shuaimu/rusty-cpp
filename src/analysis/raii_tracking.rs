@@ -46,6 +46,25 @@ pub struct IteratorBorrow {
     pub line: usize,
 }
 
+/// Track references/pointers to container elements
+/// These are obtained via operator[], at(), front(), back(), data()
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ContainerElementRef {
+    /// The reference variable (e.g., "ref" in `int& ref = vec[0]`)
+    pub reference: String,
+    /// The container it references from (e.g., "vec")
+    pub container: String,
+    /// The method used to obtain the reference (e.g., "operator[]", "at", "front")
+    pub method: String,
+    /// Scope level where the reference was declared
+    pub reference_scope: usize,
+    /// Scope level where the container was declared
+    pub container_scope: usize,
+    /// Line number for error reporting
+    pub line: usize,
+}
+
 /// Track lambda captures and their escape potential
 #[derive(Debug, Clone)]
 pub struct LambdaCapture {
@@ -125,6 +144,8 @@ pub struct RaiiTracker {
     pub container_borrows: Vec<ContainerBorrow>,
     /// Iterator borrows from containers
     pub iterator_borrows: Vec<IteratorBorrow>,
+    /// References to container elements (via operator[], at(), front(), etc.)
+    pub container_element_refs: Vec<ContainerElementRef>,
     /// Lambda captures with escape tracking
     pub lambda_captures: Vec<LambdaCapture>,
     /// Member borrows: references to object fields (Phase 5)
@@ -143,10 +164,14 @@ pub struct RaiiTracker {
     pub container_variables: HashSet<String>,
     /// Variables that are iterators
     pub iterator_variables: HashSet<String>,
+    /// Variables that are references to container elements
+    pub element_ref_variables: HashSet<String>,
     /// Track which variables are currently borrowed (source -> list of borrowers)
     pub active_borrows: HashMap<String, Vec<String>>,
     /// Track invalidated iterators (iterator name -> invalidation info)
     pub invalidated_iterators: HashMap<String, IteratorInvalidation>,
+    /// Track invalidated container element references (ref name -> invalidation info)
+    pub invalidated_element_refs: HashMap<String, IteratorInvalidation>,
 }
 
 /// Information about why an iterator was invalidated
@@ -165,6 +190,7 @@ impl RaiiTracker {
         Self {
             container_borrows: Vec::new(),
             iterator_borrows: Vec::new(),
+            container_element_refs: Vec::new(),
             lambda_captures: Vec::new(),
             member_borrows: Vec::new(),
             reference_borrows: Vec::new(),
@@ -174,8 +200,10 @@ impl RaiiTracker {
             variable_scopes: HashMap::new(),
             container_variables: HashSet::new(),
             iterator_variables: HashSet::new(),
+            element_ref_variables: HashSet::new(),
             active_borrows: HashMap::new(),
             invalidated_iterators: HashMap::new(),
+            invalidated_element_refs: HashMap::new(),
         }
     }
 
@@ -245,6 +273,19 @@ impl RaiiTracker {
         method_name == "swap"
     }
 
+    /// Check if a function returns a reference/pointer to a container element
+    /// These references are invalidated when the container is modified
+    pub fn is_container_element_method(method_name: &str) -> bool {
+        method_name == "operator[]" ||
+        method_name == "at" ||
+        method_name == "front" ||
+        method_name == "back" ||
+        method_name == "data" ||
+        // Some containers have additional element access methods
+        method_name == "top" ||   // stack, priority_queue
+        method_name == "peek"     // custom containers
+    }
+
     /// Register a variable with its scope and type
     pub fn register_variable(&mut self, name: &str, type_name: &str, scope: usize) {
         self.variable_scopes.insert(name.to_string(), scope);
@@ -288,8 +329,26 @@ impl RaiiTracker {
         self.iterator_variables.insert(iterator.to_string());
     }
 
-    /// Record that a container was modified, invalidating all its iterators
-    /// Returns a list of iterators that were just invalidated (for immediate error if used in same statement)
+    /// Record that a reference to a container element was obtained
+    /// (via operator[], at(), front(), back(), data(), etc.)
+    pub fn record_container_element_ref(&mut self, reference: &str, container: &str, method: &str, line: usize) {
+        let reference_scope = self.current_scope;
+        let container_scope = *self.variable_scopes.get(container).unwrap_or(&0);
+
+        self.container_element_refs.push(ContainerElementRef {
+            reference: reference.to_string(),
+            container: container.to_string(),
+            method: method.to_string(),
+            reference_scope,
+            container_scope,
+            line,
+        });
+
+        self.element_ref_variables.insert(reference.to_string());
+    }
+
+    /// Record that a container was modified, invalidating all its iterators and element references
+    /// Returns a list of iterators/refs that were just invalidated (for immediate error if used in same statement)
     pub fn record_container_modification(&mut self, container: &str, method: &str, line: usize) -> Vec<String> {
         let mut newly_invalidated = Vec::new();
 
@@ -312,6 +371,25 @@ impl RaiiTracker {
             }
         }
 
+        // Find all element references that borrow from this container
+        for element_ref in &self.container_element_refs {
+            if element_ref.container == container {
+                let reference = &element_ref.reference;
+                // Only add if not already invalidated
+                if !self.invalidated_element_refs.contains_key(reference) {
+                    self.invalidated_element_refs.insert(
+                        reference.clone(),
+                        IteratorInvalidation {
+                            container: container.to_string(),
+                            method: method.to_string(),
+                            invalidation_line: line,
+                        },
+                    );
+                    newly_invalidated.push(reference.clone());
+                }
+            }
+        }
+
         newly_invalidated
     }
 
@@ -328,6 +406,21 @@ impl RaiiTracker {
     /// Check if a variable is an iterator
     pub fn is_iterator(&self, var: &str) -> bool {
         self.iterator_variables.contains(var)
+    }
+
+    /// Check if a variable is a container element reference
+    pub fn is_element_ref(&self, var: &str) -> bool {
+        self.element_ref_variables.contains(var)
+    }
+
+    /// Check if a container element reference is invalidated
+    pub fn is_element_ref_invalidated(&self, reference: &str) -> bool {
+        self.invalidated_element_refs.contains_key(reference)
+    }
+
+    /// Get invalidation info for a container element reference (for error reporting)
+    pub fn get_element_ref_invalidation_info(&self, reference: &str) -> Option<&IteratorInvalidation> {
+        self.invalidated_element_refs.get(reference)
     }
 
     /// Record a lambda with reference captures
@@ -649,12 +742,29 @@ fn process_raii_statement(
                 }
             }
 
+            // Check for element-returning methods (operator[], at(), front(), back(), data())
+            if RaiiTracker::is_container_element_method(method_name) {
+                if let (Some(result_var), Some(container)) = (result, extract_receiver(func)) {
+                    tracker.record_container_element_ref(result_var, &container, method_name, 0);
+                }
+            }
+
             // Check if any argument is an invalidated iterator
             for arg in args {
                 if tracker.is_iterator(arg) && tracker.is_iterator_invalidated(arg) {
                     if let Some(info) = tracker.get_invalidation_info(arg) {
                         errors.push(format!(
                             "Use of invalidated iterator '{}': container '{}' was modified by {}() at line {}",
+                            arg, info.container, info.method, info.invalidation_line
+                        ));
+                    }
+                }
+
+                // Check if argument is an invalidated element reference
+                if tracker.is_element_ref(arg) && tracker.is_element_ref_invalidated(arg) {
+                    if let Some(info) = tracker.get_element_ref_invalidation_info(arg) {
+                        errors.push(format!(
+                            "Use of invalidated element reference '{}': container '{}' was modified by {}() at line {}",
                             arg, info.container, info.method, info.invalidation_line
                         ));
                     }
@@ -691,6 +801,16 @@ fn process_raii_statement(
                 if let Some(info) = tracker.get_invalidation_info(var) {
                     errors.push(format!(
                         "Use of invalidated iterator '{}': container '{}' was modified by {}() (operation: {})",
+                        var, info.container, info.method, operation
+                    ));
+                }
+            }
+
+            // Check for use of invalidated element reference
+            if tracker.is_element_ref(var) && tracker.is_element_ref_invalidated(var) {
+                if let Some(info) = tracker.get_element_ref_invalidation_info(var) {
+                    errors.push(format!(
+                        "Use of invalidated element reference '{}': container '{}' was modified by {}() (operation: {})",
                         var, info.container, info.method, operation
                     ));
                 }

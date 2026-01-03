@@ -576,4 +576,161 @@ mod raii_tracker_tests {
             );
         }
     }
+
+    // Tests for element reference invalidation (Phase 3b: references from operator[], at(), etc.)
+    #[test]
+    fn test_element_ref_basic_detection() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create element reference from container (e.g., int& ref = vec[0])
+        tracker.record_container_element_ref("ref", "vec", "operator[]", 10);
+
+        // Element ref should not be invalidated initially
+        assert!(!tracker.is_element_ref_invalidated("ref"));
+        assert!(tracker.is_element_ref("ref"));
+
+        // Modify container with push_back
+        tracker.record_container_modification("vec", "push_back", 15);
+
+        // Element reference should now be invalidated
+        assert!(tracker.is_element_ref_invalidated("ref"));
+
+        // Verify invalidation info
+        let info = tracker.get_element_ref_invalidation_info("ref").unwrap();
+        assert_eq!(info.container, "vec");
+        assert_eq!(info.method, "push_back");
+        assert_eq!(info.invalidation_line, 15);
+    }
+
+    #[test]
+    fn test_multiple_element_refs_from_same_container() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create multiple element references
+        tracker.record_container_element_ref("ref0", "vec", "operator[]", 10);
+        tracker.record_container_element_ref("ref1", "vec", "at", 11);
+        tracker.record_container_element_ref("front_ref", "vec", "front", 12);
+
+        // None should be invalidated initially
+        assert!(!tracker.is_element_ref_invalidated("ref0"));
+        assert!(!tracker.is_element_ref_invalidated("ref1"));
+        assert!(!tracker.is_element_ref_invalidated("front_ref"));
+
+        // Modify container with clear()
+        let invalidated = tracker.record_container_modification("vec", "clear", 20);
+
+        // All three should be invalidated
+        assert_eq!(invalidated.len(), 3);
+        assert!(tracker.is_element_ref_invalidated("ref0"));
+        assert!(tracker.is_element_ref_invalidated("ref1"));
+        assert!(tracker.is_element_ref_invalidated("front_ref"));
+    }
+
+    #[test]
+    fn test_element_ref_invalidation_different_containers() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register two containers
+        tracker.register_variable("vec1", "std::vector<int>", 0);
+        tracker.register_variable("vec2", "std::vector<int>", 1);
+        tracker.container_variables.insert("vec1".to_string());
+        tracker.container_variables.insert("vec2".to_string());
+
+        // Create element refs from different containers
+        tracker.record_container_element_ref("ref1", "vec1", "operator[]", 10);
+        tracker.record_container_element_ref("ref2", "vec2", "at", 11);
+
+        // Modify only vec1
+        tracker.record_container_modification("vec1", "push_back", 20);
+
+        // Only ref1 should be invalidated
+        assert!(tracker.is_element_ref_invalidated("ref1"));
+        assert!(!tracker.is_element_ref_invalidated("ref2"));
+    }
+
+    #[test]
+    fn test_is_container_element_method_detection() {
+        // Test all element-returning methods
+        assert!(RaiiTracker::is_container_element_method("operator[]"));
+        assert!(RaiiTracker::is_container_element_method("at"));
+        assert!(RaiiTracker::is_container_element_method("front"));
+        assert!(RaiiTracker::is_container_element_method("back"));
+        assert!(RaiiTracker::is_container_element_method("data"));
+        assert!(RaiiTracker::is_container_element_method("top"));
+        assert!(RaiiTracker::is_container_element_method("peek"));
+
+        // Non-element methods
+        assert!(!RaiiTracker::is_container_element_method("push_back"));
+        assert!(!RaiiTracker::is_container_element_method("begin"));
+        assert!(!RaiiTracker::is_container_element_method("end"));
+        assert!(!RaiiTracker::is_container_element_method("size"));
+    }
+
+    #[test]
+    fn test_element_ref_various_modifying_methods() {
+        let modifying_methods = [
+            "push_back",
+            "push_front",
+            "insert",
+            "erase",
+            "clear",
+            "resize",
+            "reserve",
+            "assign",
+            "swap",
+            "shrink_to_fit",
+        ];
+
+        for method in modifying_methods.iter() {
+            let mut tracker = RaiiTracker::new();
+            tracker.register_variable("vec", "std::vector<int>", 0);
+            tracker.container_variables.insert("vec".to_string());
+
+            tracker.record_container_element_ref("ref", "vec", "operator[]", 10);
+            tracker.record_container_modification("vec", method, 20);
+
+            assert!(
+                tracker.is_element_ref_invalidated("ref"),
+                "Element ref should be invalidated by {}()",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn test_iterators_and_element_refs_both_invalidated() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create both iterator and element ref
+        tracker.record_iterator_creation("it", "vec", 10);
+        tracker.record_container_element_ref("ref", "vec", "operator[]", 11);
+
+        // Both should be valid initially
+        assert!(!tracker.is_iterator_invalidated("it"));
+        assert!(!tracker.is_element_ref_invalidated("ref"));
+
+        // Modify container
+        let invalidated = tracker.record_container_modification("vec", "push_back", 20);
+
+        // Both should be invalidated
+        assert!(tracker.is_iterator_invalidated("it"));
+        assert!(tracker.is_element_ref_invalidated("ref"));
+
+        // record_container_modification returns all newly invalidated items (iterators + element refs)
+        assert_eq!(invalidated.len(), 2);
+        assert!(invalidated.contains(&"it".to_string()));
+        assert!(invalidated.contains(&"ref".to_string()));
+    }
 }
