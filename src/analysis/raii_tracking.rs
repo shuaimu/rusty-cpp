@@ -145,6 +145,19 @@ pub struct RaiiTracker {
     pub iterator_variables: HashSet<String>,
     /// Track which variables are currently borrowed (source -> list of borrowers)
     pub active_borrows: HashMap<String, Vec<String>>,
+    /// Track invalidated iterators (iterator name -> invalidation info)
+    pub invalidated_iterators: HashMap<String, IteratorInvalidation>,
+}
+
+/// Information about why an iterator was invalidated
+#[derive(Debug, Clone)]
+pub struct IteratorInvalidation {
+    /// The container that was modified
+    pub container: String,
+    /// The method that modified the container
+    pub method: String,
+    /// Line number where invalidation occurred
+    pub invalidation_line: usize,
 }
 
 impl RaiiTracker {
@@ -162,6 +175,7 @@ impl RaiiTracker {
             container_variables: HashSet::new(),
             iterator_variables: HashSet::new(),
             active_borrows: HashMap::new(),
+            invalidated_iterators: HashMap::new(),
         }
     }
 
@@ -212,6 +226,25 @@ impl RaiiTracker {
         method_name == "upper_bound"
     }
 
+    /// Check if a function modifies the container and potentially invalidates iterators
+    /// In C++, these operations can cause reallocation or structural changes
+    pub fn is_container_modifying_method(method_name: &str) -> bool {
+        method_name == "push_back" ||
+        method_name == "push_front" ||
+        method_name == "pop_back" ||
+        method_name == "pop_front" ||
+        method_name == "insert" ||
+        method_name == "emplace" ||
+        method_name == "emplace_back" ||
+        method_name == "emplace_front" ||
+        method_name == "erase" ||
+        method_name == "clear" ||
+        method_name == "resize" ||
+        method_name == "reserve" ||  // Can reallocate for vector
+        method_name == "assign" ||
+        method_name == "swap"
+    }
+
     /// Register a variable with its scope and type
     pub fn register_variable(&mut self, name: &str, type_name: &str, scope: usize) {
         self.variable_scopes.insert(name.to_string(), scope);
@@ -253,6 +286,48 @@ impl RaiiTracker {
         });
 
         self.iterator_variables.insert(iterator.to_string());
+    }
+
+    /// Record that a container was modified, invalidating all its iterators
+    /// Returns a list of iterators that were just invalidated (for immediate error if used in same statement)
+    pub fn record_container_modification(&mut self, container: &str, method: &str, line: usize) -> Vec<String> {
+        let mut newly_invalidated = Vec::new();
+
+        // Find all iterators that borrow from this container
+        for borrow in &self.iterator_borrows {
+            if borrow.container == container {
+                let iterator = &borrow.iterator;
+                // Only add if not already invalidated
+                if !self.invalidated_iterators.contains_key(iterator) {
+                    self.invalidated_iterators.insert(
+                        iterator.clone(),
+                        IteratorInvalidation {
+                            container: container.to_string(),
+                            method: method.to_string(),
+                            invalidation_line: line,
+                        },
+                    );
+                    newly_invalidated.push(iterator.clone());
+                }
+            }
+        }
+
+        newly_invalidated
+    }
+
+    /// Check if an iterator is invalidated
+    pub fn is_iterator_invalidated(&self, iterator: &str) -> bool {
+        self.invalidated_iterators.contains_key(iterator)
+    }
+
+    /// Get invalidation info for an iterator (for error reporting)
+    pub fn get_invalidation_info(&self, iterator: &str) -> Option<&IteratorInvalidation> {
+        self.invalidated_iterators.get(iterator)
+    }
+
+    /// Check if a variable is an iterator
+    pub fn is_iterator(&self, var: &str) -> bool {
+        self.iterator_variables.contains(var)
     }
 
     /// Record a lambda with reference captures
@@ -566,6 +641,26 @@ fn process_raii_statement(
                 }
             }
 
+            // Check for container-modifying methods that invalidate iterators
+            if RaiiTracker::is_container_modifying_method(method_name) {
+                if let Some(container) = extract_receiver(func) {
+                    // Invalidate all iterators for this container
+                    let _invalidated = tracker.record_container_modification(&container, method_name, 0);
+                }
+            }
+
+            // Check if any argument is an invalidated iterator
+            for arg in args {
+                if tracker.is_iterator(arg) && tracker.is_iterator_invalidated(arg) {
+                    if let Some(info) = tracker.get_invalidation_info(arg) {
+                        errors.push(format!(
+                            "Use of invalidated iterator '{}': container '{}' was modified by {}() at line {}",
+                            arg, info.container, info.method, info.invalidation_line
+                        ));
+                    }
+                }
+            }
+
             // Check for new/delete operations
             if func == "operator new" || func.contains("::operator new") {
                 if let Some(result_var) = result {
@@ -589,6 +684,16 @@ fn process_raii_statement(
                     "Use after free: variable '{}' has been freed (operation: {})",
                     var, operation
                 ));
+            }
+
+            // Check for use of invalidated iterator
+            if tracker.is_iterator(var) && tracker.is_iterator_invalidated(var) {
+                if let Some(info) = tracker.get_invalidation_info(var) {
+                    errors.push(format!(
+                        "Use of invalidated iterator '{}': container '{}' was modified by {}() (operation: {})",
+                        var, info.container, info.method, operation
+                    ));
+                }
             }
         }
 
@@ -810,5 +915,118 @@ mod tests {
         tracker.record_deallocation("ptr", 20);
 
         assert!(tracker.is_freed("ptr"));
+    }
+
+    #[test]
+    fn test_is_container_modifying_method() {
+        assert!(RaiiTracker::is_container_modifying_method("push_back"));
+        assert!(RaiiTracker::is_container_modifying_method("insert"));
+        assert!(RaiiTracker::is_container_modifying_method("erase"));
+        assert!(RaiiTracker::is_container_modifying_method("clear"));
+        assert!(RaiiTracker::is_container_modifying_method("resize"));
+        assert!(!RaiiTracker::is_container_modifying_method("begin"));
+        assert!(!RaiiTracker::is_container_modifying_method("size"));
+        assert!(!RaiiTracker::is_container_modifying_method("empty"));
+    }
+
+    #[test]
+    fn test_iterator_invalidation_after_push_back() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create iterator from container
+        tracker.record_iterator_creation("it", "vec", 10);
+
+        // Iterator is not invalidated yet
+        assert!(!tracker.is_iterator_invalidated("it"));
+        assert!(tracker.is_iterator("it"));
+
+        // Modify container
+        tracker.record_container_modification("vec", "push_back", 15);
+
+        // Iterator should now be invalidated
+        assert!(tracker.is_iterator_invalidated("it"));
+
+        // Check invalidation info
+        let info = tracker.get_invalidation_info("it").unwrap();
+        assert_eq!(info.container, "vec");
+        assert_eq!(info.method, "push_back");
+        assert_eq!(info.invalidation_line, 15);
+    }
+
+    #[test]
+    fn test_multiple_iterators_invalidated() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create two iterators from same container
+        tracker.record_iterator_creation("it1", "vec", 10);
+        tracker.record_iterator_creation("it2", "vec", 11);
+
+        // Neither invalidated yet
+        assert!(!tracker.is_iterator_invalidated("it1"));
+        assert!(!tracker.is_iterator_invalidated("it2"));
+
+        // Modify container
+        let invalidated = tracker.record_container_modification("vec", "clear", 15);
+
+        // Both should be returned as newly invalidated
+        assert_eq!(invalidated.len(), 2);
+        assert!(invalidated.contains(&"it1".to_string()));
+        assert!(invalidated.contains(&"it2".to_string()));
+
+        // Both should now be invalidated
+        assert!(tracker.is_iterator_invalidated("it1"));
+        assert!(tracker.is_iterator_invalidated("it2"));
+    }
+
+    #[test]
+    fn test_iterator_from_different_container_not_invalidated() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register two containers
+        tracker.register_variable("vec1", "std::vector<int>", 0);
+        tracker.register_variable("vec2", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec1".to_string());
+        tracker.container_variables.insert("vec2".to_string());
+
+        // Create iterator from vec1
+        tracker.record_iterator_creation("it", "vec1", 10);
+
+        // Modify vec2 (not vec1)
+        tracker.record_container_modification("vec2", "push_back", 15);
+
+        // Iterator from vec1 should NOT be invalidated
+        assert!(!tracker.is_iterator_invalidated("it"));
+    }
+
+    #[test]
+    fn test_already_invalidated_iterator_not_re_added() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register container
+        tracker.register_variable("vec", "std::vector<int>", 0);
+        tracker.container_variables.insert("vec".to_string());
+
+        // Create iterator
+        tracker.record_iterator_creation("it", "vec", 10);
+
+        // First modification invalidates
+        let invalidated1 = tracker.record_container_modification("vec", "push_back", 15);
+        assert_eq!(invalidated1.len(), 1);
+
+        // Second modification should not re-add
+        let invalidated2 = tracker.record_container_modification("vec", "push_back", 20);
+        assert_eq!(invalidated2.len(), 0);
+
+        // Original invalidation info should be preserved
+        let info = tracker.get_invalidation_info("it").unwrap();
+        assert_eq!(info.invalidation_line, 15);  // First modification's line
     }
 }
