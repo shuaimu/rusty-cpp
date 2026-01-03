@@ -209,18 +209,20 @@ namespace default_namespace {
 
 #[test]
 fn test_unsafe_override_in_safe_namespace() {
-    // Test that explicit @unsafe annotation overrides @safe namespace
-    // With two-state model: safe cannot call unsafe without @unsafe block
+    // Test that explicit @unsafe annotation overrides @safe namespace for pointer operations,
+    // but borrow checking is still performed uniformly on all code.
+    // With the new design: @unsafe allows pointer operations but does NOT disable borrow checking.
     let source = r#"
 // @safe
 namespace safe_namespace {
     // @unsafe
     void explicitly_unsafe() {
         // This is marked unsafe despite being in @safe namespace
-        // Unsafe functions are not checked for borrow violations
+        // @unsafe allows pointer operations but borrow conflicts are still checked
         int value = 42;
-        int& ref1 = value;
-        int& ref2 = value; // Multiple mutable borrows OK in unsafe
+        int& ref1 = value;  // First mutable borrow
+        // int& ref2 = value; // This would be a borrow conflict, removed
+        int x = ref1;  // Use ref1
     }
 
     void safe_caller() {
@@ -233,9 +235,9 @@ namespace safe_namespace {
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    // Should have NO violations - @unsafe block allows calling unsafe, and unsafe is not checked
+    // Should have NO violations - no borrow conflicts in the code
     assert!(violations.is_empty(),
-            "Expected no violations - @unsafe block allows call and unsafe is not checked, got: {:?}", violations);
+            "Expected no violations - no borrow conflicts, got: {:?}", violations);
 }
 
 #[test]

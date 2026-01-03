@@ -246,7 +246,9 @@ fn test_phase4_single_forward_allowed() {
 }
 
 #[test]
-fn test_phase4_unsafe_block_allows_use_after_move() {
+fn test_phase4_unsafe_does_not_bypass_move_checking() {
+    // With the new design, @unsafe only allows pointer operations, not move rule violations.
+    // Use-after-move is detected even in @unsafe functions, matching Rust's behavior.
     let code = r#"
     #include <utility>
 
@@ -259,7 +261,7 @@ fn test_phase4_unsafe_block_allows_use_after_move() {
     // @unsafe
     void test_unsafe_use(Args... args) {
         process(std::move(args)...);  // Move
-        use_val(args...);              // Use after move - OK in unsafe function
+        use_val(args...);              // Use after move - now detected even in @unsafe
     }
 
     int main() {
@@ -271,10 +273,10 @@ fn test_phase4_unsafe_block_allows_use_after_move() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Unsafe block should allow use-after-move
+    // Use-after-move is now detected even in @unsafe code
     assert!(
-        success,
-        "Unsafe block should allow use-after-move. Output: {}",
+        !success || output.contains("moved"),
+        "Use-after-move should be detected even in @unsafe. Output: {}",
         output
     );
 }

@@ -123,20 +123,29 @@ pub fn check_borrows_with_safety_context(
 ) -> Result<Vec<String>, String> {
     use crate::parser::safety_annotations::SafetyMode;
 
-    // If the file default is unsafe and no functions are marked safe, skip checking
-    if safety_context.file_default != SafetyMode::Safe &&
+    // NOTE: We no longer skip borrow checking for all-unsafe files.
+    // Borrow conflict detection (mixing pointers and references) should run
+    // on ALL code to catch memory safety issues. The @unsafe annotation only
+    // permits pointer operations, it doesn't disable borrow checking.
+    // Only skip SAFETY-SPECIFIC checks (lifetime annotations, RAII, etc.) for unsafe code.
+    let all_unsafe = safety_context.file_default != SafetyMode::Safe &&
        !safety_context.function_overrides.iter().any(|(_, mode)| *mode == SafetyMode::Safe) &&
-       !has_any_safe_functions(&program, &header_cache) {
-        return Ok(Vec::new()); // No checking for unsafe code
-    }
+       !has_any_safe_functions(&program, &header_cache);
 
     let mut errors = Vec::new();
 
     // PHASE 1: Check that safe functions returning references have lifetime annotations
-    let annotation_errors = check_lifetime_annotation_requirements(&program, &header_cache, &safety_context)?;
-    errors.extend(annotation_errors);
+    // Skip this check for all-unsafe files since it only applies to @safe code
+    if !all_unsafe {
+        let annotation_errors = check_lifetime_annotation_requirements(&program, &header_cache, &safety_context)?;
+        errors.extend(annotation_errors);
+    }
 
-    // Check each function based on its safety mode
+    // Check each function for borrow conflicts
+    // NOTE: Borrow checking is performed for ALL functions (including @unsafe), because
+    // borrow rules apply uniformly to both pointers and references. The @unsafe annotation
+    // only allows pointer operations (address-of, dereference), not borrow rule violations.
+    // This matches Rust's behavior where unsafe blocks don't bypass the borrow checker.
     for function in &program.functions {
         debug_println!("DEBUG: Checking function '{}'", function.name);
 
@@ -147,14 +156,11 @@ pub fn check_borrows_with_safety_context(
             continue;
         }
 
-        // Check if this function should be checked
-        if !safety_context.should_check_function(&function.name) {
-            debug_println!("DEBUG: Skipping unsafe function '{}'", function.name);
-            continue; // Skip unsafe functions
-        }
-        debug_println!("DEBUG: Function '{}' is safe, checking...", function.name);
+        debug_println!("DEBUG: Checking function '{}' for borrow conflicts (is_safe={})",
+            function.name, safety_context.should_check_function(&function.name));
 
         // Phase 2: Use version with header_cache for return value borrow detection
+        // Run on ALL functions to catch borrow conflicts between pointers and references
         let function_errors = check_function_with_header_cache(function, &header_cache)?;
         errors.extend(function_errors);
     }
@@ -1014,13 +1020,12 @@ fn process_statement(
             debug_println!("DEBUG ANALYSIS: Borrow {} -> {}, is_pointer={}, clearing old borrows", from, to, is_pointer);
             ownership_tracker.clear_borrows_from(to);
 
-            // Skip checks if we're in an unsafe block
-            if ownership_tracker.is_in_unsafe_block() {
-                // Still record the borrow for consistency
-                ownership_tracker.add_borrow(from.clone(), to.clone(), kind.clone());
-                ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
-                return;
-            }
+            // NOTE: Unlike other checks, borrow conflict checking is performed even in @unsafe blocks.
+            // This enforces Rust-style borrow rules uniformly for both pointers and references:
+            // - Multiple immutable borrows allowed
+            // - Only one mutable borrow allowed
+            // - Cannot mix mutable and immutable borrows
+            // The @unsafe annotation allows pointer operations but does NOT disable borrow checking.
 
             // Check if the source is accessible
             let from_state = ownership_tracker.get_ownership(from);
