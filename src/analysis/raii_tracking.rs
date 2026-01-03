@@ -65,6 +65,25 @@ pub struct ContainerElementRef {
     pub line: usize,
 }
 
+/// Track references obtained by dereferencing unique_ptr
+/// These references become dangling when reset() or release() is called
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct UniquePtrRef {
+    /// The reference variable (e.g., "ref" in `int& ref = *ptr;`)
+    pub reference: String,
+    /// The unique_ptr it borrows from (e.g., "ptr")
+    pub unique_ptr: String,
+    /// How the reference was obtained ("dereference" for `*ptr`, "arrow" for `ptr->x`)
+    pub method: String,
+    /// Scope level where the reference was declared
+    pub reference_scope: usize,
+    /// Scope level where the unique_ptr was declared
+    pub unique_ptr_scope: usize,
+    /// Line number for error reporting
+    pub line: usize,
+}
+
 /// Track lambda captures and their escape potential
 #[derive(Debug, Clone)]
 pub struct LambdaCapture {
@@ -146,6 +165,8 @@ pub struct RaiiTracker {
     pub iterator_borrows: Vec<IteratorBorrow>,
     /// References to container elements (via operator[], at(), front(), etc.)
     pub container_element_refs: Vec<ContainerElementRef>,
+    /// References obtained by dereferencing unique_ptr
+    pub unique_ptr_refs: Vec<UniquePtrRef>,
     /// Lambda captures with escape tracking
     pub lambda_captures: Vec<LambdaCapture>,
     /// Member borrows: references to object fields (Phase 5)
@@ -166,12 +187,29 @@ pub struct RaiiTracker {
     pub iterator_variables: HashSet<String>,
     /// Variables that are references to container elements
     pub element_ref_variables: HashSet<String>,
+    /// Variables that are unique_ptr types
+    pub unique_ptr_variables: HashSet<String>,
+    /// Variables that are references from unique_ptr dereference
+    pub unique_ptr_ref_variables: HashSet<String>,
     /// Track which variables are currently borrowed (source -> list of borrowers)
     pub active_borrows: HashMap<String, Vec<String>>,
     /// Track invalidated iterators (iterator name -> invalidation info)
     pub invalidated_iterators: HashMap<String, IteratorInvalidation>,
     /// Track invalidated container element references (ref name -> invalidation info)
     pub invalidated_element_refs: HashMap<String, IteratorInvalidation>,
+    /// Track invalidated unique_ptr references (ref name -> invalidation info)
+    pub invalidated_unique_ptr_refs: HashMap<String, UniquePtrInvalidation>,
+}
+
+/// Information about why a unique_ptr reference was invalidated
+#[derive(Debug, Clone)]
+pub struct UniquePtrInvalidation {
+    /// The unique_ptr that was invalidated
+    pub unique_ptr: String,
+    /// The method that invalidated it (reset, release)
+    pub method: String,
+    /// Line number where invalidation occurred
+    pub invalidation_line: usize,
 }
 
 /// Information about why an iterator was invalidated
@@ -191,6 +229,7 @@ impl RaiiTracker {
             container_borrows: Vec::new(),
             iterator_borrows: Vec::new(),
             container_element_refs: Vec::new(),
+            unique_ptr_refs: Vec::new(),
             lambda_captures: Vec::new(),
             member_borrows: Vec::new(),
             reference_borrows: Vec::new(),
@@ -201,9 +240,12 @@ impl RaiiTracker {
             container_variables: HashSet::new(),
             iterator_variables: HashSet::new(),
             element_ref_variables: HashSet::new(),
+            unique_ptr_variables: HashSet::new(),
+            unique_ptr_ref_variables: HashSet::new(),
             active_borrows: HashMap::new(),
             invalidated_iterators: HashMap::new(),
             invalidated_element_refs: HashMap::new(),
+            invalidated_unique_ptr_refs: HashMap::new(),
         }
     }
 
@@ -286,6 +328,21 @@ impl RaiiTracker {
         method_name == "peek"     // custom containers
     }
 
+    /// Check if a type is a unique_ptr type
+    pub fn is_unique_ptr_type(type_name: &str) -> bool {
+        type_name.contains("unique_ptr") ||
+        type_name.contains("UniquePtr") ||
+        type_name.contains("rusty::Box")  // Rust-style box is similar
+    }
+
+    /// Check if a method invalidates a unique_ptr (makes the pointed-to object inaccessible)
+    pub fn is_unique_ptr_invalidation_method(method_name: &str) -> bool {
+        method_name == "reset" ||
+        method_name == "release" ||
+        // std::move on unique_ptr also invalidates any refs to the pointed object
+        method_name == "move"
+    }
+
     /// Register a variable with its scope and type
     pub fn register_variable(&mut self, name: &str, type_name: &str, scope: usize) {
         self.variable_scopes.insert(name.to_string(), scope);
@@ -296,6 +353,10 @@ impl RaiiTracker {
 
         if Self::is_iterator_type(type_name) {
             self.iterator_variables.insert(name.to_string());
+        }
+
+        if Self::is_unique_ptr_type(type_name) {
+            self.unique_ptr_variables.insert(name.to_string());
         }
     }
 
@@ -345,6 +406,71 @@ impl RaiiTracker {
         });
 
         self.element_ref_variables.insert(reference.to_string());
+    }
+
+    /// Record that a reference was obtained by dereferencing a unique_ptr
+    /// Pattern: `int& ref = *ptr;` or `auto& ref = ptr->value;`
+    pub fn record_unique_ptr_dereference(&mut self, reference: &str, unique_ptr: &str, method: &str, line: usize) {
+        let reference_scope = self.current_scope;
+        let unique_ptr_scope = *self.variable_scopes.get(unique_ptr).unwrap_or(&0);
+
+        self.unique_ptr_refs.push(UniquePtrRef {
+            reference: reference.to_string(),
+            unique_ptr: unique_ptr.to_string(),
+            method: method.to_string(),
+            reference_scope,
+            unique_ptr_scope,
+            line,
+        });
+
+        self.unique_ptr_ref_variables.insert(reference.to_string());
+    }
+
+    /// Record that a unique_ptr was invalidated (reset, release, or moved)
+    /// Returns a list of references that were just invalidated
+    pub fn record_unique_ptr_invalidation(&mut self, unique_ptr: &str, method: &str, line: usize) -> Vec<String> {
+        let mut newly_invalidated = Vec::new();
+
+        // Find all references that borrow from this unique_ptr
+        for ptr_ref in &self.unique_ptr_refs {
+            if ptr_ref.unique_ptr == unique_ptr {
+                let reference = &ptr_ref.reference;
+                // Only add if not already invalidated
+                if !self.invalidated_unique_ptr_refs.contains_key(reference) {
+                    self.invalidated_unique_ptr_refs.insert(
+                        reference.clone(),
+                        UniquePtrInvalidation {
+                            unique_ptr: unique_ptr.to_string(),
+                            method: method.to_string(),
+                            invalidation_line: line,
+                        },
+                    );
+                    newly_invalidated.push(reference.clone());
+                }
+            }
+        }
+
+        newly_invalidated
+    }
+
+    /// Check if a variable is a reference obtained from unique_ptr dereference
+    pub fn is_unique_ptr_ref(&self, var: &str) -> bool {
+        self.unique_ptr_ref_variables.contains(var)
+    }
+
+    /// Check if a unique_ptr reference has been invalidated
+    pub fn is_unique_ptr_ref_invalidated(&self, reference: &str) -> bool {
+        self.invalidated_unique_ptr_refs.contains_key(reference)
+    }
+
+    /// Get invalidation info for a unique_ptr reference
+    pub fn get_unique_ptr_ref_invalidation_info(&self, reference: &str) -> Option<&UniquePtrInvalidation> {
+        self.invalidated_unique_ptr_refs.get(reference)
+    }
+
+    /// Check if a variable is a unique_ptr
+    pub fn is_unique_ptr(&self, var: &str) -> bool {
+        self.unique_ptr_variables.contains(var)
     }
 
     /// Record that a container was modified, invalidating all its iterators and element references
@@ -749,6 +875,25 @@ fn process_raii_statement(
                 }
             }
 
+            // Check for unique_ptr invalidation methods (reset, release)
+            if RaiiTracker::is_unique_ptr_invalidation_method(method_name) {
+                if let Some(unique_ptr) = extract_receiver(func) {
+                    if tracker.is_unique_ptr(&unique_ptr) {
+                        let _invalidated = tracker.record_unique_ptr_invalidation(&unique_ptr, method_name, 0);
+                    }
+                }
+            }
+
+            // Check for unique_ptr dereference (operator*, operator->)
+            // If the result is assigned to a reference, track it
+            if method_name == "operator*" || method_name == "operator->" {
+                if let (Some(result_var), Some(unique_ptr)) = (result, extract_receiver(func)) {
+                    if tracker.is_unique_ptr(&unique_ptr) {
+                        tracker.record_unique_ptr_dereference(result_var, &unique_ptr, method_name, 0);
+                    }
+                }
+            }
+
             // Check if any argument is an invalidated iterator
             for arg in args {
                 if tracker.is_iterator(arg) && tracker.is_iterator_invalidated(arg) {
@@ -766,6 +911,16 @@ fn process_raii_statement(
                         errors.push(format!(
                             "Use of invalidated element reference '{}': container '{}' was modified by {}() at line {}",
                             arg, info.container, info.method, info.invalidation_line
+                        ));
+                    }
+                }
+
+                // Check if argument is an invalidated unique_ptr reference
+                if tracker.is_unique_ptr_ref(arg) && tracker.is_unique_ptr_ref_invalidated(arg) {
+                    if let Some(info) = tracker.get_unique_ptr_ref_invalidation_info(arg) {
+                        errors.push(format!(
+                            "Use of invalidated reference '{}': unique_ptr '{}' was invalidated by {}() at line {}",
+                            arg, info.unique_ptr, info.method, info.invalidation_line
                         ));
                     }
                 }
@@ -812,6 +967,16 @@ fn process_raii_statement(
                     errors.push(format!(
                         "Use of invalidated element reference '{}': container '{}' was modified by {}() (operation: {})",
                         var, info.container, info.method, operation
+                    ));
+                }
+            }
+
+            // Check for use of invalidated unique_ptr reference
+            if tracker.is_unique_ptr_ref(var) && tracker.is_unique_ptr_ref_invalidated(var) {
+                if let Some(info) = tracker.get_unique_ptr_ref_invalidation_info(var) {
+                    errors.push(format!(
+                        "Use of invalidated reference '{}': unique_ptr '{}' was invalidated by {}() (operation: {})",
+                        var, info.unique_ptr, info.method, operation
                     ));
                 }
             }

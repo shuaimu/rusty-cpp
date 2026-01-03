@@ -6,7 +6,7 @@
     - [x] *done* Track which parameter's lifetime flows to return value when function has multiple reference parameters with different lifetimes
     - [x] *done* Detect iterator use after container modification (e.g., using iterator after push_back which may reallocate)
     - [x] *done* Detect reference use after container modification (e.g., holding ref to vec[0] then calling push_back)
-    - [ ] *medium* Detect use of reference obtained from unique_ptr after calling reset() or release()
+    - [x] *done* Detect use of reference obtained from unique_ptr after calling reset() or release()
     - [ ] *medium* Detect returning ptr.get() from a function where the unique_ptr is a local variable
     - [ ] *medium* Fix use-after-move detection for STL types like std::string in non-template code
     - [ ] *low* Track field-level borrows through method calls using MoveField/UseField/BorrowField IR statements

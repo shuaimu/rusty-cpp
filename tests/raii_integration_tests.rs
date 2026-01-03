@@ -733,4 +733,123 @@ mod raii_tracker_tests {
         assert!(invalidated.contains(&"it".to_string()));
         assert!(invalidated.contains(&"ref".to_string()));
     }
+
+    // Tests for unique_ptr reference invalidation
+    #[test]
+    fn test_unique_ptr_type_detection() {
+        assert!(RaiiTracker::is_unique_ptr_type("std::unique_ptr<int>"));
+        assert!(RaiiTracker::is_unique_ptr_type("unique_ptr<MyClass>"));
+        assert!(RaiiTracker::is_unique_ptr_type("rusty::Box<int>"));
+        assert!(!RaiiTracker::is_unique_ptr_type("std::shared_ptr<int>"));
+        assert!(!RaiiTracker::is_unique_ptr_type("int*"));
+    }
+
+    #[test]
+    fn test_unique_ptr_invalidation_method_detection() {
+        assert!(RaiiTracker::is_unique_ptr_invalidation_method("reset"));
+        assert!(RaiiTracker::is_unique_ptr_invalidation_method("release"));
+        assert!(RaiiTracker::is_unique_ptr_invalidation_method("move"));
+        assert!(!RaiiTracker::is_unique_ptr_invalidation_method("get"));
+        assert!(!RaiiTracker::is_unique_ptr_invalidation_method("operator*"));
+    }
+
+    #[test]
+    fn test_unique_ptr_ref_basic_detection() {
+        let mut tracker = RaiiTracker::new();
+
+        // Register unique_ptr
+        tracker.register_variable("ptr", "std::unique_ptr<int>", 0);
+
+        // Check that it's recognized as unique_ptr
+        assert!(tracker.is_unique_ptr("ptr"));
+
+        // Record dereference (int& ref = *ptr)
+        tracker.record_unique_ptr_dereference("ref", "ptr", "operator*", 10);
+
+        // Check that ref is tracked as unique_ptr ref
+        assert!(tracker.is_unique_ptr_ref("ref"));
+        assert!(!tracker.is_unique_ptr_ref_invalidated("ref"));
+
+        // Invalidate with reset()
+        let invalidated = tracker.record_unique_ptr_invalidation("ptr", "reset", 15);
+
+        // Reference should now be invalidated
+        assert_eq!(invalidated.len(), 1);
+        assert!(tracker.is_unique_ptr_ref_invalidated("ref"));
+
+        // Verify invalidation info
+        let info = tracker.get_unique_ptr_ref_invalidation_info("ref").unwrap();
+        assert_eq!(info.unique_ptr, "ptr");
+        assert_eq!(info.method, "reset");
+        assert_eq!(info.invalidation_line, 15);
+    }
+
+    #[test]
+    fn test_unique_ptr_ref_release_invalidation() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("ptr", "std::unique_ptr<int>", 0);
+        tracker.record_unique_ptr_dereference("ref", "ptr", "operator*", 10);
+
+        assert!(!tracker.is_unique_ptr_ref_invalidated("ref"));
+
+        // Invalidate with release()
+        tracker.record_unique_ptr_invalidation("ptr", "release", 15);
+
+        assert!(tracker.is_unique_ptr_ref_invalidated("ref"));
+        let info = tracker.get_unique_ptr_ref_invalidation_info("ref").unwrap();
+        assert_eq!(info.method, "release");
+    }
+
+    #[test]
+    fn test_multiple_refs_from_same_unique_ptr() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("ptr", "std::unique_ptr<MyClass>", 0);
+
+        // Multiple dereferences
+        tracker.record_unique_ptr_dereference("ref1", "ptr", "operator*", 10);
+        tracker.record_unique_ptr_dereference("ref2", "ptr", "operator->", 11);
+
+        assert!(tracker.is_unique_ptr_ref("ref1"));
+        assert!(tracker.is_unique_ptr_ref("ref2"));
+        assert!(!tracker.is_unique_ptr_ref_invalidated("ref1"));
+        assert!(!tracker.is_unique_ptr_ref_invalidated("ref2"));
+
+        // Reset invalidates all refs
+        let invalidated = tracker.record_unique_ptr_invalidation("ptr", "reset", 20);
+
+        assert_eq!(invalidated.len(), 2);
+        assert!(tracker.is_unique_ptr_ref_invalidated("ref1"));
+        assert!(tracker.is_unique_ptr_ref_invalidated("ref2"));
+    }
+
+    #[test]
+    fn test_different_unique_ptrs_independent() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("ptr1", "std::unique_ptr<int>", 0);
+        tracker.register_variable("ptr2", "std::unique_ptr<int>", 0);
+
+        tracker.record_unique_ptr_dereference("ref1", "ptr1", "operator*", 10);
+        tracker.record_unique_ptr_dereference("ref2", "ptr2", "operator*", 11);
+
+        // Reset only ptr1
+        tracker.record_unique_ptr_invalidation("ptr1", "reset", 20);
+
+        // Only ref1 should be invalidated
+        assert!(tracker.is_unique_ptr_ref_invalidated("ref1"));
+        assert!(!tracker.is_unique_ptr_ref_invalidated("ref2"));
+    }
+
+    #[test]
+    fn test_rusty_box_is_unique_ptr() {
+        let mut tracker = RaiiTracker::new();
+
+        tracker.register_variable("box", "rusty::Box<int>", 0);
+        assert!(tracker.is_unique_ptr("box"));
+
+        tracker.record_unique_ptr_dereference("ref", "box", "operator*", 10);
+        assert!(tracker.is_unique_ptr_ref("ref"));
+    }
 }
