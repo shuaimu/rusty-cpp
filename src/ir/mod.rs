@@ -329,6 +329,7 @@ pub enum IrStatement {
         object: String,
         field: String,
         operation: String,   // "read", "write", "call"
+        field_type: Option<String>, // Type of the field for interior mutability checks
     },
     BorrowField {
         object: String,
@@ -1190,6 +1191,7 @@ fn convert_statement(
                             object: obj_name.clone(),
                             field: field.clone(),
                             operation: "write".to_string(),
+                            field_type: None,
                         }
                     ]));
                 } else {
@@ -1302,6 +1304,7 @@ fn convert_statement(
                                 object: obj_path.clone(),
                                 field: field_name.clone(),
                                 operation: "read".to_string(),
+                                field_type: None,
                             },
                             IrStatement::Assign {
                                 lhs: lhs_var.clone(),
@@ -1486,6 +1489,7 @@ fn convert_statement(
                                         object: obj_path.clone(),
                                         field: field_name.clone(),
                                         operation: "use in function call".to_string(),
+                                        field_type: None,
                                     });
                                     arg_names.push(format!("{}.{}", obj_path, field_name));
                                 }
@@ -1846,6 +1850,7 @@ fn convert_statement(
                                     object: obj_path.clone(),
                                     field: field_name.clone(),
                                     operation: format!("call method '{}' on field", name),
+                                    field_type: None,
                                 });
                             } else {
                                 // For regular function argument: just check if field is valid
@@ -1853,6 +1858,7 @@ fn convert_statement(
                                     object: obj_path.clone(),
                                     field: field_name.clone(),
                                     operation: "use in function call".to_string(),
+                                    field_type: None,
                                 });
                             }
                             arg_names.push(format!("{}.{}", obj_path, field_name));
@@ -2063,6 +2069,7 @@ fn convert_statement(
                                     object: obj_name.clone(),
                                     field: field.clone(),
                                     operation: "write".to_string(),
+                                    field_type: None,
                                 }
                             ]));
                         }

@@ -56,6 +56,53 @@ fn is_primitive_type(type_name: &str) -> bool {
     )
 }
 
+/// Check if a type has interior mutability (Cell, RefCell)
+/// These types allow mutation through shared references (&self)
+fn is_interior_mutability_type(type_name: &str) -> bool {
+    type_name.starts_with("rusty::Cell<") ||
+    type_name.starts_with("Cell<") ||
+    type_name.starts_with("rusty::RefCell<") ||
+    type_name.starts_with("RefCell<") ||
+    // Also check for std::atomic which has interior mutability
+    type_name.starts_with("std::atomic<") ||
+    type_name.starts_with("atomic<")
+}
+
+/// Check if a method name is likely to mutate the object
+/// This is a heuristic - we can't know for sure without method signatures
+fn is_mutating_method_name(method_name: &str) -> bool {
+    // Common mutating method patterns
+    let mutating_prefixes = [
+        "set", "add", "push", "pop", "insert", "erase", "remove",
+        "clear", "modify", "reset", "update", "delete", "write",
+        "append", "assign", "swap", "emplace", "resize", "reserve",
+    ];
+
+    let mutating_names = [
+        "modify", "set", "clear", "reset", "pop_back", "pop_front",
+        "push_back", "push_front", "insert", "erase", "remove",
+        "sort", "reverse", "shuffle", "fill", "assign", "swap",
+    ];
+
+    let method_lower = method_name.to_lowercase();
+
+    // Check exact matches
+    for name in &mutating_names {
+        if method_lower == *name {
+            return true;
+        }
+    }
+
+    // Check prefix matches
+    for prefix in &mutating_prefixes {
+        if method_lower.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub mod ownership;
 pub mod borrows;
 pub mod lifetimes;
@@ -889,8 +936,9 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::UseField { object, field, operation } => {
-            debug_println!("DEBUG ANALYSIS: UseField object='{}', field='{}', operation='{}'", object, field, operation);
+        crate::ir::IrStatement::UseField { object, field, operation, field_type } => {
+            debug_println!("DEBUG ANALYSIS: UseField object='{}', field='{}', operation='{}', field_type={:?}",
+                object, field, operation, field_type);
 
             // Skip checking if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
@@ -918,18 +966,51 @@ fn process_statement(
             }
 
             // NEW: Check for borrow conflicts when calling methods on fields
-            // Method calls (except const methods) need mutable access
-            // If the field is already borrowed, we have a conflict
-            if operation.contains("call method") && !operation.contains("const") {
-                // Check if field has existing borrows
+            // Rules:
+            // - Mutable borrows always conflict with any method call
+            // - Immutable borrows conflict with non-const method calls
+            // - Immutable borrows don't conflict with const method calls (like begin(), end(), size())
+            if operation.contains("call method") {
                 let borrow_info = ownership_tracker.get_field_borrows(object, field);
-                if !borrow_info.borrowers.is_empty() {
+
+                // Always flag if there's a mutable borrow
+                if borrow_info.has_mutable {
                     let borrowers: Vec<String> = borrow_info.borrowers.iter().cloned().collect();
                     errors.push(format!(
-                        "Cannot call method on '{}.{}': field is borrowed by {}",
+                        "Cannot call method on '{}.{}': field is mutably borrowed by {}",
                         object, field, borrowers.join(", ")
                     ));
                     return;
+                }
+
+                // For immutable borrows, check if the method being called is likely non-const
+                if borrow_info.immutable_count > 0 {
+                    // Extract method name from operation string
+                    // Method might be qualified like 'Inner::modify' or just 'modify'
+                    let is_likely_mutating_method = if let Some(start) = operation.find('\'') {
+                        if let Some(end) = operation[start+1..].find('\'') {
+                            let qualified_method_name = &operation[start+1..start+1+end];
+                            // Extract just the method name (last part after ::)
+                            let method_name = qualified_method_name
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(qualified_method_name);
+                            is_mutating_method_name(method_name)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_likely_mutating_method {
+                        let borrowers: Vec<String> = borrow_info.borrowers.iter().cloned().collect();
+                        errors.push(format!(
+                            "Cannot call method on '{}.{}': field is borrowed by {}",
+                            object, field, borrowers.join(", ")
+                        ));
+                        return;
+                    }
                 }
             }
 
@@ -944,10 +1025,19 @@ fn process_statement(
                         }
                     }
                     // For write operations, check if we can modify
+                    // EXCEPTION: Interior mutability types (Cell, RefCell) allow mutation in const methods
                     else if operation == "write" {
-                        if let Err(err) = tracker.can_modify_member(field) {
-                            errors.push(err);
-                            return;
+                        // Check if field has interior mutability
+                        let has_interior_mutability = field_type.as_ref().map_or(false, |t| {
+                            is_interior_mutability_type(t)
+                        });
+
+                        // Only check modification restriction if NOT an interior mutability type
+                        if !has_interior_mutability {
+                            if let Err(err) = tracker.can_modify_member(field) {
+                                errors.push(err);
+                                return;
+                            }
                         }
                     }
                 }

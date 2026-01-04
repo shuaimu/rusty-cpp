@@ -227,7 +227,12 @@ pub fn analyze_function_scopes(
     
     // Create function scope
     let func_scope = tracker.push_scope(ScopeKind::Function, None);
-    
+
+    // Register 'this' pointer for methods - it's always alive for the duration of the method
+    if function.is_method {
+        tracker.declare_variable("this".to_string(), func_scope);
+    }
+
     // Initialize function parameters
     for (name, var_info) in &function.variables {
         tracker.declare_variable(name.clone(), func_scope);

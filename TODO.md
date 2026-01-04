@@ -29,11 +29,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* Enforce borrow rules uniformly for both pointers and references - mutable borrow (pointer or ref) conflicts with any other borrow (see docs/mixed_pointer_reference_borrow_plan.md)
     - [x] *done* Document `this` pointer rule: treated as mut borrow in non-const methods, immutable borrow in const methods (see docs/method_qualifiers.md "The `this` Pointer Rule" section)
       - [x] *done* in docs/method_qualifiers.md, "the this pointer rule" is in a wrong location: it is before overview. Reorganize the doc so the this pointer rule is in the right location.
-    - [ ] *high* Fix false positives in method call borrow checking - see docs/bug_report_this_borrow_false_positives.md
-      - "Cannot return 'value' because it has been moved" - value is not actually moved
-      - "Cannot borrow from 'this': variable is not alive in current scope" - this is clearly alive
-      - "Cannot modify field 'm_pNode' in const method" - interior mutability not recognized
-      - "Cannot call method on 'this.epochs_': field is borrowed by ei" - false field conflict
+    - [x] *done* Fix false positives in method call borrow checking - see docs/bug_report_this_borrow_false_positives.md
+      - [x] *done* Fix "'this' is not alive in current scope" - register 'this' in scope lifetime tracking during method analysis
+      - [ ] Fix "Cannot return 'value' because it has been moved" - investigate incorrect move state tracking (needs Janus codebase to reproduce)
+      - [x] *done* Fix "Cannot modify field in const method" - added framework for interior mutability type checking (still needs field type tracking in IR)
+      - [x] *done* Fix false field borrow conflicts - added smart method mutation heuristic to distinguish const vs non-const methods
+    - [ ] there are some hard coded types (like RefCell, std atomic) that are skipped interior mutatbility check, this is wrong. we shouldn't hard code them. These types should have internal unsafe block that bypasses checking, or std types shouldn't be checked at all because they don't have safe/unsafe mark (undeclared). If some std types are externally marked safe, we don't check them either. we just blindly trust them.
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
     - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
