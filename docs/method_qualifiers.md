@@ -4,19 +4,51 @@ This document describes how RustyCpp enforces Rust's ownership and borrowing rul
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Rust's Self Types](#rusts-self-types)
-3. [C++ to Rust Mapping](#c-to-rust-mapping)
-4. [Rules Enforced](#rules-enforced)
+1. [The `this` Pointer Rule](#the-this-pointer-rule)
+2. [Overview](#overview)
+3. [Rust's Self Types](#rusts-self-types)
+4. [C++ to Rust Mapping](#c-to-rust-mapping)
+5. [Rules Enforced](#rules-enforced)
    - [Field Access Rules](#field-access-rules)
    - [`*this` Dereference Rules](#this-dereference-rules)
    - [Lambda `this` Capture Rules](#lambda-this-capture-rules)
    - [Field Borrow Rules](#field-borrow-rules)
-5. [Design Principles](#design-principles)
-6. [Examples](#examples)
-7. [Common Patterns](#common-patterns)
-8. [Error Messages](#error-messages)
-9. [Best Practices](#best-practices)
+6. [Design Principles](#design-principles)
+7. [Examples](#examples)
+8. [Common Patterns](#common-patterns)
+9. [Error Messages](#error-messages)
+10. [Best Practices](#best-practices)
+
+---
+
+## The `this` Pointer Rule
+
+In RustyCpp, the implicit `this` pointer is treated according to the method's constness:
+
+| Method Type | `this` Pointer Treatment | Rust Equivalent |
+|-------------|--------------------------|-----------------|
+| `const` method | Immutable borrow (`&self`) | `&Self` |
+| Non-const method | Mutable borrow (`&mut self`) | `&mut Self` |
+| `&&` method | Ownership (`self`) | `Self` |
+
+**Key Implications:**
+- In **const methods**, `this` is an immutable borrow of `*this`:
+  - Cannot create mutable references to fields
+  - Cannot modify fields
+  - Cannot move fields
+  - Multiple immutable borrows allowed
+
+- In **non-const methods**, `this` is a mutable borrow of `*this`:
+  - Can create mutable references to fields
+  - Can modify fields
+  - **Cannot move fields** (this is `&mut self`, not `self`)
+  - Standard borrow conflict rules apply
+
+- In **`&&` methods**, `this` represents ownership:
+  - Full ownership of the object
+  - Can do anything including moving fields
+
+This rule applies uniformly for borrow checking purposes, ensuring that the safety guarantees of Rust's ownership model are enforced on C++ class methods.
 
 ---
 
