@@ -69,6 +69,12 @@ After all fixes, the following patterns remain:
 3. **"Cannot move out of 'rhs' because it is behind a reference"**
    - Need to investigate if this is a false positive or legitimate
 
+4. **"Cannot borrow from '_temp_call_std___cxx11_list_back': variable is not alive in current scope"** (NEW)
+   - Occurs in `src/rrr/rpc/server.cpp`
+   - The checker creates a temporary variable name for the result of `std::list::back()`
+   - The temporary is not properly tracked as alive when used in the same expression
+   - This appears to be a false positive related to STL method return value tracking
+
 ## Reproduction
 
 These errors occur when running the borrow checker on the Janus/Mako codebase:
