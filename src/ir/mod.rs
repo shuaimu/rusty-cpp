@@ -725,15 +725,12 @@ fn extract_return_source(
             // the variable might be in the arguments
             debug_println!("DEBUG IR: Return function call: {}", name);
 
-            // Check if any argument is a Move expression (e.g., return Constructor(std::move(x)))
-            // This handles cases like: return std::move(data); where the move is wrapped in a constructor
-            for arg in args.iter() {
-                if let Expression::Move { .. } = arg {
-                    debug_println!("DEBUG IR: Found Move inside function call argument");
-                    // Recursively extract from the Move
-                    return extract_return_source(arg, statements);
-                }
-            }
+            // NOTE: We intentionally do NOT extract sources from Move arguments in function calls.
+            // For `return Constructor(std::move(x))`:
+            //   - The return value is the Constructor result, NOT x
+            //   - x is consumed by the constructor and we're returning a NEW value
+            //   - The Move is already tracked separately when processing function call arguments
+            // Extracting x as the source would cause false "Cannot return x because moved" errors.
 
             // Method calls (identified by :: in name) create new values that don't reference
             // their receiver. For example: return opt.unwrap()->id;

@@ -91,15 +91,16 @@ int main() { return 0; }
 
 #[test]
 fn test_const_method_cannot_move_field_via_return() {
+    // Use int instead of std::string to avoid STL safety check preempting the const method check.
+    // (STL requires @unsafe blocks in two-state model, which would suppress the const method error)
     let source = r#"
 #include <utility>
-#include <string>
 
 // @safe
 class Container {
-    std::string data;
+    int data;
 public:
-    std::string bad_const() const {
+    int bad_const() const {
         return std::move(data);  // ERROR: const method can't move
     }
 };
