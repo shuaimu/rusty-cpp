@@ -74,14 +74,7 @@ After all fixes, the following patterns remain:
    - These were not recognized as temporaries in the alive check in `scope_lifetime.rs`
    - Fix: Added `_temp_call_` and `_temp_expr_` to the list of recognized temporary patterns
 
-5. **"Cannot create mutable borrow of field 'X' in const method"** (NEW - 2026-01-04)
-   - False positive for C++ `mutable` keyword
-   - C++ allows `mutable` fields to be modified in const methods (interior mutability)
-   - Example: `mutable rusty::VecDeque<Event> timeout_events_;` in a const method
-   - The checker doesn't understand C++'s `mutable` keyword semantics
-   - Affected file: `src/rrr/reactor/reactor.cc` (check_timeout, loop methods)
-
-6. **"Use after move: cannot pass variable 'X' because it has been moved"** (NEW - 2026-01-04)
+5. **"Use after move: cannot pass variable 'X' because it has been moved"** (NEW - 2026-01-04)
    - False positive when Rc::clone() is called before the variable is used
    - Example: `available_coros_.push_back(coro.clone()); coros_.remove(coro);`
    - `Rc::clone()` creates a new reference-counted pointer, it does NOT move the source
