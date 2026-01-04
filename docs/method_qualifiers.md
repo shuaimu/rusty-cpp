@@ -4,8 +4,8 @@ This document describes how RustyCpp enforces Rust's ownership and borrowing rul
 
 ## Table of Contents
 
-1. [The `this` Pointer Rule](#the-this-pointer-rule)
-2. [Overview](#overview)
+1. [Overview](#overview)
+2. [The `this` Pointer Rule](#the-this-pointer-rule)
 3. [Rust's Self Types](#rusts-self-types)
 4. [C++ to Rust Mapping](#c-to-rust-mapping)
 5. [Rules Enforced](#rules-enforced)
@@ -18,6 +18,20 @@ This document describes how RustyCpp enforces Rust's ownership and borrowing rul
 8. [Common Patterns](#common-patterns)
 9. [Error Messages](#error-messages)
 10. [Best Practices](#best-practices)
+
+---
+
+## Overview
+
+RustyCpp enforces Rust's `self`, `&self`, and `&mut self` semantics using C++'s method qualifiers:
+
+| C++ Method Qualifier | Rust Equivalent | Meaning |
+|---------------------|-----------------|---------|
+| `const`             | `&self`         | Shared immutable access |
+| non-const           | `&mut self`     | Exclusive mutable access |
+| `&&` (rvalue ref)   | `self`          | Consuming/ownership transfer |
+
+**Key Insight**: The method qualifier determines what operations are allowed on the object's fields, enforcing Rust's ownership rules at compile time.
 
 ---
 
@@ -49,20 +63,6 @@ In RustyCpp, the implicit `this` pointer is treated according to the method's co
   - Can do anything including moving fields
 
 This rule applies uniformly for borrow checking purposes, ensuring that the safety guarantees of Rust's ownership model are enforced on C++ class methods.
-
----
-
-## Overview
-
-RustyCpp enforces Rust's `self`, `&self`, and `&mut self` semantics using C++'s method qualifiers:
-
-| C++ Method Qualifier | Rust Equivalent | Meaning |
-|---------------------|-----------------|---------|
-| `const`             | `&self`         | Shared immutable access |
-| non-const           | `&mut self`     | Exclusive mutable access |
-| `&&` (rvalue ref)   | `self`          | Consuming/ownership transfer |
-
-**Key Insight**: The method qualifier determines what operations are allowed on the object's fields, enforcing Rust's ownership rules at compile time.
 
 ---
 

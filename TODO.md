@@ -28,6 +28,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] Phase 3: Track return value borrows from field - When method returns reference assigned to ref var, create BorrowField to track the borrow relationship
     - [x] *done* Enforce borrow rules uniformly for both pointers and references - mutable borrow (pointer or ref) conflicts with any other borrow (see docs/mixed_pointer_reference_borrow_plan.md)
     - [x] *done* Document `this` pointer rule: treated as mut borrow in non-const methods, immutable borrow in const methods (see docs/method_qualifiers.md "The `this` Pointer Rule" section)
+      - [x] *done* in docs/method_qualifiers.md, "the this pointer rule" is in a wrong location: it is before overview. Reorganize the doc so the this pointer rule is in the right location.
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
     - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
