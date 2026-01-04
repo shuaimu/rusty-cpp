@@ -33,21 +33,34 @@ Current: Commit `4804911 Fix false positives in method call borrow checking`
 
 ## Remaining Symptoms
 
-After the fix, the following false positives remain:
+After all fixes, one false positive pattern remains:
 
 1. **"Cannot return 'value' because it has been moved"** (HIGH PRIORITY)
-   - Occurs in almost every file with return statements
-   - False positive: the value is not actually moved before return
-   - Example from `src/rrr/reactor/event.cc`:
-     ```cpp
-     uint64_t Event::get_coro_id(){
-       auto coro_opt = Coroutine::current_coroutine();
-       verify(coro_opt.is_some());
-       return coro_opt.unwrap()->id;  // <-- triggers error
-     }
-     ```
-   - The checker thinks `coro_opt` is "moved" but the return is the final use
-   - This pattern is common with Option::unwrap() chains
+   - Still occurs with simple assignment + return patterns
+   - The Option::unwrap() pattern was fixed, but other patterns remain
+
+   **Example 1** (STILL PRESENT): Assignment from method + return
+   ```cpp
+   // From src/rrr/reactor/coroutine.cc line 104-107
+   bool Coroutine::finished() const {
+     auto s = status_.get();  // s assigned from Cell::get()
+     return s == FINISHED || s == RECYCLED;  // <-- triggers error
+   }
+   ```
+   - The checker incorrectly thinks `s` is "moved" after assignment
+   - `status_.get()` returns a copy (Cell interior mutability)
+
+   **Example 2** (STILL PRESENT): Assign + modify + return
+   ```cpp
+   // From src/rrr/reactor/event.cc line 196-206
+   int SharedIntEvent::set(const int& v) {
+     auto ret = value_;  // copy assignment
+     value_ = v;
+     // ... loop ...
+     return ret;  // <-- triggers error
+   }
+   ```
+   - Simple value copy + return pattern triggers false positive
 
 2. **"Cannot call method on 'this.epochs_': field is mutably borrowed by ei"**
    - Still occurs in some cases despite the smart method heuristic
