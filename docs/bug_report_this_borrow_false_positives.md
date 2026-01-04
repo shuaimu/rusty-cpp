@@ -4,29 +4,43 @@
 
 Recent changes in commit `86aa04a` ("Enforce borrow rules uniformly for pointers and references") introduced stricter borrow checking that generates false positives for common C++ patterns involving method calls on `this` and return value tracking.
 
+## Update (After commit 4804911)
+
+Commit `4804911` ("Fix false positives in method call borrow checking") addressed some issues:
+- ✅ FIXED: "Cannot borrow from 'this': variable is not alive in current scope"
+- ⚠️ PARTIALLY FIXED: Field borrow conflicts (smart method mutation heuristic added)
+- ❌ STILL PRESENT: "Cannot return 'value' because it has been moved"
+- ❌ STILL PRESENT: Some field borrow conflicts with method calls on borrowed fields
+
 ## Affected Version
 
-Commit: `86aa04a Enforce borrow rules uniformly for pointers and references`
+Original: Commit `86aa04a Enforce borrow rules uniformly for pointers and references`
+Current: Commit `4804911 Fix false positives in method call borrow checking`
 
-## Symptoms
+## Remaining Symptoms
 
-The borrow checker reports the following errors across multiple files in real-world C++ code:
+After the fix, the following false positives remain:
 
-1. **"Cannot return 'value' because it has been moved"**
-   - Occurs in functions that return values
+1. **"Cannot return 'value' because it has been moved"** (HIGH PRIORITY)
+   - Occurs in almost every file with return statements
    - False positive: the value is not actually moved before return
+   - Example from `src/rrr/reactor/event.cc`:
+     ```cpp
+     uint64_t Event::get_coro_id(){
+       auto coro_opt = Coroutine::current_coroutine();
+       verify(coro_opt.is_some());
+       return coro_opt.unwrap()->id;  // <-- triggers error
+     }
+     ```
+   - The checker thinks `coro_opt` is "moved" but the return is the final use
+   - This pattern is common with Option::unwrap() chains
 
-2. **"Cannot borrow from 'this': variable is not alive in current scope"**
-   - Occurs frequently when calling methods on object members
-   - False positive: `this` is clearly alive during method execution
+2. **"Cannot call method on 'this.epochs_': field is mutably borrowed by ei"**
+   - Still occurs in some cases despite the smart method heuristic
+   - Need to improve method call conflict detection
 
-3. **"Cannot modify field 'm_pNode' in const method"**
-   - Occurs with interior mutability patterns
-   - False positive: code uses valid interior mutability (rusty::Cell, etc.)
-
-4. **"Cannot call method on 'this.epochs_': field is borrowed by ei"**
-   - Occurs with field access patterns
-   - False positive: sequential field accesses that don't actually conflict
+3. **"Cannot move out of 'rhs' because it is behind a reference"**
+   - Need to investigate if this is a false positive or legitimate
 
 ## Reproduction
 
