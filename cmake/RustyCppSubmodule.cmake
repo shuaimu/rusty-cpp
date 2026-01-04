@@ -166,11 +166,19 @@ function(check_rustycpp_dependencies)
 endfunction()
 
 # Determine the target directory and binary name based on build type
+# Respect CARGO_TARGET_DIR environment variable if set (for Docker builds)
+if(DEFINED ENV{CARGO_TARGET_DIR})
+    set(RUSTYCPP_TARGET_BASE "$ENV{CARGO_TARGET_DIR}")
+    message(STATUS "Using CARGO_TARGET_DIR from environment: ${RUSTYCPP_TARGET_BASE}")
+else()
+    set(RUSTYCPP_TARGET_BASE "${RUSTYCPP_DIR}/target")
+endif()
+
 if(RUSTYCPP_BUILD_TYPE STREQUAL "release")
-    set(RUSTYCPP_TARGET_DIR "${RUSTYCPP_DIR}/target/release")
+    set(RUSTYCPP_TARGET_DIR "${RUSTYCPP_TARGET_BASE}/release")
     set(CARGO_BUILD_FLAGS "--release")
 else()
-    set(RUSTYCPP_TARGET_DIR "${RUSTYCPP_DIR}/target/debug")
+    set(RUSTYCPP_TARGET_DIR "${RUSTYCPP_TARGET_BASE}/debug")
     set(CARGO_BUILD_FLAGS "")
 endif()
 
