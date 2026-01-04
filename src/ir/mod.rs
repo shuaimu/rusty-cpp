@@ -735,10 +735,26 @@ fn extract_return_source(
                 }
             }
 
-            if let Some(Expression::Variable(var)) = args.first() {
+            // Method calls (identified by :: in name) create new values that don't reference
+            // their receiver. For example: return opt.unwrap()->id;
+            //   - opt is moved by unwrap()
+            //   - The return value is the result of unwrap(), not opt itself
+            //   - So we should NOT track opt as the source
+            //
+            // Constructor calls (no :: in name) may store references to arguments.
+            // For example: return Holder{x};
+            //   - Holder might store a reference to x
+            //   - We need to track x as the source for dangling reference detection
+            let is_method_call = name.contains("::");
+
+            if is_method_call {
+                // Method call - receiver is consumed/transformed, result is new value
+                None
+            } else if let Some(Expression::Variable(var)) = args.first() {
+                // Constructor or free function - first arg might be referenced by return value
                 Some(var.clone())
             } else {
-                None  // Function calls generally create temporaries
+                None
             }
         }
 

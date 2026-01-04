@@ -9,8 +9,22 @@ Recent changes in commit `86aa04a` ("Enforce borrow rules uniformly for pointers
 Commit `4804911` ("Fix false positives in method call borrow checking") addressed some issues:
 - ✅ FIXED: "Cannot borrow from 'this': variable is not alive in current scope"
 - ⚠️ PARTIALLY FIXED: Field borrow conflicts (smart method mutation heuristic added)
-- ❌ STILL PRESENT: "Cannot return 'value' because it has been moved"
+- ✅ FIXED: "Cannot return 'value' because it has been moved" (fixed in subsequent commit - see below)
 - ❌ STILL PRESENT: Some field borrow conflicts with method calls on borrowed fields
+
+## Update (After "Fix return value moved false positive" commit)
+
+The "Cannot return 'value' because it has been moved" false positive has been fixed.
+
+**Root cause**: The `extract_return_source` function in `src/ir/mod.rs` was incorrectly returning the first argument of a function call as the "source" variable for return statements. For method calls like `opt.unwrap()`, this meant returning `opt` as the source, even though `opt` is consumed by `unwrap()` and the actual return value is the RESULT of `unwrap()`, not `opt` itself.
+
+**Fix**: The function now distinguishes between:
+1. **Method calls** (function name contains `::`): Return `None` because the result is a new value, not the receiver
+2. **Constructor calls** (no `::`): Return the first argument as source for dangling reference detection
+
+This correctly handles:
+- `return opt.unwrap()->id;` - No false positive, `opt` is consumed but we're returning the result
+- `return Holder{x};` - Still detects dangling ref if `x` is local
 
 ## Affected Version
 

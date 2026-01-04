@@ -6,7 +6,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
 
 1. Pick the top undone task with highest priority (high-medium-low), choose its first leaf task.  If there are no undone TODO items left, sleep a minute and git pull and restart step 1 (so this step is a dead loop until you find a todo item).
 2. Analyze the task, check if this can be done with not too many LOC (i.e., smaller than 500 lines code give or take). If not, try to analyze this task and break it down into several smaller tasks, expanding it in the TODO.md. The breakdown can be nested and hierarchical. Try to make each leaf task small enough (<500 lines LOC). You can document your analysis in the doc folder for future reference. 
-3. Try to execute the first leaf task. Make a plan for the task before execute, put the plan in the docs folder, and add the file name in the item in TODO.md for reference. You can all write your key findings as a few sentences in the TODO item. 
+3. Try to execute the first leaf task. Make a plan for the task before execute, put the plan in the docs/dev/ folder, and add the file name in the item in TODO.md for reference. You can all write your key findings as a few sentences in the TODO item. 
 4. Make sure to add comprehensive test for the task executed. Run the whole test suites to make sure no regression happens. If tests fail, fix them using the best, honest, complete approach, run test suites again to verify fixes work. Repeat this step until no tests fail. 
 5. Prepare for git commit, remove all temporary files, especially not to commit any binary files. For plan files, extract from implementation plan the design rational and user manual and put it in the docs folder.
 6. Git commit the changes. First do git pull --rebase, and fix conflicts if any. Then do git push.
@@ -31,7 +31,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* in docs/method_qualifiers.md, "the this pointer rule" is in a wrong location: it is before overview. Reorganize the doc so the this pointer rule is in the right location.
     - [x] *done* Fix false positives in method call borrow checking - see docs/bug_report_this_borrow_false_positives.md
       - [x] *done* Fix "'this' is not alive in current scope" - register 'this' in scope lifetime tracking during method analysis
-      - [ ] Fix "Cannot return 'value' because it has been moved" - investigate incorrect move state tracking (needs Janus codebase to reproduce)
+      - [x] *done* Fix "Cannot return 'value' because it has been moved" - extract_return_source was incorrectly returning method receiver as source; fixed by distinguishing method calls (name contains ::) from constructors
       - [x] *done* Fix "Cannot modify field in const method" - interior mutability types like Cell/RefCell from system headers are already skipped via is_system_header() check; their methods use internal @unsafe blocks
       - [x] *done* Fix false field borrow conflicts - added smart method mutation heuristic to distinguish const vs non-const methods
     - [x] *done* Remove hard-coded interior mutability types - removed unused is_interior_mutability_type() function and field_type tracking. Interior mutability is properly handled: (1) rusty::Cell etc. headers use @unsafe blocks internally, (2) system headers are skipped from analysis via is_system_header() check

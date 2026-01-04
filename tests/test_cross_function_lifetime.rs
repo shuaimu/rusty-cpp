@@ -313,6 +313,66 @@ int main() { return 0; }
     );
 }
 
+#[test]
+fn test_method_call_return_not_false_positive() {
+    // Regression test for "Cannot return 'value' because it has been moved" false positive
+    // See docs/bug_report_this_borrow_false_positives.md
+    //
+    // The pattern: return opt.unwrap()->id;
+    // - opt.unwrap() moves opt, but the RETURN VALUE is the result of unwrap(), not opt
+    // - This should NOT trigger "Cannot return 'opt' because it has been moved"
+    let source = r#"
+// Simple Option-like class
+// @safe
+template<typename T>
+struct Option {
+    T value;
+    bool has_value;
+
+    // @safe
+    Option() : value{}, has_value{false} {}
+
+    // @safe
+    Option(T v, bool h) : value{v}, has_value{h} {}
+
+    // @safe
+    bool is_some() const { return has_value; }
+
+    // @safe
+    T unwrap() { return value; }
+};
+
+// @safe
+Option<int> get_option() {
+    // @unsafe
+    { return Option<int>{42, true}; }
+}
+
+// @safe
+int use_option() {
+    // @unsafe
+    auto opt = get_option();
+    // is_some() is const - should NOT move opt
+    if (!opt.is_some()) {
+        return -1;
+    }
+    // unwrap() consumes opt, but we're returning the RESULT, not opt
+    return opt.unwrap();  // Should NOT trigger "Cannot return 'opt' because it has been moved"
+}
+
+int main() { return 0; }
+"#;
+
+    let (success, output) = analyze(source);
+    // This should succeed - there's no actual use-after-move
+    // The return value is the result of unwrap(), not the moved opt variable
+    assert!(
+        success,
+        "Method call return should not trigger false positive. Got error: {}",
+        output
+    );
+}
+
 // =============================================================================
 // CATEGORY 4: Output parameter lifetime violations
 // =============================================================================
