@@ -185,7 +185,9 @@ impl ScopedLifetimeTracker {
                     let is_function_call_result = source.starts_with("operator") ||
                         source.contains("::") ||  // Qualified function calls
                         source.starts_with("__") || // Compiler-generated temporaries
-                        source.starts_with("temp_"); // Explicit temporaries
+                        source.starts_with("temp_") || // Explicit temporaries
+                        source.starts_with("_temp_call_") || // Function call result temporaries (ir/mod.rs)
+                        source.starts_with("_temp_expr_"); // Binary expression temporaries (ir/mod.rs)
 
                     // Check that the source is alive where the reference is used (skip for temporaries)
                     if !is_function_call_result {
@@ -307,7 +309,9 @@ fn analyze_block(
                 let is_function_call_result = from.starts_with("operator") ||
                     from.contains("::") ||  // Qualified function calls
                     from.starts_with("__") || // Compiler-generated temporaries
-                    from.starts_with("temp_"); // Explicit temporaries
+                    from.starts_with("temp_") || // Explicit temporaries
+                    from.starts_with("_temp_call_") || // Function call result temporaries (ir/mod.rs)
+                    from.starts_with("_temp_expr_"); // Binary expression temporaries (ir/mod.rs)
 
                 // Check that 'from' is alive in this scope (skip for temporaries)
                 if !is_function_call_result && !tracker.is_alive_in_scope(from, scope_id) {
