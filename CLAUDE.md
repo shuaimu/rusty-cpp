@@ -364,14 +364,18 @@ src/
 
 ## Environment Setup
 
-```bash
-# macOS
-export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
-export DYLD_LIBRARY_PATH=/opt/homebrew/Cellar/llvm/19.1.7/lib:$DYLD_LIBRARY_PATH
+**LLVM/Clang Requirements**: Version 16.0 or later. The build will automatically find libclang if installed in standard locations.
 
-# Linux
+```bash
+# macOS (Homebrew LLVM is auto-detected)
+export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
+
+# Linux (LLVM is auto-detected in /usr/lib/llvm-*/lib)
 export Z3_SYS_Z3_HEADER=/usr/include/z3.h
-export LD_LIBRARY_PATH=/usr/lib/llvm-16/lib:$LD_LIBRARY_PATH
+
+# Optional: If LLVM is in a non-standard location, set one of:
+export LIBCLANG_PATH=/path/to/llvm/lib          # Directory containing libclang.so/dylib
+export LLVM_CONFIG_PATH=/path/to/llvm-config    # Alternative: path to llvm-config
 
 # Optional: Include paths via environment
 export CPLUS_INCLUDE_PATH=/usr/include/c++:/usr/local/include
@@ -624,9 +628,10 @@ T& getMutable();
 ## Testing Commands
 
 ```bash
-# Set environment variables first (macOS)
-export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
-export DYLD_LIBRARY_PATH=/opt/homebrew/Cellar/llvm/19.1.7/lib:$DYLD_LIBRARY_PATH
+# Set environment variables (if needed)
+# macOS: export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
+# Linux: export Z3_SYS_Z3_HEADER=/usr/include/z3.h
+# LLVM is auto-detected; set LIBCLANG_PATH only if in non-standard location
 
 # Build the project
 cargo build
