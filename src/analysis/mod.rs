@@ -56,18 +56,6 @@ fn is_primitive_type(type_name: &str) -> bool {
     )
 }
 
-/// Check if a type has interior mutability (Cell, RefCell)
-/// These types allow mutation through shared references (&self)
-fn is_interior_mutability_type(type_name: &str) -> bool {
-    type_name.starts_with("rusty::Cell<") ||
-    type_name.starts_with("Cell<") ||
-    type_name.starts_with("rusty::RefCell<") ||
-    type_name.starts_with("RefCell<") ||
-    // Also check for std::atomic which has interior mutability
-    type_name.starts_with("std::atomic<") ||
-    type_name.starts_with("atomic<")
-}
-
 /// Check if a method name is likely to mutate the object
 /// This is a heuristic - we can't know for sure without method signatures
 fn is_mutating_method_name(method_name: &str) -> bool {
@@ -936,9 +924,9 @@ fn process_statement(
             }
         }
 
-        crate::ir::IrStatement::UseField { object, field, operation, field_type } => {
-            debug_println!("DEBUG ANALYSIS: UseField object='{}', field='{}', operation='{}', field_type={:?}",
-                object, field, operation, field_type);
+        crate::ir::IrStatement::UseField { object, field, operation } => {
+            debug_println!("DEBUG ANALYSIS: UseField object='{}', field='{}', operation='{}'",
+                object, field, operation);
 
             // Skip checking if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
@@ -1025,19 +1013,12 @@ fn process_statement(
                         }
                     }
                     // For write operations, check if we can modify
-                    // EXCEPTION: Interior mutability types (Cell, RefCell) allow mutation in const methods
+                    // Note: Interior mutability types (Cell, RefCell) from system headers
+                    // are already skipped from analysis - their methods use @unsafe internally
                     else if operation == "write" {
-                        // Check if field has interior mutability
-                        let has_interior_mutability = field_type.as_ref().map_or(false, |t| {
-                            is_interior_mutability_type(t)
-                        });
-
-                        // Only check modification restriction if NOT an interior mutability type
-                        if !has_interior_mutability {
-                            if let Err(err) = tracker.can_modify_member(field) {
-                                errors.push(err);
-                                return;
-                            }
+                        if let Err(err) = tracker.can_modify_member(field) {
+                            errors.push(err);
+                            return;
                         }
                     }
                 }

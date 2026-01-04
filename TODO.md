@@ -32,9 +32,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* Fix false positives in method call borrow checking - see docs/bug_report_this_borrow_false_positives.md
       - [x] *done* Fix "'this' is not alive in current scope" - register 'this' in scope lifetime tracking during method analysis
       - [ ] Fix "Cannot return 'value' because it has been moved" - investigate incorrect move state tracking (needs Janus codebase to reproduce)
-      - [x] *done* Fix "Cannot modify field in const method" - added framework for interior mutability type checking (still needs field type tracking in IR)
+      - [x] *done* Fix "Cannot modify field in const method" - interior mutability types like Cell/RefCell from system headers are already skipped via is_system_header() check; their methods use internal @unsafe blocks
       - [x] *done* Fix false field borrow conflicts - added smart method mutation heuristic to distinguish const vs non-const methods
-    - [ ] there are some hard coded types (like RefCell, std atomic) that are skipped interior mutatbility check, this is wrong. we shouldn't hard code them. These types should have internal unsafe block that bypasses checking, or std types shouldn't be checked at all because they don't have safe/unsafe mark (undeclared). If some std types are externally marked safe, we don't check them either. we just blindly trust them.
+    - [x] *done* Remove hard-coded interior mutability types - removed unused is_interior_mutability_type() function and field_type tracking. Interior mutability is properly handled: (1) rusty::Cell etc. headers use @unsafe blocks internally, (2) system headers are skipped from analysis via is_system_header() check
   - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
     - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
