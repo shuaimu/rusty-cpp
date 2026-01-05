@@ -38,9 +38,9 @@ But Circle also has its downsides that make it basically unusable to me. It reli
 
 So we're back to square one. Everybody tries to fix the language, but nobody tries to just analyze it. There are other efforts, like some say 2025 is the year of inventing alternative languages to C++, but that's not what I want. I want C++ to be safe. I don't have to leave my C++ world yet.
 
-Then I thought: how hard is it to write this C++ static analyzer? Conceptually, I think it's not hard. It requires going through the AST. And since the static analysis is mostly statically scoped, it doesn't require heavy cross-file analysis---it can be single-file based, very limited scope. It should be engineerable, but the amount of engineering is expected to be huge, as it is basically cloning Rust's frontend. Having a full-time professor job, I don't have the time to do it. 
+Then I thought: how hard is it to write this C++ static analyzer? Conceptually, I think it's not hard. It requires going through the AST. And since the static analysis is mostly statically scoped, it doesn't require heavy cross-file analysis. It can be single-file based, very limited scope. It should be engineerable, but the amount of engineering is expected to be huge, as it is basically cloning Rust's frontend. Having a full-time professor job, I don't have the time to do it. 
 
-I thought about hiring a PhD student to do it. But I had two problems: I don't have the funding, and it's very hard to find a PhD student for this. I don't blame them. I talked about this project to a few students, but they're not interested. Because it sounds like too much engineering and not enough paper-friendly novelty---you probably cannot even invent some cool concepts and put them in a publication, although it think it would be a very impactful paper we can manage to publish it.
+I thought about hiring a PhD student to do it. But I had two problems: I don't have the funding, and it's very hard to find a PhD student for this. I don't blame them. I talked about this project to a few students, but they're not interested. Because it sounds like too much engineering and not enough paper-friendly novelty, you probably cannot even invent some cool concepts and put them in a publication, although it think it would be a very impactful paper we can manage to publish it.
 
 So this idea sat for a while.
 
@@ -56,7 +56,7 @@ Now I would say it is actually at a pretty stable, usable state.
 
 ## Watching AI Evolve in Real-Time
 
-Something else about the AI coding development: it's really evolving quickly. Initially I was using Sonnet 3.7, and it was giving me a lot of errors---behaviors very much like a first-year student. I had to manually re-run tests because it wasn't doing that. When I upgraded to Sonnet 4.5, it became less often that it gave phantom answers. But it still sometimes wasn't able to handle some complex problems. We'd go back and forth and I'd try to give it hints. But with Opus 4.5, that happens much less often now. I even started trying out the fully autonomous coding: instead of examining its every action, I just write a TODO list with many tasks, and ask it to finish the tasks one by one.  
+Something else about the AI coding development: it's really evolving quickly. Initially I was using Sonnet 3.7, and it was giving me a lot of errors in a behavior very much like a first-year student. I had to manually re-run tests because it wasn't doing that. When I upgraded to Sonnet 4.5, it became less often that it gave phantom answers. But it still sometimes wasn't able to handle some complex problems. We'd go back and forth and I'd try to give it hints. But with Opus 4.5, that happens much less often now. I even started trying out the fully autonomous coding: instead of examining its every action, I just write a TODO list with many tasks, and ask it to finish the tasks one by one.  
 
 This is a very interesting experience. Six months ago, I would never have thought AI coding assistants could be this powerful.
 
@@ -233,7 +233,7 @@ We also have CMake integration that supports automatic checking at compile time.
 
 ## Conclusion
 
-This project to me personally is a 15-year itch finally being scratched. Not by hiring a team of compiler engineers, not by waiting for the C++ committee to adopt memory safety, but just by having a conversation with an AI that turned my half-baked ideas into working code. This is unimaginable to me 6 months ago. I expected experiencing a few more iPhone-moments in my life, but I never thought it would be in this way---it shows a future where all my (programming) skills are probably not needed any more.  
+This project to me personally is a 15-year itch finally being scratched. Not by hiring a team of compiler engineers, not by waiting for the C++ committee to adopt memory safety, but just by having a conversation with an AI that turned my half-baked ideas into working code. This is unimaginable to me 6 months ago. I expected experiencing a few more iPhone-moments in my life, but I never thought it would be in this way-it shows a future where all my (programming) skills are probably not needed any more.  
 
 Anyway, check out the project. Try it on your codebase. And maybe, like me, you'll finally get some peace of mind about those mysterious segfaults.
 
