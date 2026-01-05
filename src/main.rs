@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::env;
 use serde_json;
+use clang_sys::support::Clang;
 
 #[macro_use]
 mod debug_macros;
@@ -79,9 +80,12 @@ fn main() {
 fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], compile_commands: Option<&PathBuf>) -> Result<Vec<String>, String> {
     // Start with CLI-provided include paths
     let mut all_include_paths = include_paths.to_vec();
-    
+
     // Add include paths from environment variables
     all_include_paths.extend(extract_include_paths_from_env());
+
+    // Auto-detect C++ standard library paths from clang installation
+    all_include_paths.extend(extract_include_paths_from_clang());
     
     // Extract include paths from compile_commands.json if provided
     if let Some(cc_path) = compile_commands {
@@ -322,6 +326,45 @@ fn extract_include_paths_from_env() -> Vec<PathBuf> {
     if !paths.is_empty() {
         eprintln!("Found {} include path(s) from environment variables", paths.len());
     }
-    
+
+    paths
+}
+
+/// Extract C++ standard library include paths using clang_sys
+/// This queries the system's clang installation to find STL headers
+fn extract_include_paths_from_clang() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Try to find clang and get its C++ search paths
+    match Clang::find(None, &[]) {
+        Some(clang) => {
+            // Add C++ search paths (most important for STL)
+            if let Some(cpp_paths) = clang.cpp_search_paths {
+                for path in cpp_paths {
+                    if path.exists() && !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+
+            // Also add C search paths as fallback
+            if let Some(c_paths) = clang.c_search_paths {
+                for path in c_paths {
+                    if path.exists() && !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+
+            if !paths.is_empty() {
+                eprintln!("Found {} include path(s) from clang installation", paths.len());
+            }
+        }
+        None => {
+            // Clang not found - this is okay, user can specify paths manually
+            debug_println!("DEBUG: Could not find clang installation for auto-detecting include paths");
+        }
+    }
+
     paths
 }
