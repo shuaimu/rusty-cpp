@@ -84,16 +84,15 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     // Add include paths from environment variables
     all_include_paths.extend(extract_include_paths_from_env());
 
-    // Extract include paths from compile_commands.json if provided
-    // When compile_commands.json is provided, skip auto-detection since
-    // the build system should have all necessary paths
+    // Always auto-detect C++ standard library paths from clang installation
+    // This is needed because compile_commands.json typically doesn't include STL paths
+    // (they're implicit to the compiler, not passed as -I flags)
+    all_include_paths.extend(extract_include_paths_from_clang());
+
+    // Extract additional include paths from compile_commands.json if provided
     if let Some(cc_path) = compile_commands {
         let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
         all_include_paths.extend(extracted_paths);
-    } else {
-        // Auto-detect C++ standard library paths from clang installation
-        // Only when no compile_commands.json is provided
-        all_include_paths.extend(extract_include_paths_from_clang());
     }
     
     // Parse included headers for lifetime annotations
@@ -334,13 +333,28 @@ fn extract_include_paths_from_env() -> Vec<PathBuf> {
 }
 
 /// Extract C++ standard library include paths using clang_sys
-/// This queries the system's clang installation to find STL headers
+/// This queries the system's clang installation to find STL headers and builtin headers
 fn extract_include_paths_from_clang() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     // Try to find clang and get its C++ search paths
     match Clang::find(None, &[]) {
         Some(clang) => {
+            // First, add the Clang resource directory for built-in headers (stdarg.h, etc.)
+            // This is essential for LibClang to parse code that includes standard headers
+            if let Ok(output) = std::process::Command::new(&clang.path)
+                .arg("-print-resource-dir")
+                .output()
+            {
+                if output.status.success() {
+                    let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let builtin_include = PathBuf::from(&resource_dir).join("include");
+                    if builtin_include.exists() && !paths.contains(&builtin_include) {
+                        paths.push(builtin_include);
+                    }
+                }
+            }
+
             if let Some(cpp_paths) = clang.cpp_search_paths {
                 // Check if we have GCC paths - if so, filter out LLVM/clang paths to avoid conflicts
                 let has_gcc_paths = cpp_paths.iter().any(|p| {
@@ -375,3 +389,4 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
 
     paths
 }
+

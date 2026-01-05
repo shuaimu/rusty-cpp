@@ -58,6 +58,7 @@ namespace rusty {
 ///   &mut T is not Copy.
 ///
 /// For const references: Use = to copy (compile error if you try rusty::move)
+// @safe
 template<typename T>
 constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
     using BaseT = std::remove_reference_t<T>;
@@ -73,7 +74,8 @@ constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
 
     // Return an rvalue reference to enable move semantics (same as std::move)
     // The RustyCpp checker will track what was moved based on the argument type
-    return static_cast<BaseT&&>(t);
+    // @unsafe
+    { return static_cast<BaseT&&>(t); }
 }
 
 /// @brief Explicitly copy a value (for clarity when move is the default)
@@ -82,6 +84,7 @@ constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
 /// explicit that you want a copy, not a move.
 ///
 /// @note Only works for types that are Copy (trivially copyable or have copy ctor)
+// @safe
 template<typename T>
 constexpr T copy(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
     static_assert(

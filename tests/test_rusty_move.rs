@@ -22,17 +22,8 @@ fn run_checker_with_name(code: &str, test_name: &str) -> String {
         .as_nanos();
     let test_file = temp_dir.join(format!("test_rusty_move_{}_{}.cpp", test_name, unique_id));
 
-    // Create include directory structure
-    let include_dir = temp_dir.join("rusty_include");
-    let rusty_dir = include_dir.join("rusty");
-    fs::create_dir_all(&rusty_dir).unwrap();
-
-    // Copy the move.hpp header
-    let move_header = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("include/rusty/move.hpp");
-    if move_header.exists() {
-        fs::copy(&move_header, rusty_dir.join("move.hpp")).unwrap();
-    }
+    // Use the project's include directory directly
+    let include_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
 
     fs::write(&test_file, code).unwrap();
 
@@ -58,19 +49,12 @@ fn run_checker_with_name(code: &str, test_name: &str) -> String {
 fn test_rusty_move_value_basic() {
     let code = r#"
 #include <rusty/move.hpp>
-
-class Box {
-    int* data;
-public:
-    Box(int v) : data(new int(v)) {}
-    Box(Box&& other) : data(other.data) { other.data = nullptr; }
-    ~Box() { delete data; }
-};
+#include <rusty/box.hpp>
 
 // @safe
 void test() {
-    Box b1(42);
-    Box b2 = rusty::move(b1);
+    rusty::Box<int> b1 = rusty::Box<int>::make(42);
+    rusty::Box<int> b2 = rusty::move(b1);
     // b1 is now moved, using it would be an error
 }
 "#;
@@ -233,6 +217,7 @@ fn test_std_move_also_works() {
     let code = r#"
 #include <utility>
 
+// @safe
 class Box {
     int value;
 public:
@@ -261,19 +246,15 @@ void test() {
 fn test_rusty_move_temporary() {
     let code = r#"
 #include <rusty/move.hpp>
+#include <rusty/box.hpp>
 
-class Box {
-    int value;
-public:
-    Box(int v) : value(v) {}
-};
-
-Box make_box() { return Box(42); }
+// @safe
+rusty::Box<int> make_box() { return rusty::Box<int>::make(42); }
 
 // @safe
 void test() {
     // Moving a temporary is a no-op but should compile
-    Box b = rusty::move(make_box());
+    rusty::Box<int> b = rusty::move(make_box());
 }
 "#;
     let output = run_checker(code);
@@ -287,18 +268,13 @@ void test() {
 fn test_rusty_move_chain() {
     let code = r#"
 #include <rusty/move.hpp>
-
-class Box {
-    int value;
-public:
-    Box(int v) : value(v) {}
-};
+#include <rusty/box.hpp>
 
 // @safe
 void test() {
-    Box b1(1);
-    Box b2 = rusty::move(b1);  // b1 invalid
-    Box b3 = rusty::move(b2);  // b2 invalid
+    rusty::Box<int> b1 = rusty::Box<int>::make(1);
+    rusty::Box<int> b2 = rusty::move(b1);  // b1 invalid
+    rusty::Box<int> b3 = rusty::move(b2);  // b2 invalid
     // Only b3 is valid now
 }
 "#;
@@ -381,6 +357,7 @@ fn test_std_move_on_value_allowed() {
     let code = r#"
 #include <utility>
 
+// @safe
 class Box {
     int value;
 public:
