@@ -121,10 +121,12 @@ install_macos() {
     info "Installing LLVM and Z3 via Homebrew..."
     brew install llvm z3
 
-    # Set up environment for clang
+    # Set up environment for clang and z3
     LLVM_PREFIX=$(brew --prefix llvm)
+    Z3_PREFIX=$(brew --prefix z3)
     export LLVM_CONFIG_PATH="$LLVM_PREFIX/bin/llvm-config"
     export LIBCLANG_PATH="$LLVM_PREFIX/lib"
+    export Z3_SYS_Z3_HEADER="$Z3_PREFIX/include/z3.h"
 
     success "Dependencies installed"
 
@@ -132,6 +134,7 @@ install_macos() {
     warn "Add these to your shell profile (~/.zshrc or ~/.bashrc):"
     echo "  export LLVM_CONFIG_PATH=\"$LLVM_PREFIX/bin/llvm-config\""
     echo "  export LIBCLANG_PATH=\"$LLVM_PREFIX/lib\""
+    echo "  export Z3_SYS_Z3_HEADER=\"$Z3_PREFIX/include/z3.h\""
     echo ""
 }
 
