@@ -11,6 +11,10 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 
 fn run_analyzer(cpp_file: &Path) -> (bool, String) {
+    run_analyzer_with_args(cpp_file, &[])
+}
+
+fn run_analyzer_with_args(cpp_file: &Path, extra_args: &[&str]) -> (bool, String) {
     let z3_header = if cfg!(target_os = "macos") {
         "/opt/homebrew/include/z3.h"
     } else {
@@ -18,7 +22,9 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     };
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
+    let mut args = vec!["run", "--quiet", "--", cpp_file.to_str().unwrap()];
+    args.extend(extra_args);
+    cmd.args(&args)
         .env("Z3_SYS_Z3_HEADER", z3_header);
 
     if cfg!(target_os = "macos") {
@@ -120,7 +126,7 @@ fn test_memory_header_found() {
 
 #[test]
 fn test_clang_include_paths_detected() {
-    // Test that the analyzer reports finding include paths from clang
+    // Test that the analyzer reports finding include paths from clang automatically
     let code = r#"
     int main() {
         return 0;
@@ -132,9 +138,9 @@ fn test_clang_include_paths_detected() {
 
     // The analyzer should report finding include paths from clang installation
     assert!(
-        output.contains("include path(s) from clang installation") ||
+        output.contains("C++ include path(s)") ||
         output.contains("include path(s) from environment"),
-        "Analyzer should detect include paths automatically. Output: {}",
+        "Analyzer should auto-detect include paths from clang. Output: {}",
         output
     );
 }

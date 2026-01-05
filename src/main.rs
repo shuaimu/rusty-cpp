@@ -86,7 +86,7 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
 
     // Auto-detect C++ standard library paths from clang installation
     all_include_paths.extend(extract_include_paths_from_clang());
-    
+
     // Extract include paths from compile_commands.json if provided
     if let Some(cc_path) = compile_commands {
         let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
@@ -338,18 +338,22 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
     // Try to find clang and get its C++ search paths
     match Clang::find(None, &[]) {
         Some(clang) => {
-            // Add C++ search paths (most important for STL)
             if let Some(cpp_paths) = clang.cpp_search_paths {
-                for path in cpp_paths {
-                    if path.exists() && !paths.contains(&path) {
-                        paths.push(path);
-                    }
-                }
-            }
+                // Check if we have GCC paths - if so, filter out LLVM/clang paths to avoid conflicts
+                let has_gcc_paths = cpp_paths.iter().any(|p| {
+                    let s = p.to_string_lossy();
+                    s.contains("/gcc/") || s.contains("/g++/") || s.contains("/c++/")
+                });
 
-            // Also add C search paths as fallback
-            if let Some(c_paths) = clang.c_search_paths {
-                for path in c_paths {
+                for path in cpp_paths {
+                    let path_str = path.to_string_lossy();
+
+                    // Skip LLVM/clang internal paths if we have GCC paths
+                    // These can conflict with GCC's stdint definitions
+                    if has_gcc_paths && (path_str.contains("/llvm") || path_str.contains("/clang")) {
+                        continue;
+                    }
+
                     if path.exists() && !paths.contains(&path) {
                         paths.push(path);
                     }
@@ -357,7 +361,7 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
             }
 
             if !paths.is_empty() {
-                eprintln!("Found {} include path(s) from clang installation", paths.len());
+                eprintln!("Auto-detected {} C++ include path(s)", paths.len());
             }
         }
         None => {
