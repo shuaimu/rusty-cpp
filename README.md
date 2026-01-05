@@ -81,34 +81,9 @@ Cannot create mutable borrow 'mut_ref': 'value' is already borrowed by 'const_re
 
 #### Option 1: Git Submodule (Recommended)
 
-**The recommended way to use rusty-cpp** is to add it as a git submodule to your project. This makes it easy to track updates as rusty-cpp is rapidly evolving.
+**The recommended way to use rusty-cpp** is to use cmake to do automatic checking at build. Also consider adding rusty-cpp as a submoduel so it is easy to track updates as rusty-cpp is rapidly evolving.
+See [cmake-example-project/](cmake-example-project/) for a complete working example.
 
-```bash
-cd your-project
-git submodule add https://github.com/shuaimu/rusty-cpp.git third-party/rusty-cpp
-git submodule update --init --recursive
-```
-
-Then integrate with CMake - see **[cmake-example-project/](cmake-example-project/)** for a complete working example:
-
-```cmake
-# CMakeLists.txt
-set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
-include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
-enable_borrow_checking()
-
-add_executable(myapp src/main.cpp)
-add_borrow_check_target(myapp)
-```
-
-The CMake module will automatically build rusty-cpp-checker and run safety checks during your build.
-
-**Keeping rusty-cpp updated:**
-```bash
-cd third-party/rusty-cpp && git pull origin main
-# Or update all submodules:
-git submodule update --remote --merge
-```
 
 #### Option 2: Global Install Script
 
@@ -160,17 +135,6 @@ cargo build --release
 set LIBCLANG_PATH=C:\Program Files\LLVM\lib
 set Z3_SYS_Z3_HEADER=C:\z3\include\z3.h
 cargo build --release
-```
-
-#### Option 4: Install from crates.io
-
-```bash
-# Set Z3 header path first
-export Z3_SYS_Z3_HEADER=/usr/include/z3.h  # Linux
-# export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h  # macOS
-
-cargo install rusty-cpp
-rusty-cpp-checker --help
 ```
 
 ### 🚀 Usage
