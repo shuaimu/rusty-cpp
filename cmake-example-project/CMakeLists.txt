@@ -4,30 +4,41 @@ project(rusty_cpp_example CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Generate compile_commands.json for rusty-cpp
+# Generate compile_commands.json
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Find rusty-cpp executable
-# Users should set RUSTY_CPP_PATH or have it in PATH
-find_program(RUSTY_CPP_EXECUTABLE
-    NAMES rusty-cpp-checker rusty-cpp
-    HINTS
-        ${RUSTY_CPP_PATH}
-        $ENV{RUSTY_CPP_PATH}
-        ${CMAKE_SOURCE_DIR}/../target/release
-        ${CMAKE_SOURCE_DIR}/../target/debug
-    DOC "Path to rusty-cpp-checker executable"
-)
+# =============================================================================
+# Rusty-CPP Integration
+# =============================================================================
+# Set RUSTYCPP_DIR to point to the rusty-cpp directory
+# This can be:
+#   1. A git submodule: set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
+#   2. An external path: set(RUSTYCPP_DIR "/path/to/rusty-cpp")
+#   3. Relative to this example: (default below)
 
-if(NOT RUSTY_CPP_EXECUTABLE)
-    message(WARNING "rusty-cpp-checker not found. Safety checks will be skipped. "
-                    "Set RUSTY_CPP_PATH or build rusty-cpp with 'cargo build --release'")
+if(NOT DEFINED RUSTYCPP_DIR)
+    # Default: assume this example is inside the rusty-cpp repo
+    set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/..")
 endif()
 
-# Option to enable/disable rusty-cpp checks
-option(ENABLE_RUSTY_CPP "Enable rusty-cpp safety checks" ON)
+message(STATUS "RUSTYCPP_DIR: ${RUSTYCPP_DIR}")
 
-# Source files
+# Include the RustyCpp CMake module
+# This provides: enable_borrow_checking(), add_borrow_check_target(), etc.
+include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
+
+# Set build type for rusty-cpp (release is recommended for speed)
+set(RUSTYCPP_BUILD_TYPE "release" CACHE STRING "Build type for rusty-cpp")
+
+# Enable borrow checking - this will:
+#   1. Check for required dependencies (cargo, libclang, z3)
+#   2. Create a build target for rusty-cpp-checker
+enable_borrow_checking()
+
+# =============================================================================
+# Project Sources
+# =============================================================================
+
 set(SOURCES
     src/main.cpp
     src/safe_example.cpp
@@ -36,55 +47,20 @@ set(SOURCES
 # Main executable
 add_executable(example ${SOURCES})
 
-# Function to add rusty-cpp check for a source file
-function(add_rusty_cpp_check target source_file)
-    if(RUSTY_CPP_EXECUTABLE AND ENABLE_RUSTY_CPP)
-        get_filename_component(source_name ${source_file} NAME)
-        set(check_target "rusty_check_${source_name}")
+# Add rusty-cpp include path for rusty:: types (Box, Arc, Vec, etc.)
+target_include_directories(example PRIVATE ${RUSTYCPP_DIR}/include)
 
-        add_custom_command(
-            OUTPUT ${CMAKE_BINARY_DIR}/.rusty_checked_${source_name}
-            COMMAND ${RUSTY_CPP_EXECUTABLE}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
-                    --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
-            COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/.rusty_checked_${source_name}
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
-            COMMENT "Running rusty-cpp on ${source_file}"
-            VERBATIM
-        )
+# Enable borrow checking for this target
+# This will run rusty-cpp-checker on all source files before compilation
+add_borrow_check_target(example)
 
-        add_custom_target(${check_target}
-            DEPENDS ${CMAKE_BINARY_DIR}/.rusty_checked_${source_name}
-        )
+# =============================================================================
+# Build Summary
+# =============================================================================
 
-        add_dependencies(${target} ${check_target})
-    endif()
-endfunction()
-
-# Add rusty-cpp checks for all source files
-foreach(source ${SOURCES})
-    add_rusty_cpp_check(example ${source})
-endforeach()
-
-# Convenience target to run all rusty-cpp checks
-if(RUSTY_CPP_EXECUTABLE AND ENABLE_RUSTY_CPP)
-    add_custom_target(rusty_check_all
-        COMMENT "Running rusty-cpp on all source files"
-    )
-
-    foreach(source ${SOURCES})
-        get_filename_component(source_name ${source} NAME)
-        add_dependencies(rusty_check_all "rusty_check_${source_name}")
-    endforeach()
-endif()
-
-# Print configuration summary
 message(STATUS "")
-message(STATUS "=== Rusty-CPP Configuration ===")
-message(STATUS "  Enabled: ${ENABLE_RUSTY_CPP}")
-if(RUSTY_CPP_EXECUTABLE)
-    message(STATUS "  Executable: ${RUSTY_CPP_EXECUTABLE}")
-else()
-    message(STATUS "  Executable: NOT FOUND")
-endif()
+message(STATUS "=== Build Configuration ===")
+message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Borrow Checking: ${ENABLE_BORROW_CHECKING}")
+message(STATUS "  RustyCpp Dir: ${RUSTYCPP_DIR}")
 message(STATUS "")

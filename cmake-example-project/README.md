@@ -2,61 +2,120 @@
 
 This example demonstrates how to integrate rusty-cpp into a CMake-based C++ project.
 
-## Prerequisites
+## Setup
 
-1. Build rusty-cpp:
-   ```bash
-   cd /path/to/rusty-cpp
-   cargo build --release
-   ```
+### Step 1: Add rusty-cpp to Your Project
 
-2. CMake 3.16 or later
-3. A C++20 compatible compiler
-
-## Building
+**Recommended: Add as a git submodule** (allows easy updates with `git submodule update`):
 
 ```bash
-# Create build directory
+cd your-project
+git submodule add https://github.com/anthropics/rusty-cpp.git third-party/rusty-cpp
+git submodule update --init --recursive
+```
+
+Then set the path in your CMakeLists.txt:
+```cmake
+set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
+```
+
+**Alternative: Point to external path**:
+```cmake
+set(RUSTYCPP_DIR "/path/to/rusty-cpp")
+```
+
+### Step 2: Prerequisites
+
+The CMake module will check for these automatically:
+
+- **Rust/Cargo**: Install from https://rustup.rs/
+- **LLVM/Clang** (libclang):
+  - Ubuntu/Debian: `sudo apt-get install llvm-14-dev libclang-14-dev`
+  - macOS: `brew install llvm`
+- **Z3 Solver**:
+  - Ubuntu/Debian: `sudo apt-get install libz3-dev`
+  - macOS: `brew install z3`
+
+### Step 3: Build
+
+```bash
 mkdir build && cd build
-
-# Configure (rusty-cpp will be auto-detected from ../target/release/)
 cmake ..
-
-# Build (this will run rusty-cpp checks automatically)
 make
 ```
 
-## How It Works
+The build will automatically:
+1. Build `rusty-cpp-checker` if not already built
+2. Run safety checks on all source files
+3. Fail if any violations are found
+4. Compile the project
 
-The CMake configuration:
+## CMakeLists.txt Integration
 
-1. **Generates `compile_commands.json`** - Required by rusty-cpp for include paths
-2. **Finds rusty-cpp executable** - Searches in common locations
-3. **Adds custom build targets** - Runs rusty-cpp before compilation
-4. **Fails the build on violations** - Safety errors stop the build
+Minimal example:
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(myproject CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+
+# Point to rusty-cpp (as submodule or external path)
+set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
+
+# Include the CMake module
+include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
+
+# Enable borrow checking
+enable_borrow_checking()
+
+# Your target
+add_executable(myapp src/main.cpp src/utils.cpp)
+
+# Add rusty:: types (Box, Arc, Vec, etc.)
+target_include_directories(myapp PRIVATE ${RUSTYCPP_DIR}/include)
+
+# Enable checking for this target
+add_borrow_check_target(myapp)
+```
 
 ## Configuration Options
 
 ```bash
-# Disable rusty-cpp checks
-cmake -DENABLE_RUSTY_CPP=OFF ..
+# Disable borrow checking
+cmake -DENABLE_BORROW_CHECKING=OFF ..
 
-# Specify custom rusty-cpp path
-cmake -DRUSTY_CPP_PATH=/path/to/rusty-cpp/target/release ..
+# Use debug build of rusty-cpp (slower but more debug info)
+cmake -DRUSTYCPP_BUILD_TYPE=debug ..
+
+# Make borrow check failures fatal (stop on first error)
+cmake -DBORROW_CHECK_FATAL=ON ..
 ```
 
-## Manual Checking
+## Keeping rusty-cpp Updated
 
-Run rusty-cpp on all files without building:
+Since rusty-cpp is rapidly evolving, update your submodule frequently:
 
 ```bash
-make rusty_check_all
+cd third-party/rusty-cpp
+git pull origin main
+cd ../..
+git add third-party/rusty-cpp
+git commit -m "Update rusty-cpp"
 ```
 
-## Adding New Source Files
+Or update all submodules at once:
+```bash
+git submodule update --remote --merge
+```
 
-1. Add the file to the `SOURCES` list in `CMakeLists.txt`
-2. The rusty-cpp check is automatically added
+## Available CMake Functions
+
+| Function | Description |
+|----------|-------------|
+| `enable_borrow_checking()` | Enable checking, verify dependencies, create build target |
+| `add_borrow_check_target(target)` | Add checks for all sources in a target |
+| `add_borrow_check(file.cpp)` | Add check for a single file |
 
 ## Example Annotations
 
@@ -64,4 +123,4 @@ See `src/safe_example.cpp` for examples of:
 - `@safe` function annotations
 - `@unsafe` blocks for STL operations
 - Borrow checking patterns
-- Move detection
+- Scope-based lifetime management
