@@ -10,7 +10,7 @@ This example demonstrates how to integrate rusty-cpp into a CMake-based C++ proj
 
 ```bash
 cd your-project
-git submodule add https://github.com/anthropics/rusty-cpp.git third-party/rusty-cpp
+git submodule add https://github.com/shuaimu/rusty-cpp.git third-party/rusty-cpp
 git submodule update --init --recursive
 ```
 
@@ -19,18 +19,13 @@ Then set the path in your CMakeLists.txt:
 set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
 ```
 
-**Alternative: Point to external path**:
-```cmake
-set(RUSTYCPP_DIR "/path/to/rusty-cpp")
-```
-
 ### Step 2: Prerequisites
 
 The CMake module will check for these automatically:
 
 - **Rust/Cargo**: Install from https://rustup.rs/
-- **LLVM/Clang** (libclang):
-  - Ubuntu/Debian: `sudo apt-get install llvm-14-dev libclang-14-dev`
+- **LLVM/Clang** (libclang): (higher versions should also work)
+  - Ubuntu/Debian: `sudo apt-get install llvm-16-dev libclang-16-dev`
   - macOS: `brew install llvm`
 - **Z3 Solver**:
   - Ubuntu/Debian: `sudo apt-get install libz3-dev`
