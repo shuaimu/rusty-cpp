@@ -257,16 +257,22 @@ void safe_function() {
         std::vector<int> vec;  // OK: STL in @unsafe block
     }
 
-    // ❌ CANNOT do pointer operations (outside @unsafe block)
-    // int* ptr = &x;  // ERROR: requires unsafe context
+    // ✅ CAN use pointers (treated like references)
+    int x = 42;
+    int* ptr = &x;  // OK: pointers allowed in safe code
+
+    // ❌ CANNOT do pointer arithmetic or use nullptr
+    // ptr++;              // ERROR: pointer arithmetic requires unsafe context
+    // int* p = nullptr;   // ERROR: nullptr requires unsafe context
 }
 
 // @unsafe (or no annotation - same thing)
 void unsafe_function() {
-    // ✅ Can call anything and do pointer operations
+    // ✅ Can call anything, use nullptr, and do pointer arithmetic
     safe_function();       // OK: can call safe
     another_unsafe();      // OK: can call unsafe
-    int* ptr = nullptr;    // OK: pointer operations allowed
+    int* ptr = nullptr;    // OK: nullptr allowed
+    ptr++;                 // OK: pointer arithmetic allowed
     std::vector<int> vec;  // OK: STL allowed
 }
 ```
@@ -301,7 +307,7 @@ void process_raw_memory(void* ptr) {
 
 #### STL and External Libraries
 
-By default, all STL and external functions are **@unsafe**, meaning `@safe` functions cannot call them directly. You have two options:
+By default, all STL and external functions are **@unsafe**, meaning `@safe` functions cannot call them directly. You have three options:
 
 **Option 1 (Recommended): Use Rusty structures**
 
