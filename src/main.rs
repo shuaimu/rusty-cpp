@@ -84,13 +84,16 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     // Add include paths from environment variables
     all_include_paths.extend(extract_include_paths_from_env());
 
-    // Auto-detect C++ standard library paths from clang installation
-    all_include_paths.extend(extract_include_paths_from_clang());
-
     // Extract include paths from compile_commands.json if provided
+    // When compile_commands.json is provided, skip auto-detection since
+    // the build system should have all necessary paths
     if let Some(cc_path) = compile_commands {
         let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
         all_include_paths.extend(extracted_paths);
+    } else {
+        // Auto-detect C++ standard library paths from clang installation
+        // Only when no compile_commands.json is provided
+        all_include_paths.extend(extract_include_paths_from_clang());
     }
     
     // Parse included headers for lifetime annotations
