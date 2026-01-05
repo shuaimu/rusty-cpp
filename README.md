@@ -79,12 +79,42 @@ Cannot create mutable borrow 'mut_ref': 'value' is already borrowed by 'const_re
 
 ### 📦 Installation
 
-#### Quick Install (Recommended)
+#### Option 1: Git Submodule (Recommended)
 
-The easiest way to install rusty-cpp is using our install script, which automatically detects your OS and installs all dependencies:
+**The recommended way to use rusty-cpp** is to add it as a git submodule to your project. This makes it easy to track updates as rusty-cpp is rapidly evolving.
 
 ```bash
-# One-liner install (detects OS, installs deps, builds from source)
+cd your-project
+git submodule add https://github.com/shuaimu/rusty-cpp.git third-party/rusty-cpp
+git submodule update --init --recursive
+```
+
+Then integrate with CMake - see **[cmake-example-project/](cmake-example-project/)** for a complete working example:
+
+```cmake
+# CMakeLists.txt
+set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
+include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
+enable_borrow_checking()
+
+add_executable(myapp src/main.cpp)
+add_borrow_check_target(myapp)
+```
+
+The CMake module will automatically build rusty-cpp-checker and run safety checks during your build.
+
+**Keeping rusty-cpp updated:**
+```bash
+cd third-party/rusty-cpp && git pull origin main
+# Or update all submodules:
+git submodule update --remote --merge
+```
+
+#### Option 2: Global Install Script
+
+For system-wide installation, use our install script which detects your OS and installs all dependencies:
+
+```bash
 curl -sSL https://raw.githubusercontent.com/shuaimu/rusty-cpp/main/install.sh | bash
 ```
 
@@ -95,73 +125,28 @@ cd rusty-cpp
 ./install.sh
 ```
 
-**Supported platforms:**
-- macOS (via Homebrew)
-- Ubuntu/Debian (apt)
-- Fedora (dnf)
-- CentOS/RHEL 8+ (dnf)
-- Arch Linux (pacman)
+**Supported platforms:** macOS (Homebrew), Ubuntu/Debian (apt), Fedora (dnf), CentOS/RHEL 8+ (dnf), Arch Linux (pacman)
 
-#### ⚠️ Build Requirements (Manual Installation)
+#### Option 3: Manual Build
 
-If you prefer manual installation, this tool requires the following native dependencies to be installed **before** building from source or installing via cargo:
-
-- **Rust**: 1.70+ (for building the analyzer)
-- **LLVM/Clang**: 16+ (for parsing C++ - required by clang-sys)
-- **Z3**: 4.8+ (for constraint solving - required by z3-sys)
-
-**Note**: These dependencies must be installed system-wide before running `cargo install rusty-cpp` or building from source. The build will fail without them.
-
-#### Installing from crates.io
-
-Once you have the prerequisites installed:
-
-```bash
-# macOS: Set environment variable for Z3
-export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
-
-# Linux: Set environment variable for Z3
-export Z3_SYS_Z3_HEADER=/usr/include/z3.h
-
-# Install from crates.io
-cargo install rusty-cpp
-
-# The binary will be installed as 'rusty-cpp-checker'
-rusty-cpp-checker --help
-```
-
-#### Building from Source
+**Prerequisites** (must be installed before building):
+- **Rust**: 1.70+
+- **LLVM/Clang**: 16+ (for parsing C++)
+- **Z3**: 4.8+ (for constraint solving)
 
 ##### macOS
 
 ```bash
-# Install dependencies
 brew install llvm z3
-
-# Clone the repository
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
-
-# Build the project
 cargo build --release
-
-# Run tests
-./run_tests.sh
-
-# Add to PATH (optional)
-export PATH="$PATH:$(pwd)/target/release"
 ```
-
-**Note**: The project includes a `.cargo/config.toml` file that automatically sets the required environment variables for Z3. If you encounter build issues, you may need to adjust the paths in this file based on your system configuration.
 
 ##### Linux (Ubuntu/Debian)
 
 ```bash
-# Install dependencies (LLVM 16+ required)
-sudo apt-get update
 sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
-
-# Clone and build
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 cargo build --release
@@ -172,12 +157,20 @@ cargo build --release
 ```bash
 # Install LLVM from https://releases.llvm.org/
 # Install Z3 from https://github.com/Z3Prover/z3/releases
-# Set environment variables:
 set LIBCLANG_PATH=C:\Program Files\LLVM\lib
 set Z3_SYS_Z3_HEADER=C:\z3\include\z3.h
-
-# Build
 cargo build --release
+```
+
+#### Option 4: Install from crates.io
+
+```bash
+# Set Z3 header path first
+export Z3_SYS_Z3_HEADER=/usr/include/z3.h  # Linux
+# export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h  # macOS
+
+cargo install rusty-cpp
+rusty-cpp-checker --help
 ```
 
 ### 🚀 Usage
