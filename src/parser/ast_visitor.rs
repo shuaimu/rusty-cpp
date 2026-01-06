@@ -323,6 +323,10 @@ pub struct Class {
     pub has_copy_assignment: bool,         // True if class has operator=(const ClassName&)
     pub copy_constructor_deleted: bool,    // True if copy constructor is explicitly deleted
     pub copy_assignment_deleted: bool,     // True if copy assignment is explicitly deleted
+    // Constructor tracking for pointer member safety
+    pub has_user_defined_constructor: bool,  // Any user-defined constructor exists
+    pub has_default_constructor: bool,       // Default ctor exists (explicit or implicit)
+    pub default_constructor_deleted: bool,   // Default ctor is = delete
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +353,15 @@ pub enum MethodQualifier {
     RvalueRef,    // && qualified method (like Rust's self)
 }
 
+/// Represents a member initializer in a constructor initializer list
+/// e.g., `ptr(&value)` in `Constructor() : ptr(&value) {}`
+#[derive(Debug, Clone)]
+pub struct MemberInitializer {
+    pub member_name: String,
+    pub init_expression: Expression,
+    pub is_nullptr: bool,  // Quick check if initialized to nullptr
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
@@ -368,6 +381,11 @@ pub struct Function {
     // Safety annotation for method safety contract checking
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>,
     pub has_explicit_safety_annotation: bool,  // true if annotation was in source code
+    // Constructor-specific: member initializer list
+    pub is_constructor: bool,
+    pub is_deleted: bool,      // = delete
+    pub is_defaulted: bool,    // = default
+    pub member_initializers: Vec<MemberInitializer>,  // : member(expr), ...
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +582,144 @@ pub struct SourceLocation {
     pub column: u32,
 }
 
+/// Extract member initializer list from a constructor
+/// e.g., `Constructor() : ptr(&value), data(42) {}`
+///
+/// LibClang represents member initializers as siblings:
+/// ```
+/// Constructor
+/// ├── MemberRef "ptr"      <- member name
+/// ├── UnexposedExpr        <- initializer value (nullptr)
+/// ├── MemberRef "data"     <- another member
+/// ├── IntegerLiteral       <- its initializer (42)
+/// └── CompoundStmt         <- body
+/// ```
+fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
+    let mut initializers = Vec::new();
+
+    let children: Vec<_> = entity.get_children();
+    let mut i = 0;
+
+    while i < children.len() {
+        let child = &children[i];
+        let child_kind = child.get_kind();
+
+        // Once we hit the compound statement (body), stop looking
+        if child_kind == EntityKind::CompoundStmt {
+            break;
+        }
+
+        // MemberRef indicates a member being initialized
+        // The next sibling should be the initializer expression
+        if child_kind == EntityKind::MemberRef {
+            let member_name = child.get_name().unwrap_or_default();
+
+            // Get the next sibling as the initialization expression
+            let init_expr = if i + 1 < children.len() {
+                let next = &children[i + 1];
+                let next_kind = next.get_kind();
+                // Skip if next is another MemberRef or the body - means no initializer
+                if next_kind != EntityKind::MemberRef && next_kind != EntityKind::CompoundStmt {
+                    i += 1; // Consume the expression
+                    extract_expression_from_entity(next)
+                } else {
+                    Expression::Literal("unknown".to_string())
+                }
+            } else {
+                Expression::Literal("unknown".to_string())
+            };
+
+            // Check if the initializer is nullptr
+            let is_nullptr = match &init_expr {
+                Expression::Nullptr => true,
+                Expression::Literal(lit) => lit == "nullptr" || lit == "NULL" || lit == "0",
+                _ => false,
+            };
+
+            initializers.push(MemberInitializer {
+                member_name,
+                init_expression: init_expr,
+                is_nullptr,
+            });
+        }
+
+        i += 1;
+    }
+
+    initializers
+}
+
+/// Helper to extract an expression from an AST entity
+fn extract_expression_from_entity(entity: &Entity) -> Expression {
+    let kind = entity.get_kind();
+
+    match kind {
+        EntityKind::UnexposedExpr | EntityKind::ParenExpr => {
+            // Recurse into unexposed/paren expressions
+            let children = entity.get_children();
+            if let Some(child) = children.first() {
+                return extract_expression_from_entity(child);
+            }
+            Expression::Literal("unknown".to_string())
+        }
+        EntityKind::UnaryOperator => {
+            // Could be &x (address-of)
+            let children = entity.get_children();
+            if let Some(child) = children.first() {
+                let inner = extract_expression_from_entity(child);
+                // Check if this is address-of by looking at tokens
+                if let Some(range) = entity.get_range() {
+                    let tokens = range.tokenize();
+                    if let Some(first_token) = tokens.first() {
+                        if first_token.get_spelling() == "&" {
+                            return Expression::AddressOf(Box::new(inner));
+                        }
+                    }
+                }
+                return inner;
+            }
+            Expression::Literal("unknown".to_string())
+        }
+        EntityKind::DeclRefExpr => {
+            // Reference to a variable
+            let name = entity.get_name().unwrap_or_default();
+            if name == "nullptr" {
+                Expression::Nullptr
+            } else {
+                Expression::Variable(name)
+            }
+        }
+        EntityKind::IntegerLiteral => {
+            // Could be 0 (null) or other integer
+            if let Some(range) = entity.get_range() {
+                let tokens: Vec<_> = range.tokenize();
+                if let Some(token) = tokens.first() {
+                    let spelling = token.get_spelling();
+                    if spelling == "0" {
+                        return Expression::Literal("0".to_string());
+                    }
+                    return Expression::Literal(spelling);
+                }
+            }
+            Expression::Literal("0".to_string())
+        }
+        EntityKind::NullPtrLiteralExpr => {
+            Expression::Nullptr
+        }
+        EntityKind::CallExpr => {
+            // Function call
+            let name = entity.get_name().unwrap_or_else(|| "unknown".to_string());
+            Expression::FunctionCall {
+                name,
+                args: Vec::new(), // Simplified - don't extract args here
+            }
+        }
+        _ => {
+            Expression::Literal("unknown".to_string())
+        }
+    }
+}
+
 pub fn extract_function(entity: &Entity) -> Function {
     use crate::parser::safety_annotations::check_method_safety_annotation;
 
@@ -663,6 +819,21 @@ pub fn extract_function(entity: &Entity) -> Function {
         }
     };
 
+    // Check if this is a constructor
+    let is_constructor = entity.get_kind() == EntityKind::Constructor;
+
+    // Check for = delete and = default
+    let is_deleted = entity.get_availability() == clang::Availability::Unavailable
+                     || is_deleted_via_libclang(entity);
+    let is_defaulted = entity.is_defaulted();
+
+    // Extract member initializer list for constructors
+    let member_initializers = if is_constructor {
+        extract_member_initializers(entity)
+    } else {
+        Vec::new()
+    };
+
     Function {
         name,
         parameters,
@@ -675,6 +846,10 @@ pub fn extract_function(entity: &Entity) -> Function {
         template_parameters,
         safety_annotation,
         has_explicit_safety_annotation,
+        is_constructor,
+        is_deleted,
+        is_defaulted,
+        member_initializers,
     }
 }
 
@@ -724,6 +899,10 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut has_copy_assignment = false;
     let mut copy_constructor_deleted = false;
     let mut copy_assignment_deleted = false;
+    // Constructor tracking for pointer member safety
+    let mut has_user_defined_constructor = false;
+    let mut has_default_constructor = false;  // Will set to true if found, or compute based on ctors
+    let mut default_constructor_deleted = false;
 
     // LibClang's get_children() flattens the hierarchy and returns class members directly
     // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
@@ -774,6 +953,9 @@ pub fn extract_class(entity: &Entity) -> Class {
 
                 // Check for copy constructor
                 if child.get_kind() == EntityKind::Constructor {
+                    // Track that we have at least one user-defined constructor
+                    has_user_defined_constructor = true;
+
                     if child.is_copy_constructor() {
                         has_copy_constructor = true;
                         if is_deleted {
@@ -781,6 +963,22 @@ pub fn extract_class(entity: &Entity) -> Class {
                             debug_println!("DEBUG PARSE: Class '{}' has deleted copy constructor", name);
                         } else {
                             debug_println!("DEBUG PARSE: Class '{}' has copy constructor", name);
+                        }
+                    }
+
+                    // Check if this is a default constructor (no parameters or all defaulted)
+                    let is_default_ctor = child.is_default_constructor();
+                    if is_default_ctor {
+                        has_default_constructor = true;
+                        let ctor_is_deleted = child.get_availability() == clang::Availability::Unavailable
+                                              || is_deleted_via_libclang(&child);
+                        if ctor_is_deleted {
+                            default_constructor_deleted = true;
+                            debug_println!("DEBUG PARSE: Class '{}' has deleted default constructor", name);
+                        } else if child.is_defaulted() {
+                            debug_println!("DEBUG PARSE: Class '{}' has defaulted (= default) default constructor", name);
+                        } else {
+                            debug_println!("DEBUG PARSE: Class '{}' has user-defined default constructor", name);
                         }
                     }
                 }
@@ -869,9 +1067,17 @@ pub fn extract_class(entity: &Entity) -> Class {
         all_methods_pure_virtual = true;
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, destructor_is_defaulted={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={})",
+    // If no user-defined constructor at all, C++ implicitly generates a default constructor
+    // (unless there are member types that prevent it)
+    if !has_user_defined_constructor {
+        has_default_constructor = true;
+        debug_println!("DEBUG PARSE: Class '{}' has implicit default constructor (no user-defined ctors)", name);
+    }
+
+    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, destructor_is_defaulted={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={}), has_user_defined_ctor={}, has_default_ctor={}, default_ctor_deleted={}",
         name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, destructor_is_defaulted, all_methods_pure_virtual, has_non_virtual_methods,
-        has_copy_constructor, copy_constructor_deleted, has_copy_assignment, copy_assignment_deleted);
+        has_copy_constructor, copy_constructor_deleted, has_copy_assignment, copy_assignment_deleted,
+        has_user_defined_constructor, has_default_constructor, default_constructor_deleted);
 
     Class {
         name,
@@ -894,6 +1100,10 @@ pub fn extract_class(entity: &Entity) -> Class {
         has_copy_assignment,
         copy_constructor_deleted,
         copy_assignment_deleted,
+        // Constructor tracking for pointer member safety
+        has_user_defined_constructor,
+        has_default_constructor,
+        default_constructor_deleted,
     }
 }
 

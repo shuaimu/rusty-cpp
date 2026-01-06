@@ -249,6 +249,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     let inheritance_violations = analysis::inheritance_safety::check_inheritance_safety(&ast.classes);
     violations.extend(inheritance_violations);
 
+    // Check struct pointer member safety (pointer members must be non-null)
+    let struct_pointer_violations = analysis::struct_pointer_safety::check_struct_pointer_safety(&ast.classes);
+    violations.extend(struct_pointer_violations);
+
     // Build intermediate representation with safety context
     let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
 

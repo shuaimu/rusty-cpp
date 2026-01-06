@@ -16,7 +16,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -88,7 +88,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -163,7 +163,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -214,7 +214,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -252,7 +252,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -292,7 +292,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -337,7 +337,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -376,7 +376,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -417,7 +417,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -457,7 +457,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -498,7 +498,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -543,7 +543,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -582,7 +582,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -623,7 +623,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -662,7 +662,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -703,7 +703,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {
@@ -744,7 +744,7 @@ namespace std {
 }
 
 // @safe
-struct Box { int* ptr; };
+struct Box { int data; };  // Simple movable type for testing
 
 // @safe
 void test() {

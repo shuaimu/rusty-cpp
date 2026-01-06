@@ -111,6 +111,7 @@ pub mod initialization_tracking;
 pub mod pointer_provenance;
 pub mod alignment_safety;
 pub mod array_bounds;
+pub mod struct_pointer_safety;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

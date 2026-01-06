@@ -2128,6 +2128,10 @@ mod tests {
             template_parameters: vec![],
             safety_annotation: None,
             has_explicit_safety_annotation: false,
+            is_constructor: false,
+            is_deleted: false,
+            is_defaulted: false,
+            member_initializers: vec![],
         }
     }
 

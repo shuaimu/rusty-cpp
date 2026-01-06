@@ -638,6 +638,9 @@ mod tests {
             has_copy_assignment: false,
             copy_constructor_deleted: false,
             copy_assignment_deleted: false,
+            has_user_defined_constructor: false,
+            has_default_constructor: true,
+            default_constructor_deleted: false,
         }
     }
 
@@ -661,6 +664,9 @@ mod tests {
             has_copy_assignment: false,
             copy_constructor_deleted: false,
             copy_assignment_deleted: false,
+            has_user_defined_constructor: false,
+            has_default_constructor: true,
+            default_constructor_deleted: false,
         }
     }
 
