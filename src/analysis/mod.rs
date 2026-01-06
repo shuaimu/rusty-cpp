@@ -106,6 +106,11 @@ pub mod lambda_capture_safety;
 pub mod raii_tracking;
 pub mod inheritance_safety;
 pub mod function_pointer_safety;
+pub mod null_safety;
+pub mod initialization_tracking;
+pub mod pointer_provenance;
+pub mod alignment_safety;
+pub mod array_bounds;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

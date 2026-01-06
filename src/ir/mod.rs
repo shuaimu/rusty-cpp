@@ -782,7 +782,7 @@ fn extract_return_source(
             None
         }
 
-        Expression::Cast(inner) => {
+        Expression::Cast { inner, .. } => {
             // Cast: return static_cast<T>(x);
             // The source is whatever is being casted
             debug_println!("DEBUG IR: Return cast expression");
@@ -815,6 +815,13 @@ fn extract_return_source(
             // The source is the pointer being manipulated
             debug_println!("DEBUG IR: Return pointer arithmetic expression");
             extract_return_source(pointer, statements)
+        }
+
+        Expression::ArraySubscript { array, .. } => {
+            // Array subscript: return arr[i];
+            // The source is the array being accessed
+            debug_println!("DEBUG IR: Return array subscript expression");
+            extract_return_source(array, statements)
         }
     }
 }

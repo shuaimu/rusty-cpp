@@ -311,7 +311,7 @@ fn check_expression_for_std_move_on_ref(
         Expression::MemberAccess { object, .. } => {
             check_expression_for_std_move_on_ref(object, reference_vars, line)
         }
-        Expression::Cast(inner) => {
+        Expression::Cast { inner, .. } => {
             check_expression_for_std_move_on_ref(inner, reference_vars, line)
         }
         _ => None,
@@ -580,11 +580,27 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // For other cases, check object for pointer operations
             contains_pointer_operation(object)
         }
-        Expression::Cast(inner) => {
-            // C++ casts (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
-            // are all considered unsafe operations in @safe code
-            // Return "cast" as the operation type, but also check inner for other violations
-            Some("cast")
+        Expression::Cast { inner, kind, .. } => {
+            use crate::parser::CastKind;
+            // Check if this is an unsafe cast type
+            match kind {
+                CastKind::ReinterpretCast => Some("reinterpret_cast"),
+                CastKind::ConstCast => Some("const_cast"),
+                CastKind::CStyleCast => Some("C-style cast"),
+                CastKind::StaticCast => {
+                    // static_cast is safe for numeric conversions but unsafe for pointer type changes
+                    // For now, let it through and check inner expression
+                    contains_pointer_operation(inner)
+                }
+                CastKind::DynamicCast => {
+                    // dynamic_cast is runtime-checked and generally safe
+                    contains_pointer_operation(inner)
+                }
+                CastKind::ImplicitCast => {
+                    // Implicit casts are compiler-generated and safe
+                    contains_pointer_operation(inner)
+                }
+            }
         }
         Expression::StringLiteral(_) => {
             // String literals have static lifetime and cannot dangle
@@ -627,6 +643,13 @@ fn contains_pointer_operation(expr: &Expression) -> Option<&'static str> {
             // Pointer arithmetic is unsafe - can cause out-of-bounds access
             // Use iterators or safe containers instead
             Some("pointer arithmetic")
+        }
+        Expression::ArraySubscript { array, index } => {
+            // Array subscript - check both array and index for pointer operations
+            if let Some(op) = contains_pointer_operation(array) {
+                return Some(op);
+            }
+            contains_pointer_operation(index)
         }
     }
 }

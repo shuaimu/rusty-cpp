@@ -393,7 +393,7 @@ fn check_expression_safety(
         Expression::MemberAccess { object, .. } => {
             errors.extend(check_expression_safety(object, method_name, class_name, interface_name));
         }
-        Expression::Cast(inner) => {
+        Expression::Cast { inner, .. } => {
             // Cast operations could be unsafe depending on the cast type
             // For now, just check the inner expression
             errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
@@ -427,6 +427,11 @@ fn check_expression_safety(
                 class_name, method_name, strip_template_params(interface_name)
             ));
             errors.extend(check_expression_safety(pointer, method_name, class_name, interface_name));
+        }
+        Expression::ArraySubscript { array, index } => {
+            // Check both array and index for unsafe operations
+            errors.extend(check_expression_safety(array, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(index, method_name, class_name, interface_name));
         }
         // Variable references, literals, string literals, and nullptr are safe expressions
         // String literals have static lifetime and cannot dangle

@@ -474,6 +474,23 @@ pub enum MoveKind {
     RustyMove,
 }
 
+/// C++ cast kinds for type safety checking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastKind {
+    /// static_cast<T>(expr) - generally safe for numeric conversions and upcasts
+    StaticCast,
+    /// dynamic_cast<T>(expr) - safe, runtime checked for downcasts
+    DynamicCast,
+    /// reinterpret_cast<T>(expr) - unsafe, bit-level reinterpretation
+    ReinterpretCast,
+    /// const_cast<T>(expr) - unsafe, removes const/volatile qualifiers
+    ConstCast,
+    /// C-style cast (T)expr - unsafe, can perform any of the above
+    CStyleCast,
+    /// Implicit cast by the compiler - generally safe
+    ImplicitCast,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Expression {
@@ -508,8 +525,12 @@ pub enum Expression {
         captures: Vec<LambdaCaptureKind>,
     },
     // C++ cast expression (static_cast, dynamic_cast, reinterpret_cast, const_cast, C-style)
-    // All casts are considered unsafe operations in @safe code
-    Cast(Box<Expression>),
+    // Some casts are unsafe operations in @safe code
+    Cast {
+        inner: Box<Expression>,
+        kind: CastKind,
+        target_type: Option<String>,
+    },
     /// Null pointer literal (nullptr, NULL, 0 in pointer context)
     /// This is forbidden in @safe code - use Option<T*> for nullable pointers
     Nullptr,
@@ -524,6 +545,12 @@ pub enum Expression {
     PointerArithmetic {
         pointer: Box<Expression>,
         op: String,
+    },
+    /// Array subscript expression (arr[i], data[idx])
+    /// Used for tracking array bounds checking
+    ArraySubscript {
+        array: Box<Expression>,
+        index: Box<Expression>,
     },
 }
 
@@ -1533,6 +1560,79 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     statements
 }
 
+/// Binary operators that we recognize
+const BINARY_OPERATORS: &[&str] = &[
+    // Multi-character operators (check these first)
+    "!=", "==", ">=", "<=", "&&", "||",
+    "<<=", ">>=",
+    "+=", "-=", "*=", "/=", "%=",
+    "&=", "|=", "^=",
+    "<<", ">>",
+    // Single-character operators (check after multi-char)
+    ">", "<",
+    "&", "|", "^",
+    "+", "-", "*", "/", "%",
+    "=",
+];
+
+/// Check if a string is a binary operator
+fn is_binary_operator(s: &str) -> bool {
+    BINARY_OPERATORS.contains(&s)
+}
+
+/// Extract operator from binary operator display name
+/// In clang, binary operators often have display names like "operator!=" or contain
+/// the actual source tokens. This function extracts the operator symbol.
+fn extract_operator_from_display(display: &str) -> Option<String> {
+    for op in BINARY_OPERATORS {
+        if display.contains(op) {
+            return Some(op.to_string());
+        }
+    }
+    None
+}
+
+/// Extract a cast expression with the given cast kind
+fn extract_cast_expression(entity: &Entity, kind: CastKind) -> Option<Expression> {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+
+    // Extract the target type from TypeRef child
+    let mut target_type = None;
+    for child in &children {
+        if child.get_kind() == EntityKind::TypeRef {
+            target_type = child.get_name();
+            break;
+        }
+    }
+
+    // Also try to get the type from the entity itself
+    if target_type.is_none() {
+        if let Some(ty) = entity.get_type() {
+            target_type = Some(type_to_string(&ty));
+        }
+    }
+
+    // Find the expression being cast (not the type reference)
+    for child in &children {
+        if child.get_kind() != EntityKind::TypeRef {
+            if let Some(inner_expr) = extract_expression(child) {
+                return Some(Expression::Cast {
+                    inner: Box::new(inner_expr),
+                    kind,
+                    target_type,
+                });
+            }
+        }
+    }
+
+    // If we couldn't extract inner expression, create one with just Literal
+    Some(Expression::Cast {
+        inner: Box::new(Expression::Literal("<unknown>".to_string())),
+        kind,
+        target_type,
+    })
+}
+
 fn extract_expression(entity: &Entity) -> Option<Expression> {
     match entity.get_kind() {
         EntityKind::DeclRefExpr => {
@@ -1912,11 +2012,36 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         EntityKind::BinaryOperator => {
             // Extract binary operation (e.g., i < 2, x == 0)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            debug_println!("DEBUG: BinaryOperator - name={:?}, display_name={:?}",
+                          entity.get_name(), entity.get_display_name());
             if children.len() == 2 {
                 if let (Some(left), Some(right)) =
                     (extract_expression(&children[0]), extract_expression(&children[1])) {
-                    // Try to get the operator from the entity's spelling
-                    let op = entity.get_name().unwrap_or_else(|| "==".to_string());
+                    // Try multiple methods to get the operator
+                    let op = {
+                        // Method 1: Try tokenizing the source range to find the operator
+                        let mut found_op = None;
+                        if let Some(range) = entity.get_range() {
+                            let tokens = range.tokenize();
+                            debug_println!("DEBUG: BinaryOperator tokens: {:?}",
+                                          tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>());
+                            for token in tokens {
+                                let spelling = token.get_spelling();
+                                if is_binary_operator(&spelling) {
+                                    found_op = Some(spelling);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Method 2: Try display_name
+                        found_op.or_else(|| entity.get_display_name()
+                            .and_then(|d| extract_operator_from_display(&d)))
+                        // Method 3: Fall back to name
+                        .or_else(|| entity.get_name())
+                        // Default to "?" if nothing works
+                        .unwrap_or_else(|| "?".to_string())
+                    };
 
                     // Check for pointer arithmetic (p + n, p - n, p += n, p -= n)
                     // Pointer arithmetic is when one operand is a pointer and the operator is +, -, +=, -=
@@ -2008,27 +2133,22 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             }
             None
         }
-        // C++ cast expressions - extract the inner expression
+        // C++ cast expressions - extract the inner expression with cast kind
         // static_cast<T*>(ptr), dynamic_cast<T*>(ptr), reinterpret_cast<T*>(ptr), const_cast<T*>(ptr)
-        // These are transparent for borrow checking - we care about what's being cast
-        EntityKind::StaticCastExpr
-        | EntityKind::DynamicCastExpr
-        | EntityKind::ReinterpretCastExpr
-        | EntityKind::ConstCastExpr
-        | EntityKind::CStyleCastExpr => {
-            // C++ cast expressions are unsafe operations in @safe code
-            // Wrap the inner expression in Cast to track this
-            let children: Vec<Entity> = entity.get_children().into_iter().collect();
-            // Find the expression being cast (not the type reference)
-            for child in &children {
-                if child.get_kind() != EntityKind::TypeRef {
-                    if let Some(inner_expr) = extract_expression(child) {
-                        return Some(Expression::Cast(Box::new(inner_expr)));
-                    }
-                }
-            }
-            // Even if we can't extract the inner expression, the cast itself is unsafe
-            None
+        EntityKind::StaticCastExpr => {
+            extract_cast_expression(entity, CastKind::StaticCast)
+        }
+        EntityKind::DynamicCastExpr => {
+            extract_cast_expression(entity, CastKind::DynamicCast)
+        }
+        EntityKind::ReinterpretCastExpr => {
+            extract_cast_expression(entity, CastKind::ReinterpretCast)
+        }
+        EntityKind::ConstCastExpr => {
+            extract_cast_expression(entity, CastKind::ConstCast)
+        }
+        EntityKind::CStyleCastExpr => {
+            extract_cast_expression(entity, CastKind::CStyleCast)
         }
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&), dereference (*), or pointer increment/decrement (++, --)
@@ -2326,28 +2446,36 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // Array subscript: arr[i], data[idx], ptr[n], etc.
             // The first child is the array/pointer, second is the index
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
-            if !children.is_empty() {
-                // Check if the base is a pointer type (pointer subscript = pointer arithmetic)
-                if let Some(base_type) = children[0].get_type() {
-                    let type_str = type_to_string(&base_type);
-                    // If base is a pointer (not an array), this is pointer arithmetic
-                    // Arrays have types like "int [10]" while pointers have "int *"
-                    if type_str.contains('*') && !type_str.contains('[') {
-                        if let Some(ptr_expr) = extract_expression(&children[0]) {
-                            debug_println!("DEBUG: Pointer subscript detected: {:?}[...]", ptr_expr);
+            if children.len() >= 2 {
+                let array_expr = extract_expression(&children[0]);
+                let index_expr = extract_expression(&children[1]);
+
+                if let (Some(array), Some(index)) = (array_expr, index_expr) {
+                    // Check if the base is a pointer type (pointer subscript = pointer arithmetic)
+                    if let Some(base_type) = children[0].get_type() {
+                        let type_str = type_to_string(&base_type);
+                        // If base is a pointer (not an array), this is pointer arithmetic
+                        // Arrays have types like "int [10]" while pointers have "int *"
+                        if type_str.contains('*') && !type_str.contains('[') {
+                            debug_println!("DEBUG: Pointer subscript detected: {:?}[...]", array);
                             return Some(Expression::PointerArithmetic {
-                                pointer: Box::new(ptr_expr),
+                                pointer: Box::new(array),
                                 op: "[]".to_string(),
                             });
                         }
                     }
-                }
 
-                // For arrays, return the array expression as the source for lifetime tracking
+                    // For actual arrays, return ArraySubscript for bounds checking
+                    debug_println!("DEBUG: ArraySubscriptExpr - array: {:?}, index: {:?}", array, index);
+                    return Some(Expression::ArraySubscript {
+                        array: Box::new(array),
+                        index: Box::new(index),
+                    });
+                }
+            } else if !children.is_empty() {
+                // Fallback: return just the array expression
                 if let Some(array_expr) = extract_expression(&children[0]) {
-                    debug_println!("DEBUG: ArraySubscriptExpr - array/pointer source: {:?}", array_expr);
-                    // Return the array expression as the source
-                    // This handles cases like data[i] returning reference to member data
+                    debug_println!("DEBUG: ArraySubscriptExpr (fallback) - array: {:?}", array_expr);
                     return Some(array_expr);
                 }
             }

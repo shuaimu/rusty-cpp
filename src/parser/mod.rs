@@ -9,7 +9,7 @@ pub mod template_context;
 pub mod type_annotations;
 pub mod external_annotations;
 
-pub use ast_visitor::{CppAst, Function, Statement, Expression, MethodQualifier, MoveKind};
+pub use ast_visitor::{CppAst, Function, Statement, Expression, MethodQualifier, MoveKind, CastKind};
 pub use header_cache::HeaderCache;
 pub use template_context::TemplateContext;
 #[allow(unused_imports)]

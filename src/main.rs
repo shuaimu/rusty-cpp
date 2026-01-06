@@ -197,6 +197,26 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function, function_safety);
             violations.extend(pointer_errors);
 
+            // Check for null safety (dereferencing potentially null pointers)
+            let null_errors = analysis::null_safety::check_null_safety(function, function_safety);
+            violations.extend(null_errors);
+
+            // Check for initialization safety (use of uninitialized variables)
+            let init_errors = analysis::initialization_tracking::check_initialization_safety(function, function_safety);
+            violations.extend(init_errors);
+
+            // Check for pointer provenance (pointer subtraction/comparison between different allocations)
+            let provenance_errors = analysis::pointer_provenance::check_pointer_provenance(function, function_safety);
+            violations.extend(provenance_errors);
+
+            // Check for alignment safety (misaligned pointer access)
+            let alignment_errors = analysis::alignment_safety::check_alignment_safety(function, function_safety);
+            violations.extend(alignment_errors);
+
+            // Check for array bounds safety (out-of-bounds access)
+            let bounds_errors = analysis::array_bounds::check_array_bounds(function, function_safety);
+            violations.extend(bounds_errors);
+
             // Check for std::move on references (forbidden in @safe code)
             let std_move_errors = analysis::pointer_safety::check_std_move_on_references(function, function_safety);
             violations.extend(std_move_errors);
