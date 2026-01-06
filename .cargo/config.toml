@@ -1,21 +1,8 @@
-[env]
-# Z3 header location - automatically determined based on OS
-# Override with: Z3_SYS_Z3_HEADER=/path/to/z3.h
-# For macOS with Homebrew: /opt/homebrew/include/z3.h
-# For Linux (standard location): /usr/include/z3.h
-Z3_SYS_Z3_HEADER = "/usr/include/z3.h"
-
-# LLVM/Clang configuration:
-# The clang-sys crate will automatically find libclang in standard locations.
-# If you have LLVM installed in a non-standard location, set one of:
-#   LIBCLANG_PATH=/path/to/lib       (directory containing libclang.so/dylib)
-#   LLVM_CONFIG_PATH=/path/to/llvm-config
-#
-# Supported versions: LLVM/Clang 16.0 and later
+# Z3 is bundled via gh-release feature - no manual installation needed!
+# LLVM/Clang is auto-detected by clang-sys at build time.
 
 [target.aarch64-apple-darwin]
 # macOS ARM64 (Apple Silicon) specific settings
-# Searches: Homebrew LLVM, Xcode CLT, system paths
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,@executable_path/../lib",
     "-C", "link-arg=-Wl,-rpath,@loader_path/../lib",
@@ -34,7 +21,6 @@ rustflags = [
 
 [target.x86_64-unknown-linux-gnu]
 # Linux x86_64 settings
-# Searches standard LLVM paths (/usr/lib/llvm-*/lib)
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,$ORIGIN/../lib",
     "-C", "link-arg=-Wl,-rpath,/usr/lib/llvm/lib",
@@ -49,7 +35,6 @@ rustflags = [
     "-C", "link-arg=-Wl,-rpath,/usr/local/lib"
 ]
 
-# Profile for release builds - optimize for portability
 [profile.release]
 lto = true
 codegen-units = 1

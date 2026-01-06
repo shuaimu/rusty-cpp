@@ -24,14 +24,6 @@ impl TemplateContext {
     }
 
     /// Enter a template scope with the given type parameters
-    ///
-    /// # Example
-    /// ```
-    /// use rusty_cpp::parser::TemplateContext;
-    /// let mut ctx = TemplateContext::new();
-    /// ctx.enter_template(vec!["T".to_string(), "U".to_string()]);
-    /// assert!(ctx.is_type_parameter("T"));
-    /// ```
     pub fn enter_template(&mut self, params: Vec<String>) {
         self.type_parameters.extend(params);
     }

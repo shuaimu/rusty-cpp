@@ -107,12 +107,12 @@ cd rusty-cpp
 **Prerequisites** (must be installed before building):
 - **Rust**: 1.70+
 - **LLVM/Clang**: 16+ (for parsing C++)
-- **Z3**: 4.8+ (for constraint solving)
+- **Z3**: Bundled automatically (no manual installation needed)
 
 ##### macOS
 
 ```bash
-brew install llvm z3
+brew install llvm
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 cargo build --release
@@ -121,7 +121,7 @@ cargo build --release
 ##### Linux (Ubuntu/Debian)
 
 ```bash
-sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
+sudo apt-get install llvm-16-dev libclang-16-dev clang-16
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 cargo build --release
@@ -131,9 +131,7 @@ cargo build --release
 
 ```bash
 # Install LLVM from https://releases.llvm.org/
-# Install Z3 from https://github.com/Z3Prover/z3/releases
 set LIBCLANG_PATH=C:\Program Files\LLVM\lib
-set Z3_SYS_Z3_HEADER=C:\z3\include\z3.h
 cargo build --release
 ```
 
@@ -172,12 +170,11 @@ See [RELEASE.md](RELEASE.md) for details on building and distributing standalone
 
 #### Environment Setup (macOS)
 
-For convenience, add these to your shell profile:
+No environment variables required! Z3 is bundled automatically, and LLVM is auto-detected at build time.
 
+If LLVM is in a non-standard location, you can optionally set:
 ```bash
-# ~/.zshrc or ~/.bashrc
-export Z3_SYS_Z3_HEADER=/opt/homebrew/opt/z3/include/z3.h
-export DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib:$DYLD_LIBRARY_PATH
+export LIBCLANG_PATH=/path/to/llvm/lib
 ```
 
 ### 🛡️ Safety System

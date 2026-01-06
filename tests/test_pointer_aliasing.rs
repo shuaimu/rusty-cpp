@@ -4,11 +4,12 @@ use std::process::Command;
 use std::fs;
 
 fn run_checker(code: &str) -> String {
-    let temp_file = format!("/tmp/test_pointer_aliasing_{}.cpp",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos());
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let thread_id = format!("{:?}", std::thread::current().id());
+    let temp_file = format!("/tmp/test_pointer_aliasing_{}_{}.cpp", unique_id, thread_id);
 
     fs::write(&temp_file, code).unwrap();
 

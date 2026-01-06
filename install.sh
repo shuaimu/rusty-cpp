@@ -3,6 +3,7 @@
 # rusty-cpp installer
 #
 # This script installs system dependencies and builds rusty-cpp from source.
+# Z3 is automatically downloaded during build (no manual installation needed).
 #
 # Supported platforms:
 #   - macOS (via Homebrew)
@@ -118,15 +119,13 @@ install_macos() {
         error "Homebrew is required. Install it from https://brew.sh"
     fi
 
-    info "Installing LLVM and Z3 via Homebrew..."
-    brew install llvm z3
+    info "Installing LLVM via Homebrew (Z3 is bundled automatically)..."
+    brew install llvm
 
-    # Set up environment for clang and z3
+    # Set up environment for clang
     LLVM_PREFIX=$(brew --prefix llvm)
-    Z3_PREFIX=$(brew --prefix z3)
     export LLVM_CONFIG_PATH="$LLVM_PREFIX/bin/llvm-config"
     export LIBCLANG_PATH="$LLVM_PREFIX/lib"
-    export Z3_SYS_Z3_HEADER="$Z3_PREFIX/include/z3.h"
 
     success "Dependencies installed"
 
@@ -134,7 +133,6 @@ install_macos() {
     warn "Add these to your shell profile (~/.zshrc or ~/.bashrc):"
     echo "  export LLVM_CONFIG_PATH=\"$LLVM_PREFIX/bin/llvm-config\""
     echo "  export LIBCLANG_PATH=\"$LLVM_PREFIX/lib\""
-    echo "  export Z3_SYS_Z3_HEADER=\"$Z3_PREFIX/include/z3.h\""
     echo ""
 }
 
@@ -164,12 +162,11 @@ install_debian() {
     sudo ./llvm.sh 16"
     fi
 
-    info "Installing LLVM $LLVM_VERSION and Z3..."
+    info "Installing LLVM $LLVM_VERSION (Z3 is bundled automatically)..."
     $SUDO apt-get install -y \
         llvm-${LLVM_VERSION}-dev \
         libclang-${LLVM_VERSION}-dev \
         clang-${LLVM_VERSION} \
-        libz3-dev \
         pkg-config \
         build-essential
 
@@ -185,12 +182,11 @@ install_fedora() {
     info "Detected Fedora"
     check_sudo
 
-    info "Installing LLVM and Z3..."
+    info "Installing LLVM (Z3 is bundled automatically)..."
     $SUDO dnf install -y \
         llvm-devel \
         clang-devel \
         clang-libs \
-        z3-devel \
         pkg-config \
         gcc \
         gcc-c++
@@ -218,12 +214,11 @@ install_centos() {
         $SUDO dnf config-manager --set-enabled crb 2>/dev/null || \
         warn "Could not enable PowerTools/CRB repo"
 
-        info "Installing LLVM and Z3..."
+        info "Installing LLVM (Z3 is bundled automatically)..."
         $SUDO dnf install -y \
             llvm-devel \
             clang-devel \
             clang-libs \
-            z3-devel \
             pkg-config \
             gcc \
             gcc-c++
@@ -239,11 +234,10 @@ install_arch() {
     info "Detected Arch Linux"
     check_sudo
 
-    info "Installing LLVM and Z3..."
+    info "Installing LLVM (Z3 is bundled automatically)..."
     $SUDO pacman -Sy --needed --noconfirm \
         llvm \
         clang \
-        z3 \
         pkgconf \
         base-devel
 
@@ -326,7 +320,6 @@ main() {
         unknown)
             error "Unsupported operating system. Please install dependencies manually:
   - LLVM/Clang 16+ with development headers
-  - Z3 SMT solver with development headers
   - Rust toolchain
 
 Then run: cargo install rusty-cpp"

@@ -1,15 +1,15 @@
-use z3::{Context, Solver};
+use z3::Solver;
 use std::collections::HashMap;
 
 #[allow(dead_code)]
-pub struct ConstraintSolver<'ctx> {
-    solver: Solver<'ctx>,
+pub struct ConstraintSolver {
+    solver: Solver,
 }
 
-impl<'ctx> ConstraintSolver<'ctx> {
+impl ConstraintSolver {
     #[allow(dead_code)]
-    pub fn new(context: &'ctx Context) -> Self {
-        let solver = Solver::new(context);
+    pub fn new() -> Self {
+        let solver = Solver::new();
         Self { solver }
     }
     
