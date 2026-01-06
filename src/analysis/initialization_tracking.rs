@@ -174,9 +174,14 @@ fn analyze_statement_init(
 
             // Heuristic: if the variable is a reference or has a complex type, assume initialized
             // Otherwise, mark as uninitialized
+            //
+            // Class/struct types are considered initialized because their constructor is called
+            // even for `Container c;` declarations. Only primitive types without initializers
+            // are truly uninitialized in C++.
             let is_initialized = var.is_reference ||
                                  var.type_name.contains('=') ||
-                                 !var.type_name.is_empty() && var.is_const;
+                                 (!var.type_name.is_empty() && var.is_const) ||
+                                 is_class_or_struct_type(&var.type_name);
 
             tracker.declare(&var.name, is_initialized);
         }
@@ -364,6 +369,67 @@ fn extract_var_name(expr: &Expression) -> Option<String> {
         Expression::Move { inner, .. } => extract_var_name(inner),
         _ => None,
     }
+}
+
+/// Check if a type is a class or struct type (not a primitive)
+/// Class/struct types are initialized by their constructor, so they should be
+/// considered initialized even without an explicit initializer.
+fn is_class_or_struct_type(type_name: &str) -> bool {
+    // Strip qualifiers and modifiers
+    let clean_type = type_name
+        .replace("const ", "")
+        .replace("volatile ", "")
+        .replace("&", "")
+        .replace("*", "")
+        .trim()
+        .to_string();
+
+    // Primitive types that are NOT initialized by default
+    let primitives = [
+        "int", "unsigned int", "signed int",
+        "short", "unsigned short", "signed short",
+        "long", "unsigned long", "signed long",
+        "long long", "unsigned long long", "signed long long",
+        "char", "unsigned char", "signed char",
+        "float", "double", "long double",
+        "bool",
+        "void",
+        "size_t", "ssize_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "intptr_t", "uintptr_t",
+        "ptrdiff_t",
+    ];
+
+    // If it's a primitive, it's NOT a class/struct
+    if primitives.iter().any(|p| clean_type == *p) {
+        return false;
+    }
+
+    // If it's empty, assume not initialized
+    if clean_type.is_empty() {
+        return false;
+    }
+
+    // STL types that have constructors
+    if clean_type.starts_with("std::") {
+        return true;
+    }
+
+    // If it starts with an uppercase letter, likely a user-defined type
+    // This is a heuristic - most C++ class names start with uppercase
+    if clean_type.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+        return true;
+    }
+
+    // Template types are typically classes
+    if clean_type.contains('<') {
+        return true;
+    }
+
+    // Default: assume it's a class type if it's not a recognized primitive
+    // This errs on the side of not flagging false positives
+    true
 }
 
 #[cfg(test)]

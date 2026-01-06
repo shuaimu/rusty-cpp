@@ -267,22 +267,29 @@ fn check_expr_null_safety(
         Expression::Dereference(inner) => {
             // Check what we're dereferencing
             if let Some(var_name) = extract_var_name_from_expr(inner) {
-                let state = tracker.get_state(&var_name);
-                match state {
-                    NullState::MaybeNull => {
-                        errors.push(format!(
-                            "In function '{}': Dereferencing potentially null pointer '{}' - add null check first",
-                            func_name, var_name
-                        ));
-                    }
-                    NullState::Null => {
-                        errors.push(format!(
-                            "In function '{}': Dereferencing null pointer '{}'",
-                            func_name, var_name
-                        ));
-                    }
-                    NullState::NonNull => {
-                        // OK
+                // Special case: 'this' is always non-null in C++ (guaranteed by the language)
+                // Calling a method on a null pointer is undefined behavior, so we can assume
+                // that if we're in a method, 'this' is valid.
+                if var_name == "this" {
+                    // OK - 'this' is always non-null
+                } else {
+                    let state = tracker.get_state(&var_name);
+                    match state {
+                        NullState::MaybeNull => {
+                            errors.push(format!(
+                                "In function '{}': Dereferencing potentially null pointer '{}' - add null check first",
+                                func_name, var_name
+                            ));
+                        }
+                        NullState::Null => {
+                            errors.push(format!(
+                                "In function '{}': Dereferencing null pointer '{}'",
+                                func_name, var_name
+                            ));
+                        }
+                        NullState::NonNull => {
+                            // OK
+                        }
                     }
                 }
             }
