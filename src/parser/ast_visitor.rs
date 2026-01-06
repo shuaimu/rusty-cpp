@@ -2020,16 +2020,22 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     // Try multiple methods to get the operator
                     let op = {
                         // Method 1: Try tokenizing the source range to find the operator
+                        // NOTE: Skip tokenization for entities in system headers to avoid crashes
+                        // from invalid source ranges (libclang can return null pointers for system
+                        // header source locations)
                         let mut found_op = None;
                         if let Some(range) = entity.get_range() {
-                            let tokens = range.tokenize();
-                            debug_println!("DEBUG: BinaryOperator tokens: {:?}",
-                                          tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>());
-                            for token in tokens {
-                                let spelling = token.get_spelling();
-                                if is_binary_operator(&spelling) {
-                                    found_op = Some(spelling);
-                                    break;
+                            // Only tokenize if not in a system header (avoids crashes)
+                            if !range.is_in_system_header() {
+                                let tokens = range.tokenize();
+                                debug_println!("DEBUG: BinaryOperator tokens: {:?}",
+                                              tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>());
+                                for token in tokens {
+                                    let spelling = token.get_spelling();
+                                    if is_binary_operator(&spelling) {
+                                        found_op = Some(spelling);
+                                        break;
+                                    }
                                 }
                             }
                         }

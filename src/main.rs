@@ -362,10 +362,21 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
         Some(clang) => {
             // First, add the Clang resource directory for built-in headers (stdarg.h, etc.)
             // This is essential for LibClang to parse code that includes standard headers
-            if let Ok(output) = std::process::Command::new(&clang.path)
+            //
+            // IMPORTANT: We need to use the resource directory that matches the actual libclang
+            // version being linked, not the clang binary on PATH. The clang binary and libclang
+            // can be different versions (e.g., clang-14 on PATH but libclang-16 linked).
+            //
+            // Try to detect the actual libclang version and use its resource directory.
+            if let Some(resource_include) = find_libclang_resource_include() {
+                if !paths.contains(&resource_include) {
+                    paths.push(resource_include);
+                }
+            } else if let Ok(output) = std::process::Command::new(&clang.path)
                 .arg("-print-resource-dir")
                 .output()
             {
+                // Fallback: use clang binary's resource dir
                 if output.status.success() {
                     let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let builtin_include = PathBuf::from(&resource_dir).join("include");
@@ -397,6 +408,11 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
                 }
             }
 
+            // Add system C include paths that are needed for libc headers (stdint.h, etc.)
+            // clang_sys only provides C++ paths, but we also need the C library paths
+            // for headers like bits/stdint-intn.h which define int8_t, int16_t, etc.
+            add_system_c_include_paths(&mut paths);
+
             if !paths.is_empty() {
                 eprintln!("Auto-detected {} C++ include path(s)", paths.len());
             }
@@ -404,9 +420,100 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
         None => {
             // Clang not found - this is okay, user can specify paths manually
             debug_println!("DEBUG: Could not find clang installation for auto-detecting include paths");
+            // Still try to add system C paths even without clang
+            add_system_c_include_paths(&mut paths);
         }
     }
 
     paths
+}
+
+/// Find the resource include directory for the actual libclang being linked
+/// This handles the case where clang binary version differs from libclang version
+fn find_libclang_resource_include() -> Option<PathBuf> {
+    // Try to find libclang version by checking common LLVM installation paths
+    // Search for the newest version first (higher versions are typically more compatible)
+    for version in (14..=20).rev() {
+        // Try versioned path (e.g., /usr/lib/llvm-16/lib/clang/16/include)
+        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
+        if versioned_path.exists() {
+            // Verify this version's libclang is actually what we're linked against
+            let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
+            let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
+            if libclang_path.exists() || libclang_path_alt.exists() {
+                return Some(versioned_path);
+            }
+        }
+
+        // Also try the format with full version (e.g., /usr/lib/llvm-14/lib/clang/14.0.6/include)
+        for minor in (0..=9).rev() {
+            for patch in (0..=9).rev() {
+                let full_version_path = PathBuf::from(format!(
+                    "/usr/lib/llvm-{}/lib/clang/{}.{}.{}/include",
+                    version, version, minor, patch
+                ));
+                if full_version_path.exists() {
+                    let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
+                    let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
+                    if libclang_path.exists() || libclang_path_alt.exists() {
+                        return Some(full_version_path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Try to find any clang resource directory
+    for version in (14..=20).rev() {
+        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
+        if versioned_path.exists() {
+            return Some(versioned_path);
+        }
+    }
+
+    None
+}
+
+/// Add system C include paths needed for libc headers (stdint.h, etc.)
+/// These paths are typically used as -internal-externc-isystem by clang
+fn add_system_c_include_paths(paths: &mut Vec<PathBuf>) {
+    // Platform-specific system include paths
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: need architecture-specific include path for bits/ headers
+        let arch_include = PathBuf::from("/usr/include/x86_64-linux-gnu");
+        if arch_include.exists() && !paths.contains(&arch_include) {
+            paths.push(arch_include);
+        }
+
+        // Also try aarch64 for ARM64
+        let arm_include = PathBuf::from("/usr/include/aarch64-linux-gnu");
+        if arm_include.exists() && !paths.contains(&arm_include) {
+            paths.push(arm_include);
+        }
+
+        // Generic /usr/include (lower priority, add last)
+        let usr_include = PathBuf::from("/usr/include");
+        if usr_include.exists() && !paths.contains(&usr_include) {
+            paths.push(usr_include);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Xcode SDK paths
+        if let Ok(output) = std::process::Command::new("xcrun")
+            .args(["--show-sdk-path"])
+            .output()
+        {
+            if output.status.success() {
+                let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let sdk_include = PathBuf::from(&sdk_path).join("usr/include");
+                if sdk_include.exists() && !paths.contains(&sdk_include) {
+                    paths.push(sdk_include);
+                }
+            }
+        }
+    }
 }
 

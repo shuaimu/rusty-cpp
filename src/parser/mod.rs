@@ -52,7 +52,7 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     for include_path in include_paths {
         args.push(format!("-I{}", include_path.display()));
     }
-    
+
     // Add preprocessor definitions
     for define in defines {
         args.push(format!("-D{}", define));
