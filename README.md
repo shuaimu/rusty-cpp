@@ -107,12 +107,12 @@ cd rusty-cpp
 **Prerequisites** (must be installed before building):
 - **Rust**: 1.70+
 - **LLVM/Clang**: 16+ (for parsing C++)
-- **Z3**: Bundled automatically (no manual installation needed)
+- **Z3**: 4.8+ (constraint solver)
 
 ##### macOS
 
 ```bash
-brew install llvm
+brew install llvm z3
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 cargo build --release
@@ -121,7 +121,7 @@ cargo build --release
 ##### Linux (Ubuntu/Debian)
 
 ```bash
-sudo apt-get install llvm-16-dev libclang-16-dev clang-16
+sudo apt-get install llvm-16-dev libclang-16-dev clang-16 libz3-dev
 git clone https://github.com/shuaimu/rusty-cpp
 cd rusty-cpp
 cargo build --release
@@ -170,11 +170,12 @@ See [RELEASE.md](RELEASE.md) for details on building and distributing standalone
 
 #### Environment Setup (macOS)
 
-No environment variables required! Z3 is bundled automatically, and LLVM is auto-detected at build time.
+No environment variables required! Both Z3 and LLVM are auto-detected via pkg-config at build time.
 
-If LLVM is in a non-standard location, you can optionally set:
+If dependencies are in non-standard locations, you can optionally set:
 ```bash
 export LIBCLANG_PATH=/path/to/llvm/lib
+export Z3_SYS_Z3_HEADER=/path/to/z3.h
 ```
 
 ### 🛡️ Safety System

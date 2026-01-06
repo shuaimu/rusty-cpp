@@ -1,5 +1,5 @@
-# Z3 is bundled via gh-release feature - no manual installation needed!
-# LLVM/Clang is auto-detected by clang-sys at build time.
+# Z3 and LLVM/Clang are auto-detected via pkg-config at build time.
+# Install via: brew install llvm z3 (macOS) or apt install libz3-dev (Linux)
 
 [target.aarch64-apple-darwin]
 # macOS ARM64 (Apple Silicon) specific settings

@@ -119,8 +119,8 @@ install_macos() {
         error "Homebrew is required. Install it from https://brew.sh"
     fi
 
-    info "Installing LLVM via Homebrew (Z3 is bundled automatically)..."
-    brew install llvm
+    info "Installing LLVM and Z3 via Homebrew..."
+    brew install llvm z3
 
     # Set up environment for clang
     LLVM_PREFIX=$(brew --prefix llvm)
@@ -162,11 +162,12 @@ install_debian() {
     sudo ./llvm.sh 16"
     fi
 
-    info "Installing LLVM $LLVM_VERSION (Z3 is bundled automatically)..."
+    info "Installing LLVM $LLVM_VERSION and Z3..."
     $SUDO apt-get install -y \
         llvm-${LLVM_VERSION}-dev \
         libclang-${LLVM_VERSION}-dev \
         clang-${LLVM_VERSION} \
+        libz3-dev \
         pkg-config \
         build-essential
 
@@ -182,11 +183,12 @@ install_fedora() {
     info "Detected Fedora"
     check_sudo
 
-    info "Installing LLVM (Z3 is bundled automatically)..."
+    info "Installing LLVM and Z3..."
     $SUDO dnf install -y \
         llvm-devel \
         clang-devel \
         clang-libs \
+        z3-devel \
         pkg-config \
         gcc \
         gcc-c++
@@ -214,11 +216,12 @@ install_centos() {
         $SUDO dnf config-manager --set-enabled crb 2>/dev/null || \
         warn "Could not enable PowerTools/CRB repo"
 
-        info "Installing LLVM (Z3 is bundled automatically)..."
+        info "Installing LLVM and Z3..."
         $SUDO dnf install -y \
             llvm-devel \
             clang-devel \
             clang-libs \
+            z3-devel \
             pkg-config \
             gcc \
             gcc-c++
@@ -234,10 +237,11 @@ install_arch() {
     info "Detected Arch Linux"
     check_sudo
 
-    info "Installing LLVM (Z3 is bundled automatically)..."
+    info "Installing LLVM and Z3..."
     $SUDO pacman -Sy --needed --noconfirm \
         llvm \
         clang \
+        z3 \
         pkgconf \
         base-devel
 
