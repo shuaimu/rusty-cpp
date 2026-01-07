@@ -119,9 +119,61 @@ impl SafetyContext {
         }
     }
 
-    /// Check if a specific function should be checked
+    /// Check if a specific function should be checked (only @safe functions)
     pub fn should_check_function(&self, func_name: &str) -> bool {
         self.get_function_safety(func_name) == SafetyMode::Safe
+    }
+
+    /// Check if a function has any explicit annotation (@safe or @unsafe)
+    /// Returns false for unannotated functions (which default to Unsafe)
+    pub fn has_explicit_annotation(&self, func_name: &str) -> bool {
+        let query = FunctionSignature::from_name_only(func_name.to_string());
+
+        // Check for exact match
+        for (sig, _mode) in &self.function_overrides {
+            if sig.matches(&query) {
+                return true;
+            }
+
+            let sig_is_qualified = sig.name.contains("::");
+            let func_is_qualified = func_name.contains("::");
+
+            // Check for qualified match
+            if sig_is_qualified && func_is_qualified {
+                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
+                    return true;
+                }
+            }
+        }
+
+        // Check class-level annotation for methods
+        if func_name.contains("::") {
+            if let Some(last_colon) = func_name.rfind("::") {
+                let class_name = &func_name[..last_colon];
+                let class_query = FunctionSignature::from_name_only(class_name.to_string());
+                for (sig, _mode) in &self.function_overrides {
+                    if sig.matches(&class_query) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check namespace-level annotation
+        if func_name.contains("::") {
+            let parts: Vec<&str> = func_name.split("::").collect();
+            for i in 1..parts.len() {
+                let namespace = parts[..i].join("::");
+                let ns_query = FunctionSignature::from_name_only(namespace.clone());
+                for (sig, _mode) in &self.function_overrides {
+                    if sig.matches(&ns_query) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Check if a file path is from the source file where annotations were parsed

@@ -198,11 +198,16 @@ pub fn check_borrows_with_safety_context(
             continue;
         }
 
-        debug_println!("DEBUG: Checking function '{}' for borrow conflicts (is_safe={})",
-            function.name, safety_context.should_check_function(&function.name));
+        // Only check functions with explicit annotations (@safe or @unsafe)
+        // Skip unannotated third-party headers
+        if !safety_context.has_explicit_annotation(&function.name) {
+            debug_println!("DEBUG: Skipping unannotated function '{}' from {}", function.name, function.source_file);
+            continue;
+        }
+
+        debug_println!("DEBUG: Checking function '{}' for borrow conflicts", function.name);
 
         // Phase 2: Use version with header_cache for return value borrow detection
-        // Run on ALL functions to catch borrow conflicts between pointers and references
         let function_errors = check_function_with_header_cache(function, &header_cache)?;
         errors.extend(function_errors);
     }
