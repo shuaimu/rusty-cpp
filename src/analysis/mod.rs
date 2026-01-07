@@ -112,6 +112,7 @@ pub mod pointer_provenance;
 pub mod alignment_safety;
 pub mod array_bounds;
 pub mod struct_pointer_safety;
+pub mod const_propagation;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

@@ -86,6 +86,38 @@ fn is_forward_function(name: &str) -> bool {
     name == "forward" || name == "std::forward" || name.ends_with("::forward")
 }
 
+/// Safely tokenize a source range, returning empty Vec if the range is invalid
+///
+/// The clang-rust bindings can crash when tokenizing ranges from built-in
+/// locations or certain system headers. This function checks that the range
+/// has a valid file location before attempting to tokenize.
+fn safe_tokenize<'a>(range: &clang::source::SourceRange<'a>) -> Vec<clang::token::Token<'a>> {
+    // Check if the range has a valid file - if not, it's from a built-in
+    // location and tokenizing it will crash
+    let start_loc = range.get_start().get_file_location();
+    let end_loc = range.get_end().get_file_location();
+
+    if start_loc.file.is_none() || end_loc.file.is_none() {
+        return Vec::new();
+    }
+
+    // Also check that the locations are valid (non-zero line/column)
+    // Invalid ranges from system headers can have file but 0 offsets
+    if start_loc.line == 0 || start_loc.column == 0 {
+        return Vec::new();
+    }
+    if end_loc.line == 0 || end_loc.column == 0 {
+        return Vec::new();
+    }
+
+    // Check if this is in a system header - safer to skip tokenization
+    if range.is_in_system_header() {
+        return Vec::new();
+    }
+
+    range.tokenize()
+}
+
 /// Check if an entity represents a call to an overloaded operator->
 ///
 /// Key insight: If the entity is a call to "operator->", it means the type has
@@ -586,7 +618,7 @@ pub struct SourceLocation {
 /// e.g., `Constructor() : ptr(&value), data(42) {}`
 ///
 /// LibClang represents member initializers as siblings:
-/// ```
+/// ```text
 /// Constructor
 /// ├── MemberRef "ptr"      <- member name
 /// ├── UnexposedExpr        <- initializer value (nullptr)
@@ -669,7 +701,7 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
                 let inner = extract_expression_from_entity(child);
                 // Check if this is address-of by looking at tokens
                 if let Some(range) = entity.get_range() {
-                    let tokens = range.tokenize();
+                    let tokens = safe_tokenize(&range);
                     if let Some(first_token) = tokens.first() {
                         if first_token.get_spelling() == "&" {
                             return Expression::AddressOf(Box::new(inner));
@@ -692,7 +724,7 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
         EntityKind::IntegerLiteral => {
             // Could be 0 (null) or other integer
             if let Some(range) = entity.get_range() {
-                let tokens: Vec<_> = range.tokenize();
+                let tokens: Vec<_> = safe_tokenize(&range);
                 if let Some(token) = tokens.first() {
                     let spelling = token.get_spelling();
                     if spelling == "0" {
@@ -2237,7 +2269,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if let Some(range) = entity.get_range() {
                             // Only tokenize if not in a system header (avoids crashes)
                             if !range.is_in_system_header() {
-                                let tokens = range.tokenize();
+                                let tokens = safe_tokenize(&range);
                                 debug_println!("DEBUG: BinaryOperator tokens: {:?}",
                                               tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>());
                                 for token in tokens {

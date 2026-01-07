@@ -253,6 +253,10 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     let struct_pointer_violations = analysis::struct_pointer_safety::check_struct_pointer_safety(&ast.classes);
     violations.extend(struct_pointer_violations);
 
+    // Check const propagation through pointer members (in @safe code, const propagates)
+    let const_propagation_violations = analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
+    violations.extend(const_propagation_violations);
+
     // Build intermediate representation with safety context
     let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
 
