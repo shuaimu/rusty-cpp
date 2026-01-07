@@ -67,25 +67,24 @@ public:
         return value;
     }
 
-    // @safe - Get mutable reference through shared access (interior mutability)
-    // Similar to Rust's unchecked access patterns - no runtime checks performed.
-    // Has internal @unsafe block.
+    // @unsafe - Get mutable reference through shared access (interior mutability)
     // SAFETY: Caller must ensure no data races or aliasing violations
     // @lifetime: (&'a) -> &'a mut T
     T& as_mut_unchecked() const {
-        // @unsafe
-        { return *const_cast<T*>(&value); }
+        return *const_cast<T*>(&value);
     }
 
-    // @safe - Get const reference through shared access (has internal @unsafe block)
+    // @unsafe - Get const reference through shared access
+    // SAFETY: Caller must ensure no data races
     // @lifetime: (&'a) -> &'a T
     const T& as_ref_unchecked() const {
-        // @unsafe
-        { return value; }
+        return value;
     }
 
-    // Take ownership of the value, leaving default in its place
+    // @unsafe - Take ownership of the value, leaving default in its place
     // Only available if T has a default constructor
+    // SAFETY: Caller must ensure no aliasing or data races
+    // @lifetime: (&'a) -> T
     template<typename U = T>
     typename std::enable_if_t<std::is_default_constructible_v<U>, T>
     take() const {
@@ -94,7 +93,8 @@ public:
         return old;
     }
 
-    // Replace the value and return the old one
+    // @unsafe - Replace the value and return the old one
+    // SAFETY: Caller must ensure no aliasing or data races
     // @lifetime: (&'a, T) -> T
     T replace(T new_value) const {
         T old = *get();
@@ -109,6 +109,7 @@ public:
     // Move is allowed (matches Rust semantics)
     // SAFETY: Any existing pointers to the old location become invalid
     UnsafeCell(UnsafeCell&& other) noexcept : value(std::move(other.value)) {}
+    // @lifetime: (&'a mut, UnsafeCell&&) -> &'a mut
     UnsafeCell& operator=(UnsafeCell&& other) noexcept {
         if (this != &other) {
             value = std::move(other.value);

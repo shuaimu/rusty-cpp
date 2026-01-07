@@ -109,22 +109,21 @@ fn test_move_hpp_passes() {
     check_header_passes("include/rusty/move.hpp");
 }
 
-// ============================================================================
-// Tests for headers that have known violations (to be fixed)
-// These tests document the current state and will fail when fixed
-// ============================================================================
-
+// cell.hpp and unsafe_cell.hpp now pass with no violations
 #[test]
-#[ignore] // Remove ignore when cell.hpp is fixed (currently 3 violations)
 fn test_cell_hpp_passes() {
     check_header_passes("include/rusty/cell.hpp");
 }
 
 #[test]
-#[ignore] // Remove ignore when unsafe_cell.hpp is fixed (currently 1 violation)
 fn test_unsafe_cell_hpp_passes() {
     check_header_passes("include/rusty/unsafe_cell.hpp");
 }
+
+// ============================================================================
+// Tests for headers that have known violations (to be fixed)
+// These tests document the current state and will fail when fixed
+// ============================================================================
 
 #[test]
 #[ignore] // Remove ignore when option.hpp is fixed (currently 29 violations)
@@ -142,20 +141,6 @@ fn test_result_hpp_passes() {
 #[ignore] // Remove ignore when fn.hpp is fixed (currently 28 violations)
 fn test_fn_hpp_passes() {
     check_header_passes("include/rusty/fn.hpp");
-}
-
-// Test that documents current violations in cell.hpp
-#[test]
-fn test_cell_hpp_current_violations() {
-    // cell.hpp currently has 3 violations from UnsafeCell usage
-    check_header_has_expected_violations("include/rusty/cell.hpp", 3);
-}
-
-// Test that documents current violations in unsafe_cell.hpp
-#[test]
-fn test_unsafe_cell_hpp_current_violations() {
-    // unsafe_cell.hpp currently has 1 violation (operator= lifetime annotation)
-    check_header_has_expected_violations("include/rusty/unsafe_cell.hpp", 1);
 }
 
 // Test that documents current violations in option.hpp
