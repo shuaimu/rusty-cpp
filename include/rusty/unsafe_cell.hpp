@@ -81,18 +81,6 @@ public:
         return value;
     }
 
-    // @unsafe - Take ownership of the value, leaving default in its place
-    // Only available if T has a default constructor
-    // SAFETY: Caller must ensure no aliasing or data races
-    // @lifetime: (&'a) -> T
-    template<typename U = T>
-    typename std::enable_if_t<std::is_default_constructible_v<U>, T>
-    take() const {
-        T old = *get();
-        *get() = T{};
-        return old;
-    }
-
     // @unsafe - Replace the value and return the old one
     // SAFETY: Caller must ensure no aliasing or data races
     // @lifetime: (&'a, T) -> T
