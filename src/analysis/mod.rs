@@ -198,10 +198,9 @@ pub fn check_borrows_with_safety_context(
             continue;
         }
 
-        // Only check functions with explicit annotations (@safe or @unsafe)
-        // Skip unannotated third-party headers
-        if !safety_context.has_explicit_annotation(&function.name) {
-            debug_println!("DEBUG: Skipping unannotated function '{}' from {}", function.name, function.source_file);
+        // Only check @safe functions - skip @unsafe and unannotated code
+        if !safety_context.should_check_function(&function.name) {
+            debug_println!("DEBUG: Skipping non-safe function '{}' from {}", function.name, function.source_file);
             continue;
         }
 

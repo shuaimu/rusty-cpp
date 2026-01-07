@@ -213,26 +213,27 @@ void test() {
 // ============================================================================
 
 #[test]
-fn test_unsafe_function_still_checks_borrows() {
-    // @unsafe function should still check borrow conflicts
+fn test_unsafe_function_skips_borrow_checking() {
+    // @unsafe function should NOT be borrow checked
     let code = r#"
 // @unsafe
 void test_unsafe() {
     int x = 42;
     int& ref = x;
-    int& ref2 = x;  // ERROR: even @unsafe should detect this
+    int& ref2 = x;  // Would be error in @safe, but @unsafe skips checking
 }
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("already mutably borrowed") || output.contains("already borrowed"),
-        "@unsafe should still check borrow conflicts. Output: {}", output
+        output.contains("no violations found"),
+        "@unsafe functions should skip borrow checking. Output: {}", output
     );
 }
 
 #[test]
 fn test_unsafe_block_in_safe_function_checks_borrows() {
-    // @unsafe block should still check borrow conflicts
+    // @unsafe block inside @safe function should still check borrow conflicts
+    // because the function itself is @safe
     let code = r#"
 // @safe
 void test() {
@@ -240,13 +241,13 @@ void test() {
     int& ref = x;
     // @unsafe
     {
-        int* ptr = &x;  // ERROR: conflicts with ref
+        int* ptr = &x;  // ERROR: conflicts with ref (function is still @safe)
     }
 }
 "#;
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("violation"),
-        "@unsafe block should still check borrow conflicts. Output: {}", output
+        "@unsafe block in @safe function should still check borrow conflicts. Output: {}", output
     );
 }
