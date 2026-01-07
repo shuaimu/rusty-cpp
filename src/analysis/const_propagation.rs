@@ -35,6 +35,9 @@ pub fn check_const_propagation(
     // Build map of class name -> pointer members
     let class_info = build_class_info(classes);
 
+    // Build set of @safe function names (for checking if callee is safe)
+    let safe_functions = build_safe_function_set(functions);
+
     for function in functions {
         // Only check @safe functions
         let func_safety = function.safety_annotation.unwrap_or(SafetyMode::Unsafe);
@@ -50,6 +53,7 @@ pub fn check_const_propagation(
             function,
             &const_vars,
             &class_info,
+            &safe_functions,
         );
 
         for error in func_errors {
@@ -58,6 +62,24 @@ pub fn check_const_propagation(
     }
 
     errors
+}
+
+/// Build a set of function names that are marked @safe
+fn build_safe_function_set(functions: &[Function]) -> HashSet<String> {
+    let mut safe_funcs = HashSet::new();
+
+    for func in functions {
+        if func.safety_annotation == Some(SafetyMode::Safe) {
+            safe_funcs.insert(func.name.clone());
+            // Also add normalized version for template matching
+            let normalized = normalize_template_name(&func.name);
+            if normalized != func.name {
+                safe_funcs.insert(normalized);
+            }
+        }
+    }
+
+    safe_funcs
 }
 
 /// Build a map of class names to their pointer members
@@ -126,6 +148,7 @@ fn check_function_for_const_violations(
     function: &Function,
     const_vars: &HashSet<String>,
     class_info: &HashMap<String, ClassInfo>,
+    safe_functions: &HashSet<String>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     let mut unsafe_depth = 0;
@@ -147,7 +170,7 @@ fn check_function_for_const_violations(
             Statement::FunctionCall { name, args, location, .. } => {
                 // Check if this is a method call through a const-propagated path
                 if let Some(error) = check_method_call_const_propagation(
-                    name, args, location.line, const_vars, class_info
+                    name, args, location.line, const_vars, class_info, safe_functions
                 ) {
                     errors.push(error);
                 }
@@ -163,20 +186,20 @@ fn check_function_for_const_violations(
             Statement::If { then_branch, else_branch, .. } => {
                 // Recursively check branches
                 let branch_errors = check_statements_for_const_violations(
-                    then_branch, const_vars, class_info, unsafe_depth
+                    then_branch, const_vars, class_info, unsafe_depth, safe_functions
                 );
                 errors.extend(branch_errors);
 
                 if let Some(else_stmts) = else_branch {
                     let else_errors = check_statements_for_const_violations(
-                        else_stmts, const_vars, class_info, unsafe_depth
+                        else_stmts, const_vars, class_info, unsafe_depth, safe_functions
                     );
                     errors.extend(else_errors);
                 }
             }
             Statement::Block(stmts) => {
                 let block_errors = check_statements_for_const_violations(
-                    stmts, const_vars, class_info, unsafe_depth
+                    stmts, const_vars, class_info, unsafe_depth, safe_functions
                 );
                 errors.extend(block_errors);
             }
@@ -193,6 +216,7 @@ fn check_statements_for_const_violations(
     const_vars: &HashSet<String>,
     class_info: &HashMap<String, ClassInfo>,
     mut unsafe_depth: usize,
+    safe_functions: &HashSet<String>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -211,7 +235,7 @@ fn check_statements_for_const_violations(
             }
             Statement::FunctionCall { name, args, location, .. } => {
                 if let Some(error) = check_method_call_const_propagation(
-                    name, args, location.line, const_vars, class_info
+                    name, args, location.line, const_vars, class_info, safe_functions
                 ) {
                     errors.push(error);
                 }
@@ -238,6 +262,7 @@ fn check_method_call_const_propagation(
     line: u32,
     const_vars: &HashSet<String>,
     _class_info: &HashMap<String, ClassInfo>,
+    safe_functions: &HashSet<String>,
 ) -> Option<String> {
     // Method calls in our parser look like "Class::method" with receiver in args[0]
     // Or they might be parsed as "receiver.method" patterns
@@ -251,19 +276,78 @@ fn check_method_call_const_propagation(
 
     // Check if receiver is a const-propagated access chain
     if let Some(const_source) = get_const_source_in_chain(receiver, const_vars) {
-        // Check if the method is non-const
-        // For now, we assume methods not ending with "const" are non-const
-        // A more robust solution would check the actual method declaration
-        if !is_likely_const_method(func_name) {
-            return Some(format!(
-                "Const propagation violation at line {}: calling non-const method '{}' \
-                 through const object '{}'. In @safe code, const propagates through pointer members.",
-                line, func_name, const_source
-            ));
+        // If the callee is marked @safe, trust it - the callee's own file will check
+        // that any mutations are inside @unsafe blocks
+        if is_callee_safe(func_name, safe_functions) {
+            return None;
         }
+
+        // If the callee is not @safe (or unknown), report a violation
+        return Some(format!(
+            "Const propagation violation at line {}: calling method '{}' \
+             through const object '{}'. In @safe code, const propagates through pointer members.",
+            line, func_name, const_source
+        ));
     }
 
     None
+}
+
+/// Check if a callee function is marked @safe
+fn is_callee_safe(func_name: &str, safe_functions: &HashSet<String>) -> bool {
+    // Direct match
+    if safe_functions.contains(func_name) {
+        return true;
+    }
+
+    // Try normalized version (without template parameters)
+    let normalized = normalize_template_name(func_name);
+    if safe_functions.contains(&normalized) {
+        return true;
+    }
+
+    // Try matching by base class name + method
+    if let Some(pos) = func_name.rfind("::") {
+        let method_name = &func_name[pos..]; // e.g., "::set"
+        for safe_func in safe_functions {
+            if safe_func.ends_with(method_name) {
+                let func_base = get_base_class_name(func_name);
+                let safe_base = get_base_class_name(safe_func);
+                if func_base == safe_base {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Normalize a template name by removing template parameters
+/// e.g., "rusty::Cell<int>::set" -> "rusty::Cell::set"
+fn normalize_template_name(name: &str) -> String {
+    let mut result = String::new();
+    let mut depth = 0;
+    for c in name.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 => result.push(c),
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Get the base class name without template parameters and method
+/// e.g., "rusty::Cell<int>::set" -> "rusty::Cell"
+fn get_base_class_name(name: &str) -> Option<String> {
+    let normalized = normalize_template_name(name);
+    if let Some(pos) = normalized.rfind("::") {
+        Some(normalized[..pos].to_string())
+    } else {
+        None
+    }
 }
 
 /// Check if an assignment violates const propagation
@@ -316,42 +400,6 @@ fn get_const_source_in_chain(expr: &Expression, const_vars: &HashSet<String>) ->
     }
 }
 
-/// Heuristic to determine if a method is likely const
-/// A proper implementation would check the actual method declaration
-fn is_likely_const_method(func_name: &str) -> bool {
-    // Common const method patterns
-    // Include both snake_case (is_) and camelCase (is) variants
-    let const_patterns = [
-        "get", "size", "length", "empty", "is", "has", "can",
-        "begin", "end", "cbegin", "cend", "front", "back",
-        "at", "find", "count", "contains", "data",
-        "c_str", "str", "to_string", "to_",
-    ];
-
-    let name_lower = func_name.to_lowercase();
-
-    // Extract just the method name (after last ::)
-    let method_name = if let Some(pos) = name_lower.rfind("::") {
-        &name_lower[pos + 2..]
-    } else {
-        &name_lower
-    };
-
-    // Check for common const method patterns
-    for pattern in const_patterns {
-        if method_name.starts_with(pattern) || method_name == pattern {
-            return true;
-        }
-    }
-
-    // Methods ending in "_const" or containing "const" are likely const
-    if method_name.contains("const") {
-        return true;
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,16 +445,5 @@ mod tests {
             pack_element_type: None,
         };
         assert!(!is_const_pointer_or_ref(&non_const_ptr));
-    }
-
-    #[test]
-    fn test_is_likely_const_method() {
-        assert!(is_likely_const_method("get_value"));
-        assert!(is_likely_const_method("size"));
-        assert!(is_likely_const_method("isEmpty"));
-        assert!(is_likely_const_method("Container::begin"));
-        assert!(!is_likely_const_method("mutate"));
-        assert!(!is_likely_const_method("set_value"));
-        assert!(!is_likely_const_method("push_back"));
     }
 }
