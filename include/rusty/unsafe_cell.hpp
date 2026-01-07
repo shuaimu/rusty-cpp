@@ -35,7 +35,7 @@ public:
         return UnsafeCell<T>(std::move(value));
     }
 
-    // Get a raw mutable pointer to the inner value
+    // @unsafe - Get a raw mutable pointer to the inner value
     // This is the ONLY way to access the value
     // @lifetime: (&'a) -> *mut T where return: 'a
     // SAFETY: Caller must ensure:
@@ -43,7 +43,8 @@ public:
     // 2. No aliasing violations (don't create multiple mutable refs)
     // 3. Returned pointer doesn't outlive the UnsafeCell
     T* get() const {
-        return const_cast<T*>(&value);
+        // @unsafe
+        { return const_cast<T*>(&value); }
     }
 
     // Get a const raw pointer to the inner value (for reading)

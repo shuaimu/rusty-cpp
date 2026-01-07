@@ -70,7 +70,8 @@ public:
     // Note: May wake spuriously - use wait_while for predicate-based waiting.
     template<typename T>
     [[nodiscard]] LockResult<T> wait(MutexGuard<T>&& guard) const {
-        cv_.get()->wait(guard.underlying_lock());
+        // @unsafe
+        { cv_.get()->wait(guard.underlying_lock()); }
         return LockResult<T>::Ok(std::move(guard));
     }
 
@@ -82,7 +83,8 @@ public:
         // Rust: waits WHILE condition is TRUE, stops when FALSE
         // C++ std::condition_variable: waits UNTIL predicate is TRUE
         // So we negate: wait until NOT condition
-        cv_.get()->wait(guard.underlying_lock(), [&]{ return !condition(*guard); });
+        // @unsafe
+        { cv_.get()->wait(guard.underlying_lock(), [&]{ return !condition(*guard); }); }
         return LockResult<T>::Ok(std::move(guard));
     }
 
@@ -93,7 +95,9 @@ public:
         MutexGuard<T>&& guard,
         const std::chrono::duration<Rep, Period>& duration
     ) const {
-        auto status = cv_.get()->wait_for(guard.underlying_lock(), duration);
+        std::cv_status status;
+        // @unsafe
+        { status = cv_.get()->wait_for(guard.underlying_lock(), duration); }
         bool timed_out = (status == std::cv_status::timeout);
         using ResultType = std::pair<MutexGuard<T>, WaitTimeoutResult>;
         return Result<ResultType, PoisonError<T>>::Ok(
@@ -112,11 +116,15 @@ public:
         // Rust: waits WHILE condition is TRUE, returns when FALSE or timeout
         // C++ wait_for with pred: waits UNTIL predicate is TRUE, returns pred value
         // So we negate: wait until NOT condition, return whether condition is now false
-        bool condition_false = cv_.get()->wait_for(
-            guard.underlying_lock(),
-            duration,
-            [&]{ return !condition(*guard); }
-        );
+        bool condition_false;
+        // @unsafe
+        {
+            condition_false = cv_.get()->wait_for(
+                guard.underlying_lock(),
+                duration,
+                [&]{ return !condition(*guard); }
+            );
+        }
         using ResultType = std::pair<MutexGuard<T>, bool>;
         return Result<ResultType, PoisonError<T>>::Ok(
             ResultType(std::move(guard), condition_false)
@@ -130,13 +138,15 @@ public:
 
     // @safe - Wait on a unique_lock (C++ style, no return value)
     void wait(std::unique_lock<std::mutex>& lock) const {
-        cv_.get()->wait(lock);
+        // @unsafe
+        { cv_.get()->wait(lock); }
     }
 
     // @safe - Wait with predicate (C++ semantics: waits UNTIL pred is TRUE)
     template<typename Predicate>
     void wait(std::unique_lock<std::mutex>& lock, Predicate pred) const {
-        cv_.get()->wait(lock, pred);
+        // @unsafe
+        { cv_.get()->wait(lock, pred); }
     }
 
     // @safe - Wait for duration
@@ -145,7 +155,8 @@ public:
         std::unique_lock<std::mutex>& lock,
         const std::chrono::duration<Rep, Period>& duration
     ) const {
-        return cv_.get()->wait_for(lock, duration) == std::cv_status::no_timeout;
+        // @unsafe
+        { return cv_.get()->wait_for(lock, duration) == std::cv_status::no_timeout; }
     }
 
     // @safe - Wait for duration with predicate (C++ semantics)
@@ -155,7 +166,8 @@ public:
         const std::chrono::duration<Rep, Period>& duration,
         Predicate pred
     ) const {
-        return cv_.get()->wait_for(lock, duration, pred);
+        // @unsafe
+        { return cv_.get()->wait_for(lock, duration, pred); }
     }
 
     // @safe - Wait until time point
@@ -164,7 +176,8 @@ public:
         std::unique_lock<std::mutex>& lock,
         const std::chrono::time_point<Clock, Duration>& timeout_time
     ) const {
-        return cv_.get()->wait_until(lock, timeout_time) == std::cv_status::no_timeout;
+        // @unsafe
+        { return cv_.get()->wait_until(lock, timeout_time) == std::cv_status::no_timeout; }
     }
 
     // @safe - Wait until time point with predicate
@@ -174,7 +187,8 @@ public:
         const std::chrono::time_point<Clock, Duration>& timeout_time,
         Predicate pred
     ) const {
-        return cv_.get()->wait_until(lock, timeout_time, pred);
+        // @unsafe
+        { return cv_.get()->wait_until(lock, timeout_time, pred); }
     }
 
     // =========================================================================
@@ -183,12 +197,14 @@ public:
 
     // @safe - Notify one waiting thread
     void notify_one() const {
-        cv_.get()->notify_one();
+        // @unsafe
+        { cv_.get()->notify_one(); }
     }
 
     // @safe - Notify all waiting threads
     void notify_all() const {
-        cv_.get()->notify_all();
+        // @unsafe
+        { cv_.get()->notify_all(); }
     }
 
     // Non-copyable, non-movable
