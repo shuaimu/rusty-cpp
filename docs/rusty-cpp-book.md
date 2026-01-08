@@ -693,6 +693,8 @@ void cross_function_example() {
 }
 ```
 
+> **Important:** Unlike the Rust compiler, RustyCpp does not have strong lifetime inference capabilities. Cross-function lifetime checking **relies on `@lifetime` annotations** that you provide. Without annotations, RustyCpp cannot deduce how parameter lifetimes relate to return lifetimes. Always annotate functions that return references to ensure proper checking.
+
 ---
 
 # Part III: Safety Annotations
