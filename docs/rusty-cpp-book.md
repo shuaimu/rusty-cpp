@@ -2078,36 +2078,45 @@ void allowed_in_unsafe() {
 }
 ```
 
-### `rusty::Ptr<T>` / `rusty::MutPtr<T>` (Type Aliases)
+### `rusty::Ptr<T>` / `rusty::MutPtr<T>` (Safe Pointer Wrappers)
 
-For code that needs raw pointers, RustyCpp provides Rust-like type aliases:
+RustyCpp provides safe pointer types that can be used in `@safe` code:
 
 ```cpp
 #include <rusty/ptr.hpp>
 
-// @unsafe
+// @safe - Ptr and MutPtr are safe to use!
 void ptr_example() {
     int x = 42;
-    rusty::Ptr<int> p = &x;        // Alias for: const int*
-    rusty::MutPtr<int> mp = &x;    // Alias for: int*
+    rusty::Ptr<int> p = &x;        // Safe immutable pointer (like *const T)
+    rusty::MutPtr<int> mp = &x;    // Safe mutable pointer (like *mut T)
 
-    int y = *p;   // Read through const pointer
-    *mp = 100;    // Write through mutable pointer
+    int y = *p;   // Read through const pointer - safe
+    *mp = 100;    // Write through mutable pointer - safe
 }
 ```
 
-| Type | Equivalent | Rust Equivalent |
-|------|------------|-----------------|
-| `rusty::Ptr<T>` | `const T*` | `*const T` |
-| `rusty::MutPtr<T>` | `T*` | `*mut T` |
+| Type | C++ Equivalent | Rust Equivalent | Safety |
+|------|----------------|-----------------|--------|
+| `rusty::Ptr<T>` | `const T*` | `*const T` | ✅ Safe |
+| `rusty::MutPtr<T>` | `T*` | `*mut T` | ✅ Safe |
+| `const T*` (raw) | - | - | ❌ Requires @unsafe |
+| `T*` (raw) | - | - | ❌ Requires @unsafe |
+
+**Key distinction:**
+- **Raw C++ pointers** (`T*`, `const T*`): Require `@unsafe` context
+- **`rusty::Ptr<T>` / `rusty::MutPtr<T>`**: Safe to use in `@safe` code
 
 ### Safe Patterns for Pointer-Like Behavior
-
-Instead of raw pointers, prefer these safe alternatives:
 
 ```cpp
 // ❌ Raw pointer - requires @unsafe
 int* get_ptr(std::vector<int>& vec) {
+    return &vec[0];
+}
+
+// ✅ rusty::Ptr - safe pointer
+rusty::Ptr<int> get_safe_ptr(std::vector<int>& vec) {
     return &vec[0];
 }
 

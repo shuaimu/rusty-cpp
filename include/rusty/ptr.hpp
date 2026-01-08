@@ -1,10 +1,10 @@
-// rusty/ptr.hpp - Rust-like raw pointer type aliases
+// rusty/ptr.hpp - Safe pointer types for RustyCpp
 //
 // In Rust, raw pointers come in two flavors:
 //   *const T - pointer to immutable data (safer default)
 //   *mut T   - pointer to mutable data (explicit)
 //
-// This header provides C++ equivalents:
+// This header provides C++ equivalents that are SAFE to use in @safe code:
 //   Ptr<T>    - const T* (like *const T) - immutable pointee by default
 //   MutPtr<T> - T*       (like *mut T)   - explicit mutable pointee
 //
@@ -23,8 +23,8 @@
 //   MutPtr<T>       - rebindable, mutable pointee       (let mut r: &mut T)
 //   const MutPtr<T> - non-rebindable, mutable pointee   (let r: &mut T)
 //
-// SAFETY: In @safe code, both Ptr<T> and MutPtr<T> require @unsafe blocks
-// to dereference or take addresses, just like raw pointers in Rust.
+// SAFETY: Ptr<T> and MutPtr<T> are SAFE to use in @safe code.
+// Raw C++ pointers (T*, const T*) still require @unsafe.
 
 #ifndef RUSTY_PTR_HPP
 #define RUSTY_PTR_HPP
@@ -50,16 +50,16 @@ constexpr Ptr<T> null_ptr = nullptr;
 template<typename T>
 constexpr MutPtr<T> null_mut_ptr = nullptr;
 
-// Helper functions for pointer creation (require @unsafe to call)
+// Helper functions for pointer creation
 // These make the intent explicit when taking addresses
 
-// @unsafe
+// @safe
 template<typename T>
 constexpr Ptr<T> addr_of(const T& value) noexcept {
     return &value;
 }
 
-// @unsafe
+// @safe
 template<typename T>
 constexpr MutPtr<T> addr_of_mut(T& value) noexcept {
     return &value;
@@ -73,21 +73,21 @@ constexpr MutPtr<T> as_mut(Ptr<T> ptr) noexcept {
     return const_cast<MutPtr<T>>(ptr);
 }
 
-// Safe - adding const is always safe
+// @safe - adding const is always safe
 template<typename T>
 constexpr Ptr<T> as_const(MutPtr<T> ptr) noexcept {
     return ptr;
 }
 
-// Pointer arithmetic helpers (require @unsafe)
+// Pointer arithmetic helpers
 
-// @unsafe
+// @safe
 template<typename T>
 constexpr Ptr<T> offset(Ptr<T> ptr, std::ptrdiff_t count) noexcept {
     return ptr + count;
 }
 
-// @unsafe
+// @safe
 template<typename T>
 constexpr MutPtr<T> offset_mut(MutPtr<T> ptr, std::ptrdiff_t count) noexcept {
     return ptr + count;
