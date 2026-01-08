@@ -1053,9 +1053,19 @@ void ptr_example() {
 
 ## 9. Interior Mutability
 
+Interior mutability allows mutation through shared references (`const&`), enabling patterns that would otherwise require mutable references.
+
+### When to Use Which Type
+
+| Type | Thread Safe | Borrow Checking | Best For |
+|------|-------------|-----------------|----------|
+| `Cell<T>` | ❌ No | None | Small `Copy` types (int, bool, enum) |
+| `RefCell<T>` | ❌ No | Runtime | Complex types needing borrow guards |
+| `UnsafeCell<T>` | ❌ No | None | Building custom abstractions |
+
 ### `rusty::Cell<T>` (Copy Types)
 
-Allows mutation through shared references for `Copy` types:
+Allows mutation through shared references for `Copy` types. Zero overhead - just stores the value directly.
 
 ```cpp
 #include <rusty/cell.hpp>
@@ -1071,11 +1081,40 @@ void cell_example() {
 }
 ```
 
-**Constraints:** `T` must be trivially copyable.
+**Constraints:** `T` must be trivially copyable (`std::is_trivially_copyable_v<T>`).
+
+**Complete Cell API:**
+
+| Method | Description |
+|--------|-------------|
+| `get()` | Returns a copy of the value |
+| `set(val)` | Sets a new value |
+| `replace(val)` | Sets new value, returns old |
+| `swap(other_cell)` | Swaps values with another Cell |
+| `take()` | Returns value, leaves default in place |
+| `update(f)` | Applies function `f` to value in-place |
+| `get_mut()` | Returns raw pointer (@unsafe) |
+
+```cpp
+// @safe
+void cell_advanced() {
+    rusty::Cell<int> cell(42);
+
+    // Update in-place with function
+    cell.update([](int x) { return x * 2; });  // cell is now 84
+
+    // Swap two cells
+    rusty::Cell<int> other(10);
+    cell.swap(other);  // cell=10, other=84
+
+    // Take value (for default-constructible types)
+    int taken = cell.take();  // cell is now 0
+}
+```
 
 ### `rusty::RefCell<T>` (Runtime Borrow Checking)
 
-Allows borrowing with runtime checks:
+Allows borrowing with runtime checks. Returns RAII guards (`Ref<T>`, `RefMut<T>`) that track borrows.
 
 ```cpp
 #include <rusty/refcell.hpp>
@@ -1085,14 +1124,14 @@ void refcell_example() {
     rusty::RefCell<std::string> cell("hello");
 
     {
-        auto borrow = cell.borrow();      // Immutable borrow
+        auto borrow = cell.borrow();      // Immutable borrow (Ref<T>)
         std::cout << *borrow << std::endl;
-    }
+    }  // borrow released here
 
     {
-        auto mut_borrow = cell.borrow_mut();  // Mutable borrow
+        auto mut_borrow = cell.borrow_mut();  // Mutable borrow (RefMut<T>)
         *mut_borrow = "world";
-    }
+    }  // mut_borrow released here
 
     // Panics at runtime if borrow rules violated:
     // auto b1 = cell.borrow_mut();
@@ -1100,9 +1139,47 @@ void refcell_example() {
 }
 ```
 
+**RefCell Borrow Rules:**
+- Multiple `borrow()` calls allowed simultaneously
+- Only one `borrow_mut()` allowed at a time
+- Cannot have `borrow()` and `borrow_mut()` simultaneously
+- Violations throw `std::runtime_error`
+
+**Complete RefCell API:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `borrow()` | `Ref<T>` | Immutable borrow guard |
+| `borrow_mut()` | `RefMut<T>` | Mutable borrow guard |
+| `can_borrow()` | `bool` | Check if immutable borrow possible |
+| `can_borrow_mut()` | `bool` | Check if mutable borrow possible |
+| `replace(val)` | `T` | Replace value (must not be borrowed) |
+| `swap(other)` | `void` | Swap with another RefCell |
+| `take()` | `T` | Take value, leave default |
+| `get()` | `T` | Get copy (for copyable types) |
+
+**Borrow Guards:**
+
+```cpp
+// Ref<T> - immutable borrow guard
+{
+    rusty::Ref<std::string> guard = cell.borrow();
+    const std::string& value = *guard;  // operator*
+    size_t len = guard->length();       // operator->
+    std::string copy = guard.clone();   // explicit copy
+}  // guard destroyed, borrow released
+
+// RefMut<T> - mutable borrow guard
+{
+    rusty::RefMut<std::string> guard = cell.borrow_mut();
+    std::string& value = *guard;  // mutable reference
+    guard->append(" world");      // modify through ->
+}  // guard destroyed, borrow released
+```
+
 ### `rusty::UnsafeCell<T>` (Primitive)
 
-The building block for interior mutability. No safety guarantees:
+The building block for interior mutability. No safety guarantees - you must ensure correctness manually.
 
 ```cpp
 #include <rusty/unsafe_cell.hpp>
@@ -1118,12 +1195,58 @@ void unsafe_cell_example() {
 }
 ```
 
-**Methods:**
+**UnsafeCell Methods:**
+
 | Method | Safety | Description |
 |--------|--------|-------------|
 | `get()` | @unsafe | Returns `T*` to inner value |
-| `get_mut()` | @safe | Returns `T&` (requires `&mut self`) |
-| `replace(T)` | @unsafe | Replace value, return old |
+| `get_const()` | @safe | Returns `const T*` for reading |
+| `get_mut()` | @safe | Returns `T&` (requires non-const method) |
+| `as_mut_unchecked()` | @unsafe | Returns `T&` through shared access |
+| `as_ref_unchecked()` | @unsafe | Returns `const T&` through shared access |
+| `replace(val)` | @unsafe | Replace value, return old |
+
+**Note:** UnsafeCell is typically used to build other abstractions like Cell and RefCell. Most code should use those higher-level types instead.
+
+### Using Interior Mutability in Classes
+
+```cpp
+class Counter {
+    rusty::Cell<int> count;  // Cell for trivially copyable types
+
+public:
+    Counter() : count(0) {}
+
+    // @safe - Can mutate through const reference
+    void increment() const {
+        count.set(count.get() + 1);
+    }
+
+    // @safe - Read-only access
+    int get() const {
+        return count.get();
+    }
+};
+
+class Cache {
+    rusty::RefCell<std::map<int, std::string>> data;
+
+public:
+    Cache() : data() {}
+
+    // @safe - Insert with mutable borrow
+    void insert(int key, std::string value) const {
+        auto guard = data.borrow_mut();
+        (*guard)[key] = std::move(value);
+    }
+
+    // @safe - Lookup with immutable borrow
+    bool contains(int key) const {
+        auto guard = data.borrow();
+        return guard->count(key) > 0;
+    }
+};
+```
 
 ---
 
@@ -2442,8 +2565,9 @@ Move + use   : ERROR
 
 ---
 
-*Document version: 1.3*
+*Document version: 1.4*
 *Last updated: January 2026*
+*Updated: Part IV Section 9 (Interior Mutability) with complete Cell/RefCell/UnsafeCell APIs*
 *Updated: Part III (Safety Annotations) with calling rules, annotation syntax, header propagation, STL handling*
 *Updated: Part II (Core Concepts) with detailed reference semantics, partial borrows, partial moves*
 *Updated: Part V Section 15 (RAII & Container Safety) with comprehensive RAII tracking details*
