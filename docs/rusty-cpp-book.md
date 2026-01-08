@@ -37,14 +37,15 @@ A Rust-style borrow checker for C++ code.
   - [22. Limitations & Known Issues](#22-limitations--known-issues)
 - [Part VIII: Advanced Topics](#part-viii-advanced-topics)
   - [23. Relocation vs Move Semantics](#23-relocation-vs-move-semantics)
-  - [24. Thread Safety Model](#24-thread-safety-model)
-  - [25. Initialization Analysis](#25-initialization-analysis)
-  - [26. Lifetime Elision Rules](#26-lifetime-elision-rules)
-  - [27. Pattern Matching & Sum Types](#27-pattern-matching--sum-types)
-  - [28. Comparison with Safe C++ Proposal](#28-comparison-with-safe-c-proposal)
+  - [24. Raw Pointer Safety](#24-raw-pointer-safety)
+  - [25. Thread Safety Model](#25-thread-safety-model)
+  - [26. Initialization Analysis](#26-initialization-analysis)
+  - [27. Lifetime Elision Rules](#27-lifetime-elision-rules)
+  - [28. Pattern Matching & Sum Types](#28-pattern-matching--sum-types)
+  - [29. Comparison with Safe C++ Proposal](#29-comparison-with-safe-c-proposal)
 - [Part IX: Future Roadmap](#part-ix-future-roadmap)
-  - [29. Planned Features](#29-planned-features)
-  - [30. FAQ & Troubleshooting](#30-faq--troubleshooting)
+  - [30. Planned Features](#30-planned-features)
+  - [31. FAQ & Troubleshooting](#31-faq--troubleshooting)
 
 ---
 
@@ -81,11 +82,11 @@ Rust solves these problems through its ownership system, enforced at compile tim
 
 Several approaches to C++ memory safety have been tried:
 
-**Interop with Rust**: While some hope for seamless C++/Rust interoperability (like C++ has with C), deep integration between the two languages remains unlikely in the near term due to fundamental differences in their memory models.
+**Interop with Rust**: While some hope for seamless C++/Rust interoperability (like C++ has with C), deep integration between the two languages remains unlikely in the near term.
 
 **Macro-based solutions**: Google engineers explored using C++'s macro system to track borrows at compile time. This approach proved [impossible due to C++ language limitations](https://docs.google.com/document/d/e/2PACX-1vSt2VB1zQAJ6JDMaIA9PlmEgBxz2K5Tx6w2JqJNeYCy0gU4aoubdTxlENSKNSrQ2TXqPWcuwtXe6PlO/pub).
 
-**Circle C++ / Safe C++**: The [Circle compiler](https://github.com/seanbaxter/circle) implements Rust-style borrow checking with new C++ syntax. While technically impressive, it requires a closed-source compiler and introduces breaking syntax changes. The [Safe C++ proposal](https://safecpp.org/draft.html) takes a similar approach but awaits standardization.
+**Circle C++ / Safe C++**: The [Circle compiler](https://github.com/seanbaxter/circle) (i.e., the [Safe C++ proposal](https://safecpp.org/draft.html)) implements Rust-style borrow checking with new C++ syntax. While technically impressive, it introduces breaking syntax changes and thus requires a new compiler. 
 
 **RustyCpp's approach**: Rather than modifying the language or compiler, RustyCpp is a static analyzer that works with standard C++. It uses comment-based annotations (`@safe`, `@unsafe`) that are invisible to compilers, enabling gradual adoption without breaking existing code.
 
@@ -113,7 +114,7 @@ Several approaches to C++ memory safety have been tried:
 3. **Analyze**: Multiple analysis passes check for violations
 4. **Report**: Clear error messages with locations
 
-### Comparison with Other Tools
+<!-- ### Comparison with Other Tools
 
 | Tool | Type | When | Overhead | Coverage |
 |------|------|------|----------|----------|
@@ -122,7 +123,7 @@ Several approaches to C++ memory safety have been tried:
 | Valgrind | Dynamic | Runtime | 10-50x slowdown | All executed paths |
 | Clang Static Analyzer | Static | Compile-time | None | Heuristic-based |
 
-RustyCpp differs by using Rust's proven ownership model rather than heuristics, and by requiring explicit opt-in through annotations.
+RustyCpp differs by using Rust's proven ownership model rather than heuristics, and by requiring explicit opt-in through annotations. -->
 
 ---
 
@@ -622,18 +623,24 @@ ERROR: Cannot move 'x' because it is borrowed
 
 ### Scope-Based Lifetime Tracking
 
-Every variable has a lifetime determined by its scope:
+Every variable has a lifetime determined by its scope. References must not outlive the data they refer to:
 
 ```cpp
 // @safe
 void lifetime_example() {
-    int* ptr;
+    std::string outer;
     {
-        int x = 42;
-        ptr = &x;  // ptr borrows x
-    }  // x's lifetime ends here
+        std::string inner = "hello";
+        outer = inner;  // OK: copies the value
+    }  // inner's lifetime ends here
 
-    *ptr;  // ERROR: Dangling pointer - x is out of scope
+    use(outer);  // OK: outer has its own copy
+}
+
+// @safe
+void bad_lifetime_example() {
+    const std::string& ref = get_temporary();  // ref binds to temporary
+    use(ref);  // ERROR: temporary has been destroyed
 }
 ```
 
@@ -646,6 +653,12 @@ RustyCpp catches references that outlive their referents:
 int& dangling_reference() {
     int x = 42;
     return x;  // ERROR: Returning reference to local variable
+}
+
+// @safe
+const std::string& get_name() {
+    std::string name = "hello";
+    return name;  // ERROR: Returning reference to local
 }
 ```
 
@@ -741,18 +754,14 @@ void safe_function() {
         unsafe_func();           // OK: in @unsafe block
         std::vector<int> vec;    // OK: STL in @unsafe block
     }
-
-    // ❌ CANNOT do pointer operations (outside @unsafe block)
-    // int* ptr = &x;  // ERROR: requires unsafe context
 }
 
 // @unsafe - Apply to next element only (or no annotation = same)
 // @unsafe
 void unsafe_function() {
-    // ✅ Can call anything and do pointer operations
+    // ✅ Can call anything
     safe_function();       // OK
     another_unsafe();      // OK
-    int* ptr = nullptr;    // OK
     std::vector<int> vec;  // OK
 }
 
@@ -772,8 +781,8 @@ Annotations support any suffix for documentation purposes:
 // @safe-verified on 2025-01-17
 void audited_function() { }
 
-// @unsafe: uses raw pointers for performance
-void performance_critical() { }
+// @unsafe: calls legacy code
+void wrapper_function() { }
 
 // @safe, reviewed by security team
 void reviewed_function() { }
@@ -1034,20 +1043,7 @@ void rc_example() {
 }
 ```
 
-### `rusty::Ptr<T>` / `rusty::MutPtr<T>` (Raw Pointer Aliases)
-
-Type aliases for raw pointers with Rust-like naming:
-
-```cpp
-#include <rusty/ptr.hpp>
-
-// @unsafe
-void ptr_example() {
-    int x = 42;
-    rusty::Ptr<int> p = &x;        // const int*
-    rusty::MutPtr<int> mp = &x;    // int*
-}
-```
+> **Note:** For raw pointer operations, see [Section 24: Raw Pointer Safety](#24-raw-pointer-safety) in Part VIII.
 
 ---
 
@@ -2045,7 +2041,117 @@ This matches C++ semantics where moved-from objects can be reused.
 
 ---
 
-## 24. Thread Safety Model
+## 24. Raw Pointer Safety
+
+### Pointers vs References in RustyCpp
+
+In Rust, raw pointers (`*const T`, `*mut T`) are inherently unsafe - dereferencing them requires an `unsafe` block. RustyCpp takes a similar approach: raw pointer operations are restricted in `@safe` code.
+
+**Key distinction:**
+- **References** (`T&`, `const T&`): Safe, borrow-checked, cannot be null
+- **Raw pointers** (`T*`, `const T*`): Unsafe, require `@unsafe` context
+
+### Raw Pointer Operations Require @unsafe
+
+In `@safe` code, the following operations are forbidden:
+
+```cpp
+// @safe
+void forbidden_in_safe() {
+    int x = 42;
+
+    // ❌ Address-of operator creates raw pointer
+    int* ptr = &x;  // ERROR: requires @unsafe
+
+    // ❌ Pointer dereference
+    int y = *ptr;   // ERROR: requires @unsafe
+}
+
+// @unsafe
+void allowed_in_unsafe() {
+    int x = 42;
+
+    // ✅ All pointer operations allowed
+    int* ptr = &x;
+    int y = *ptr;
+    *ptr = 100;
+}
+```
+
+### `rusty::Ptr<T>` / `rusty::MutPtr<T>` (Type Aliases)
+
+For code that needs raw pointers, RustyCpp provides Rust-like type aliases:
+
+```cpp
+#include <rusty/ptr.hpp>
+
+// @unsafe
+void ptr_example() {
+    int x = 42;
+    rusty::Ptr<int> p = &x;        // Alias for: const int*
+    rusty::MutPtr<int> mp = &x;    // Alias for: int*
+
+    int y = *p;   // Read through const pointer
+    *mp = 100;    // Write through mutable pointer
+}
+```
+
+| Type | Equivalent | Rust Equivalent |
+|------|------------|-----------------|
+| `rusty::Ptr<T>` | `const T*` | `*const T` |
+| `rusty::MutPtr<T>` | `T*` | `*mut T` |
+
+### Safe Patterns for Pointer-Like Behavior
+
+Instead of raw pointers, prefer these safe alternatives:
+
+```cpp
+// ❌ Raw pointer - requires @unsafe
+int* get_ptr(std::vector<int>& vec) {
+    return &vec[0];
+}
+
+// ✅ Reference - safe and borrow-checked
+int& get_ref(std::vector<int>& vec) {
+    return vec[0];
+}
+
+// ✅ Smart pointer - safe ownership
+rusty::Box<int> make_owned() {
+    return rusty::Box<int>::make(42);
+}
+```
+
+### When Raw Pointers Are Necessary
+
+Raw pointers are sometimes unavoidable:
+- Interfacing with C APIs
+- Working with memory-mapped I/O
+- Implementing custom allocators
+- FFI boundaries
+
+In these cases, isolate the pointer usage in `@unsafe` functions:
+
+```cpp
+// @unsafe
+void* allocate_memory(size_t size) {
+    return malloc(size);
+}
+
+// @safe
+void safe_wrapper() {
+    // @unsafe
+    {
+        void* mem = allocate_memory(1024);
+        // Use mem...
+        free(mem);
+    }
+}
+```
+
+---
+
+## 25. Thread Safety Model
 
 ### Current Status: Not Implemented
 
@@ -2116,7 +2222,7 @@ class UnsafeCounter {
 
 ---
 
-## 25. Initialization Analysis
+## 26. Initialization Analysis
 
 ### What We Check
 
@@ -2179,7 +2285,7 @@ Current initialization analysis does not cover:
 
 ---
 
-## 26. Lifetime Elision Rules
+## 27. Lifetime Elision Rules
 
 ### What is Lifetime Elision?
 
@@ -2248,7 +2354,7 @@ std::string to_string(const MyClass& obj);
 
 ---
 
-## 27. Pattern Matching & Sum Types
+## 28. Pattern Matching & Sum Types
 
 ### The Limitation of C++ Optional/Variant
 
@@ -2362,7 +2468,7 @@ int best(rusty::Option<int> opt) {
 
 ---
 
-## 28. Comparison with Safe C++ Proposal
+## 29. Comparison with Safe C++ Proposal
 
 ### Overview
 
@@ -2420,7 +2526,7 @@ In the future, RustyCpp could potentially:
 
 # Part IX: Future Roadmap
 
-## 29. Planned Features
+## 30. Planned Features
 
 ### Short Term (Next 6 Months)
 
@@ -2484,7 +2590,7 @@ Some features we intentionally won't implement:
 
 ---
 
-## 30. FAQ & Troubleshooting
+## 31. FAQ & Troubleshooting
 
 ### Q: Why isn't my function being checked?
 
@@ -2565,7 +2671,7 @@ Move + use   : ERROR
 
 ---
 
-*Document version: 1.5*
+*Document version: 1.6*
 *Last updated: January 2026*
-*All Parts I-IX now complete with detailed documentation*
-*Key enhancements: Core concepts, safety annotations, interior mutability APIs, RAII tracking*
+*Reorganized: Raw pointer discussion moved to dedicated Section 24 in Part VIII*
+*Early examples now use references instead of pointers to match Rust's safe-by-default model*
