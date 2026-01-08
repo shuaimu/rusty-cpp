@@ -2565,9 +2565,7 @@ Move + use   : ERROR
 
 ---
 
-*Document version: 1.4*
+*Document version: 1.5*
 *Last updated: January 2026*
-*Updated: Part IV Section 9 (Interior Mutability) with complete Cell/RefCell/UnsafeCell APIs*
-*Updated: Part III (Safety Annotations) with calling rules, annotation syntax, header propagation, STL handling*
-*Updated: Part II (Core Concepts) with detailed reference semantics, partial borrows, partial moves*
-*Updated: Part V Section 15 (RAII & Container Safety) with comprehensive RAII tracking details*
+*All Parts I-IX now complete with detailed documentation*
+*Key enhancements: Core concepts, safety annotations, interior mutability APIs, RAII tracking*
