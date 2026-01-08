@@ -712,6 +712,73 @@ void legacy_function() {
 }
 ```
 
+### Calling Rules Matrix
+
+| Caller → Can Call | @safe | @unsafe |
+|-------------------|-------|---------|
+| **@safe**         | ✅ Yes | ❌ No (use `@unsafe` block) |
+| **@unsafe**       | ✅ Yes | ✅ Yes  |
+
+**Key Insight**: This is a clean two-state model. To call unsafe code from `@safe` functions, use an `@unsafe { }` block.
+
+### Annotation Syntax
+
+Annotations attach to the **next** code element only:
+
+```cpp
+// @safe - Apply to next element only
+// @safe
+void safe_function() {
+    // ✅ CAN call other @safe functions
+    safe_helper();
+
+    // ❌ CANNOT call @unsafe functions directly
+    // unsafe_func();  // ERROR
+
+    // ✅ CAN call @unsafe via @unsafe block
+    // @unsafe
+    {
+        unsafe_func();           // OK: in @unsafe block
+        std::vector<int> vec;    // OK: STL in @unsafe block
+    }
+
+    // ❌ CANNOT do pointer operations (outside @unsafe block)
+    // int* ptr = &x;  // ERROR: requires unsafe context
+}
+
+// @unsafe - Apply to next element only (or no annotation = same)
+// @unsafe
+void unsafe_function() {
+    // ✅ Can call anything and do pointer operations
+    safe_function();       // OK
+    another_unsafe();      // OK
+    int* ptr = nullptr;    // OK
+    std::vector<int> vec;  // OK
+}
+
+// No annotation = @unsafe by default
+void legacy_function() {
+    // Treated as @unsafe
+    // ✅ Can call anything
+    std::vector<int> vec;  // OK
+}
+```
+
+### Annotation Suffixes
+
+Annotations support any suffix for documentation purposes:
+
+```cpp
+// @safe-verified on 2025-01-17
+void audited_function() { }
+
+// @unsafe: uses raw pointers for performance
+void performance_critical() { }
+
+// @safe, reviewed by security team
+void reviewed_function() { }
+```
+
 ### Annotation Hierarchy
 
 Annotations cascade from outer to inner scopes:
@@ -742,6 +809,32 @@ namespace myapp {
 }
 ```
 
+### Header-to-Implementation Propagation
+
+Safety annotations in headers automatically apply to implementations:
+
+```cpp
+// === math.h ===
+// @safe
+int calculate(int a, int b);
+
+// @unsafe
+void process_raw_memory(void* ptr);
+
+// === math.cpp ===
+#include "math.h"
+
+int calculate(int a, int b) {
+    // Automatically @safe from header
+    return a + b;
+}
+
+void process_raw_memory(void* ptr) {
+    // Automatically @unsafe from header
+    // Pointer operations allowed
+}
+```
+
 ### `@unsafe` Blocks for Escape Hatches
 
 Within a `@safe` function, use `@unsafe` blocks for specific unsafe operations:
@@ -755,6 +848,8 @@ void mostly_safe() {
     {
         // This block can call unsafe functions, use raw pointers, etc.
         legacy_c_function(&x);
+        std::vector<int> vec;  // STL is @unsafe
+        vec.push_back(x);
     }
 
     // Back to safe code
@@ -783,6 +878,45 @@ namespace myapp {
 ```
 
 This enables gradual migration: annotate files independently.
+
+### STL and External Code
+
+All STL and external functions are `@unsafe` by default. To use them in `@safe` code:
+
+**Option 1: Use `@unsafe` blocks**
+```cpp
+// @safe
+void use_stl() {
+    // @unsafe
+    {
+        std::vector<int> vec = {1, 2, 3};
+        vec.push_back(4);  // OK in unsafe block
+    }
+}
+```
+
+**Option 2: Use Rusty structures (recommended)**
+```cpp
+// @safe
+void use_rusty() {
+    rusty::Vec<int> vec = {1, 2, 3};
+    vec.push_back(4);  // No unsafe block needed
+}
+```
+
+**Option 3: External annotations for audited functions**
+```cpp
+// @external: {
+//   my_audited_function: [safe, () -> void]
+// }
+
+void my_audited_function();
+
+// @safe
+void caller() {
+    my_audited_function();  // OK: marked [safe] via external annotation
+}
+```
 
 ---
 
@@ -2308,7 +2442,8 @@ Move + use   : ERROR
 
 ---
 
-*Document version: 1.2*
+*Document version: 1.3*
 *Last updated: January 2026*
+*Updated: Part III (Safety Annotations) with calling rules, annotation syntax, header propagation, STL handling*
 *Updated: Part II (Core Concepts) with detailed reference semantics, partial borrows, partial moves*
 *Updated: Part V Section 15 (RAII & Container Safety) with comprehensive RAII tracking details*
