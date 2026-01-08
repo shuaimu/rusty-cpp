@@ -742,7 +742,6 @@ Annotations attach to the **next** code element only:
 
 ```cpp
 // @safe - Apply to next element only
-// @safe
 void safe_function() {
     // ✅ CAN call other @safe functions
     safe_helper();
@@ -759,7 +758,6 @@ void safe_function() {
 }
 
 // @unsafe - Apply to next element only (or no annotation = same)
-// @unsafe
 void unsafe_function() {
     // ✅ Can call anything
     safe_function();       // OK
@@ -803,7 +801,7 @@ Inner annotations override outer ones:
 ```cpp
 // @safe
 namespace myapp {
-    // All functions in this namespace are @safe by default
+    // All functions in this namespace---this file only---are @safe by default
 
     void safe_by_inheritance() { }  // @safe (from namespace)
 
@@ -940,9 +938,9 @@ void caller() {
 | `@safe` functions | Yes | Yes | Yes |
 | `@unsafe` functions | No | No | No |
 | Unannotated functions | No | No | No |
-| `@unsafe` blocks in `@safe` | Yes* | Yes* | Yes* |
+| `@unsafe` blocks in `@safe` | No | No | No |
 
-*`@unsafe` blocks inside `@safe` functions are still checked because the function itself is `@safe`.
+`@unsafe` blocks are escape hatches - all safety checking is skipped within them, even inside `@safe` functions.
 
 ### `@safe` Functions: Full Analysis
 
