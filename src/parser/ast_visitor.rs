@@ -2294,8 +2294,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     // Check for pointer arithmetic (p + n, p - n, p += n, p -= n)
                     // Pointer arithmetic is when one operand is a pointer and the operator is +, -, +=, -=
                     if matches!(op.as_str(), "+" | "-" | "+=" | "-=") {
-                        let left_type = children[0].get_type().map(|t| type_to_string(&t));
-                        let right_type = children[1].get_type().map(|t| type_to_string(&t));
+                        // Use canonical type to resolve type aliases for pointer detection
+                        let left_type = children[0].get_type().map(|t| canonical_type_to_string(&t));
+                        let right_type = children[1].get_type().map(|t| canonical_type_to_string(&t));
 
                         let left_is_pointer = left_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
                         let right_is_pointer = right_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
@@ -2407,10 +2408,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     // Try to determine the operator type
                     // LibClang doesn't give us the operator directly, but we can check the types
                     if let Some(result_type) = entity.get_type() {
-                        let type_str = type_to_string(&result_type);
+                        // Use canonical type to resolve type aliases for pointer detection
+                        let type_str = canonical_type_to_string(&result_type);
 
                         if let Some(child_type) = children[0].get_type() {
-                            let child_type_str = type_to_string(&child_type);
+                            let child_type_str = canonical_type_to_string(&child_type);
 
                             // If child is pointer and result is not, it's dereference (*)
                             if child_type_str.contains('*') && !type_str.contains('*') {
@@ -2701,7 +2703,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 if let (Some(array), Some(index)) = (array_expr, index_expr) {
                     // Check if the base is a pointer type (pointer subscript = pointer arithmetic)
                     if let Some(base_type) = children[0].get_type() {
-                        let type_str = type_to_string(&base_type);
+                        // Use canonical type to resolve type aliases for pointer detection
+                        let type_str = canonical_type_to_string(&base_type);
                         // If base is a pointer (not an array), this is pointer arithmetic
                         // Arrays have types like "int [10]" while pointers have "int *"
                         if type_str.contains('*') && !type_str.contains('[') {
@@ -2778,4 +2781,10 @@ fn extract_location(entity: &Entity) -> SourceLocation {
 
 fn type_to_string(ty: &Type) -> String {
     ty.get_display_name()
+}
+
+/// Get the canonical type string for pointer detection
+/// This resolves type aliases (e.g., rusty::Ptr<int> -> const int *)
+fn canonical_type_to_string(ty: &Type) -> String {
+    ty.get_canonical_type().get_display_name()
 }
