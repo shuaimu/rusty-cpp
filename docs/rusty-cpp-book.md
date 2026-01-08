@@ -1941,7 +1941,7 @@ ERROR: Cannot move 'x' because it is borrowed
 
 ### What's Not Checked
 
-- **Thread safety**: No data race detection
+- **Runtime thread safety**: No data race detection (use ThreadSanitizer); Send/Sync traits ARE enforced at compile-time
 - **Exception safety**: Stack unwinding not modeled
 - **Virtual functions**: Limited dynamic dispatch analysis
 - **Complex templates**: SFINAE, partial specialization limitations
@@ -2153,71 +2153,260 @@ void safe_wrapper() {
 
 ## 25. Thread Safety Model
 
-### Current Status: Not Implemented
+### Current Status: Implemented
 
-RustyCpp currently does **not** check for thread safety issues:
+RustyCpp provides **compile-time thread safety** via Rust-like `Send` and `Sync` traits, enforced through C++20 concepts.
 
-- No data race detection
-- No enforcement of Send/Sync traits
-- No mutex lock ordering analysis
+### Send Trait: Transfer Across Threads
 
-### What Safe C++ Proposes
+The `Send` trait indicates a type can be safely transferred (moved) to another thread.
 
-Safe C++ introduces Rust-like thread safety through traits:
-
-**`send` trait**: Type can be transferred to another thread
 ```cpp
-// Safe C++ syntax
-template<typename T> requires send<T>
-void spawn_thread(T data);
+#include <rusty/traits.hpp>
+
+// rusty::Send concept - compile-time check
+template<typename T>
+concept Send = rusty::is_send<T>::value;
+
+// Types that are Send:
+// ✅ Primitives (int, float, etc.)
+// ✅ rusty::Box<T> if T is Send
+// ✅ rusty::Arc<T> if T is Send + Sync
+// ✅ rusty::Mutex<T> if T is Send
+// ✅ rusty::Cell<T> if T is Send
+// ✅ rusty::RefCell<T> if T is Send
+// ✅ std::unique_ptr<T> if T is Send
+
+// Types that are NOT Send:
+// ❌ rusty::Rc<T> - non-atomic reference count
+// ❌ Raw pointers (T*, const T*)
 ```
 
-**`sync` trait**: Type can be shared between threads (via `&T`)
+### Sync Trait: Share Across Threads
+
+The `Sync` trait indicates `&T` can be safely shared between threads.
+
 ```cpp
-// Safe C++ syntax
-template<typename T> requires sync<T>
-void share_between_threads(const T& data);
+// rusty::Sync concept - compile-time check
+template<typename T>
+concept Sync = rusty::is_sync<T>::value;
+
+// Types that are Sync:
+// ✅ Primitives (int, float, etc.)
+// ✅ rusty::Arc<T> if T is Send + Sync
+// ✅ rusty::Box<T> if T is Sync
+// ✅ rusty::Mutex<T> if T is Send
+// ✅ rusty::Atomic<T>
+// ✅ const T& if T is Sync
+
+// Types that are NOT Sync:
+// ❌ rusty::Rc<T> - non-atomic
+// ❌ rusty::Cell<T> - unsynchronized interior mutability
+// ❌ rusty::RefCell<T> - unsynchronized interior mutability
+// ❌ T& (mutable references) - never Sync
+// ❌ Raw pointers
 ```
 
-**Mutex integration**:
+### Thread Spawning with Send Enforcement
+
+Use `rusty::thread::spawn()` to launch threads with compile-time `Send` checking:
+
 ```cpp
-// Safe C++ syntax
-std2::mutex<std2::vector<int>> shared_vec;
-{
-    auto guard = shared_vec.lock();  // Returns mutable borrow
-    guard->push_back(42);
-}  // Lock released, borrow ends
+#include <rusty/thread.hpp>
+
+// @safe
+void spawn_example() {
+    // Data to send to thread must satisfy Send concept
+    auto data = rusty::Box<int>::make(42);
+
+    // spawn() requires all arguments to be Send
+    auto handle = rusty::thread::spawn([](rusty::Box<int> d) {
+        // Use data in thread
+        return *d * 2;
+    }, std::move(data));
+
+    // JoinHandle<T> - Rust-style semantics
+    int result = handle.join();  // Blocks and returns result
+}
+
+// Compile-time error example:
+void error_example() {
+    rusty::Rc<int> rc = rusty::Rc<int>::make(42);
+
+    // ❌ COMPILE ERROR: Rc<T> is not Send
+    // auto handle = rusty::thread::spawn([](rusty::Rc<int> r) {
+    //     return *r;
+    // }, std::move(rc));
+}
 ```
 
-### RustyCpp's Position
+### JoinHandle: Rust-Style Thread Management
 
-We intentionally omit thread safety checking because:
+`JoinHandle<T>` provides Rust-like thread lifecycle management:
 
-1. **Complexity**: Requires whole-program analysis
-2. **C++ ecosystem**: Existing code uses various threading models
-3. **Runtime nature**: Many thread safety issues are inherently dynamic
-4. **Tooling overlap**: Tools like ThreadSanitizer handle this well
+```cpp
+#include <rusty/thread.hpp>
 
-**Recommendation**: Use ThreadSanitizer or similar tools for thread safety:
+void join_handle_example() {
+    auto handle = rusty::thread::spawn([]() {
+        return 42;
+    });
+
+    // Check if finished (non-blocking)
+    if (handle.is_finished()) {
+        // Thread completed
+    }
+
+    // Join and get result (blocks)
+    int result = handle.join();
+
+    // ❌ Cannot join twice
+    // handle.join();  // Throws: "Thread already joined"
+}
+
+// Rust semantics: detach on drop
+void detach_on_drop() {
+    {
+        auto handle = rusty::thread::spawn([]() {
+            // Long-running task
+        });
+        // handle goes out of scope without join()
+    }  // Thread is DETACHED (not blocked), Rust-style
+}
+
+// Explicit detach
+void explicit_detach() {
+    auto handle = rusty::thread::spawn([]() { /* work */ });
+    handle.detach();  // Explicitly detach
+}
+```
+
+### Scoped Threads: Guaranteed Join
+
+For threads that must complete before a scope exits, use `rusty::thread::scope()`:
+
+```cpp
+#include <rusty/thread.hpp>
+
+void scoped_example() {
+    std::vector<int> data = {1, 2, 3, 4, 5};
+
+    rusty::thread::scope([&](rusty::thread::Scope& s) {
+        // Spawn threads within scope - NO Send requirement!
+        // Scope guarantees threads complete before data dies
+        s.spawn([&data]() {
+            // Can safely borrow local data
+            for (int x : data) {
+                process(x);
+            }
+        });
+
+        s.spawn([&data]() {
+            // Multiple threads can share &data
+            compute(data);
+        });
+    });  // Blocks until ALL scoped threads complete
+
+    // data is still valid here
+}
+```
+
+**Key difference from `spawn()`**:
+- `spawn()`: Requires `Send`, thread may outlive caller
+- `scope()`: No `Send` required, threads guaranteed to join before scope ends
+
+### Marking User Types as Send
+
+Use the `RUSTY_MARK_SEND` macro for your own types:
+
+```cpp
+#include <rusty/send_trait.hpp>
+
+class MyThreadSafeData {
+    std::atomic<int> value;
+public:
+    explicit MyThreadSafeData(int v) : value(v) {}
+    int get() const { return value.load(); }
+};
+
+// Mark as Send (type can be transferred across threads)
+RUSTY_MARK_SEND(MyThreadSafeData)
+
+// For template types: Send if T is Send
+template<typename T>
+class MyContainer {
+    T data;
+};
+
+RUSTY_MARK_SEND_TEMPLATE(MyContainer, T)
+
+// Now these compile:
+void use_custom_types() {
+    MyThreadSafeData data(42);
+    auto h1 = rusty::thread::spawn([](MyThreadSafeData d) {
+        return d.get();
+    }, std::move(data));
+
+    MyContainer<int> container;
+    auto h2 = rusty::thread::spawn([](MyContainer<int> c) {
+        // ...
+    }, std::move(container));
+}
+```
+
+### Reference Rules for Send/Sync
+
+RustyCpp follows Rust's rules for references:
+
+```cpp
+// RULE 1: const T& is Send if T is Sync
+// (Immutable shared reference can be sent if type is shareable)
+template<typename T>
+struct is_send<const T&> : is_sync<T> {};
+
+// RULE 2: T& (mutable ref) is Send if T is Send
+// (Mutable reference can be sent if type itself can be sent)
+template<typename T>
+struct is_send<T&> : is_send<T> {};
+
+// RULE 3: const T& is Sync if T is Sync
+template<typename T>
+struct is_sync<const T&> : is_sync<T> {};
+
+// RULE 4: T& (mutable ref) is NEVER Sync
+// (Cannot share mutable references - would cause data races)
+template<typename T>
+struct is_sync<T&> : std::false_type {};
+```
+
+### Send/Sync Summary Table
+
+| Type | Send | Sync | Notes |
+|------|------|------|-------|
+| `int`, `float`, primitives | ✅ | ✅ | Always thread-safe |
+| `rusty::Box<T>` | if T is Send | if T is Sync | Unique ownership |
+| `rusty::Arc<T>` | if T is Send+Sync | if T is Send+Sync | Shared ownership |
+| `rusty::Rc<T>` | ❌ | ❌ | Non-atomic refcount |
+| `rusty::Mutex<T>` | if T is Send | if T is Send | Synchronizes access |
+| `rusty::Cell<T>` | if T is Send | ❌ | Unsync interior mut |
+| `rusty::RefCell<T>` | if T is Send | ❌ | Unsync interior mut |
+| `rusty::Atomic<T>` | ✅ | ✅ | Lock-free sync |
+| `T*`, `const T*` | ❌ | ❌ | Raw pointers unsafe |
+| `const T&` | if T is Sync | if T is Sync | Immutable borrow |
+| `T&` | if T is Send | ❌ | Mutable borrow |
+
+### What's NOT Checked
+
+RustyCpp's thread safety is **compile-time via concepts**, not runtime analysis:
+
+- ❌ Data race detection (use ThreadSanitizer)
+- ❌ Mutex lock ordering / deadlock detection
+- ❌ Atomics ordering correctness
+- ❌ Dynamic thread safety analysis
+
+For runtime thread safety checking, use ThreadSanitizer:
 ```bash
 clang++ -fsanitize=thread -g source.cpp
-```
-
-### Future Consideration
-
-We may add basic thread safety annotations in the future:
-
-```cpp
-// Hypothetical future syntax
-// @thread_safe
-class Counter {
-    std::atomic<int> value;  // OK: atomic is thread-safe
-};
-
-// @not_thread_safe
-class UnsafeCounter {
-    int value;  // Would warn if shared across threads
-};
 ```
 
 ---
@@ -2583,7 +2772,7 @@ In the future, RustyCpp could potentially:
 
 Some features we intentionally won't implement:
 
-- **Full thread safety**: Use ThreadSanitizer instead
+- **Runtime thread safety**: Data race detection at runtime (use ThreadSanitizer); we DO have compile-time Send/Sync enforcement
 - **Exception flow analysis**: Too complex, limited benefit
 - **Runtime instrumentation**: We're purely static
 - **Automatic code fixes**: Too risky for safety-critical code
