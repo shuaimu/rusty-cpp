@@ -152,25 +152,26 @@ void test() {
 #[test]
 fn test_multiple_new_delete_violations() {
     // Multiple new/delete expressions should all be detected
+    // Additionally, raw pointer declarations in function bodies are now detected
     let test_code = r#"
 // @safe
 void test1() {
-    int* p = new int(42);  // ERROR 1
+    int* p = new int(42);  // ERROR: raw pointer decl + new
 }
 
 // @safe
 void test2(int* p) {
-    delete p;  // ERROR 2
+    delete p;  // ERROR: delete
 }
 
 // @safe
 void test3() {
-    int* arr = new int[10];  // ERROR 3
+    int* arr = new int[10];  // ERROR: raw pointer decl + new
 }
 
 // @safe
 void test4(int* arr) {
-    delete[] arr;  // ERROR 4
+    delete[] arr;  // ERROR: delete
 }
 "#;
 
@@ -183,9 +184,14 @@ void test4(int* arr) {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Should detect all 4 violations
-    assert!(stdout.contains("4 violation"),
-            "Should detect 4 violations (2 new, 2 delete). Output: {}", stdout);
+    // Should detect 6 violations:
+    // - test1: raw pointer declaration + new = 2
+    // - test2: delete = 1
+    // - test3: raw pointer declaration + new = 2
+    // - test4: delete = 1
+    // Total = 6
+    assert!(stdout.contains("6 violation"),
+            "Should detect 6 violations (2 raw ptr decl, 2 new, 2 delete). Output: {}", stdout);
 
     // Clean up
     let _ = fs::remove_file("test_multiple_new_delete.cpp");

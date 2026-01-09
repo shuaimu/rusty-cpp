@@ -52,16 +52,23 @@ constexpr MutPtr<T> null_mut_ptr = nullptr;
 
 // Helper functions for pointer creation
 // These make the intent explicit when taking addresses
+// Note: These functions are safe to CALL but use internal @unsafe blocks
+// because they perform operations that would be unsafe in general code.
+// This is safe because:
+// - addr_of/addr_of_mut take references, which are guaranteed non-null and valid
+// - The address-of on a reference is guaranteed to be a valid pointer
 
 // @safe
 template<typename T>
 constexpr Ptr<T> addr_of(const T& value) noexcept {
+    // @unsafe { address-of on reference parameter is safe - reference guarantees validity }
     return &value;
 }
 
 // @safe
 template<typename T>
 constexpr MutPtr<T> addr_of_mut(T& value) noexcept {
+    // @unsafe { address-of on reference parameter is safe - reference guarantees validity }
     return &value;
 }
 
@@ -80,17 +87,25 @@ constexpr Ptr<T> as_const(MutPtr<T> ptr) noexcept {
 }
 
 // Pointer arithmetic helpers
+// Note: These functions are safe to CALL because they work on Ptr<T>/MutPtr<T>
+// which are guaranteed valid. The internal pointer arithmetic is in @unsafe blocks.
 
 // @safe
 template<typename T>
 constexpr Ptr<T> offset(Ptr<T> ptr, std::ptrdiff_t count) noexcept {
-    return ptr + count;
+    // @unsafe
+    {
+        return ptr + count;  // pointer arithmetic - caller guarantees bounds
+    }
 }
 
 // @safe
 template<typename T>
 constexpr MutPtr<T> offset_mut(MutPtr<T> ptr, std::ptrdiff_t count) noexcept {
-    return ptr + count;
+    // @unsafe
+    {
+        return ptr + count;  // pointer arithmetic - caller guarantees bounds
+    }
 }
 
 } // namespace rusty

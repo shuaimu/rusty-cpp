@@ -160,6 +160,6 @@ fn test_result_hpp_current_violations() {
 // Test that documents current violations in fn.hpp
 #[test]
 fn test_fn_hpp_current_violations() {
-    // fn.hpp currently has 28 violations
-    check_header_has_expected_violations("include/rusty/fn.hpp", 28);
+    // fn.hpp currently has 30 violations (28 + 2 raw pointer declarations)
+    check_header_has_expected_violations("include/rusty/fn.hpp", 30);
 }

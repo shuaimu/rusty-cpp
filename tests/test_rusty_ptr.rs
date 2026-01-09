@@ -35,14 +35,15 @@ fn cleanup(file_path: &std::path::PathBuf) {
 // =============================================================================
 
 #[test]
-fn test_ptr_address_of_requires_unsafe() {
+fn test_ptr_address_of_allowed_in_safe() {
+    // Address-of IS allowed when assigning to Ptr<T> because Ptr provides safe semantics
     let code = r#"
 #include "rusty/ptr.hpp"
 
 // @safe
 void test_ptr_addr() {
     int x = 42;
-    rusty::Ptr<int> p = &x;  // Should ERROR: address-of in @safe
+    rusty::Ptr<int> p = &x;  // OK: address-of allowed when assigning to Ptr<T>
 }
 "#;
 
@@ -51,21 +52,22 @@ void test_ptr_addr() {
     cleanup(&temp_file);
 
     assert!(
-        output.contains("address-of") || output.contains("unsafe"),
-        "Ptr address-of should require unsafe. Output: {}",
+        !output.contains("address-of"),
+        "Ptr address-of should be allowed in @safe code. Output: {}",
         output
     );
 }
 
 #[test]
-fn test_mutptr_address_of_requires_unsafe() {
+fn test_mutptr_address_of_allowed_in_safe() {
+    // Address-of IS allowed when assigning to MutPtr<T> because MutPtr provides safe semantics
     let code = r#"
 #include "rusty/ptr.hpp"
 
 // @safe
 void test_mutptr_addr() {
     int x = 42;
-    rusty::MutPtr<int> mp = &x;  // Should ERROR: address-of in @safe
+    rusty::MutPtr<int> mp = &x;  // OK: address-of allowed when assigning to MutPtr<T>
 }
 "#;
 
@@ -74,8 +76,8 @@ void test_mutptr_addr() {
     cleanup(&temp_file);
 
     assert!(
-        output.contains("address-of") || output.contains("unsafe"),
-        "MutPtr address-of should require unsafe. Output: {}",
+        !output.contains("address-of"),
+        "MutPtr address-of should be allowed in @safe code. Output: {}",
         output
     );
 }
@@ -199,9 +201,11 @@ void test_mutptr_unsafe_block() {
 // =============================================================================
 
 #[test]
-fn test_type_alias_resolved_to_canonical() {
-    // This test verifies that Ptr<T> and MutPtr<T> are resolved to their
-    // canonical types (const T* and T*) by libclang, so no hardcoding needed
+fn test_ptr_and_mutptr_borrow_conflict() {
+    // This test verifies that Ptr<T> and MutPtr<T> obey borrow rules.
+    // - Ptr<int> p = &x creates an immutable borrow of x
+    // - MutPtr<int> mp = &x creates a mutable borrow of x
+    // Having both at the same time violates borrow rules!
     let code = r#"
 #include "rusty/ptr.hpp"
 
@@ -209,12 +213,13 @@ fn test_type_alias_resolved_to_canonical() {
 void test_both_types() {
     int x = 42;
 
-    // Both should be detected - relies on canonical type resolution
-    rusty::Ptr<int> p = &x;      // ERROR: address-of (Ptr<int> -> const int*)
-    rusty::MutPtr<int> mp = &x;  // ERROR: address-of (MutPtr<int> -> int*)
+    // Address-of is SAFE when assigning to safe pointer types
+    rusty::Ptr<int> p = &x;      // OK: immutable borrow of x
+    rusty::MutPtr<int> mp = &x;  // ERROR: mutable borrow conflicts with existing immutable borrow
 
-    int a = *p;   // ERROR: dereference
-    int b = *mp;  // ERROR: dereference
+    // Dereferencing safe pointers (Ptr/MutPtr) is also SAFE
+    int a = *p;   // OK: safe pointer dereference
+    int b = *mp;  // OK: safe pointer dereference
 }
 "#;
 
@@ -222,13 +227,12 @@ void test_both_types() {
     let output = run_analyzer(&temp_file, "include");
     cleanup(&temp_file);
 
-    // Count violations - should have at least 4 (2 address-of + 2 dereference)
-    let has_addr_of = output.contains("address-of");
-    let has_deref = output.contains("dereference");
+    // Should detect borrow conflict: can't have mutable borrow while immutable borrow exists
+    let has_borrow_conflict = output.contains("already") && output.contains("borrow");
 
     assert!(
-        has_addr_of && has_deref,
-        "Should detect both address-of and dereference for type aliases. Output: {}",
+        has_borrow_conflict,
+        "Should detect borrow conflict when Ptr (immutable) and MutPtr (mutable) both borrow same variable. Output: {}",
         output
     );
 }
@@ -289,6 +293,146 @@ void test_mutptr_mutation() {
     assert!(
         output.contains("no violations") || !output.contains("violation"),
         "Unsafe function should have no analyzer violations. Output: {}",
+        output
+    );
+}
+
+// =============================================================================
+// Borrow rule tests for Ptr<T> and MutPtr<T>
+// =============================================================================
+
+#[test]
+fn test_ptr_single_immutable_borrow_allowed() {
+    // A single immutable borrow via Ptr<T> should be allowed
+    let code = r#"
+#include "rusty/ptr.hpp"
+
+// @safe
+void test_single_ptr() {
+    int x = 42;
+    rusty::Ptr<int> p = &x;  // OK: single immutable borrow
+    int a = *p;              // OK: use the borrow
+}
+"#;
+
+    let temp_file = create_temp_file("single_ptr", code);
+    let output = run_analyzer(&temp_file, "include");
+    cleanup(&temp_file);
+
+    assert!(
+        !output.contains("borrow") || output.contains("no violations"),
+        "Single Ptr borrow should be allowed. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_mutptr_single_mutable_borrow_allowed() {
+    // A single mutable borrow via MutPtr<T> should be allowed
+    let code = r#"
+#include "rusty/ptr.hpp"
+
+// @safe
+void test_single_mutptr() {
+    int x = 42;
+    rusty::MutPtr<int> mp = &x;  // OK: single mutable borrow
+    *mp = 100;                   // OK: mutate through the borrow
+}
+"#;
+
+    let temp_file = create_temp_file("single_mutptr", code);
+    let output = run_analyzer(&temp_file, "include");
+    cleanup(&temp_file);
+
+    assert!(
+        !output.contains("borrow") || output.contains("no violations"),
+        "Single MutPtr borrow should be allowed. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_multiple_ptr_immutable_borrows_allowed() {
+    // Multiple immutable borrows via Ptr<T> should be allowed (like Rust's &T)
+    let code = r#"
+#include "rusty/ptr.hpp"
+
+// @safe
+void test_multiple_ptrs() {
+    int x = 42;
+    rusty::Ptr<int> p1 = &x;  // OK: immutable borrow
+    rusty::Ptr<int> p2 = &x;  // OK: another immutable borrow is allowed
+    int a = *p1;
+    int b = *p2;
+}
+"#;
+
+    let temp_file = create_temp_file("multiple_ptrs", code);
+    let output = run_analyzer(&temp_file, "include");
+    cleanup(&temp_file);
+
+    assert!(
+        !output.contains("already") || output.contains("no violations"),
+        "Multiple Ptr (immutable) borrows should be allowed. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_mutptr_then_ptr_conflict() {
+    // MutPtr then Ptr should also conflict (mutable borrow exists)
+    let code = r#"
+#include "rusty/ptr.hpp"
+
+// @safe
+void test_mutptr_then_ptr() {
+    int x = 42;
+    rusty::MutPtr<int> mp = &x;  // Mutable borrow
+    rusty::Ptr<int> p = &x;      // ERROR: can't immutable borrow while mutably borrowed
+    int a = *p;
+}
+"#;
+
+    let temp_file = create_temp_file("mutptr_then_ptr", code);
+    let output = run_analyzer(&temp_file, "include");
+    cleanup(&temp_file);
+
+    // Should detect borrow conflict
+    let has_borrow_conflict = output.contains("already") && output.contains("borrow");
+
+    assert!(
+        has_borrow_conflict,
+        "Should detect borrow conflict when Ptr tries to borrow while MutPtr has mutable borrow. Output: {}",
+        output
+    );
+}
+
+#[test]
+fn test_two_mutptr_conflict() {
+    // Two MutPtr to same variable should conflict
+    let code = r#"
+#include "rusty/ptr.hpp"
+
+// @safe
+void test_two_mutptrs() {
+    int x = 42;
+    rusty::MutPtr<int> mp1 = &x;  // Mutable borrow
+    rusty::MutPtr<int> mp2 = &x;  // ERROR: can't have two mutable borrows
+    *mp1 = 1;
+    *mp2 = 2;
+}
+"#;
+
+    let temp_file = create_temp_file("two_mutptrs", code);
+    let output = run_analyzer(&temp_file, "include");
+    cleanup(&temp_file);
+
+    // Should detect borrow conflict
+    let has_borrow_conflict = output.contains("already") && output.contains("borrow");
+
+    assert!(
+        has_borrow_conflict,
+        "Should detect borrow conflict when two MutPtrs try to mutably borrow same variable. Output: {}",
         output
     );
 }

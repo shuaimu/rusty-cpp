@@ -132,20 +132,23 @@ public:
     
     // Take ownership of the raw pointer (Rust: Box::into_raw)
     // After this, the Box is empty and caller is responsible for deletion
+    // @unsafe
     // @lifetime: owned
     T* into_raw() {
         T* temp = ptr;
         ptr = nullptr;
         return temp;
     }
-    
+
     // C++-style alias for into_raw
+    // @unsafe
     // @lifetime: owned
     T* release() {
         return into_raw();
     }
-    
+
     // Get raw pointer without transferring ownership
+    // @unsafe - returns raw pointer, use operator* or operator-> instead
     // @lifetime: (&'a) -> &'a
     T* get() const {
         return ptr;

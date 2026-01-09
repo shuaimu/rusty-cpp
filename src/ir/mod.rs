@@ -43,6 +43,30 @@ fn is_member_access_operator(func_name: &str) -> bool {
     }
 }
 
+/// Determine if a pointer type should be treated as immutable (Ptr<T>) or mutable (MutPtr<T>)
+/// This is used for borrow checking - Ptr<T> creates an immutable borrow, MutPtr<T> creates a mutable borrow
+fn is_immutable_pointer_type(type_name: &str) -> bool {
+    let normalized = type_name.replace(" ", "");
+
+    // rusty::Ptr<T> is const T* - immutable borrow
+    if normalized.contains("rusty::Ptr<") || normalized.starts_with("Ptr<") {
+        return true;
+    }
+
+    // rusty::MutPtr<T> is T* - mutable borrow
+    if normalized.contains("rusty::MutPtr<") || normalized.starts_with("MutPtr<") {
+        return false;
+    }
+
+    // const variations of Ptr
+    if normalized.contains("construsty::Ptr<") || normalized.starts_with("constPtr<") {
+        return true;
+    }
+
+    // Fallback: check for "const " prefix (original logic)
+    type_name.starts_with("const ")
+}
+
 /// Check if an expression chain originates from a temporary (constructor call).
 /// This handles chained method calls like Builder().set(42).get_value().
 /// Returns true if the ultimate receiver is a constructor call (creating a temporary).
@@ -1600,16 +1624,15 @@ fn convert_statement(
                             debug_println!("DEBUG IR: Creating pointer borrow from '{}' to '{}'", target_var, lhs_var);
 
                             // Determine mutability from LHS pointer type
-                            // If LHS is `const T*` -> Immutable, otherwise -> Mutable
+                            // - Ptr<T> (const T*) -> Immutable borrow
+                            // - MutPtr<T> (T*) -> Mutable borrow
                             let kind = if let Some(var_info) = variables.get(lhs_var) {
-                                // Check if this is a const pointer (const T*)
                                 match &var_info.ty {
-                                    VariableType::Owned(type_name) if type_name.starts_with("const ") => {
+                                    VariableType::Owned(type_name) if is_immutable_pointer_type(type_name) => {
                                         BorrowKind::Immutable
                                     }
                                     _ => {
-                                        // Non-const pointer defaults to mutable borrow
-                                        // In safe C++, T* p = &x means we might modify *p
+                                        // Non-const pointer or MutPtr defaults to mutable borrow
                                         BorrowKind::Mutable
                                     }
                                 }
@@ -1634,7 +1657,7 @@ fn convert_statement(
                                 // Same mutability logic as above
                                 let kind = if let Some(var_info) = variables.get(lhs_var) {
                                     match &var_info.ty {
-                                        VariableType::Owned(type_name) if type_name.starts_with("const ") => {
+                                        VariableType::Owned(type_name) if is_immutable_pointer_type(type_name) => {
                                             BorrowKind::Immutable
                                         }
                                         _ => BorrowKind::Mutable

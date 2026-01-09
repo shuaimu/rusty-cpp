@@ -182,14 +182,16 @@ void test() {
 #[test]
 fn test_pointer_param_alias_not_tracked_deeply() {
     // Pointers from parameters don't have known sources, so aliasing is shallow
+    // Note: Raw pointers require @unsafe in the new safety model
     let code = r#"
-// @safe
+// @unsafe
 void test(int* p) {
     int* q = p;  // q aliases p (no deep source tracking for params)
 }
 "#;
     let output = run_checker(code);
     // This should pass because we don't deeply track pointer parameter sources
+    // (and because we're in @unsafe context)
     assert!(
         output.contains("no violations") || !output.contains("violation"),
         "Pointer param aliasing should not cause deep tracking issues. Output: {}", output
