@@ -445,21 +445,12 @@ pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: 
         return false;
     }
 
-    // Check for Rusty RAII types (with or without namespace prefix)
-    if type_name.starts_with("rusty::Box<") ||
-       type_name.starts_with("Box<") ||  // Without namespace
-       type_name.starts_with("rusty::Rc<") ||
-       type_name.starts_with("Rc<") ||
-       type_name.starts_with("rusty::Arc<") ||
-       type_name.starts_with("Arc<") ||
-       type_name.starts_with("rusty::RefCell<") ||
-       type_name.starts_with("RefCell<") ||
-       type_name.starts_with("rusty::Cell<") ||
-       type_name.starts_with("Cell<") {
-        return true;
-    }
+    // NOTE: rusty:: RAII types (Box, Rc, Arc, RefCell, Cell) are NOT hard-coded here.
+    // They are detected dynamically via user_defined_raii_types when the rusty headers
+    // are parsed and their destructors are found. This avoids unnecessary hard-coding.
 
-    // Check for standard library RAII types
+    // Check for standard library RAII types (these are hard-coded because STL headers
+    // are typically not parsed deeply enough to detect their destructors)
     if type_name.starts_with("std::unique_ptr<") ||
        type_name.starts_with("unique_ptr<") ||  // Without namespace
        type_name.starts_with("std::shared_ptr<") ||
@@ -504,6 +495,12 @@ pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: 
         if type_name.contains(raii_type) {
             return true;
         }
+        // Check if the RAII type (with namespace) ends with the base type
+        // e.g., "rusty::Box" ends with "Box" which matches "Box<int>"
+        let raii_base = raii_type.split("::").last().unwrap_or(raii_type);
+        if base_type == raii_base {
+            return true;
+        }
     }
 
     false
@@ -531,7 +528,7 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
     }
 
     for func in ast.functions {
-        let ir_func = convert_function(&func)?;
+        let ir_func = convert_function(&func, &user_defined_raii_types)?;
         functions.push(ir_func);
     }
 
@@ -567,7 +564,7 @@ pub fn build_ir_with_safety_context(
     }
 
     for func in ast.functions {
-        let ir_func = convert_function(&func)?;
+        let ir_func = convert_function(&func, &user_defined_raii_types)?;
         functions.push(ir_func);
     }
 
@@ -579,7 +576,10 @@ pub fn build_ir_with_safety_context(
     })
 }
 
-fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String> {
+fn convert_function(
+    func: &crate::parser::Function,
+    user_defined_raii_types: &std::collections::HashSet<String>,
+) -> Result<IrFunction, String> {
     let mut cfg = DiGraph::new();
     let mut variables = HashMap::new();
     let mut current_scope_level = 0; // Track scope depth (0 = function level)
@@ -589,7 +589,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
 
     for stmt in &func.body {
         // Convert the statement
-        if let Some(ir_stmts) = convert_statement(stmt, &mut variables, &mut current_scope_level)? {
+        if let Some(ir_stmts) = convert_statement(stmt, &mut variables, &mut current_scope_level, user_defined_raii_types)? {
             statements.extend(ir_stmts);
         }
     }
@@ -629,7 +629,7 @@ fn convert_function(func: &crate::parser::Function) -> Result<IrFunction, String
                 is_parameter: true,  // This is a parameter
                 is_static: false,    // Parameters are not static
                 scope_level: 0,      // Parameters are at function scope
-                has_destructor: is_raii_type(&param.type_name),
+                has_destructor: is_raii_type_with_user_defined(&param.type_name, user_defined_raii_types),
                 declaration_index,   // NEW: Track declaration order
             },
         );
@@ -854,6 +854,7 @@ fn convert_statement(
     stmt: &crate::parser::Statement,
     variables: &mut HashMap<String, VariableInfo>,
     current_scope_level: &mut usize,
+    user_defined_raii_types: &std::collections::HashSet<String>,
 ) -> Result<Option<Vec<IrStatement>>, String> {
     use crate::parser::Statement;
 
@@ -890,7 +891,7 @@ fn convert_statement(
                 (VariableType::Owned(var.type_name.clone()), OwnershipState::Owned)
             };
             
-            let has_destructor_value = is_raii_type(&var.type_name);
+            let has_destructor_value = is_raii_type_with_user_defined(&var.type_name, user_defined_raii_types);
             let declaration_index = variables.len();  // Current count = declaration order
             debug_println!("DEBUG IR: VariableDecl '{}': type='{}', has_destructor={}, declaration_index={}",
                 var.name, var.type_name, has_destructor_value, declaration_index);
@@ -2045,7 +2046,7 @@ fn convert_statement(
             // Convert then branch
             let mut then_ir = Vec::new();
             for stmt in then_branch {
-                if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level)? {
+                if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level, user_defined_raii_types)? {
                     then_ir.extend(ir_stmts);
                 }
             }
@@ -2054,7 +2055,7 @@ fn convert_statement(
             let else_ir = if let Some(else_stmts) = else_branch {
                 let mut else_ir = Vec::new();
                 for stmt in else_stmts {
-                    if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level)? {
+                    if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level, user_defined_raii_types)? {
                         else_ir.extend(ir_stmts);
                     }
                 }

@@ -955,6 +955,24 @@ fn process_raii_statement(
                 }
             }
 
+            // Check for operator= calls - this is an assignment to the receiver
+            // If the receiver is borrowed, this is an error (like reassigning a borrowed variable)
+            if method_name == "operator=" {
+                // For qualified method calls like rusty::Box::operator=, the first arg is the receiver
+                // For direct method calls like box.operator=, the receiver is in the func name
+                let receiver = extract_receiver(func).or_else(|| {
+                    // If func is a qualified name (e.g., rusty::Box::operator=),
+                    // the first argument is the receiver object
+                    args.first().cloned()
+                });
+                if let Some(recv) = receiver {
+                    // operator= modifies the receiver, check if it's borrowed
+                    if let Some(err) = tracker.check_reassignment_while_borrowed(&recv, 0) {
+                        errors.push(err);
+                    }
+                }
+            }
+
             // Check if any argument is an invalidated iterator
             for arg in args {
                 if tracker.is_iterator(arg) && tracker.is_iterator_invalidated(arg) {
