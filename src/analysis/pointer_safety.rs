@@ -157,7 +157,12 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
             }
         }
 
-        if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope, &safe_pointer_vars) {
+        if let Some(error) = check_parsed_statement_for_pointers_with_return_type(
+            stmt,
+            in_unsafe_scope,
+            &safe_pointer_vars,
+            Some(&function.return_type),
+        ) {
             errors.push(format!("In function '{}': {}", function.name, error));
         }
     }
@@ -461,6 +466,16 @@ pub fn check_parsed_statement_for_pointers(
     in_unsafe_scope: bool,
     safe_pointer_vars: &HashSet<String>,
 ) -> Option<String> {
+    check_parsed_statement_for_pointers_with_return_type(stmt, in_unsafe_scope, safe_pointer_vars, None)
+}
+
+/// Check statement for pointer operations, with optional return type info for return statements
+pub fn check_parsed_statement_for_pointers_with_return_type(
+    stmt: &Statement,
+    in_unsafe_scope: bool,
+    safe_pointer_vars: &HashSet<String>,
+    return_type: Option<&str>,
+) -> Option<String> {
     use crate::parser::Statement;
 
     // Skip all checks if we're in an unsafe block
@@ -597,6 +612,26 @@ pub fn check_parsed_statement_for_pointers(
                      Use Option<T*> for nullable pointers.".to_string()
                 );
             }
+
+            // Check if return type is a safe pointer (Ptr<T> or MutPtr<T>)
+            // If so, allow address-of in return expression (like we do for assignments)
+            let returning_to_safe_ptr = return_type
+                .map(|rt| is_rusty_safe_pointer_type(rt))
+                .unwrap_or(false);
+
+            if returning_to_safe_ptr {
+                // Allow address-of when returning to Ptr/MutPtr, but still check inner expr
+                if let Expression::AddressOf(inner) = expr {
+                    if let Some(op) = contains_pointer_operation(inner, safe_pointer_vars) {
+                        return Some(format!(
+                            "Unsafe pointer {} in return statement: pointer operations require unsafe context",
+                            op
+                        ));
+                    }
+                    return None; // Address-of is OK when returning Ptr/MutPtr
+                }
+            }
+
             if let Some(op) = contains_pointer_operation(expr, safe_pointer_vars) {
                 return Some(format!(
                     "Unsafe pointer {} in return statement: pointer operations require unsafe context",
