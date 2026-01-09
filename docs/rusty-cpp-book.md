@@ -2088,8 +2088,10 @@ RustyCpp provides safe pointer types that can be used in `@safe` code:
 // @safe - Ptr and MutPtr are safe to use!
 void ptr_example() {
     int x = 42;
-    rusty::Ptr<int> p = &x;        // Safe immutable pointer (like *const T)
-    rusty::MutPtr<int> mp = &x;    // Safe mutable pointer (like *mut T)
+
+    // Use addr_of() / addr_of_mut() to create safe pointers
+    rusty::Ptr<int> p = rusty::addr_of(x);        // Safe immutable pointer
+    rusty::MutPtr<int> mp = rusty::addr_of_mut(x); // Safe mutable pointer
 
     int y = *p;   // Read through const pointer - safe
     *mp = 100;    // Write through mutable pointer - safe
@@ -2106,6 +2108,7 @@ void ptr_example() {
 **Key distinction:**
 - **Raw C++ pointers** (`T*`, `const T*`): Require `@unsafe` context
 - **`rusty::Ptr<T>` / `rusty::MutPtr<T>`**: Safe to use in `@safe` code
+- **`rusty::addr_of()` / `rusty::addr_of_mut()`**: Safe way to create pointers from references
 
 ### Safe Patterns for Pointer-Like Behavior
 
@@ -2115,9 +2118,9 @@ int* get_ptr(std::vector<int>& vec) {
     return &vec[0];
 }
 
-// ✅ rusty::Ptr - safe pointer
+// ✅ rusty::Ptr - safe pointer (use addr_of)
 rusty::Ptr<int> get_safe_ptr(std::vector<int>& vec) {
-    return &vec[0];
+    return rusty::addr_of(vec[0]);
 }
 
 // ✅ Reference - safe and borrow-checked

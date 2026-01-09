@@ -1,268 +1,188 @@
 # Pointer Safety in RustyCpp
 
-RustyCpp treats raw pointers in `@safe` code similarly to how Rust treats references: they must always be valid and non-null at initialization, but can be dereferenced safely.
+RustyCpp follows Rust's model: **raw pointers are unsafe**. For safe pointer-like behavior, use `rusty::Ptr<T>` and `rusty::MutPtr<T>`.
 
 ## Design Philosophy
 
-### Why Not Follow Rust's "Pointers Are Unsafe" Model?
+### Raw Pointers Are Unsafe (Like Rust)
 
-In Rust, raw pointers (`*const T`, `*mut T`) are inherently unsafe - any dereference requires an `unsafe` block. RustyCpp takes a different approach for C++. Here's why:
+In Rust, raw pointers (`*const T`, `*mut T`) are inherently unsafe - any dereference requires an `unsafe` block. RustyCpp adopts the same approach for C++ raw pointers:
 
-#### 1. C++ References Are Not First-Class Citizens
+| Operation | Raw Pointer (`T*`) | `rusty::Ptr<T>` |
+|-----------|-------------------|-----------------|
+| Declaration | Requires @unsafe | Safe |
+| Address-of (`&x`) | Requires @unsafe | Safe via `addr_of()` |
+| Dereference (`*p`) | Requires @unsafe | Safe |
+| Arithmetic | Requires @unsafe | Safe via `offset()` |
 
-Rust's references (`&T`, `&mut T`) are powerful and flexible. C++ references have significant limitations:
+### Why Make Raw Pointers Unsafe?
+
+#### 1. C++ Pointers Have No Safety Guarantees
+
+Raw C++ pointers can be:
+- Null (undefined behavior on dereference)
+- Dangling (pointing to freed memory)
+- Uninitialized (garbage value)
+- Out of bounds (buffer overflow)
 
 ```cpp
-// Cannot rebind C++ references
-int a = 1, b = 2;
-int& ref = a;
-ref = b;      // This assigns b's value to a, doesn't rebind!
-
-// Cannot have reference members without constructor initialization
-struct Bad {
-    int& ref;  // Must be initialized in every constructor
-};
-
-// Templates with references need special treatment
-template<typename T>
-struct Container {
-    T value;  // What if T = int&? Complex semantics!
-};
+int* ptr;           // Uninitialized - garbage value
+int* ptr = nullptr; // Null - UB on dereference
+int* ptr = &x;      // x might go out of scope later
+ptr[100];           // No bounds checking
 ```
 
-Because C++ references can't do everything Rust references can, C++ programmers often use pointers where Rust would use references.
+#### 2. Clear Safety Boundary
 
-#### 2. Fundamental C++ Types Rely on Pointers
+By making raw pointers unsafe, we create a clear boundary:
+- `@safe` code: No raw pointer operations
+- `@unsafe` code: Full pointer access with programmer responsibility
 
-Many basic C++ operations produce pointers:
+This forces developers to either:
+1. Use safe alternatives (`rusty::Ptr<T>`, references, smart pointers)
+2. Explicitly mark code as `@unsafe` and take responsibility
 
-```cpp
-// String literals decay to pointers
-const char* str = "hello";  // Automatic decay
+#### 3. Gradual Migration Path
 
-// C-strings are pointer-based
-void process(const char* s);  // Standard C string API
+Legacy code using raw pointers can be:
+1. Left as `@unsafe` (works immediately)
+2. Gradually migrated to `rusty::Ptr<T>` for safety
+3. Refactored to use references where possible
 
-// Arrays decay to pointers
-int arr[10];
-int* p = arr;  // Automatic decay
+## Safe Pointer Types: `rusty::Ptr<T>` and `rusty::MutPtr<T>`
 
-// Many C APIs use pointers
-FILE* f = fopen("file.txt", "r");
-```
-
-If we marked all pointer operations as unsafe, these common patterns would require `@unsafe` blocks everywhere:
+RustyCpp provides safe pointer wrappers that can be used in `@safe` code:
 
 ```cpp
-// This would be unusable if pointers were always unsafe:
-// @safe
-void greet(const char* name) {  // How do you even call this safely?
-    printf("Hello, %s\n", name);  // Pointer dereference = unsafe?
-}
-```
+#include <rusty/ptr.hpp>
 
-#### 3. Legacy Code Compatibility
-
-Billions of lines of C/C++ code use pointers extensively. Making pointers inherently unsafe would mean:
-- Most existing functions become `@unsafe`
-- Gradual migration becomes impractical
-- The `@safe` subset of C++ would be too restrictive
-
-Our goal is to make refactoring existing C++ codebases feasible, not to create a theoretical ideal that's unusable in practice.
-
-### Our Approach: Pointers as "Must-Be-Valid References"
-
-Instead of "pointers are unsafe", we say "pointers must be valid":
-
-| Aspect | Rust Raw Pointers | RustyCpp Pointers in @safe |
-|--------|-------------------|---------------------------|
-| Creation | Safe | Requires valid source |
-| Dereference | Unsafe | Safe (validity guaranteed) |
-| Null allowed | Yes | No |
-| Philosophy | Defer safety to use | Prove safety at creation |
-
-In `@safe` code, pointers are treated like Rust references:
-- They must be initialized to a valid, non-null value
-- They can be dereferenced safely (no null check required)
-- The burden of ensuring validity is at initialization/assignment time, not at use time
-
-This mirrors Rust's `&T` model - you prove safety once when creating the reference, then use it freely.
-
-### Why Not Check at Dereference?
-
-Checking for null at every dereference would:
-1. Require runtime checks (performance cost)
-2. Not prevent the real issue (creating invalid pointers)
-3. Not match Rust's reference model
-
-Instead, we ensure pointers are valid when created, making all subsequent uses safe.
-
-## Rules for Raw Pointers in @safe Code
-
-### Rule 1: No Uninitialized Pointers
-
-```cpp
-// @safe
-void bad() {
-    int* ptr;  // ERROR: Uninitialized pointer
-}
-
-// @safe
-void good(int* valid_ptr) {
-    int* ptr = valid_ptr;  // OK: Initialized from parameter
-}
-```
-
-### Rule 2: No nullptr Initialization
-
-```cpp
-// @safe
-void bad() {
-    int* ptr = nullptr;  // ERROR: Cannot initialize to nullptr
-}
-```
-
-### Rule 3: No nullptr Assignment
-
-```cpp
-// @safe
-void bad(int* ptr) {
-    ptr = nullptr;  // ERROR: Cannot assign nullptr
-}
-```
-
-### Rule 4: Address-of Requires @unsafe
-
-Taking an address creates a pointer from a reference, which requires explicit `@unsafe`:
-
-```cpp
 // @safe
 void example() {
     int x = 42;
 
-    // @unsafe
-    {
-        int* ptr = &x;  // OK: In @unsafe block
-    }
+    // Safe pointer creation and use
+    rusty::Ptr<int> p = rusty::addr_of(x);      // Immutable pointer
+    rusty::MutPtr<int> mp = rusty::addr_of_mut(x); // Mutable pointer
+
+    int y = *p;    // Safe dereference
+    *mp = 100;     // Safe write
 }
 ```
 
-## Pointer Members in Structs/Classes
+### Why Are `Ptr<T>`/`MutPtr<T>` Safe?
 
-### Basic Rule
+These types enforce safety invariants:
 
-In `@safe` structs, pointer members must be properly initialized:
+1. **Non-null by construction**: Created from valid references via `addr_of()`/`addr_of_mut()`
+2. **Lifetime tracked**: The analyzer tracks the source lifetime
+3. **Borrow checked**: Mutable/immutable access rules enforced
+4. **No implicit conversions**: Cannot accidentally create from raw pointers in @safe code
+
+### API Reference
+
+```cpp
+namespace rusty {
+
+// Type aliases (underlying representation)
+template<typename T> using Ptr = const T*;    // Immutable pointer
+template<typename T> using MutPtr = T*;       // Mutable pointer
+
+// Safe creation from references
+// @safe
+template<typename T>
+constexpr Ptr<T> addr_of(const T& value);
+
+// @safe
+template<typename T>
+constexpr MutPtr<T> addr_of_mut(T& value);
+
+// Safe conversion (const promotion)
+// @safe
+template<typename T>
+constexpr Ptr<T> as_const(MutPtr<T> ptr);
+
+// Unsafe conversion (const cast)
+// @unsafe - casting away const is dangerous
+template<typename T>
+constexpr MutPtr<T> as_mut(Ptr<T> ptr);
+
+// Safe pointer arithmetic
+// @safe
+template<typename T>
+constexpr Ptr<T> offset(Ptr<T> ptr, std::ptrdiff_t count);
+
+// @safe
+template<typename T>
+constexpr MutPtr<T> offset_mut(MutPtr<T> ptr, std::ptrdiff_t count);
+
+// Null pointer constants (for @unsafe code only)
+template<typename T> constexpr Ptr<T> null_ptr = nullptr;
+template<typename T> constexpr MutPtr<T> null_mut_ptr = nullptr;
+
+}
+```
+
+## Rules for Raw Pointers in @safe Code
+
+### Rule 1: No Raw Pointer Declarations
 
 ```cpp
 // @safe
-struct Bad {
-    int* ptr;  // ERROR: No initialization, could be garbage
-};
-
-// @safe
-struct AlsoBad {
-    int* ptr = nullptr;  // ERROR: Cannot initialize to nullptr
-};
+void bad() {
+    int* ptr;              // ERROR: Raw pointer declaration
+    const int* cptr;       // ERROR: Raw pointer declaration
+}
 ```
 
-### Constructor-Initialized Pointer Members
-
-RustyCpp allows `@safe` structs with pointer members IF there's no way to create an instance with an uninitialized or null pointer.
-
-#### Pattern 1: Deleted Default Constructor
-
-```cpp
-// @safe - ALLOWED
-struct SafeWrapper {
-    int* ptr;
-
-    SafeWrapper() = delete;  // No default construction
-
-    // @unsafe - address-of requires unsafe
-    SafeWrapper(int& value) : ptr(&value) {}  // Always non-null
-};
-```
-
-#### Pattern 2: Only Parameterized Constructors
-
-```cpp
-// @safe - ALLOWED
-struct AnotherSafe {
-    int* ptr;
-
-    // Only constructor requires a valid pointer
-    // @unsafe
-    SafeWrapper(int* p) : ptr(p) {}
-
-    // No default constructor exists (suppressed by user-defined ctor)
-};
-```
-
-#### Pattern 3: Multiple Constructors (ALL Must Initialize)
-
-```cpp
-// @safe - ALLOWED
-struct MultiCtor {
-    int* ptr;
-
-    MultiCtor() = delete;
-
-    // @unsafe
-    MultiCtor(int* p) : ptr(p) {}
-
-    // @unsafe
-    MultiCtor(int& ref) : ptr(&ref) {}
-};
-```
-
-### Invalid Patterns
-
-#### Default Constructor Doesn't Initialize
+### Rule 2: No Address-of Operator
 
 ```cpp
 // @safe
-struct Bad {
-    int* ptr;
+void bad() {
+    int x = 42;
+    int* ptr = &x;         // ERROR: Address-of creates raw pointer
+}
 
-    Bad() {}  // ERROR: Default ctor doesn't initialize ptr
-
-    // @unsafe
-    Bad(int* p) : ptr(p) {}  // This one is fine, but Bad() isn't
-};
+// Use rusty::addr_of() instead
+// @safe
+void good() {
+    int x = 42;
+    rusty::Ptr<int> p = rusty::addr_of(x);  // OK
+}
 ```
 
-#### One Constructor Doesn't Initialize
+### Rule 3: No Raw Pointer Dereference
 
 ```cpp
 // @safe
-struct Bad {
-    int* ptr;
+void bad(int* ptr) {       // ERROR: Raw pointer parameter
+    int x = *ptr;          // ERROR: Raw pointer dereference
+}
 
-    MultiCtor() = delete;
-
-    // @unsafe
-    Bad(int* p) : ptr(p) {}  // OK
-
-    // @safe
-    Bad(int x) {}  // ERROR: Doesn't initialize ptr
-};
+// Use rusty::Ptr<T> instead
+// @safe
+void good(rusty::Ptr<int> ptr) {  // OK: Safe pointer parameter
+    int x = *ptr;                  // OK: Safe dereference
+}
 ```
 
-#### Initializer List Uses nullptr
+### Rule 4: No Pointer Arithmetic on Raw Pointers
 
 ```cpp
 // @safe
-struct Bad {
-    int* ptr;
+void bad(int* arr, size_t len) {
+    int* end = arr + len;  // ERROR: Pointer arithmetic
+    arr[5];                // ERROR: Subscript is pointer arithmetic
+}
 
-    Bad() = delete;
-
-    // @safe
-    Bad(int x) : ptr(nullptr) {}  // ERROR: Initializing to nullptr
-};
+// Use rusty::offset() instead
+// @safe
+void good(rusty::MutPtr<int> arr, size_t len) {
+    rusty::MutPtr<int> end = rusty::offset_mut(arr, len);  // OK
+}
 ```
 
-## Working with Pointers Safely
+## Working with Raw Pointers
 
 ### Using @unsafe Blocks
 
@@ -270,84 +190,108 @@ When you need raw pointer operations, use `@unsafe` blocks:
 
 ```cpp
 // @safe
-void process_data(int* data, size_t len) {
+void process_c_array(int* data, size_t len) {
     // @unsafe
     {
         for (size_t i = 0; i < len; i++) {
-            data[i] *= 2;  // Pointer arithmetic in @unsafe block
+            data[i] *= 2;  // OK: In @unsafe block
         }
     }
 }
 ```
 
-### Smart Pointer Alternative
+### Interfacing with C APIs
 
-Smart pointers are always allowed and provide additional safety:
+C APIs typically use raw pointers. Wrap them in @unsafe:
+
+```cpp
+// @safe
+void read_file(const char* filename) {
+    // @unsafe
+    {
+        FILE* f = fopen(filename, "r");
+        if (f) {
+            // ... use f ...
+            fclose(f);
+        }
+    }
+}
+```
+
+### Converting Between Safe and Raw Pointers
+
+```cpp
+// @safe
+void example() {
+    int x = 42;
+    rusty::MutPtr<int> safe_ptr = rusty::addr_of_mut(x);
+
+    // @unsafe
+    {
+        // Safe -> Raw: Implicit (Ptr<T> is just const T*)
+        int* raw = safe_ptr;
+
+        // Raw -> Safe: Must go through addr_of
+        // (Cannot directly assign raw pointer to Ptr<T> in @safe)
+    }
+}
+```
+
+## Pointer Members in Structs
+
+### Raw Pointer Members Require @unsafe
+
+```cpp
+// @safe
+struct Bad {
+    int* ptr;  // ERROR: Raw pointer member in @safe struct
+};
+
+// @unsafe
+struct RawWrapper {
+    int* ptr;  // OK: Struct is @unsafe
+};
+```
+
+### Safe Pointer Members Are Allowed
+
+```cpp
+// @safe
+struct SafeWrapper {
+    rusty::Ptr<int> ptr;  // OK: Safe pointer type
+
+    SafeWrapper(int& value) : ptr(rusty::addr_of(value)) {}
+};
+```
+
+### Smart Pointer Members (Always Safe)
 
 ```cpp
 // @safe
 struct Container {
-    std::unique_ptr<int> ptr;  // OK: Smart pointer, not raw
-    std::shared_ptr<Data> data;  // OK: Smart pointer
+    std::unique_ptr<int> owned;   // OK: Smart pointer
+    std::shared_ptr<Data> shared; // OK: Smart pointer
 };
 ```
 
-### Reference Members (Preferred)
+## Comparison: Old vs New Model
 
-Reference members are preferred over pointer members when possible:
-
-```cpp
-// @safe
-struct Container {
-    int& ref;  // OK: References must be bound at construction
-
-    Container(int& r) : ref(r) {}
-};
-```
-
-## Design Rationale
-
-### Why Allow Constructor-Initialized Pointers?
-
-Many valid C++ patterns require pointer members:
-- Intrusive data structures
-- Observer patterns
-- Performance-critical code avoiding smart pointer overhead
-
-By allowing pointer members when properly initialized, we support these patterns while maintaining safety.
-
-### Why Require ALL Constructors to Initialize?
-
-If any constructor can leave a pointer uninitialized, users could accidentally create unsafe instances:
-
-```cpp
-struct Wrapper {
-    int* ptr;
-    Wrapper() = delete;
-    Wrapper(int* p) : ptr(p) {}
-    Wrapper(int x) {}  // Oops! ptr is garbage
-};
-
-Wrapper w(42);  // Looks safe, but w.ptr is garbage!
-```
-
-### Why Check Initializer Lists for nullptr?
-
-Initializing to nullptr defeats the purpose of having a non-null pointer:
-
-```cpp
-struct Wrapper {
-    int* ptr;
-    Wrapper(int x) : ptr(nullptr) {}  // "Initialized" but still null!
-};
-```
+| Aspect | Old Model (pointer_safety.md) | New Model |
+|--------|------------------------------|-----------|
+| Raw pointer decl | Allowed (must init) | Requires @unsafe |
+| Address-of (`&x`) | Requires @unsafe | Requires @unsafe |
+| Dereference (`*p`) | Safe (if valid) | Requires @unsafe |
+| nullptr init | Forbidden | Requires @unsafe |
+| Ptr<T>/MutPtr<T> | Type aliases only | Safe wrappers |
+| Philosophy | "Pointers as valid refs" | "Raw unsafe, wrappers safe" |
 
 ## Summary
 
-| Context | nullptr Init | Uninitialized | Address-of |
-|---------|-------------|---------------|------------|
-| @safe local var | ERROR | ERROR | Requires @unsafe |
-| @safe struct member | ERROR | ERROR (unless all ctors init) | N/A |
-| @unsafe | OK | OK | OK |
+| Context | Raw `T*` | `rusty::Ptr<T>` | Reference `T&` |
+|---------|----------|-----------------|----------------|
+| @safe code | ❌ Forbidden | ✅ Safe | ✅ Safe |
+| @unsafe code | ✅ Allowed | ✅ Allowed | ✅ Allowed |
+| Null allowed | Yes (in @unsafe) | No | No |
+| Borrow checked | No | Yes | Yes |
 
-The key principle: **In @safe code, pointers behave like references - always valid, no null checks needed.**
+**Key principle: In @safe code, use `rusty::Ptr<T>`/`rusty::MutPtr<T>` instead of raw pointers. Raw pointers require `@unsafe`.**
