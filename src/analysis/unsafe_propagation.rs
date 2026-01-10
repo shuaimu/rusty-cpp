@@ -3,21 +3,12 @@ use crate::parser::safety_annotations::{SafetyContext, SafetyMode};
 use crate::parser::external_annotations::ExternalAnnotations;
 use std::collections::HashSet;
 
-/// Check for unsafe propagation in safe functions
+/// Check for unsafe propagation with external annotations support
 ///
 /// In safe code, the following require explicit @unsafe annotation:
 /// 1. Calling functions not marked as @safe
 /// 2. Using types/structs not marked as @safe
 /// 3. Any operation on unsafe types
-pub fn check_unsafe_propagation(
-    function: &Function,
-    safety_context: &SafetyContext,
-    known_safe_functions: &HashSet<String>,
-) -> Vec<String> {
-    check_unsafe_propagation_with_external(function, safety_context, known_safe_functions, None)
-}
-
-/// Check for unsafe propagation with external annotations support
 pub fn check_unsafe_propagation_with_external(
     function: &Function,
     safety_context: &SafetyContext,

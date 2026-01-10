@@ -1,4 +1,4 @@
-use crate::parser::{Statement, Expression, Function, MoveKind, Variable};
+use crate::parser::{Statement, Expression, Function, MoveKind};
 use crate::parser::safety_annotations::SafetyMode;
 use std::collections::HashSet;
 
@@ -761,10 +761,6 @@ fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<Str
                 }
                 CastKind::DynamicCast => {
                     // dynamic_cast is runtime-checked and generally safe
-                    contains_pointer_operation(inner, safe_pointer_vars)
-                }
-                CastKind::ImplicitCast => {
-                    // Implicit casts are compiler-generated and safe
                     contains_pointer_operation(inner, safe_pointer_vars)
                 }
             }

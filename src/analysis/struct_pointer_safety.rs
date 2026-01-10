@@ -238,11 +238,6 @@ fn constructor_initializes_member_in_body(ctor: &crate::parser::Function, member
     false
 }
 
-/// Legacy function for backward compatibility
-fn constructor_initializes_member(ctor: &crate::parser::Function, member_name: &str) -> bool {
-    constructor_initializes_member_with_init_list(ctor, member_name)
-}
-
 /// Extract member name from an expression like `ptr` or `this->ptr`
 fn extract_member_name(expr: &crate::parser::Expression) -> Option<String> {
     use crate::parser::Expression;

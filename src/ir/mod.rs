@@ -779,7 +779,7 @@ fn extract_return_source(
             }
         }
 
-        Expression::BinaryOp { left, right, op } => {
+        Expression::BinaryOp { op, .. } => {
             // Binary operation: return a + b;
             // These create temporaries, but we could track both operands
             debug_println!("DEBUG IR: Return binary operation: {:?}", op);
@@ -819,7 +819,7 @@ fn extract_return_source(
             None
         }
 
-        Expression::New(inner) => {
+        Expression::New(_) => {
             // new expression: return new T();
             // This allocates memory - could recursively check inner, but typically
             // new expressions create owned values with no source variable
@@ -1419,7 +1419,7 @@ fn convert_statement(
                                 arg_names.push(temp_name);
                             }
                             // Track string literals - they have static lifetime
-                            crate::parser::Expression::StringLiteral(lit) => {
+                            crate::parser::Expression::StringLiteral(_) => {
                                 let temp_name = format!("_temp_string_literal_{}", temp_counter);
                                 temp_counter += 1;
                                 arg_names.push(temp_name);
@@ -1510,17 +1510,7 @@ fn convert_statement(
                                 }
                                 arg_names.push(format!("_result_of_{}", recv_name));
                             }
-                            crate::parser::Expression::Move { inner, .. } => {
-                                if let crate::parser::Expression::Variable(var) = inner.as_ref() {
-                                    // Mark as moved before the call
-                                    statements.push(IrStatement::Move {
-                                        from: var.clone(),
-                                        to: format!("_temp_move_{}", var),
-                                        line: 0,  // Line not easily available in this nested context
-                                    });
-                                    arg_names.push(var.clone());
-                                }
-                            }
+                            // NOTE: Expression::Move is handled above at the start of this match
                             // NEW: Handle field access as function argument (including nested)
                             crate::parser::Expression::MemberAccess { .. } => {
                                 // Use helper to extract full path for nested member access
@@ -1594,7 +1584,7 @@ fn convert_statement(
                                 is_ref: false,
                                 is_this: false,
                             },
-                            LambdaCaptureKind::Init { name, is_move } => LambdaCaptureInfo {
+                            LambdaCaptureKind::Init { name, .. } => LambdaCaptureInfo {
                                 name: name.clone(),
                                 is_ref: false, // Init captures are by value
                                 is_this: false,
@@ -1909,7 +1899,7 @@ fn convert_statement(
                         arg_names.push(temp_name);
                     }
                     // Track string literals - they have static lifetime
-                    crate::parser::Expression::StringLiteral(lit) => {
+                    crate::parser::Expression::StringLiteral(_) => {
                         let temp_name = format!("_temp_string_literal_{}", temp_counter);
                         temp_counter += 1;
                         arg_names.push(temp_name);
@@ -2086,12 +2076,12 @@ fn convert_statement(
                         Ok(None)
                     }
                 }
-                crate::parser::Expression::AddressOf(inner) => {
+                crate::parser::Expression::AddressOf(_) => {
                     // Address-of doesn't use the value, so no moved-state check needed
                     Ok(None)
                 }
                 // Handle assignment expressions (e.g., value = 42;)
-                crate::parser::Expression::BinaryOp { left, op, right } if op == "=" => {
+                crate::parser::Expression::BinaryOp { left, op, .. } if op == "=" => {
                     debug_println!("DEBUG IR: ExpressionStatement assignment: op={}", op);
 
                     // Check if LHS is a field access (e.g., this.value = 42)
@@ -2152,9 +2142,7 @@ mod tests {
             template_parameters: vec![],
             safety_annotation: None,
             has_explicit_safety_annotation: false,
-            is_constructor: false,
             is_deleted: false,
-            is_defaulted: false,
             member_initializers: vec![],
         }
     }

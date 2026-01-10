@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use crate::ir::{IrFunction, IrStatement, BorrowKind};
-use crate::debug_println;
 
 /// Check if a return type string represents a reference
 fn returns_reference(return_type: &str) -> bool {
@@ -244,7 +243,7 @@ pub fn infer_and_validate_lifetimes(function: &IrFunction) -> Result<Vec<String>
                     }
                 }
                 
-                IrStatement::Move { from, to, .. } => {
+                IrStatement::Move { from, .. } => {
                     // Check that 'from' is alive when moved
                     if inferencer.lifetimes.contains_key(from) && !inferencer.is_alive_at(from, statement_index) {
                         errors.push(format!(

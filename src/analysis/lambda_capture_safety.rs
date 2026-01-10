@@ -414,7 +414,6 @@ mod tests {
         let lambda = Expression::Lambda {
             captures: vec![LambdaCaptureKind::Init {
                 name: "y".to_string(),
-                is_move: true,
             }],
         };
 

@@ -10,8 +10,7 @@
 // - When uncertain → assume live (safe default)
 
 use crate::ir::{IrStatement, IrFunction};
-use std::collections::{HashMap, HashSet};
-use crate::debug_println;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UseType {

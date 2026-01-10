@@ -3,7 +3,6 @@ use crate::parser::HeaderCache;
 use crate::parser::safety_annotations::SafetyContext;
 use crate::ir::{IrProgram, IrStatement, IrFunction, VariableType};
 use std::collections::{HashMap, HashSet};
-use crate::debug_println;
 
 /// Tracks lifetime information for variables in the current scope
 #[derive(Debug, Clone)]

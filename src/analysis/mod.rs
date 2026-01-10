@@ -105,7 +105,6 @@ pub mod mutable_checker;
 pub mod lambda_capture_safety;
 pub mod raii_tracking;
 pub mod inheritance_safety;
-pub mod function_pointer_safety;
 pub mod null_safety;
 pub mod initialization_tracking;
 pub mod pointer_provenance;
@@ -253,13 +252,6 @@ fn has_any_safe_functions(program: &IrProgram, header_cache: &HeaderCache) -> bo
         }
     }
     false
-}
-
-/// Check if a return type string represents a reference
-fn returns_reference(return_type: &str) -> bool {
-    // Check for reference types: &, const &, const Type&, Type&, etc.
-    // This is a simple heuristic based on the string representation
-    return_type.contains('&') && !return_type.contains("&&") // Exclude rvalue references for now
 }
 
 /// Phase 1: Check that safe functions returning references have lifetime annotations
@@ -2127,18 +2119,6 @@ impl OwnershipTracker {
         }
     }
 
-    /// Check if any field of the object is borrowed
-    fn has_any_field_borrowed(&self, object: &str) -> bool {
-        if let Some(fields) = self.field_borrows.get(object) {
-            for borrow_info in fields.values() {
-                if borrow_info.immutable_count > 0 || borrow_info.has_mutable {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Get list of borrowed fields for an object
     fn get_borrowed_fields(&self, object: &str) -> Vec<(String, bool)> {
         let mut result = Vec::new();
@@ -2152,20 +2132,6 @@ impl OwnershipTracker {
             }
         }
         result
-    }
-
-    /// Check if can move from 'this' in current context
-    fn can_move_from_this(&self) -> bool {
-        match &self.this_context {
-            Some(ThisContext::Consumed) => true,  // && method - can move
-            Some(_) => false,  // All other methods - cannot move
-            None => true,  // Not in method - OK (though this shouldn't happen)
-        }
-    }
-
-    /// Set method context
-    fn set_this_context(&mut self, context: Option<ThisContext>) {
-        self.this_context = context;
     }
 
     fn enter_scope(&mut self) {
@@ -2360,7 +2326,6 @@ impl OwnershipTracker {
         for (var, then_borrows) in &then_state.active_borrows {
             if let Some(else_borrows) = else_state.active_borrows.get(var) {
                 // Borrow exists in both branches - keep common borrows
-                let then_borrowers: HashSet<String> = then_borrows.iter().map(|b| b.borrower.clone()).collect();
                 let else_borrowers: HashSet<String> = else_borrows.iter().map(|b| b.borrower.clone()).collect();
 
                 let common_borrowers: Vec<ActiveBorrow> = then_borrows.iter()

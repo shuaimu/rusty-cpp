@@ -621,8 +621,6 @@ mod tests {
     fn make_interface(name: &str) -> Class {
         Class {
             name: name.to_string(),
-            template_parameters: Vec::new(),
-            is_template: false,
             members: Vec::new(),
             methods: Vec::new(),
             base_classes: Vec::new(),
@@ -647,8 +645,6 @@ mod tests {
     fn make_class(name: &str, base_classes: Vec<String>) -> Class {
         Class {
             name: name.to_string(),
-            template_parameters: Vec::new(),
-            is_template: false,
             members: Vec::new(),
             methods: Vec::new(),
             base_classes,

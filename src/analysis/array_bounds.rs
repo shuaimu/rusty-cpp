@@ -301,7 +301,7 @@ fn update_bounds_from_expr(ptr: &str, expr: &Expression, tracker: &mut BoundsTra
             }
         }
 
-        Expression::PointerArithmetic { pointer, op } => {
+        Expression::PointerArithmetic { pointer, .. } => {
             // For now, just copy the source bounds
             // Full tracking would require knowing the offset amount
             if let Some(source) = extract_var_name(pointer) {

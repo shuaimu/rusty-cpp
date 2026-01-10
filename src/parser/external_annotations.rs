@@ -93,7 +93,6 @@ impl ExternalAnnotations {
     fn extract_from_comments(&self, content: &str) -> String {
         let mut result = String::new();
         let mut in_comment_block = false;
-        let mut comment_content = String::new();
         
         for line in content.lines() {
             let trimmed = line.trim();
@@ -370,7 +369,7 @@ impl ExternalAnnotations {
     
     fn parse_lifetime_specification(&self, spec: &str) -> (Vec<String>, Option<String>, Vec<String>) {
         let mut param_lifetimes = Vec::new();
-        let mut return_lifetime = None;
+        let return_lifetime;
         let mut constraints = Vec::new();
         
         // Split by "where" clause if present

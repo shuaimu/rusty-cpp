@@ -159,39 +159,6 @@ fn get_type_alignment(type_name: &str) -> usize {
     }
 }
 
-/// Get the size of a C++ type (for pointer arithmetic)
-fn get_type_size(type_name: &str) -> usize {
-    let type_name = type_name.trim();
-
-    // Remove pointer/reference for base type size
-    let base_type = type_name
-        .trim_end_matches('*')
-        .trim_end_matches('&')
-        .trim();
-
-    match base_type {
-        "char" | "signed char" | "unsigned char" | "int8_t" | "uint8_t" | "bool" => 1,
-        "short" | "signed short" | "unsigned short" | "int16_t" | "uint16_t" => 2,
-        "int" | "signed int" | "unsigned int" | "int32_t" | "uint32_t" | "float" => 4,
-        "long" | "signed long" | "unsigned long" | "long long" | "signed long long"
-        | "unsigned long long" | "int64_t" | "uint64_t" | "double" | "size_t"
-        | "ptrdiff_t" | "intptr_t" | "uintptr_t" => 8,
-        "long double" => 16,
-        "__m128" | "__m128i" | "__m128d" => 16,
-        "__m256" | "__m256i" | "__m256d" => 32,
-        "__m512" | "__m512i" | "__m512d" => 64,
-        _ => {
-            // For pointers, size is 8 on 64-bit
-            if type_name.ends_with('*') {
-                8
-            } else {
-                // Unknown type - assume 1 byte
-                1
-            }
-        }
-    }
-}
-
 /// Check for alignment safety violations in a parsed function
 pub fn check_alignment_safety(function: &Function, function_safety: SafetyMode) -> Vec<String> {
     let mut errors = Vec::new();
@@ -353,7 +320,7 @@ fn update_alignment_from_expr(ptr: &str, expr: &Expression, tracker: &mut Alignm
             }
         }
 
-        Expression::Cast { inner, kind, target_type } => {
+        Expression::Cast { inner, target_type, .. } => {
             // Cast may change the perceived type but the underlying alignment stays
             if let Some(source) = extract_var_name(inner) {
                 if let Some(info) = tracker.get_alignment(&source).cloned() {

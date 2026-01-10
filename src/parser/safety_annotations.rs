@@ -951,23 +951,6 @@ fn normalize_param_type(param: &str) -> String {
     type_tokens.join(" ")
 }
 
-/// Extract qualified function name (e.g., "MyClass::myMethod") from a declaration
-fn extract_qualified_function_name(before_paren: &str) -> Option<String> {
-    // Look for the pattern "ClassName::methodName" 
-    // This could be preceded by return type and other qualifiers
-    let parts: Vec<&str> = before_paren.split_whitespace().collect();
-    
-    for part in parts.iter().rev() {
-        if part.contains("::") {
-            // This is likely our qualified name
-            let clean_name = part.trim_start_matches('*').trim_start_matches('&');
-            return Some(clean_name.to_string());
-        }
-    }
-    
-    None
-}
-
 /// Parse safety annotation from entity comment (for clang AST)
 /// Bug fix: Only match @safe/@unsafe at the START of comment lines (or after prefix like //, /*, *)
 /// This prevents false matches like "No @safe annotation" being treated as @safe

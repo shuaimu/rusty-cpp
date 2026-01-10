@@ -10,10 +10,9 @@
 //! - Phase 7: Constructor initialization order
 //! - Phase 8: Reference lifetime checking (use-after-free detection)
 
-use crate::ir::{IrFunction, IrStatement, BorrowKind, OwnershipState};
+use crate::ir::{IrFunction, IrStatement, BorrowKind};
 use crate::parser::HeaderCache;
 use std::collections::{HashMap, HashSet};
-use crate::debug_println;
 
 /// Track pointers/references stored in containers
 /// When a pointer is stored in a container, the pointee must outlive the container
@@ -1136,7 +1135,7 @@ fn process_raii_statement(
 
         // Phase 8: Check for move of borrowed variable
         IrStatement::Move { from, line, .. } => {
-            if let Some(err) = tracker.check_reassignment_while_borrowed(from, *line) {
+            if tracker.check_reassignment_while_borrowed(from, *line).is_some() {
                 errors.push(format!(
                     "Cannot move '{}' at line {} because it is borrowed",
                     from, line

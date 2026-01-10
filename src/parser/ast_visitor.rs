@@ -335,8 +335,6 @@ pub fn extract_template_parameters(entity: &Entity) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct Class {
     pub name: String,
-    pub template_parameters: Vec<String>,  // e.g., ["T", "Args"] for template<typename T, typename... Args>
-    pub is_template: bool,
     pub members: Vec<Variable>,            // Member fields
     pub methods: Vec<Function>,            // Member methods
     pub base_classes: Vec<String>,         // Base class names (may contain packs like "Bases...")
@@ -390,7 +388,6 @@ pub enum MethodQualifier {
 #[derive(Debug, Clone)]
 pub struct MemberInitializer {
     pub member_name: String,
-    pub init_expression: Expression,
     pub is_nullptr: bool,  // Quick check if initialized to nullptr
 }
 
@@ -414,9 +411,7 @@ pub struct Function {
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>,
     pub has_explicit_safety_annotation: bool,  // true if annotation was in source code
     // Constructor-specific: member initializer list
-    pub is_constructor: bool,
     pub is_deleted: bool,      // = delete
-    pub is_defaulted: bool,    // = default
     pub member_initializers: Vec<MemberInitializer>,  // : member(expr), ...
 }
 
@@ -508,7 +503,7 @@ pub enum LambdaCaptureKind {
     /// [x] - explicit copy capture
     ByCopy(String),
     /// [x = expr] - init capture (includes move captures)
-    Init { name: String, is_move: bool },
+    Init { name: String },
     /// [this] - captures this pointer
     This,
     /// [*this] - captures this by copy (C++17)
@@ -537,8 +532,6 @@ pub enum CastKind {
     ConstCast,
     /// C-style cast (T)expr - unsafe, can perform any of the above
     CStyleCast,
-    /// Implicit cast by the compiler - generally safe
-    ImplicitCast,
 }
 
 #[derive(Debug, Clone)]
@@ -670,7 +663,6 @@ fn extract_member_initializers(entity: &Entity) -> Vec<MemberInitializer> {
 
             initializers.push(MemberInitializer {
                 member_name,
-                init_expression: init_expr,
                 is_nullptr,
             });
         }
@@ -854,10 +846,9 @@ pub fn extract_function(entity: &Entity) -> Function {
     // Check if this is a constructor
     let is_constructor = entity.get_kind() == EntityKind::Constructor;
 
-    // Check for = delete and = default
+    // Check for = delete
     let is_deleted = entity.get_availability() == clang::Availability::Unavailable
                      || is_deleted_via_libclang(entity);
-    let is_defaulted = entity.is_defaulted();
 
     // Extract member initializer list for constructors
     let member_initializers = if is_constructor {
@@ -878,9 +869,7 @@ pub fn extract_function(entity: &Entity) -> Function {
         template_parameters,
         safety_annotation,
         has_explicit_safety_annotation,
-        is_constructor,
         is_deleted,
-        is_defaulted,
         member_initializers,
     }
 }
@@ -894,19 +883,8 @@ pub fn extract_class(entity: &Entity) -> Class {
     // e.g., "yaml::Node" instead of just "Node"
     let name = get_qualified_name(entity);
     let location = extract_location(entity);
-    let is_template = entity.get_kind() == EntityKind::ClassTemplate;
 
-    debug_println!("DEBUG PARSE: Extracting class '{}', is_template={}", name, is_template);
-
-    // Extract template parameters from ClassTemplate
-    let template_parameters = if is_template {
-        extract_template_parameters(entity)
-    } else {
-        Vec::new()
-    };
-
-    debug_println!("DEBUG PARSE: Class '{}' has {} template parameters: {:?}",
-        name, template_parameters.len(), template_parameters);
+    debug_println!("DEBUG PARSE: Extracting class '{}'", name);
 
     // Check for @interface annotation
     let is_interface = check_class_interface_annotation(entity);
@@ -1113,8 +1091,6 @@ pub fn extract_class(entity: &Entity) -> Class {
 
     Class {
         name,
-        template_parameters,
-        is_template,
         members,
         methods,
         base_classes,
@@ -2624,11 +2600,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                                 // Extract variable name before the '='
                                                 if let Some(eq_pos) = capture_list.find('=') {
                                                     let var_name = capture_list[..eq_pos].trim().to_string();
-                                                    let is_move = capture_list.contains("std::move") ||
-                                                                 capture_list.contains("move(");
                                                     captures.push(LambdaCaptureKind::Init {
                                                         name: var_name,
-                                                        is_move,
                                                     });
                                                 }
                                             }
@@ -2670,7 +2643,6 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     debug_println!("DEBUG LAMBDA: Init move capture '{}'", var_name);
                     captures.push(LambdaCaptureKind::Init {
                         name: var_name,
-                        is_move: true,
                     });
                 } else if is_init_capture_pattern {
                     // Has DeclRefExpr with entirely DIFFERENT names = init capture [y = x]
@@ -2678,7 +2650,6 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     debug_println!("DEBUG LAMBDA: Init copy capture '{}'", var_name);
                     captures.push(LambdaCaptureKind::Init {
                         name: var_name,
-                        is_move: false,
                     });
                 } else {
                     // No matching DeclRefExpr = reference capture
