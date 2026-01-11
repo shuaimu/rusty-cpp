@@ -64,18 +64,27 @@ function(check_rustycpp_dependencies)
         PATHS
             /usr/include
             /usr/local/include
-            /usr/lib/llvm-14/include
-            /usr/lib/llvm-15/include
             /usr/lib/llvm-16/include
-            /usr/lib/llvm/14/include
-            /usr/lib/llvm/15/include
+            /usr/lib/llvm-17/include
+            /usr/lib/llvm-18/include
+            /usr/lib/llvm-19/include
+            /usr/lib/llvm-20/include
+            /usr/lib/llvm-21/include
             /usr/lib/llvm/16/include
+            /usr/lib/llvm/17/include
+            /usr/lib/llvm/18/include
+            /usr/lib/llvm/19/include
+            /usr/lib/llvm/20/include
+            /usr/lib/llvm/21/include
             /opt/homebrew/opt/llvm/include
         PATH_SUFFIXES
             llvm
-            llvm-14
-            llvm-15
             llvm-16
+            llvm-17
+            llvm-18
+            llvm-19
+            llvm-20
+            llvm-21
     )
     
     find_library(LIBCLANG_LIBRARY
@@ -83,12 +92,18 @@ function(check_rustycpp_dependencies)
         PATHS
             /usr/lib
             /usr/local/lib
-            /usr/lib/llvm-14/lib
-            /usr/lib/llvm-15/lib
             /usr/lib/llvm-16/lib
-            /usr/lib/llvm/14/lib
-            /usr/lib/llvm/15/lib
+            /usr/lib/llvm-17/lib
+            /usr/lib/llvm-18/lib
+            /usr/lib/llvm-19/lib
+            /usr/lib/llvm-20/lib
+            /usr/lib/llvm-21/lib
             /usr/lib/llvm/16/lib
+            /usr/lib/llvm/17/lib
+            /usr/lib/llvm/18/lib
+            /usr/lib/llvm/19/lib
+            /usr/lib/llvm/20/lib
+            /usr/lib/llvm/21/lib
             /usr/lib/x86_64-linux-gnu
             /opt/homebrew/opt/llvm/lib
     )
@@ -96,7 +111,7 @@ function(check_rustycpp_dependencies)
     if(NOT LIBCLANG_INCLUDE_DIR OR NOT LIBCLANG_LIBRARY)
         message(WARNING "libclang development files not found.")
         message(WARNING "Please install LLVM/Clang development packages:")
-        message(WARNING "  Ubuntu/Debian: sudo apt-get install llvm-14-dev libclang-14-dev")
+        message(WARNING "  Ubuntu/Debian: sudo apt-get install llvm-16-dev libclang-16-dev")
         message(WARNING "  Fedora/RHEL: sudo dnf install llvm-devel clang-devel")
         message(WARNING "  macOS: brew install llvm")
         set(MISSING_DEPS TRUE)
@@ -110,16 +125,22 @@ function(check_rustycpp_dependencies)
         
         # Try to find llvm-config
         find_program(LLVM_CONFIG_EXECUTABLE
-            NAMES llvm-config llvm-config-14 llvm-config-15 llvm-config-16
+            NAMES llvm-config llvm-config-16 llvm-config-17 llvm-config-18 llvm-config-19 llvm-config-20 llvm-config-21
             PATHS
                 /usr/bin
                 /usr/local/bin
-                /usr/lib/llvm-14/bin
-                /usr/lib/llvm-15/bin
                 /usr/lib/llvm-16/bin
-                /usr/lib/llvm/14/bin
-                /usr/lib/llvm/15/bin
+                /usr/lib/llvm-17/bin
+                /usr/lib/llvm-18/bin
+                /usr/lib/llvm-19/bin
+                /usr/lib/llvm-20/bin
+                /usr/lib/llvm-21/bin
                 /usr/lib/llvm/16/bin
+                /usr/lib/llvm/17/bin
+                /usr/lib/llvm/18/bin
+                /usr/lib/llvm/19/bin
+                /usr/lib/llvm/20/bin
+                /usr/lib/llvm/21/bin
                 /opt/homebrew/opt/llvm/bin
         )
         
