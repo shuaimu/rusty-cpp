@@ -1,5 +1,7 @@
 # rusty-cpp
 
+[![CI](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml)
+
 Bringing Rust's safety to C++ through:
 
 **1. Static Borrow Checker** - Compile-time ownership and lifetime analysis via `rusty-cpp-checker`.
