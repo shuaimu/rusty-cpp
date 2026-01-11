@@ -909,23 +909,23 @@ Earlier achievements:
 ## Next Priority Tasks
 
 ### High Priority
-1. **Non-Lexical Lifetimes (NLL)** - Would dramatically reduce false positives
-2. **Reborrowing** - Important for ergonomic reference-heavy code
+1. **Reborrowing** - Important for ergonomic reference-heavy code
 
 ### Medium Priority
-3. **Better error messages** - Code snippets and fix suggestions
-4. **Constructor initialization order** - Member initializer list analysis (Phase 7)
-5. **Advanced template features** - Variadic templates, SFINAE, partial specialization
-6. **Switch/case statements** - Common control flow
+2. **Better error messages** - Code snippets and fix suggestions
+3. **Constructor initialization order** - Member initializer list analysis (Phase 7)
+4. **Advanced template features** - Variadic templates, SFINAE, partial specialization
+5. **Switch/case statements** - Common control flow
 
-### Low Priority
-7. **Two-phase borrows** - Method call patterns
-8. **Loop counter variable tracking** - Variables in `for(int i=...)`
-9. **Iterator invalidation from modifications** - Track `clear()`, `erase()`, etc.
-10. **Circular reference detection** - Complex whole-program analysis
-11. **Exception handling** - Stack unwinding
-12. **Virtual function analysis** - Dynamic dispatch tracking
-13. **IDE integration (LSP)** - CLI works for now
+### Low Priority (Future)
+6. **Two-phase borrows** - Method call patterns
+7. **Loop counter variable tracking** - Variables in `for(int i=...)`
+8. **Iterator invalidation from modifications** - Track `clear()`, `erase()`, etc.
+9. **Circular reference detection** - Complex whole-program analysis
+10. **Exception handling** - Stack unwinding
+11. **Virtual function analysis** - Dynamic dispatch tracking
+12. **IDE integration (LSP)** - CLI works for now
+13. **Non-Lexical Lifetimes (NLL)** - Would reduce false positives but adds complexity
 
 ## Contact with Original Requirements
 
