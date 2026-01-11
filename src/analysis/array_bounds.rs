@@ -30,8 +30,6 @@ pub struct BoundsInfo {
     pub size: Option<usize>,
     /// Current offset from the start (for pointer arithmetic)
     pub offset: usize,
-    /// Whether this is a known array or derived pointer
-    pub is_array: bool,
     /// The original array variable (for derived pointers)
     pub source_array: Option<String>,
 }
@@ -42,7 +40,6 @@ impl BoundsInfo {
         BoundsInfo {
             size: Some(size),
             offset: 0,
-            is_array: true,
             source_array: None,
         }
     }
@@ -52,7 +49,6 @@ impl BoundsInfo {
         BoundsInfo {
             size,
             offset,
-            is_array: false,
             source_array: Some(source.to_string()),
         }
     }
@@ -62,7 +58,6 @@ impl BoundsInfo {
         BoundsInfo {
             size: None,
             offset: 0,
-            is_array: false,
             source_array: None,
         }
     }
@@ -88,17 +83,6 @@ impl BoundsInfo {
         BoundsInfo {
             size: self.size,
             offset: self.offset + amount,
-            is_array: false,
-            source_array: self.source_array.clone(),
-        }
-    }
-
-    /// Apply pointer arithmetic (subtraction)
-    pub fn sub_offset(&self, amount: usize) -> Self {
-        BoundsInfo {
-            size: self.size,
-            offset: self.offset.saturating_sub(amount),
-            is_array: false,
             source_array: self.source_array.clone(),
         }
     }

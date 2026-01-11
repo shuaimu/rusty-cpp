@@ -1725,23 +1725,9 @@ struct OwnershipTracker {
     // NEW: Track field-level borrows (for partial borrow tracking)
     // Key: object name, Value: map of field name to borrow info
     field_borrows: HashMap<String, HashMap<String, BorrowInfo>>,
-    // NEW: Track method context (are we in a method? is 'this' owned or borrowed?)
-    this_context: Option<ThisContext>,
     // NEW: Liveness analysis - track last use of variables
     // Key: variable name, Value: statement index of last use
     last_use_map: HashMap<String, usize>,
-    // Struct lifetime tracking: structs with reference members borrow from constructor args
-    // Key: struct instance variable, Value: (borrowed_from_var, struct_type, scope_level)
-    struct_borrows: HashMap<String, StructBorrowInfo>,
-}
-
-// Track struct borrows - when a struct with reference members is constructed,
-// the struct instance borrows from the constructor arguments
-#[derive(Clone, Debug)]
-struct StructBorrowInfo {
-    borrowed_from: String,  // Variable the struct borrows from
-    struct_type: String,    // Type name of the struct
-    scope: usize,           // Scope where struct was created
 }
 
 #[derive(Clone)]
@@ -1787,14 +1773,11 @@ struct ReferenceInfo {
 #[derive(Clone, Debug)]
 struct ActiveBorrow {
     borrower: String,      // The reference variable that is borrowing (e.g., "ref")
-    borrowed_from: String, // The variable being borrowed from (e.g., "ptr")
     kind: BorrowKind,
     scope: usize,          // Scope level where this borrow was created
-    // Phase 2: Track HOW the borrow was created
-    source: BorrowSource,
 }
 
-// Phase 2: Represents how a borrow was created
+// Phase 2: Represents how a borrow was created (used for tracking aliasing)
 #[derive(Clone, Debug, PartialEq)]
 enum BorrowSource {
     DirectReference,          // T& ref = value;
@@ -1802,25 +1785,13 @@ enum BorrowSource {
         method: String,       // Method name (e.g., "as_ref", "as_mut")
         receiver: String,     // Object the method was called on
     },
-    FieldAccess {             // auto& x = obj.field;
-        object: String,
-        field: String,
-    },
     PointerAlias {            // T* q = p;  (q aliases what p borrows from)
         source_pointer: String,  // The pointer being aliased (e.g., "p")
     },
 }
 
-// Track method context: how is 'this' accessed in methods?
-#[derive(Clone, Debug, PartialEq)]
-enum ThisContext {
-    Borrowed,       // Regular method - implicit &self
-    MutBorrowed,    // Mutable method - implicit &mut self
-    ConstBorrowed,  // Const method - const &self
-    Consumed,       // Rvalue ref method - implicit &&self (owned)
-}
-
 impl OwnershipTracker {
+    #[cfg(test)]
     fn new() -> Self {
         Self::with_liveness(HashMap::new())
     }
@@ -1837,9 +1808,7 @@ impl OwnershipTracker {
             active_borrows: HashMap::new(),
             field_ownership: HashMap::new(),  // NEW
             field_borrows: HashMap::new(),    // NEW: Partial borrow tracking
-            this_context: None,                // NEW
             last_use_map,                      // NEW: Liveness analysis
-            struct_borrows: HashMap::new(),   // Struct lifetime tracking
         };
         // Start with a root scope
         tracker.scope_stack.push(ScopeInfo::default());
@@ -1863,7 +1832,7 @@ impl OwnershipTracker {
     }
     
     // Phase 2: Enhanced add_borrow with source tracking
-    fn add_borrow_with_source(&mut self, from: String, to: String, kind: BorrowKind, source: BorrowSource) {
+    fn add_borrow_with_source(&mut self, from: String, to: String, kind: BorrowKind, _source: BorrowSource) {
         let borrow_info = self.borrows.entry(from.clone()).or_default();
         borrow_info.borrowers.insert(to.clone());
 
@@ -1881,10 +1850,8 @@ impl OwnershipTracker {
         let current_scope_level = self.scope_stack.len();
         let active_borrow = ActiveBorrow {
             borrower: to,
-            borrowed_from: from.clone(),
             kind,
             scope: current_scope_level,
-            source,  // Phase 2: Track borrow source
         };
         self.active_borrows.entry(from).or_default().push(active_borrow);
     }
@@ -2477,7 +2444,6 @@ mod tests {
         IrProgram {
             functions: vec![],
             ownership_graph: DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         }
     }
@@ -2499,8 +2465,6 @@ mod tests {
             source_file: "test.cpp".to_string(),
             is_method: false,
             method_qualifier: None,
-            class_name: None,
-            template_parameters: vec![],
             lifetime_params: HashMap::new(),
             param_lifetimes: Vec::new(),
             return_lifetime: None,
@@ -3165,8 +3129,6 @@ mod scope_tests {
             source_file: "test.cpp".to_string(),
             is_method: false,
             method_qualifier: None,
-            class_name: None,
-            template_parameters: vec![],
             lifetime_params: HashMap::new(),
             param_lifetimes: Vec::new(),
             return_lifetime: None,
@@ -3196,10 +3158,9 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         };
-        
+
         let result = check_borrows(program);
         assert!(result.is_ok());
         let errors = result.unwrap();
@@ -3237,10 +3198,9 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         };
-        
+
         let result = check_borrows(program);
         assert!(result.is_ok());
         let errors = result.unwrap();
@@ -3267,10 +3227,9 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         };
-        
+
         let result = check_borrows(program);
         assert!(result.is_ok());
         let errors = result.unwrap();
@@ -3313,10 +3272,9 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         };
-        
+
         let result = check_borrows(program);
         assert!(result.is_ok());
         let errors = result.unwrap();
@@ -3345,10 +3303,9 @@ mod scope_tests {
         let mut program = IrProgram {
             functions: vec![func],
             ownership_graph: petgraph::graph::DiGraph::new(),
-            user_defined_raii_types: std::collections::HashSet::new(),
             types_with_ref_members: std::collections::HashSet::new(),
         };
-        
+
         let result = check_borrows(program);
         assert!(result.is_ok());
         let errors = result.unwrap();

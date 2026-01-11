@@ -404,7 +404,6 @@ pub struct Function {
     // Method information
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
-    pub class_name: Option<String>,
     // Template information
     pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
     // Safety annotation for method safety contract checking
@@ -799,14 +798,11 @@ pub fn extract_function(entity: &Entity) -> Function {
 
     let body = extract_function_body(entity);
 
-    // Detect method qualifier and class name
-    let (method_qualifier, class_name) = if is_method {
-        let qualifier = detect_method_qualifier(entity);
-        let class_name = entity.get_semantic_parent()
-            .and_then(|parent| parent.get_name());
-        (Some(qualifier), class_name)
+    // Detect method qualifier
+    let method_qualifier = if is_method {
+        Some(detect_method_qualifier(entity))
     } else {
-        (None, None)
+        None
     };
 
     // Extract template parameters from:
@@ -865,7 +861,6 @@ pub fn extract_function(entity: &Entity) -> Function {
         location,
         is_method,
         method_qualifier,
-        class_name,
         template_parameters,
         safety_annotation,
         has_explicit_safety_annotation,

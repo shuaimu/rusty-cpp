@@ -10,9 +10,12 @@
 // [safe] external functions can be called directly from @safe code.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::fs;
 use regex::Regex;
+
+#[cfg(test)]
+use std::path::Path;
+#[cfg(test)]
+use std::fs;
 
 /// Safety level for external functions.
 /// - Safe: Programmer has audited and confirmed the function follows safety rules.
@@ -26,12 +29,7 @@ pub enum ExternalSafety {
 
 #[derive(Debug, Clone)]
 pub struct ExternalFunctionAnnotation {
-    pub name: String,
     pub safety: ExternalSafety,
-    pub lifetime_spec: Option<String>, // Raw lifetime specification for future use
-    pub param_lifetimes: Vec<String>,  // Parameter lifetime annotations
-    pub return_lifetime: Option<String>, // Return type lifetime
-    pub lifetime_constraints: Vec<String>, // Where clauses
 }
 
 #[derive(Debug, Clone)]
@@ -80,11 +78,13 @@ impl ExternalAnnotations {
         annotations.load_defaults();
         annotations
     }
-    
+
+    /// Load annotations from a file (used in tests)
+    #[cfg(test)]
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read external annotations: {}", e))?;
-        
+
         let mut annotations = Self::new();
         annotations.parse_content(&content)?;
         Ok(annotations)
@@ -210,7 +210,7 @@ impl ExternalAnnotations {
                     let inner = &spec_str[1..spec_str.len()-1];
                     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
 
-                    if parts.len() >= 1 {
+                    if !parts.is_empty() {
                         // Check for unsafe_type annotation
                         if parts[0] == "unsafe_type" {
                             self.unsafe_types.push(name);
@@ -223,27 +223,8 @@ impl ExternalAnnotations {
                             _ => continue,
                         };
 
-                        let lifetime_spec = if parts.len() >= 2 {
-                            Some(parts[1..].join(","))
-                        } else {
-                            None
-                        };
-
-                        let (param_lifetimes, return_lifetime, constraints) =
-                            if let Some(ref spec) = lifetime_spec {
-                                self.parse_lifetime_specification(spec)
-                            } else {
-                                (Vec::new(), None, Vec::new())
-                            };
-
-
-                        self.functions.insert(name.clone(), ExternalFunctionAnnotation {
-                            name,
+                        self.functions.insert(name, ExternalFunctionAnnotation {
                             safety,
-                            lifetime_spec,
-                            param_lifetimes,
-                            return_lifetime,
-                            lifetime_constraints: constraints,
                         });
                     }
                 }
@@ -329,80 +310,16 @@ impl ExternalAnnotations {
                     // Default to unsafe (conservative choice for external code)
                     ExternalSafety::Unsafe
                 };
-                
-                // Parse lifetime field
-                let lifetime_re = Regex::new(r"lifetime:\s*([^\n]+)").unwrap();
-                let lifetime_spec = lifetime_re.captures(block_content)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().trim().to_string());
-                
-                // Parse where field
-                let where_re = Regex::new(r"where:\s*([^\n]+)").unwrap();
-                let where_clause = where_re.captures(block_content)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().trim().to_string());
-                
-                let (param_lifetimes, return_lifetime, mut constraints) = 
-                    if let Some(ref spec) = lifetime_spec {
-                        self.parse_lifetime_specification(spec)
-                    } else {
-                        (Vec::new(), None, Vec::new())
-                    };
-                
-                if let Some(where_str) = where_clause {
-                    constraints.push(where_str);
-                }
-                
-                self.functions.insert(func_name.clone(), ExternalFunctionAnnotation {
-                    name: func_name,
+
+                self.functions.insert(func_name, ExternalFunctionAnnotation {
                     safety,
-                    lifetime_spec,
-                    param_lifetimes,
-                    return_lifetime,
-                    lifetime_constraints: constraints,
                 });
             }
         }
-        
+
         Ok(())
     }
-    
-    fn parse_lifetime_specification(&self, spec: &str) -> (Vec<String>, Option<String>, Vec<String>) {
-        let mut param_lifetimes = Vec::new();
-        let return_lifetime;
-        let mut constraints = Vec::new();
-        
-        // Split by "where" clause if present
-        let parts: Vec<&str> = spec.split("where").collect();
-        let main_spec = parts[0].trim();
-        
-        if parts.len() > 1 {
-            constraints.push(parts[1].trim().to_string());
-        }
-        
-        // Parse main specification (params) -> return
-        if let Some(arrow_pos) = main_spec.find("->") {
-            let params_part = main_spec[..arrow_pos].trim();
-            let return_part = main_spec[arrow_pos + 2..].trim();
-            
-            // Parse parameters
-            if params_part.starts_with('(') && params_part.ends_with(')') {
-                let params_inner = &params_part[1..params_part.len()-1];
-                for param in params_inner.split(',') {
-                    param_lifetimes.push(param.trim().to_string());
-                }
-            }
-            
-            // Parse return type
-            return_lifetime = Some(return_part.to_string());
-        } else {
-            // No parameters, just return type
-            return_lifetime = Some(main_spec.to_string());
-        }
-        
-        (param_lifetimes, return_lifetime, constraints)
-    }
-    
+
     fn parse_unsafe_scopes(&mut self, content: &str) -> Result<(), String> {
         // Parse @external_unsafe: namespace::* or @external_unsafe: class::*
         let unsafe_scope_re = Regex::new(r"@external_unsafe:\s*([^\s]+)").unwrap();
@@ -573,57 +490,13 @@ impl ExternalAnnotations {
         // - Programmer takes responsibility for auditing their usage
         // - This is the correct semantic: unsafe = programmer-audited, safe = tool-verified
 
-        // Common C I/O functions
+        // Common C I/O functions and memory/string functions
         for func in &["printf", "fprintf", "snprintf", "puts", "fputs", "fgets",
-                      "strcmp", "strncmp", "strlen", "atoi", "atof", "exit"] {
+                      "strcmp", "strncmp", "strlen", "atoi", "atof", "exit",
+                      "malloc", "free", "strcpy", "calloc", "realloc", "memcpy",
+                      "memmove", "memset", "strcat", "sprintf", "gets"] {
             self.functions.insert(func.to_string(), ExternalFunctionAnnotation {
-                name: func.to_string(),
-                safety: ExternalSafety::Unsafe,  // All external functions are unsafe
-                lifetime_spec: None,
-                param_lifetimes: Vec::new(),
-                return_lifetime: None,
-                lifetime_constraints: Vec::new(),
-            });
-        }
-
-        // Memory management with lifetimes
-        self.functions.insert("malloc".to_string(), ExternalFunctionAnnotation {
-            name: "malloc".to_string(),
-            safety: ExternalSafety::Unsafe,
-            lifetime_spec: Some("(size_t) -> owned void*".to_string()),
-            param_lifetimes: vec!["size_t".to_string()],
-            return_lifetime: Some("owned void*".to_string()),
-            lifetime_constraints: Vec::new(),
-        });
-
-        self.functions.insert("free".to_string(), ExternalFunctionAnnotation {
-            name: "free".to_string(),
-            safety: ExternalSafety::Unsafe,
-            lifetime_spec: Some("(void*) -> void".to_string()),
-            param_lifetimes: vec!["void*".to_string()],
-            return_lifetime: Some("void".to_string()),
-            lifetime_constraints: Vec::new(),
-        });
-
-        self.functions.insert("strcpy".to_string(), ExternalFunctionAnnotation {
-            name: "strcpy".to_string(),
-            safety: ExternalSafety::Unsafe,
-            lifetime_spec: Some("(char* dest, const char* src) -> char* where dest: 'a, return: 'a".to_string()),
-            param_lifetimes: vec!["char* dest".to_string(), "const char* src".to_string()],
-            return_lifetime: Some("char*".to_string()),
-            lifetime_constraints: vec!["dest: 'a, return: 'a".to_string()],
-        });
-
-        // Other memory/string functions
-        for func in &["calloc", "realloc", "memcpy", "memmove",
-                      "memset", "strcat", "sprintf", "gets"] {
-            self.functions.insert(func.to_string(), ExternalFunctionAnnotation {
-                name: func.to_string(),
                 safety: ExternalSafety::Unsafe,
-                lifetime_spec: None,
-                param_lifetimes: Vec::new(),
-                return_lifetime: None,
-                lifetime_constraints: Vec::new(),
             });
         }
     }
@@ -779,7 +652,9 @@ impl ExternalAnnotations {
 
         name == pattern
     }
-    
+
+    /// Set the active profile (used in tests)
+    #[cfg(test)]
     pub fn set_active_profile(&mut self, profile_name: &str) -> Result<(), String> {
         if self.profiles.contains_key(profile_name) {
             self.active_profile = Some(profile_name.to_string());

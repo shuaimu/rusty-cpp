@@ -178,24 +178,4 @@ impl ThisPointerTracker {
     pub fn mark_field_borrowed(&mut self, field: String, kind: BorrowKind) {
         self.borrowed_fields.insert(field, kind);
     }
-
-    /// Clear a borrow on a field (when reference goes out of scope)
-    pub fn clear_field_borrow(&mut self, field: &str) {
-        self.borrowed_fields.remove(field);
-    }
-
-    /// Get the method qualifier
-    pub fn method_qualifier(&self) -> Option<&MethodQualifier> {
-        self.method_qualifier.as_ref()
-    }
-
-    /// Check if a field has been moved
-    pub fn is_field_moved(&self, field: &str) -> bool {
-        self.moved_fields.contains(field)
-    }
-
-    /// Check if a field is currently borrowed
-    pub fn is_field_borrowed(&self, field: &str) -> bool {
-        self.borrowed_fields.contains_key(field)
-    }
 }

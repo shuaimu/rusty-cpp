@@ -97,14 +97,6 @@ fn type_contains_template_param(type_name: &str, template_param: &str) -> bool {
     words.contains(&template_param.as_ref())
 }
 
-fn check_statement_for_unsafe_calls(
-    stmt: &Statement,
-    safety_context: &SafetyContext,
-    known_safe_functions: &HashSet<String>,
-) -> Option<String> {
-    check_statement_for_unsafe_calls_with_external(stmt, safety_context, known_safe_functions, None, &[], &HashSet::new(), false)
-}
-
 /// Check if a name looks like a template type parameter (including variadic pack parameters)
 /// This includes:
 /// - Exact matches: "T", "Args"
@@ -322,14 +314,6 @@ fn check_statement_for_unsafe_calls_with_external(
     None
 }
 
-fn find_unsafe_function_call(
-    expr: &Expression,
-    safety_context: &SafetyContext,
-    known_safe_functions: &HashSet<String>,
-) -> Option<String> {
-    find_unsafe_function_call_with_external(expr, safety_context, known_safe_functions, None, &[], &HashSet::new())
-}
-
 fn find_unsafe_function_call_with_external(
     expr: &Expression,
     safety_context: &SafetyContext,
@@ -439,14 +423,6 @@ fn find_unsafe_function_call_with_external(
     None
 }
 
-fn is_function_safe(
-    func_name: &str,
-    safety_context: &SafetyContext,
-    known_safe_functions: &HashSet<String>,
-) -> bool {
-    is_function_safe_with_external(func_name, safety_context, known_safe_functions, None)
-}
-
 /// Get the safety mode of a called function
 fn get_called_function_safety(
     func_name: &str,
@@ -476,15 +452,6 @@ fn get_called_function_safety(
     SafetyMode::Unsafe
 }
 
-fn is_function_safe_with_external(
-    func_name: &str,
-    safety_context: &SafetyContext,
-    known_safe_functions: &HashSet<String>,
-    external_annotations: Option<&ExternalAnnotations>,
-) -> bool {
-    get_called_function_safety(func_name, safety_context, known_safe_functions, external_annotations) == SafetyMode::Safe
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,7 +472,7 @@ mod tests {
         let safety_context = SafetyContext::new();
         let known_safe = HashSet::new();
         
-        let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
+        let error = check_statement_for_unsafe_calls_with_external(&stmt, &safety_context, &known_safe, None, &[], &HashSet::new(), false);
         assert!(error.is_some());
         let error_msg = error.unwrap();
         assert!(error_msg.contains("unknown_func"));
@@ -528,7 +495,7 @@ mod tests {
         let safety_context = SafetyContext::new();
         let known_safe = HashSet::new();
 
-        let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
+        let error = check_statement_for_unsafe_calls_with_external(&stmt, &safety_context, &known_safe, None, &[], &HashSet::new(), false);
         assert!(error.is_some(), "std::move should require @unsafe block in safe code");
         let error_msg = error.unwrap();
         assert!(error_msg.contains("std::move"));
@@ -551,7 +518,7 @@ mod tests {
         let mut known_safe = HashSet::new();
         known_safe.insert("my_safe_func".to_string());
         
-        let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
+        let error = check_statement_for_unsafe_calls_with_external(&stmt, &safety_context, &known_safe, None, &[], &HashSet::new(), false);
         assert!(error.is_none(), "Known safe function should be allowed");
     }
     
@@ -573,7 +540,7 @@ mod tests {
         let safety_context = SafetyContext::new();
         let known_safe = HashSet::new();
         
-        let error = check_statement_for_unsafe_calls(&stmt, &safety_context, &known_safe);
+        let error = check_statement_for_unsafe_calls_with_external(&stmt, &safety_context, &known_safe, None, &[], &HashSet::new(), false);
         assert!(error.is_some());
         let error_msg = error.unwrap();
         assert!(error_msg.contains("unsafe_func"));

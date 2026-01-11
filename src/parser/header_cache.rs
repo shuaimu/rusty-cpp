@@ -53,12 +53,7 @@ impl HeaderCache {
     pub fn get_signature(&self, func_name: &str) -> Option<&FunctionSignature> {
         self.signatures.get(func_name)
     }
-    
-    /// Get safety annotation for a function from headers
-    pub fn get_safety_annotation(&self, func_name: &str) -> Option<SafetyMode> {
-        self.safety_annotations.get(func_name).copied()
-    }
-    
+
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
         debug_println!("DEBUG HEADER: Parsing header file: {}", header_path.display());

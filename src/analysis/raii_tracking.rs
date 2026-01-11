@@ -107,8 +107,6 @@ pub struct LambdaCapture {
     pub lambda_var: String,
     /// Variables captured by reference
     pub ref_captures: Vec<String>,
-    /// Scope level where lambda was declared
-    pub lambda_scope: usize,
     /// Whether lambda has escaped (assigned to longer-lived variable or returned)
     pub has_escaped: bool,
     /// Line number for error reporting
@@ -127,9 +125,7 @@ pub enum AllocationState {
 /// Track heap allocations
 #[derive(Debug, Clone)]
 pub struct HeapAllocation {
-    pub variable: String,
     pub state: AllocationState,
-    pub allocation_line: usize,
     pub free_line: Option<usize>,
 }
 
@@ -164,8 +160,6 @@ pub struct ReferenceBorrow {
     pub reference_scope: usize,
     /// Scope level where the source was declared
     pub source_scope: usize,
-    /// Whether this is a mutable borrow
-    pub is_mutable: bool,
     /// Line number for error reporting
     pub line: usize,
     /// Whether this reference was returned from a function
@@ -193,8 +187,6 @@ pub struct RaiiTracker {
     pub reference_borrows: Vec<ReferenceBorrow>,
     /// Heap allocations for new/delete tracking
     pub heap_allocations: HashMap<String, HeapAllocation>,
-    /// User-defined RAII types detected in this file
-    pub user_defined_raii_types: HashSet<String>,
     /// Current scope level
     pub current_scope: usize,
     /// Variable scope levels
@@ -253,7 +245,6 @@ impl RaiiTracker {
             member_borrows: Vec::new(),
             reference_borrows: Vec::new(),
             heap_allocations: HashMap::new(),
-            user_defined_raii_types: HashSet::new(),
             current_scope: 0,
             variable_scopes: HashMap::new(),
             container_variables: HashSet::new(),
@@ -604,7 +595,6 @@ impl RaiiTracker {
         self.lambda_captures.push(LambdaCapture {
             lambda_var: lambda_var.to_string(),
             ref_captures,
-            lambda_scope: self.current_scope,
             has_escaped: false,
             line,
         });
@@ -638,7 +628,7 @@ impl RaiiTracker {
 
     /// Record a general reference borrow (Phase 8: Lifetime Checking)
     /// When `ref = source` or `ref = source.get_mut().unwrap()`, track the borrow
-    pub fn record_reference_borrow(&mut self, reference: &str, source: &str, is_mutable: bool, line: usize) {
+    pub fn record_reference_borrow(&mut self, reference: &str, source: &str, _is_mutable: bool, line: usize) {
         let reference_scope = *self.variable_scopes.get(reference).unwrap_or(&self.current_scope);
         let source_scope = *self.variable_scopes.get(source).unwrap_or(&0);
 
@@ -647,7 +637,6 @@ impl RaiiTracker {
             source: source.to_string(),
             reference_scope,
             source_scope,
-            is_mutable,
             line,
             is_returned: false,
         });
@@ -666,16 +655,6 @@ impl RaiiTracker {
                 borrow.is_returned = true;
             }
         }
-    }
-
-    /// Check if a variable is currently borrowed
-    pub fn is_borrowed(&self, var: &str) -> bool {
-        self.active_borrows.get(var).map(|v| !v.is_empty()).unwrap_or(false)
-    }
-
-    /// Get list of active borrowers for a variable
-    pub fn get_borrowers(&self, var: &str) -> Vec<String> {
-        self.active_borrows.get(var).cloned().unwrap_or_default()
     }
 
     /// Check if source is reassigned while borrowed (returns error message if violation)
@@ -706,11 +685,9 @@ impl RaiiTracker {
     }
 
     /// Record a new allocation
-    pub fn record_allocation(&mut self, var: &str, line: usize) {
+    pub fn record_allocation(&mut self, var: &str, _line: usize) {
         self.heap_allocations.insert(var.to_string(), HeapAllocation {
-            variable: var.to_string(),
             state: AllocationState::Allocated,
-            allocation_line: line,
             free_line: None,
         });
     }
@@ -1170,45 +1147,6 @@ fn extract_receiver(func: &str) -> Option<String> {
     }
 
     None
-}
-
-/// Check if a type has a user-defined destructor
-/// This is used for Phase 2: User-defined RAII types
-pub fn has_user_defined_destructor(type_name: &str) -> bool {
-    // This would need to be populated from parsing class definitions
-    // For now, we check common patterns
-
-    // Skip primitive types
-    if is_primitive_or_builtin(type_name) {
-        return false;
-    }
-
-    // Skip known non-RAII types
-    if type_name.starts_with("const ") ||
-       type_name.ends_with("&") ||
-       type_name.ends_with("*") {
-        return false;
-    }
-
-    // User-defined class types likely have destructors
-    // This is a heuristic - real implementation would check class definitions
-    !type_name.contains("::") ||
-    type_name.contains("std::") ||
-    type_name.starts_with("class ") ||
-    type_name.starts_with("struct ")
-}
-
-fn is_primitive_or_builtin(type_name: &str) -> bool {
-    let primitives = [
-        "int", "char", "bool", "float", "double", "void",
-        "long", "short", "unsigned", "signed",
-        "int8_t", "int16_t", "int32_t", "int64_t",
-        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-        "size_t", "ptrdiff_t", "nullptr_t",
-    ];
-
-    let base = type_name.split('<').next().unwrap_or(type_name).trim();
-    primitives.contains(&base)
 }
 
 #[cfg(test)]

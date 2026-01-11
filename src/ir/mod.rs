@@ -165,8 +165,6 @@ pub struct IrProgram {
     pub functions: Vec<IrFunction>,
     #[allow(dead_code)]
     pub ownership_graph: OwnershipGraph,
-    /// RAII Phase 2: Types with user-defined destructors
-    pub user_defined_raii_types: std::collections::HashSet<String>,
     /// Struct lifetime tracking: Classes that have reference members
     /// These types implicitly "borrow" from the variables passed to their constructors
     pub types_with_ref_members: std::collections::HashSet<String>,
@@ -183,9 +181,6 @@ pub struct IrFunction {
     // Method information for tracking 'this' pointer
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
-    pub class_name: Option<String>,
-    // Template information
-    pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
     // Phase 1: Lifetime information from annotations
     pub lifetime_params: HashMap<String, LifetimeParam>,  // e.g., {"a" -> LifetimeParam, "b" -> LifetimeParam}
     pub param_lifetimes: Vec<Option<ParameterLifetime>>,  // Lifetime for each parameter (indexed by param position)
@@ -391,7 +386,6 @@ pub enum IrStatement {
 pub struct LambdaCaptureInfo {
     pub name: String,
     pub is_ref: bool,  // true = reference capture, false = copy capture
-    pub is_this: bool, // true if capturing 'this'
 }
 
 #[derive(Debug, Clone)]
@@ -535,7 +529,6 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
     Ok(IrProgram {
         functions,
         ownership_graph,
-        user_defined_raii_types,
         types_with_ref_members,
     })
 }
@@ -571,7 +564,6 @@ pub fn build_ir_with_safety_context(
     Ok(IrProgram {
         functions,
         ownership_graph,
-        user_defined_raii_types,
         types_with_ref_members,
     })
 }
@@ -643,8 +635,6 @@ fn convert_function(
         source_file: func.location.file.clone(),
         is_method: func.is_method,
         method_qualifier: func.method_qualifier.clone(),
-        class_name: func.class_name.clone(),
-        template_parameters: func.template_parameters.clone(),
         // Phase 1: Initialize lifetime fields (will be populated from annotations)
         lifetime_params: HashMap::new(),
         param_lifetimes: Vec::new(),
@@ -1567,37 +1557,30 @@ fn convert_statement(
                             LambdaCaptureKind::DefaultRef => LambdaCaptureInfo {
                                 name: "<default>".to_string(),
                                 is_ref: true,
-                                is_this: false,
                             },
                             LambdaCaptureKind::DefaultCopy => LambdaCaptureInfo {
                                 name: "<default>".to_string(),
                                 is_ref: false,
-                                is_this: false,
                             },
                             LambdaCaptureKind::ByRef(name) => LambdaCaptureInfo {
                                 name: name.clone(),
                                 is_ref: true,
-                                is_this: false,
                             },
                             LambdaCaptureKind::ByCopy(name) => LambdaCaptureInfo {
                                 name: name.clone(),
                                 is_ref: false,
-                                is_this: false,
                             },
                             LambdaCaptureKind::Init { name, .. } => LambdaCaptureInfo {
                                 name: name.clone(),
                                 is_ref: false, // Init captures are by value
-                                is_this: false,
                             },
                             LambdaCaptureKind::This => LambdaCaptureInfo {
                                 name: "this".to_string(),
                                 is_ref: true, // 'this' capture is a pointer, essentially by-ref
-                                is_this: true,
                             },
                             LambdaCaptureKind::ThisCopy => LambdaCaptureInfo {
                                 name: "this".to_string(),
                                 is_ref: false, // *this capture is by value
-                                is_this: true,
                             },
                         }
                     }).collect();
@@ -2138,7 +2121,6 @@ mod tests {
             },
             is_method: false,
             method_qualifier: None,
-            class_name: None,
             template_parameters: vec![],
             safety_annotation: None,
             has_explicit_safety_annotation: false,

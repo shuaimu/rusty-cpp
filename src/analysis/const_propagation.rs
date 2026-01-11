@@ -18,12 +18,8 @@ use crate::parser::ast_visitor::Class;
 use crate::parser::safety_annotations::SafetyMode;
 use std::collections::{HashMap, HashSet};
 
-/// Information about a class's pointer members and their types
-#[derive(Debug, Clone)]
-struct ClassInfo {
-    /// Map of member name -> member info
-    pointer_members: HashSet<String>,
-}
+/// Placeholder for class pointer member tracking (for future expansion)
+type ClassInfo = ();
 
 /// Check for const propagation violations in @safe functions
 pub fn check_const_propagation(
@@ -82,18 +78,16 @@ fn build_safe_function_set(functions: &[Function]) -> HashSet<String> {
     safe_funcs
 }
 
-/// Build a map of class names to their pointer members
+/// Build a map of class names to their pointer members (placeholder for future expansion)
 fn build_class_info(classes: &[Class]) -> HashMap<String, ClassInfo> {
     let mut info = HashMap::new();
 
     for class in classes {
-        let pointer_members: HashSet<String> = class.members.iter()
-            .filter(|m| m.is_pointer)
-            .map(|m| m.name.clone())
-            .collect();
+        let has_pointer_members = class.members.iter()
+            .any(|m| m.is_pointer);
 
-        if !pointer_members.is_empty() {
-            info.insert(class.name.clone(), ClassInfo { pointer_members });
+        if has_pointer_members {
+            info.insert(class.name.clone(), ());
         }
     }
 

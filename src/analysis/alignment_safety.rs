@@ -41,7 +41,8 @@ impl AlignmentInfo {
         }
     }
 
-    /// Create alignment info with an offset
+    /// Create alignment info with an offset (used in tests)
+    #[cfg(test)]
     pub fn with_offset(alignment: usize, offset: usize, pointee_type: String) -> Self {
         AlignmentInfo {
             base_alignment: alignment,
@@ -59,7 +60,8 @@ impl AlignmentInfo {
         self.offset % target_alignment == 0 && self.base_alignment >= target_alignment
     }
 
-    /// Apply pointer arithmetic (addition of bytes)
+    /// Apply pointer arithmetic (addition of bytes) (used in tests)
+    #[cfg(test)]
     pub fn add_offset(&self, bytes: usize, new_type: String) -> Self {
         AlignmentInfo {
             base_alignment: self.base_alignment,

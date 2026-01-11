@@ -88,11 +88,9 @@ fn test_borrow_conflicts() {
     assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_err());
     assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_err());
 
-    // Clear the borrow
-    tracker.clear_field_borrow("field");
-
-    // Now can borrow again
-    assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_ok());
+    // A fresh tracker can borrow (simulating scope exit)
+    let fresh_tracker = ThisPointerTracker::new(Some(MethodQualifier::NonConst));
+    assert!(fresh_tracker.can_borrow_member("field", BorrowKind::Immutable).is_ok());
 }
 
 #[test]

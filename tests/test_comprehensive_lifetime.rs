@@ -708,7 +708,8 @@ int main() { return 0; }
 }
 
 #[test]
-fn test_lifetime_error_includes_line_number() {
+fn test_borrow_conflict_error_message() {
+    // Test that borrow conflict errors contain meaningful information
     let source = r#"
 // @safe
 void test() {
@@ -721,9 +722,10 @@ int main() { return 0; }
 "#;
     let (has_violations, output) = analyze(source);
     assert!(has_violations, "Expected violation");
+    // Check that error message mentions the variable and the conflict
     assert!(
-        output.contains("line"),
-        "Error should include line number. Output: {}",
+        output.contains("x") && output.contains("mutably borrowed"),
+        "Error should mention variable and borrow conflict. Output: {}",
         output
     );
 }

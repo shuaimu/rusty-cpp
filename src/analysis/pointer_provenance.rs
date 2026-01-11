@@ -24,8 +24,6 @@ pub enum AllocationId {
     Array(String),
     /// Heap allocation (from new expression)
     Heap(usize),
-    /// Unknown provenance (e.g., from function return)
-    Unknown,
 }
 
 /// Tracks pointer provenance

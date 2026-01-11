@@ -124,58 +124,6 @@ impl SafetyContext {
         self.get_function_safety(func_name) == SafetyMode::Safe
     }
 
-    /// Check if a function has any explicit annotation (@safe or @unsafe)
-    /// Returns false for unannotated functions (which default to Unsafe)
-    pub fn has_explicit_annotation(&self, func_name: &str) -> bool {
-        let query = FunctionSignature::from_name_only(func_name.to_string());
-
-        // Check for exact match
-        for (sig, _mode) in &self.function_overrides {
-            if sig.matches(&query) {
-                return true;
-            }
-
-            let sig_is_qualified = sig.name.contains("::");
-            let func_is_qualified = func_name.contains("::");
-
-            // Check for qualified match
-            if sig_is_qualified && func_is_qualified {
-                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
-                    return true;
-                }
-            }
-        }
-
-        // Check class-level annotation for methods
-        if func_name.contains("::") {
-            if let Some(last_colon) = func_name.rfind("::") {
-                let class_name = &func_name[..last_colon];
-                let class_query = FunctionSignature::from_name_only(class_name.to_string());
-                for (sig, _mode) in &self.function_overrides {
-                    if sig.matches(&class_query) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        // Check namespace-level annotation
-        if func_name.contains("::") {
-            let parts: Vec<&str> = func_name.split("::").collect();
-            for i in 1..parts.len() {
-                let namespace = parts[..i].join("::");
-                let ns_query = FunctionSignature::from_name_only(namespace.clone());
-                for (sig, _mode) in &self.function_overrides {
-                    if sig.matches(&ns_query) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
-    }
-
     /// Check if a file path is from the source file where annotations were parsed
     /// Returns true if the file path matches the source file, false otherwise
     pub fn is_from_source_file(&self, file_path: &str) -> bool {
@@ -260,56 +208,6 @@ impl SafetyContext {
         self.file_default
     }
 
-    /// Get the safety mode of a specific class
-    /// This is similar to get_function_safety but specifically handles class-level annotations
-    pub fn get_class_safety(&self, class_name: &str) -> SafetyMode {
-        let query = FunctionSignature::from_name_only(class_name.to_string());
-
-        debug_println!("DEBUG SAFETY: Looking up class '{}'", class_name);
-        debug_println!("DEBUG SAFETY: Stored overrides ({} total):", self.function_overrides.len());
-        for (sig, mode) in &self.function_overrides {
-            debug_println!("DEBUG SAFETY:   - '{}' -> {:?}", sig.name, mode);
-        }
-
-        // Check for exact match
-        for (sig, mode) in &self.function_overrides {
-            if sig.matches(&query) {
-                debug_println!("DEBUG SAFETY: Exact match for class '{}' -> {:?}", class_name, mode);
-                return *mode;
-            }
-
-            // Bug #8 fix: Careful suffix matching to avoid namespace collisions
-            let sig_is_qualified = sig.name.contains("::");
-            let class_is_qualified = class_name.contains("::");
-
-            // REMOVED Case 1: Qualified stored, unqualified lookup - NO LONGER MATCH
-            //         This was causing false positives: an unqualified "Node" would incorrectly
-            //         match "rusty::Node" or any other qualified ::Node annotation.
-            // Case 2: Both qualified - allow suffix matching on either side
-            //         e.g., stored "rusty::Node", lookup "ns::rusty::Node" -> MATCH
-            // Case 3: Unqualified stored, qualified lookup - DON'T match (bug #8)
-            //         e.g., stored "Node", lookup "yaml::Node" -> NO MATCH
-            // Note: If sig_is_qualified && !class_is_qualified, we DON'T match anymore.
-            if sig_is_qualified && class_is_qualified {
-                // Both are qualified - suffix matching is sound
-                if sig.name.ends_with(&format!("::{}", class_name)) {
-                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' (stored as '{}') -> {:?}", class_name, sig.name, mode);
-                    return *mode;
-                }
-
-                if class_name.ends_with(&format!("::{}", sig.name)) {
-                    debug_println!("DEBUG SAFETY: Prefix match for class '{}' (query has more qualifiers) -> {:?}", class_name, mode);
-                    return *mode;
-                }
-            }
-            // Note: if !sig_is_qualified && class_is_qualified, we DON'T match (bug #8)
-        }
-
-        debug_println!("DEBUG SAFETY: No match for class '{}', using file default: {:?}", class_name, self.file_default);
-        // Fall back to file default
-        self.file_default
-    }
-
     /// Get the safety mode of a class, considering its source file location
     ///
     /// IMPORTANT: file_default only applies to classes from the source file being analyzed.
@@ -359,66 +257,6 @@ impl SafetyContext {
                 class_name, class_file);
             SafetyMode::Unsafe
         }
-    }
-
-    /// Get the safety mode of a function, considering its source file location
-    ///
-    /// IMPORTANT: file_default only applies to functions from the source file being analyzed.
-    /// Functions from other files are treated as Undeclared unless explicitly annotated.
-    pub fn get_function_safety_for_file(&self, func_name: &str, func_file: &str) -> SafetyMode {
-        let query = FunctionSignature::from_name_only(func_name.to_string());
-
-        // Check for explicit function-specific override
-        for (sig, mode) in &self.function_overrides {
-            if sig.matches(&query) {
-                return *mode;
-            }
-
-            let sig_is_qualified = sig.name.contains("::");
-            let func_is_qualified = func_name.contains("::");
-
-            if sig_is_qualified && func_is_qualified {
-                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
-                    return *mode;
-                }
-            }
-        }
-
-        // Check class-level annotation for methods
-        if func_name.contains("::") {
-            if let Some(last_colon) = func_name.rfind("::") {
-                let class_name = &func_name[..last_colon];
-
-                let class_query = FunctionSignature::from_name_only(class_name.to_string());
-                for (sig, mode) in &self.function_overrides {
-                    if sig.matches(&class_query) {
-                        return *mode;
-                    }
-
-                    let sig_is_qualified = sig.name.contains("::");
-                    let class_is_qualified = class_name.contains("::");
-
-                    if sig_is_qualified && class_is_qualified {
-                        if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
-                            return *mode;
-                        }
-                    }
-                }
-            }
-        }
-
-        // No explicit annotation found
-        // Only apply file_default if the function is from the source file
-        if self.is_from_source_file(func_file) {
-            self.file_default
-        } else {
-            SafetyMode::Unsafe
-        }
-    }
-
-    /// Check if a function should be checked, considering its source file location
-    pub fn should_check_function_for_file(&self, func_name: &str, func_file: &str) -> bool {
-        self.get_function_safety_for_file(func_name, func_file) == SafetyMode::Safe
     }
 }
 
