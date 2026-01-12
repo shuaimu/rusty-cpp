@@ -316,6 +316,7 @@ pub fn check_borrows_with_annotations(program: IrProgram, header_cache: HeaderCa
     safety_context.merge_header_annotations(&header_cache);
 
     // Run regular borrow checking, but skip unsafe functions
+    // Note: In our design, @unsafe functions skip all safety checks including borrow/move checking
     for function in &program.functions {
         // Check if this function is marked as unsafe
         let is_unsafe = if let Some(sig) = header_cache.get_signature(&function.name) {

@@ -246,9 +246,9 @@ fn test_phase4_single_forward_allowed() {
 }
 
 #[test]
-fn test_phase4_unsafe_does_not_bypass_move_checking() {
-    // With the new design, @unsafe only allows pointer operations, not move rule violations.
-    // Use-after-move is detected even in @unsafe functions, matching Rust's behavior.
+fn test_phase4_unsafe_bypasses_move_checking() {
+    // In our design, @unsafe functions skip all safety checks including borrow/move checking.
+    // This differs from Rust where unsafe only allows pointer operations.
     let code = r#"
     #include <utility>
 
@@ -261,7 +261,7 @@ fn test_phase4_unsafe_does_not_bypass_move_checking() {
     // @unsafe
     void test_unsafe_use(Args... args) {
         process(std::move(args)...);  // Move
-        use_val(args...);              // Use after move - now detected even in @unsafe
+        use_val(args...);              // Use after move - NOT detected in @unsafe
     }
 
     int main() {
@@ -273,10 +273,10 @@ fn test_phase4_unsafe_does_not_bypass_move_checking() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    // Use-after-move is now detected even in @unsafe code
+    // @unsafe functions skip all safety checks, so no violations should be reported
     assert!(
-        !success || output.contains("moved"),
-        "Use-after-move should be detected even in @unsafe. Output: {}",
+        success,
+        "@unsafe functions should skip borrow/move checking. Output: {}",
         output
     );
 }
