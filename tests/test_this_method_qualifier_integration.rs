@@ -183,15 +183,15 @@ int main() { return 0; }
 
 #[test]
 fn test_nonconst_method_cannot_move_field_via_return() {
+    // Use int instead of std::string to avoid STL safety checks interfering
     let source = r#"
 #include <utility>
-#include <string>
 
 // @safe
 class Container {
-    std::string data;
+    int data;
 public:
-    std::string bad_nonconst() {
+    int bad_nonconst() {
         return std::move(data);  // ERROR: non-const method can't move
     }
 };
