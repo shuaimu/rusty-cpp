@@ -19,12 +19,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show CPU count
+        run: nproc
+
       - name: Build
-        run: cargo build --release
+        run: cargo build --release -j $(nproc)
 
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --release -j $(nproc) -- --test-threads=$(nproc)
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -j $(nproc) -- -D warnings
         continue-on-error: true
