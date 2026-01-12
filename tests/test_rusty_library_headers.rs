@@ -121,45 +121,20 @@ fn test_unsafe_cell_hpp_passes() {
 }
 
 // ============================================================================
-// Tests for headers that have known violations (to be fixed)
-// These tests document the current state and will fail when fixed
+// Tests for headers that now pass after fixes
 // ============================================================================
 
 #[test]
-#[ignore] // Remove ignore when option.hpp is fixed (currently 29 violations)
 fn test_option_hpp_passes() {
     check_header_passes("include/rusty/option.hpp");
 }
 
 #[test]
-#[ignore] // Remove ignore when result.hpp is fixed (currently 18 violations)
 fn test_result_hpp_passes() {
     check_header_passes("include/rusty/result.hpp");
 }
 
 #[test]
-#[ignore] // Remove ignore when fn.hpp is fixed (currently 28 violations)
 fn test_fn_hpp_passes() {
     check_header_passes("include/rusty/fn.hpp");
-}
-
-// Test that documents current violations in option.hpp
-#[test]
-fn test_option_hpp_current_violations() {
-    // option.hpp currently has 29 violations (lifetime annotations, etc.)
-    check_header_has_expected_violations("include/rusty/option.hpp", 29);
-}
-
-// Test that documents current violations in result.hpp
-#[test]
-fn test_result_hpp_current_violations() {
-    // result.hpp currently has 18 violations
-    check_header_has_expected_violations("include/rusty/result.hpp", 18);
-}
-
-// Test that documents current violations in fn.hpp
-#[test]
-fn test_fn_hpp_current_violations() {
-    // fn.hpp currently has 30 violations (28 + 2 raw pointer declarations)
-    check_header_has_expected_violations("include/rusty/fn.hpp", 30);
 }

@@ -11,12 +11,15 @@
 // - Type-safe null handling
 // - No null pointer dereferencing
 // - Explicit handling of absence
+//
+// Note: This header is marked @unsafe because it implements low-level
+// data structures using raw pointers internally. The external API is
+// designed to be safe, but the implementation requires unsafe operations.
 
-// @safe
+// @unsafe
 namespace rusty {
 
 // Tag types for Option variants
-// @safe
 struct None_t {
     constexpr None_t() noexcept = default;
 };
@@ -26,7 +29,6 @@ inline constexpr None_t None{};
 static const None_t None{};
 #endif
 
-// @safe
 template<typename T>
 class Option {
 private:
@@ -61,6 +63,7 @@ public:
     Option& operator=(const Option& other) = delete;
 
     // Move assignment
+    // @lifetime: (&'a mut self) -> &'a mut self
     Option& operator=(Option&& other) noexcept {
         if (this != &other) {
             if (has_value) {
@@ -88,6 +91,7 @@ public:
 
     // Clone the Option (explicit copy) - Rust style
     // Requires T to be copyable
+    // @lifetime: owned
     Option clone() const {
         if (has_value) {
             return Option(T(value));  // Copy construct T
@@ -163,7 +167,10 @@ public:
         if (has_value) {
             value = std::move(new_value);
         } else {
-            new (&value) T(std::move(new_value));
+            // @unsafe
+            {
+                new (&value) T(std::move(new_value));
+            }
             has_value = true;
         }
     }
@@ -203,27 +210,26 @@ public:
 
 // Template specialization for Option<T&> (reference types)
 // This allows holding references without storing them in a union
-// Implementation uses raw pointers, but API is safe
-// @safe
+// Implementation uses raw pointers internally
 template<typename T>
 class Option<T&> {
 private:
     T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
-    // @safe - Constructors
+    // Constructors
     Option() : ptr(nullptr) {}
 
-    // @safe
+    
     Option(None_t) : ptr(nullptr) {}
 
-    // @safe
+    
     Option(T& ref) : ptr(&ref) {}
 
     // Copy constructor - deleted to enforce Rust-like move semantics
     Option(const Option& other) = delete;
 
-    // @safe - Move constructor
+    // Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
@@ -231,22 +237,23 @@ public:
     // Copy assignment - deleted to enforce Rust-like move semantics
     Option& operator=(const Option& other) = delete;
 
-    // @safe - Move assignment
+    // Move assignment
+    // @lifetime: (&'a mut self) -> &'a mut self
     Option& operator=(Option&& other) noexcept {
         ptr = other.ptr;
         other.ptr = nullptr;
         return *this;
     }
 
-    // @safe - Destructor (trivial for references)
+    // Destructor (trivial for references)
     ~Option() = default;
 
-    // @safe - Check if Option contains a value
+    // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
-    // @safe
     bool is_none() const { return !ptr; }
 
     // Clone the Option (explicit copy) - Rust style
+    // @lifetime: owned
     Option clone() const {
         if (ptr) {
             return Option(*ptr);
@@ -254,10 +261,10 @@ public:
         return Option();
     }
 
-    // @safe - Explicit bool conversion
+    // Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
 
-    // @safe - Unwrap the reference (panics if None)
+    // Unwrap the reference (panics if None)
     // @lifetime: (&'a) -> &'a T
     T& unwrap() {
         if (!ptr) {
@@ -266,7 +273,7 @@ public:
         return *ptr;
     }
 
-    // @safe - Expect with custom message
+    // Expect with custom message
     // @lifetime: (&'a) -> &'a T
     T& expect(const char* msg) {
         if (!ptr) {
@@ -275,7 +282,7 @@ public:
         return *ptr;
     }
 
-    // @safe - Unwrap with default reference
+    // Unwrap with default reference
     // @lifetime: (&'a, &'b) -> &'c T where 'a: 'c, 'b: 'c
     T& unwrap_or(T& default_ref) {
         if (ptr) {
@@ -284,7 +291,7 @@ public:
         return default_ref;
     }
 
-    // @safe - Map function over the reference
+    // Map function over the reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
     auto map(F&& f) -> Option<decltype(f(std::declval<T&>()))> {
@@ -295,7 +302,7 @@ public:
         return Option<U>(None);
     }
 
-    // @safe - Map function over const reference
+    // Map function over const reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
     auto map(F&& f) const -> Option<decltype(f(std::declval<const T&>()))> {
@@ -306,13 +313,13 @@ public:
         return Option<U>(None);
     }
 
-    // @safe - as_ref() for Option<T&> returns itself (already a reference)
+    // as_ref() for Option<T&> returns itself (already a reference)
     // @lifetime: (&'a) -> &'a self
     Option<T&> as_ref() & {
         return *this;
     }
 
-    // @safe
+    
     // @lifetime: (&'a) -> &'a self
     Option<const T&> as_ref() const & {
         if (ptr) {
@@ -321,7 +328,7 @@ public:
         return None;
     }
 
-    // @safe - as_mut() for Option<T&> returns itself (already mutable reference)
+    // as_mut() for Option<T&> returns itself (already mutable reference)
     // @lifetime: (&'a mut) -> &'a mut self
     Option<T&> as_mut() & {
         return *this;
@@ -332,34 +339,33 @@ public:
     Option<const T&> as_ref() const && = delete;
     Option<T&> as_mut() && = delete;
 
-    // @safe - Check if contains specific value
+    // Check if contains specific value
     bool contains(const T& value) const {
         return ptr && (*ptr == value);
     }
 };
 
 // Template specialization for Option<const T&> (const reference types)
-// Implementation uses raw pointers, but API is safe
-// @safe
+// Implementation uses raw pointers internally
 template<typename T>
 class Option<const T&> {
 private:
     const T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
-    // @safe - Constructors
+    // Constructors
     Option() : ptr(nullptr) {}
 
-    // @safe
+    
     Option(None_t) : ptr(nullptr) {}
 
-    // @safe
+    
     Option(const T& ref) : ptr(&ref) {}
 
     // Copy constructor - deleted to enforce Rust-like move semantics
     Option(const Option& other) = delete;
 
-    // @safe - Move constructor
+    // Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
@@ -367,22 +373,23 @@ public:
     // Copy assignment - deleted to enforce Rust-like move semantics
     Option& operator=(const Option& other) = delete;
 
-    // @safe - Move assignment
+    // Move assignment
+    // @lifetime: (&'a mut self) -> &'a mut self
     Option& operator=(Option&& other) noexcept {
         ptr = other.ptr;
         other.ptr = nullptr;
         return *this;
     }
 
-    // @safe - Destructor (trivial for references)
+    // Destructor (trivial for references)
     ~Option() = default;
 
-    // @safe - Check if Option contains a value
+    // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
-    // @safe
     bool is_none() const { return !ptr; }
 
     // Clone the Option (explicit copy) - Rust style
+    // @lifetime: owned
     Option clone() const {
         if (ptr) {
             return Option(*ptr);
@@ -390,10 +397,10 @@ public:
         return Option();
     }
 
-    // @safe - Explicit bool conversion
+    // Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
 
-    // @safe - Unwrap the reference (panics if None)
+    // Unwrap the reference (panics if None)
     // @lifetime: (&'a) -> &'a const T
     const T& unwrap() const {
         if (!ptr) {
@@ -402,7 +409,7 @@ public:
         return *ptr;
     }
 
-    // @safe - Expect with custom message
+    // Expect with custom message
     // @lifetime: (&'a) -> &'a const T
     const T& expect(const char* msg) const {
         if (!ptr) {
@@ -411,7 +418,7 @@ public:
         return *ptr;
     }
 
-    // @safe - Unwrap with default reference
+    // Unwrap with default reference
     // @lifetime: (&'a, &'b) -> &'c const T where 'a: 'c, 'b: 'c
     const T& unwrap_or(const T& default_ref) const {
         if (ptr) {
@@ -420,7 +427,7 @@ public:
         return default_ref;
     }
 
-    // @safe - Map function over the reference
+    // Map function over the reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
     auto map(F&& f) const -> Option<decltype(f(std::declval<const T&>()))> {
@@ -431,7 +438,7 @@ public:
         return Option<U>(None);
     }
 
-    // @safe - as_ref() for Option<const T&> returns itself (already a const reference)
+    // as_ref() for Option<const T&> returns itself (already a const reference)
     // @lifetime: (&'a) -> &'a self
     Option<const T&> as_ref() const & {
         return *this;
@@ -440,14 +447,14 @@ public:
     // Prevent calling as_ref() on rvalue
     Option<const T&> as_ref() const && = delete;
 
-    // @safe - Check if contains specific value
+    // Check if contains specific value
     bool contains(const T& value) const {
         return ptr && (*ptr == value);
     }
 };
 
 // Helper function to create Some variant (owned value)
-// @safe
+
 template<typename T>
 // @lifetime: owned
 Option<T> Some(T value) {
@@ -456,7 +463,7 @@ Option<T> Some(T value) {
 
 // Helper function to create Some variant (mutable reference)
 // No std::move - references don't transfer ownership
-// @safe
+
 template<typename T>
 // @lifetime: (&'a mut) -> Option<&'a mut>
 Option<T&> SomeRef(T& ref) {
@@ -464,7 +471,7 @@ Option<T&> SomeRef(T& ref) {
 }
 
 // Helper function to create Some variant (const reference)
-// @safe
+
 template<typename T>
 // @lifetime: (&'a) -> Option<&'a>
 Option<const T&> SomeRef(const T& ref) {

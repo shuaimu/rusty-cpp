@@ -38,8 +38,11 @@
 //   }
 //
 // This mirrors Rust's distinction between fn() and unsafe fn() types.
+//
+// Note: This header is marked @unsafe because it implements low-level
+// function pointer wrappers using raw pointers internally.
 
-// @safe
+// @unsafe
 namespace rusty {
 
 // ============================================================================

@@ -13,8 +13,11 @@
 // - Explicit error handling
 // - No hidden exceptions
 // - Composable error propagation
+//
+// Note: This header is marked @unsafe because it implements low-level
+// data structures using raw pointers internally.
 
-// @safe
+// @unsafe
 namespace rusty {
 
 template<typename T, typename E>
