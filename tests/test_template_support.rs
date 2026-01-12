@@ -387,7 +387,6 @@ fn test_template_forwarding_reference_double_use() {
 // ============================================================================
 
 #[test]
-#[ignore] // Variadic template parameter pack tracking not yet implemented
 fn test_variadic_template_parameter_pack_double_use() {
     let code = r#"
     #include <memory>

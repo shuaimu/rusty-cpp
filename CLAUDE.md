@@ -102,6 +102,10 @@ This is a Rust-based static analyzer that applies Rust's ownership and borrowing
   - Multiple type parameters (T, U, etc.)
   - Move detection and borrow checking in templates
   - Analyzes template declarations (no instantiation needed!)
+  - **Variadic template parameter pack tracking** (NEW!)
+    - Detects double-use of forwarded/moved parameter packs in fold expressions
+    - Example: `(std::forward<Args>(args), ...);` used twice detected as error
+    - Supports both `std::forward` and `std::move` operations
   - 100% test pass rate on template test suite
 
 - ✅ **Two-State Safety System** - Safe/Unsafe distinction (December 2025)
@@ -914,7 +918,7 @@ Earlier achievements:
 ### Medium Priority
 2. **Better error messages** - Code snippets and fix suggestions
 3. **Constructor initialization order** - Member initializer list analysis (Phase 7)
-4. **Advanced template features** - Variadic templates, SFINAE, partial specialization
+4. **Advanced template features** - SFINAE, partial specialization (variadic templates now supported!)
 5. **Switch/case statements** - Common control flow
 
 ### Low Priority (Future)

@@ -1726,41 +1726,58 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     });
                 }
             }
+            EntityKind::PackExpansionExpr => {
+                // Handle pack expansion at statement level (direct fold expressions)
+                if let Some(pack_stmt) = extract_pack_expansion(&child) {
+                    debug_println!("DEBUG STMT: PackExpansionExpr statement level: {:?}", child.get_display_name());
+                    statements.push(pack_stmt);
+                }
+            }
             EntityKind::UnexposedExpr => {
                 // UnexposedExpr can contain function calls or other expressions
                 // Also check if this contains a PackExpansionExpr (fold expression)
+                // Note: CXXFoldExpr is also mapped to UnexposedExpr but doesn't have
+                // PackExpansionExpr children - it directly contains forward/move calls
 
-                // First check for pack expansions in children
+                // First check for pack expansions in children (traditional pack expansion)
                 let has_pack_expansion = child.get_children().iter()
                     .any(|c| c.get_kind() == EntityKind::PackExpansionExpr);
 
                 if has_pack_expansion {
                     debug_println!("DEBUG STMT: UnexposedExpr contains PackExpansionExpr (fold expression)");
-                    // Process PackExpansionExpr children
+                    // Extract pack expansion info from fold expression children
                     for ue_child in child.get_children() {
                         if ue_child.get_kind() == EntityKind::PackExpansionExpr {
-                            // Recursively process the pack expansion
-                            let pack_stmts = extract_compound_statement(&ue_child);
-                            statements.extend(pack_stmts);
+                            if let Some(pack_stmt) = extract_pack_expansion(&ue_child) {
+                                debug_println!("DEBUG STMT: Extracted pack expansion from fold expression");
+                                statements.push(pack_stmt);
+                            }
                         }
                     }
                 } else {
-                    // Regular UnexposedExpr handling
-                    if let Some(expr) = extract_expression(&child) {
-                        match expr {
-                            Expression::FunctionCall { name, args } => {
-                                statements.push(Statement::FunctionCall {
-                                    name,
-                                    args,
-                                    location: extract_location(&child),
-                                });
-                            }
-                            _ => {
-                                // Other expression types - add as expression statement
-                                statements.push(Statement::ExpressionStatement {
-                                    expr,
-                                    location: extract_location(&child),
-                                });
+                    // Try to extract pack expansion from CXXFoldExpr (mapped to UnexposedExpr)
+                    // This handles (void(std::forward<Args>(args)), ...) patterns
+                    if let Some(pack_stmt) = extract_pack_expansion(&child) {
+                        debug_println!("DEBUG STMT: Extracted pack expansion from CXXFoldExpr (UnexposedExpr)");
+                        statements.push(pack_stmt);
+                    } else {
+                        // Regular UnexposedExpr handling
+                        if let Some(expr) = extract_expression(&child) {
+                            match expr {
+                                Expression::FunctionCall { name, args } => {
+                                    statements.push(Statement::FunctionCall {
+                                        name,
+                                        args,
+                                        location: extract_location(&child),
+                                    });
+                                }
+                                _ => {
+                                    // Other expression types - add as expression statement
+                                    statements.push(Statement::ExpressionStatement {
+                                        expr,
+                                        location: extract_location(&child),
+                                    });
+                                }
                             }
                         }
                     }
@@ -1771,6 +1788,60 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     }
 
     statements
+}
+
+/// Extract pack expansion information from a PackExpansionExpr AST node
+/// Returns a Statement::PackExpansion if successful
+fn extract_pack_expansion(entity: &Entity) -> Option<Statement> {
+    let mut pack_name = String::new();
+    let mut operation = "use".to_string();
+
+    // Recursively search for pack name and operation
+    fn search_pack_info(entity: &Entity, pack_name: &mut String, operation: &mut String) {
+        for child in entity.get_children() {
+            // Check for CallExpr (std::forward or std::move)
+            if child.get_kind() == EntityKind::CallExpr {
+                if let Some(callee_name) = extract_function_name(&child) {
+                    if is_forward_function(&callee_name) {
+                        *operation = "forward".to_string();
+                    } else if is_move_function(&callee_name) {
+                        *operation = "move".to_string();
+                    }
+                }
+                // Search deeper for pack parameter
+                search_pack_info(&child, pack_name, operation);
+            }
+            // Check for DeclRefExpr referencing a ParmDecl (the pack parameter)
+            else if child.get_kind() == EntityKind::DeclRefExpr {
+                if let Some(ref_entity) = child.get_reference() {
+                    if ref_entity.get_kind() == EntityKind::ParmDecl {
+                        if let Some(name) = ref_entity.get_name() {
+                            if pack_name.is_empty() {
+                                *pack_name = name;
+                            }
+                        }
+                    }
+                }
+            }
+            // Continue searching in other children
+            else {
+                search_pack_info(&child, pack_name, operation);
+            }
+        }
+    }
+
+    search_pack_info(entity, &mut pack_name, &mut operation);
+
+    if !pack_name.is_empty() {
+        debug_println!("DEBUG PACK: Extracted pack expansion: name='{}', operation='{}'", pack_name, operation);
+        Some(Statement::PackExpansion {
+            pack_name,
+            operation,
+            location: extract_location(entity),
+        })
+    } else {
+        None
+    }
 }
 
 /// Binary operators that we recognize
