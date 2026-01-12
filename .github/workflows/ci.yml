@@ -27,7 +27,3 @@ jobs:
 
       - name: Run tests
         run: cargo test --release -j $(nproc) -- --test-threads=$(nproc)
-
-      - name: Run clippy
-        run: cargo clippy -j $(nproc) -- -D warnings
-        continue-on-error: true
