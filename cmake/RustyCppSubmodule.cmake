@@ -209,37 +209,50 @@ if(WIN32)
     set(CPP_BORROW_CHECKER "${CPP_BORROW_CHECKER}.exe")
 endif()
 
+# Option to control the number of parallel jobs for Cargo build
+# Default to number of processors if available, otherwise 32
+include(ProcessorCount)
+ProcessorCount(NPROCS)
+if(NPROCS EQUAL 0)
+    set(NPROCS 32)
+endif()
+set(RUSTYCPP_PARALLEL_JOBS "${NPROCS}" CACHE STRING "Number of parallel jobs for rusty-cpp-checker build")
+message(STATUS "RustyCpp parallel jobs: ${RUSTYCPP_PARALLEL_JOBS}")
+
 # Function to build the rusty-cpp-checker with proper environment
 function(create_rustycpp_build_target)
     # Get the environment variables that were set during dependency check
     set(BUILD_ENV)
-    
+
     # Check if we found libclang and set the environment
     if(DEFINED ENV{LIBCLANG_PATH})
         list(APPEND BUILD_ENV "LIBCLANG_PATH=$ENV{LIBCLANG_PATH}")
     endif()
-    
+
     if(DEFINED ENV{LLVM_CONFIG_PATH})
         list(APPEND BUILD_ENV "LLVM_CONFIG_PATH=$ENV{LLVM_CONFIG_PATH}")
     endif()
-    
+
     if(DEFINED ENV{Z3_SYS_Z3_HEADER})
         list(APPEND BUILD_ENV "Z3_SYS_Z3_HEADER=$ENV{Z3_SYS_Z3_HEADER}")
     endif()
-    
+
+    # Build cargo arguments with parallel jobs
+    set(CARGO_ARGS "build" "-j" "${RUSTYCPP_PARALLEL_JOBS}" ${CARGO_BUILD_FLAGS})
+
     # Create a custom target to build the rusty-cpp-checker
     if(BUILD_ENV)
         add_custom_target(build_rusty_cpp_checker
-            COMMAND ${CMAKE_COMMAND} -E env ${BUILD_ENV} cargo build ${CARGO_BUILD_FLAGS}
+            COMMAND ${CMAKE_COMMAND} -E env ${BUILD_ENV} cargo ${CARGO_ARGS}
             WORKING_DIRECTORY ${RUSTYCPP_DIR}
-            COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode) with environment: ${BUILD_ENV}"
+            COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode, ${RUSTYCPP_PARALLEL_JOBS} jobs) with environment: ${BUILD_ENV}"
             VERBATIM
         )
     else()
         add_custom_target(build_rusty_cpp_checker
-            COMMAND cargo build ${CARGO_BUILD_FLAGS}
+            COMMAND cargo ${CARGO_ARGS}
             WORKING_DIRECTORY ${RUSTYCPP_DIR}
-            COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode)"
+            COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode, ${RUSTYCPP_PARALLEL_JOBS} jobs)"
             VERBATIM
         )
     endif()
