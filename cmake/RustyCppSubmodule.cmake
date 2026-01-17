@@ -436,21 +436,22 @@ function(enable_borrow_checking)
     message(STATUS "C++ Borrow Checking enabled")
     message(STATUS "Checker will be built at: ${CPP_BORROW_CHECKER}")
     message(STATUS "Build type: ${RUSTYCPP_BUILD_TYPE}")
-    
+
     # Check dependencies now that borrow checking is enabled
     check_rustycpp_dependencies()
-    
+
     # Create the build target after dependency check
     create_rustycpp_build_target()
-endfunction()
 
-# Create a custom target for checking all files
-if(ENABLE_BORROW_CHECKING)
-    add_custom_target(borrow_check_all
-        COMMENT "Running borrow checker on all C++ files"
-    )
-    ensure_checker_built(borrow_check_all)
-endif()
+    # Create a custom target for checking all files
+    # This must be after create_rustycpp_build_target() so ensure_checker_built works
+    if(NOT TARGET borrow_check_all)
+        add_custom_target(borrow_check_all
+            COMMENT "Running borrow checker on all C++ files"
+        )
+        ensure_checker_built(borrow_check_all)
+    endif()
+endfunction()
 
 # Function to add compile_commands.json support
 function(setup_borrow_checker_compile_commands)
