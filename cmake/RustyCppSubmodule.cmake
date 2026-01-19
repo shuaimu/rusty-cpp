@@ -51,33 +51,14 @@ function(check_rustycpp_dependencies)
 
     set(MISSING_DEPS FALSE)
 
-    # Check for Rust/Cargo - search common installation locations
-    # Try multiple patterns since HOME/USER may not be set in all contexts
-    find_program(CARGO_EXECUTABLE cargo
-        PATHS
-            $ENV{HOME}/.cargo/bin
-            $ENV{CARGO_HOME}/bin
-            /home/$ENV{USER}/.cargo/bin
-            /home/runner/.cargo/bin
-            /root/.cargo/bin
-            /usr/local/bin
-            /usr/bin
-        NO_DEFAULT_PATH
-    )
-    # Also check PATH as fallback
-    if(NOT CARGO_EXECUTABLE)
-        find_program(CARGO_EXECUTABLE cargo)
-    endif()
-
+    # Check for Rust/Cargo in PATH
+    find_program(CARGO_EXECUTABLE cargo)
     if(CARGO_EXECUTABLE)
         message(STATUS "Found cargo: ${CARGO_EXECUTABLE}")
-        # Add cargo's directory to PATH for subsequent commands
-        get_filename_component(CARGO_BIN_DIR ${CARGO_EXECUTABLE} DIRECTORY)
-        set(ENV{PATH} "${CARGO_BIN_DIR}:$ENV{PATH}")
-        # Cache for use in build target
-        set(CARGO_EXECUTABLE ${CARGO_EXECUTABLE} CACHE FILEPATH "Path to cargo executable" FORCE)
     else()
-        message(WARNING "cargo not found. Please install Rust from https://rustup.rs/")
+        message(WARNING "cargo not found in PATH.")
+        message(WARNING "Please install Rust (1.70+) from https://rustup.rs/ and ensure ~/.cargo/bin is in your PATH.")
+        message(WARNING "  After installation, run: source ~/.cargo/env")
         set(MISSING_DEPS TRUE)
     endif()
     
@@ -274,24 +255,17 @@ function(create_rustycpp_build_target)
     # Build cargo arguments with parallel jobs
     set(CARGO_ARGS "build" "-j" "${RUSTYCPP_PARALLEL_JOBS}" ${CARGO_BUILD_FLAGS})
 
-    # Use CARGO_EXECUTABLE if found, otherwise fall back to 'cargo'
-    if(CARGO_EXECUTABLE)
-        set(CARGO_CMD ${CARGO_EXECUTABLE})
-    else()
-        set(CARGO_CMD cargo)
-    endif()
-
     # Create a custom target to build the rusty-cpp-checker
     if(BUILD_ENV)
         add_custom_target(build_rusty_cpp_checker
-            COMMAND ${CMAKE_COMMAND} -E env ${BUILD_ENV} ${CARGO_CMD} ${CARGO_ARGS}
+            COMMAND ${CMAKE_COMMAND} -E env ${BUILD_ENV} cargo ${CARGO_ARGS}
             WORKING_DIRECTORY ${RUSTYCPP_DIR}
             COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode, ${RUSTYCPP_PARALLEL_JOBS} jobs) with environment: ${BUILD_ENV}"
             VERBATIM
         )
     else()
         add_custom_target(build_rusty_cpp_checker
-            COMMAND ${CARGO_CMD} ${CARGO_ARGS}
+            COMMAND cargo ${CARGO_ARGS}
             WORKING_DIRECTORY ${RUSTYCPP_DIR}
             COMMENT "Building rusty-cpp-checker (${RUSTYCPP_BUILD_TYPE} mode, ${RUSTYCPP_PARALLEL_JOBS} jobs)"
             VERBATIM
