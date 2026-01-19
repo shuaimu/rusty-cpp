@@ -27,3 +27,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --release -j $(nproc) -- --test-threads=$(nproc)
+
+      - name: Test CMake example project
+        run: |
+          cd cmake-example-project
+          rm -rf build
+          mkdir build && cd build
+          cmake ..
+          make -j $(nproc)
