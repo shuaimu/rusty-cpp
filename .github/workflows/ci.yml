@@ -30,6 +30,7 @@ jobs:
 
       - name: Test CMake example project
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cd cmake-example-project
           rm -rf build
           mkdir build && cd build

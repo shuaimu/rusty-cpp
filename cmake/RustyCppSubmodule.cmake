@@ -221,6 +221,17 @@ message(STATUS "RustyCpp parallel jobs: ${RUSTYCPP_PARALLEL_JOBS}")
 
 # Function to build the rusty-cpp-checker with proper environment
 function(create_rustycpp_build_target)
+    # Check if the checker binary already exists - skip building if so
+    if(EXISTS "${CPP_BORROW_CHECKER}")
+        message(STATUS "Checker already exists at: ${CPP_BORROW_CHECKER} - skipping build target")
+        # Create a no-op target so dependencies still work
+        add_custom_target(build_rusty_cpp_checker
+            COMMAND ${CMAKE_COMMAND} -E echo "Checker already built: ${CPP_BORROW_CHECKER}"
+            COMMENT "Checker already exists, skipping build"
+        )
+        return()
+    endif()
+
     # Get the environment variables that were set during dependency check
     set(BUILD_ENV)
 
