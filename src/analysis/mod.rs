@@ -1974,7 +1974,7 @@ impl OwnershipTracker {
     // If so, clear its borrows (the variable is now dead)
     fn check_and_clear_last_uses(&mut self, statement_idx: usize) {
         let vars_to_clear: Vec<String> = self.last_use_map.iter()
-            .filter(|(_, &last_use_idx)| last_use_idx == statement_idx)
+            .filter(|&(_, &last_use_idx)| last_use_idx == statement_idx)
             .map(|(var, _)| var.clone())
             .collect();
 

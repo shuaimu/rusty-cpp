@@ -1,8 +1,8 @@
 [package]
 name = "rusty-cpp"
 version = "0.1.1"
-edition = "2021"
-rust-version = "1.74"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Shuai Mu <shuai@cs.stonybrook.edu>"]
 description = "A Rust-based static analyzer that applies Rust's ownership and borrowing rules to C++ code"
 documentation = "https://docs.rs/rusty-cpp"
