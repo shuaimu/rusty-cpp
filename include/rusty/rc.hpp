@@ -290,23 +290,30 @@ public:
     }
 
     // Check if Rc contains a value
+    // @safe
     bool is_valid() const {
-        return ptr_ != nullptr && control_ != nullptr;
+        // @unsafe
+        { return ptr_ != nullptr && control_ != nullptr; }
     }
 
     // Explicit bool conversion
+    // @safe
     explicit operator bool() const {
         return is_valid();
     }
 
     // Get current strong reference count
+    // @safe
     size_t strong_count() const {
-        return control_ ? control_->strong_count : 0;
+        // @unsafe
+        { return control_ ? control_->strong_count : 0; }
     }
 
     // Get current weak reference count (excluding implicit strong-held weak)
+    // @safe
     size_t weak_count() const {
-        return control_ ? (control_->weak_count > 0 ? control_->weak_count - 1 : 0) : 0;
+        // @unsafe
+        { return control_ ? (control_->weak_count > 0 ? control_->weak_count - 1 : 0) : 0; }
     }
 
     // @safe - Clone explicitly creates a new Rc to the same value
@@ -319,8 +326,11 @@ public:
     // @safe
     // @lifetime: (&'a mut self) -> Option<&'a mut T>
     Option<T&> get_mut() {
-        if (control_ && ptr_ && control_->strong_count == 1) {
-            return SomeRef(*ptr_);
+        // @unsafe
+        {
+            if (control_ && ptr_ && control_->strong_count == 1) {
+                return SomeRef(*ptr_);
+            }
         }
         return None;
     }
@@ -328,9 +338,13 @@ public:
     // Create a new Rc with the same value (deep copy)
     // Requires T to be copyable
     // Returns None if Rc is invalid
+    // @safe
     Option<Rc<T>> make_unique() const {
-        if (ptr_ && control_) {
-            return Some(Rc<T>::make(*ptr_));
+        // @unsafe
+        {
+            if (ptr_ && control_) {
+                return Some(Rc<T>::make(*ptr_));
+            }
         }
         return None;
     }
