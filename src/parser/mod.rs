@@ -36,6 +36,11 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     let mut args = vec![
         "-std=c++20".to_string(),
         "-xc++".to_string(),
+        // Ensure fixed-width integer typedefs (int8_t, uint32_t, etc.) exist in
+        // the global namespace even when transitive headers rely on them without
+        // directly including <cstdint>/<stdint.h>.
+        "-include".to_string(),
+        "stdint.h".to_string(),
         // Add flags to make parsing more lenient
         "-fno-delayed-template-parsing".to_string(),
         "-fparse-all-comments".to_string(),
@@ -70,13 +75,19 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     let mut has_fatal = false;
     if !diagnostics.is_empty() {
         for diag in &diagnostics {
+            let rendered = diag
+                .formatter()
+                .source_location(true)
+                .column(true)
+                .option(true)
+                .format();
             // Only fail on fatal errors, ignore regular errors
             if diag.get_severity() >= clang::diagnostic::Severity::Fatal {
                 has_fatal = true;
-                eprintln!("Fatal error: {}", diag.get_text());
+                eprintln!("Fatal error: {}", rendered);
             } else if diag.get_severity() >= clang::diagnostic::Severity::Error {
                 // Log errors but don't fail
-                eprintln!("Warning (suppressed error): {}", diag.get_text());
+                eprintln!("Warning (suppressed error): {}", rendered);
             }
         }
     }

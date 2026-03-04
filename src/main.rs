@@ -94,6 +94,24 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
         let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
         all_include_paths.extend(extracted_paths);
     }
+
+    if std::env::var("RUSTY_CPP_DEBUG").is_ok() {
+        eprintln!(
+            "DEBUG MAIN: Using {} total include paths for parsing",
+            all_include_paths.len()
+        );
+        for (idx, inc) in all_include_paths.iter().enumerate() {
+            eprintln!("DEBUG MAIN:   [{}] {}", idx, inc.display());
+        }
+        if defines.is_empty() {
+            eprintln!("DEBUG MAIN: No preprocessor defines provided");
+        } else {
+            eprintln!("DEBUG MAIN: Using {} preprocessor defines", defines.len());
+            for (idx, define) in defines.iter().enumerate() {
+                eprintln!("DEBUG MAIN:   [D{}] {}", idx, define);
+            }
+        }
+    }
     
     // Parse included headers for lifetime annotations
     let mut header_cache = parser::HeaderCache::new();
@@ -368,32 +386,6 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
     // Try to find clang and get its C++ search paths
     match Clang::find(None, &[]) {
         Some(clang) => {
-            // First, add the Clang resource directory for built-in headers (stdarg.h, etc.)
-            // This is essential for LibClang to parse code that includes standard headers
-            //
-            // IMPORTANT: We need to use the resource directory that matches the actual libclang
-            // version being linked, not the clang binary on PATH. The clang binary and libclang
-            // can be different versions (e.g., clang-14 on PATH but libclang-16 linked).
-            //
-            // Try to detect the actual libclang version and use its resource directory.
-            if let Some(resource_include) = find_libclang_resource_include() {
-                if !paths.contains(&resource_include) {
-                    paths.push(resource_include);
-                }
-            } else if let Ok(output) = std::process::Command::new(&clang.path)
-                .arg("-print-resource-dir")
-                .output()
-            {
-                // Fallback: use clang binary's resource dir
-                if output.status.success() {
-                    let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let builtin_include = PathBuf::from(&resource_dir).join("include");
-                    if builtin_include.exists() && !paths.contains(&builtin_include) {
-                        paths.push(builtin_include);
-                    }
-                }
-            }
-
             if let Some(cpp_paths) = clang.cpp_search_paths {
                 // Check if we have GCC paths - if so, filter out LLVM/clang paths to avoid conflicts
                 let has_gcc_paths = cpp_paths.iter().any(|p| {
@@ -434,52 +426,6 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
     }
 
     paths
-}
-
-/// Find the resource include directory for the actual libclang being linked
-/// This handles the case where clang binary version differs from libclang version
-fn find_libclang_resource_include() -> Option<PathBuf> {
-    // Try to find libclang version by checking common LLVM installation paths
-    // Search for the newest version first (higher versions are typically more compatible)
-    for version in (14..=20).rev() {
-        // Try versioned path (e.g., /usr/lib/llvm-16/lib/clang/16/include)
-        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
-        if versioned_path.exists() {
-            // Verify this version's libclang is actually what we're linked against
-            let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
-            let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
-            if libclang_path.exists() || libclang_path_alt.exists() {
-                return Some(versioned_path);
-            }
-        }
-
-        // Also try the format with full version (e.g., /usr/lib/llvm-14/lib/clang/14.0.6/include)
-        for minor in (0..=9).rev() {
-            for patch in (0..=9).rev() {
-                let full_version_path = PathBuf::from(format!(
-                    "/usr/lib/llvm-{}/lib/clang/{}.{}.{}/include",
-                    version, version, minor, patch
-                ));
-                if full_version_path.exists() {
-                    let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
-                    let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
-                    if libclang_path.exists() || libclang_path_alt.exists() {
-                        return Some(full_version_path);
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: Try to find any clang resource directory
-    for version in (14..=20).rev() {
-        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
-        if versioned_path.exists() {
-            return Some(versioned_path);
-        }
-    }
-
-    None
 }
 
 /// Add system C include paths needed for libc headers (stdint.h, etc.)
@@ -524,4 +470,3 @@ fn add_system_c_include_paths(paths: &mut Vec<PathBuf>) {
         }
     }
 }
-
