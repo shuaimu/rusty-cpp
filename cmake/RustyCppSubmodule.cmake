@@ -62,60 +62,85 @@ function(check_rustycpp_dependencies)
         set(MISSING_DEPS TRUE)
     endif()
     
-    # Check for LLVM/Clang development libraries
-    # Try to find libclang
-    find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
-        PATHS
-            /usr/include
-            /usr/local/include
-            /usr/lib/llvm-16/include
-            /usr/lib/llvm-17/include
-            /usr/lib/llvm-18/include
-            /usr/lib/llvm-19/include
-            /usr/lib/llvm-20/include
-            /usr/lib/llvm-21/include
-            /usr/lib/llvm/16/include
-            /usr/lib/llvm/17/include
-            /usr/lib/llvm/18/include
-            /usr/lib/llvm/19/include
-            /usr/lib/llvm/20/include
-            /usr/lib/llvm/21/include
-            /opt/homebrew/opt/llvm/include
-        PATH_SUFFIXES
-            llvm
-            llvm-16
-            llvm-17
-            llvm-18
-            llvm-19
-            llvm-20
-            llvm-21
-    )
-    
-    find_library(LIBCLANG_LIBRARY
-        NAMES clang libclang
-        PATHS
-            /usr/lib
-            /usr/local/lib
-            /usr/lib/llvm-16/lib
-            /usr/lib/llvm-17/lib
-            /usr/lib/llvm-18/lib
-            /usr/lib/llvm-19/lib
-            /usr/lib/llvm-20/lib
-            /usr/lib/llvm-21/lib
-            /usr/lib/llvm/16/lib
-            /usr/lib/llvm/17/lib
-            /usr/lib/llvm/18/lib
-            /usr/lib/llvm/19/lib
-            /usr/lib/llvm/20/lib
-            /usr/lib/llvm/21/lib
-            /usr/lib/x86_64-linux-gnu
-            /opt/homebrew/opt/llvm/lib
-    )
+    # Check for LLVM/Clang development libraries.
+    # Respect LIBCLANG_PATH if already provided by the caller.
+    unset(LIBCLANG_INCLUDE_DIR CACHE)
+    unset(LIBCLANG_LIBRARY CACHE)
+
+    if(DEFINED ENV{LIBCLANG_PATH} AND EXISTS "$ENV{LIBCLANG_PATH}")
+        message(STATUS "Using LIBCLANG_PATH from environment: $ENV{LIBCLANG_PATH}")
+
+        find_library(LIBCLANG_LIBRARY
+            NAMES clang libclang clang-21 clang-20 clang-19 clang-18 clang-17 clang-16
+            PATHS "$ENV{LIBCLANG_PATH}"
+            NO_DEFAULT_PATH
+        )
+
+        get_filename_component(_LIBCLANG_ROOT "$ENV{LIBCLANG_PATH}" DIRECTORY)
+        find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
+            PATHS
+                "${_LIBCLANG_ROOT}/include"
+                "$ENV{LIBCLANG_PATH}/../include"
+            NO_DEFAULT_PATH
+        )
+    endif()
+
+    if(NOT LIBCLANG_INCLUDE_DIR)
+        find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
+            PATHS
+                /usr/lib/llvm-21/include
+                /usr/lib/llvm-20/include
+                /usr/lib/llvm-19/include
+                /usr/lib/llvm-18/include
+                /usr/lib/llvm-17/include
+                /usr/lib/llvm-16/include
+                /usr/lib/llvm/21/include
+                /usr/lib/llvm/20/include
+                /usr/lib/llvm/19/include
+                /usr/lib/llvm/18/include
+                /usr/lib/llvm/17/include
+                /usr/lib/llvm/16/include
+                /opt/homebrew/opt/llvm/include
+                /usr/local/include
+                /usr/include
+            PATH_SUFFIXES
+                llvm
+                llvm-21
+                llvm-20
+                llvm-19
+                llvm-18
+                llvm-17
+                llvm-16
+        )
+    endif()
+
+    if(NOT LIBCLANG_LIBRARY)
+        find_library(LIBCLANG_LIBRARY
+            NAMES clang libclang clang-21 clang-20 clang-19 clang-18 clang-17 clang-16
+            PATHS
+                /usr/lib/llvm-21/lib
+                /usr/lib/llvm-20/lib
+                /usr/lib/llvm-19/lib
+                /usr/lib/llvm-18/lib
+                /usr/lib/llvm-17/lib
+                /usr/lib/llvm-16/lib
+                /usr/lib/llvm/21/lib
+                /usr/lib/llvm/20/lib
+                /usr/lib/llvm/19/lib
+                /usr/lib/llvm/18/lib
+                /usr/lib/llvm/17/lib
+                /usr/lib/llvm/16/lib
+                /opt/homebrew/opt/llvm/lib
+                /usr/lib/x86_64-linux-gnu
+                /usr/local/lib
+                /usr/lib
+        )
+    endif()
     
     if(NOT LIBCLANG_INCLUDE_DIR OR NOT LIBCLANG_LIBRARY)
         message(WARNING "libclang development files not found.")
         message(WARNING "Please install LLVM/Clang development packages:")
-        message(WARNING "  Ubuntu/Debian: sudo apt-get install llvm-16-dev libclang-16-dev")
+        message(WARNING "  Ubuntu/Debian: sudo apt-get install llvm-19-dev libclang-19-dev")
         message(WARNING "  Fedora/RHEL: sudo dnf install llvm-devel clang-devel")
         message(WARNING "  macOS: brew install llvm")
         set(MISSING_DEPS TRUE)
@@ -129,23 +154,23 @@ function(check_rustycpp_dependencies)
         
         # Try to find llvm-config
         find_program(LLVM_CONFIG_EXECUTABLE
-            NAMES llvm-config llvm-config-16 llvm-config-17 llvm-config-18 llvm-config-19 llvm-config-20 llvm-config-21
+            NAMES llvm-config-21 llvm-config-20 llvm-config-19 llvm-config-18 llvm-config-17 llvm-config-16 llvm-config
             PATHS
-                /usr/bin
-                /usr/local/bin
-                /usr/lib/llvm-16/bin
-                /usr/lib/llvm-17/bin
-                /usr/lib/llvm-18/bin
-                /usr/lib/llvm-19/bin
-                /usr/lib/llvm-20/bin
-                /usr/lib/llvm-21/bin
-                /usr/lib/llvm/16/bin
-                /usr/lib/llvm/17/bin
-                /usr/lib/llvm/18/bin
-                /usr/lib/llvm/19/bin
-                /usr/lib/llvm/20/bin
                 /usr/lib/llvm/21/bin
+                /usr/lib/llvm/20/bin
+                /usr/lib/llvm/19/bin
+                /usr/lib/llvm/18/bin
+                /usr/lib/llvm/17/bin
+                /usr/lib/llvm/16/bin
+                /usr/lib/llvm-21/bin
+                /usr/lib/llvm-20/bin
+                /usr/lib/llvm-19/bin
+                /usr/lib/llvm-18/bin
+                /usr/lib/llvm-17/bin
+                /usr/lib/llvm-16/bin
                 /opt/homebrew/opt/llvm/bin
+                /usr/local/bin
+                /usr/bin
         )
         
         if(LLVM_CONFIG_EXECUTABLE)
@@ -225,17 +250,6 @@ message(STATUS "RustyCpp parallel jobs: ${RUSTYCPP_PARALLEL_JOBS}")
 
 # Function to build the rusty-cpp-checker with proper environment
 function(create_rustycpp_build_target)
-    # Check if the checker binary already exists - skip building if so
-    if(EXISTS "${CPP_BORROW_CHECKER}")
-        message(STATUS "Checker already exists at: ${CPP_BORROW_CHECKER} - skipping build target")
-        # Create a no-op target so dependencies still work
-        add_custom_target(build_rusty_cpp_checker
-            COMMAND ${CMAKE_COMMAND} -E echo "Checker already built: ${CPP_BORROW_CHECKER}"
-            COMMENT "Checker already exists, skipping build"
-        )
-        return()
-    endif()
-
     # Get the environment variables that were set during dependency check
     set(BUILD_ENV)
 
