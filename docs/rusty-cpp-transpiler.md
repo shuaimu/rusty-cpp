@@ -177,48 +177,75 @@ auto b = std::move(a);  // explicit std::move needed
 
 ### 1.8 Smart Pointers
 
-| Rust | C++ |
-|------|-----|
-| `Box<T>` | `std::unique_ptr<T>` |
-| `Rc<T>` | `std::shared_ptr<T>` |
-| `Arc<T>` | `std::shared_ptr<T>` (already atomic) |
-| `Weak<T>` (from Rc/Arc) | `std::weak_ptr<T>` |
-| `Cell<T>` | `T` (mutable, non-thread-safe) |
-| `RefCell<T>` | Custom wrapper with runtime borrow checks |
-| `Mutex<T>` | `std::mutex` + `T` (or wrapper) |
-| `RwLock<T>` | `std::shared_mutex` + `T` |
+Since rusty-cpp provides Rust-equivalent wrappers (in `include/rusty/`), the transpiler should prefer these over raw STL types. They preserve Rust semantics (ownership tracking, borrow checking) and are analyzable by the rusty-cpp checker.
+
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `Box<T>` | `rusty::Box<T>` | `std::unique_ptr<T>` |
+| `Rc<T>` | `rusty::Rc<T>` | `std::shared_ptr<T>` |
+| `Arc<T>` | `rusty::Arc<T>` | `std::shared_ptr<T>` (already atomic) |
+| `Weak<T>` (from Rc/Arc) | `rusty::Weak<T>` | `std::weak_ptr<T>` |
+| `Cell<T>` | `rusty::Cell<T>` | `T` (mutable, non-thread-safe) |
+| `RefCell<T>` | `rusty::RefCell<T>` | Custom wrapper with runtime borrow checks |
+| `Mutex<T>` | `rusty::Mutex<T>` | `std::mutex` + `T` |
+| `RwLock<T>` | `rusty::RwLock<T>` | `std::shared_mutex` + `T` |
+| `UnsafeCell<T>` | `rusty::UnsafeCell<T>` | `T` (no safety wrapper) |
+| `MaybeUninit<T>` | `rusty::MaybeUninit<T>` | Uninitialized storage |
+
+**Why prefer rusty-cpp types**: The rusty-cpp wrappers mirror Rust's API surface (e.g. `rusty::Rc<T>` has `clone()`, `borrow()`, and move semantics matching Rust's `Rc<T>`). This means the transpiled code can be verified by the rusty-cpp analyzer, closing the loop: Rust → transpile → C++ → verify with rusty-cpp.
 
 ### 1.9 Strings
 
-| Rust | C++ |
-|------|-----|
-| `String` | `std::string` |
-| `&str` | `std::string_view` |
-| `CString` | `std::string` (with null terminator guarantee) |
-| `&CStr` | `const char*` or `std::string_view` |
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `String` | `rusty::String` | `std::string` |
+| `&str` | `rusty::str` / `std::string_view` | `std::string_view` |
+| `CString` | — | `std::string` (with null terminator guarantee) |
+| `&CStr` | — | `const char*` or `std::string_view` |
 
 ### 1.10 Collections
 
-| Rust | C++ |
-|------|-----|
-| `Vec<T>` | `std::vector<T>` |
-| `HashMap<K,V>` | `std::unordered_map<K,V>` |
-| `BTreeMap<K,V>` | `std::map<K,V>` |
-| `HashSet<T>` | `std::unordered_set<T>` |
-| `BTreeSet<T>` | `std::set<T>` |
-| `VecDeque<T>` | `std::deque<T>` |
-| `LinkedList<T>` | `std::list<T>` |
-| `BinaryHeap<T>` | `std::priority_queue<T>` |
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `Vec<T>` | `rusty::Vec<T>` | `std::vector<T>` |
+| `HashMap<K,V>` | `rusty::HashMap<K,V>` | `std::unordered_map<K,V>` |
+| `BTreeMap<K,V>` | `rusty::BTreeMap<K,V>` | `std::map<K,V>` |
+| `HashSet<T>` | `rusty::HashSet<T>` | `std::unordered_set<T>` |
+| `BTreeSet<T>` | `rusty::BTreeSet<T>` | `std::set<T>` |
+| `VecDeque<T>` | `rusty::VecDeque<T>` | `std::deque<T>` |
+| `LinkedList<T>` | — | `std::list<T>` |
+| `BinaryHeap<T>` | — | `std::priority_queue<T>` |
 
 ### 1.11 Error Handling
 
-| Rust | C++ (C++23) |
-|------|-------------|
-| `Option<T>` | `std::optional<T>` |
-| `Result<T, E>` | `std::expected<T, E>` |
-| `panic!()` | `std::abort()` or `throw` (configurable) |
-| `unwrap()` | `.value()` (throws on None/Err) |
-| `?` operator | See §3.4 |
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `Option<T>` | `rusty::Option<T>` | `std::optional<T>` |
+| `Result<T, E>` | `rusty::Result<T, E>` | `std::expected<T, E>` (C++23) |
+| `panic!()` | `std::abort()` or `throw` | (configurable) |
+| `unwrap()` | `.unwrap()` | `.value()` (throws on None/Err) |
+| `?` operator | See §3.4 | |
+
+### 1.12 Concurrency Primitives
+
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `Mutex<T>` | `rusty::Mutex<T>` | `std::mutex` + `T` |
+| `RwLock<T>` | `rusty::RwLock<T>` | `std::shared_mutex` + `T` |
+| `Condvar` | `rusty::Condvar` | `std::condition_variable` |
+| `Barrier` | `rusty::Barrier` | `std::barrier` (C++20) |
+| `Once` | `rusty::Once` | `std::once_flag` + `std::call_once` |
+| `thread::spawn` | `rusty::thread::spawn` | `std::thread` |
+
+### 1.13 Function Pointers
+
+| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
+|------|-----------------|-------------------|
+| `fn(A) -> B` | `rusty::SafeFn<B(A)>` | `B(*)(A)` |
+| `unsafe fn(A) -> B` | `rusty::UnsafeFn<B(A)>` | `B(*)(A)` |
+| `Fn(A) -> B` | `std::function<B(A)>` | `std::function<B(A)>` |
+| `FnMut(A) -> B` | `std::function<B(A)>` | `std::function<B(A)>` |
+| `FnOnce(A) -> B` | `std::move_only_function<B(A)>` | `std::move_only_function<B(A)>` (C++23) |
 
 ---
 
@@ -903,8 +930,8 @@ std::generator<int> make_iter() {
 
 ## 5. Complete Feature Matrix
 
-| Rust Feature | C++ Mapping | Difficulty | Notes |
-|-------------|-------------|------------|-------|
+| Rust Feature | C++ Mapping (rusty-cpp preferred) | Difficulty | Notes |
+|-------------|-----------------------------------|------------|-------|
 | Primitive types | Fixed-width integers | Easy | Direct mapping |
 | `let` / `let mut` | `const auto` / `auto` | Easy | Flip default mutability |
 | Functions | Functions | Easy | Add explicit `return` |
@@ -918,11 +945,20 @@ std::generator<int> make_iter() {
 | Closures | Lambdas | Easy | Capture mode mapping |
 | Generics | Templates + concepts | Medium | Bounds → concepts |
 | Lifetimes | Erased | Easy | No runtime effect |
-| Ownership/moves | `std::move` | Medium | Insert at move points |
+| Ownership/moves | `rusty::move` / `std::move` | Medium | Insert at move points |
+| `Box<T>` | `rusty::Box<T>` | Easy | Direct API match |
+| `Rc<T>` / `Arc<T>` | `rusty::Rc<T>` / `rusty::Arc<T>` | Easy | Direct API match |
+| `Vec<T>` | `rusty::Vec<T>` | Easy | Direct API match |
+| `HashMap` / `HashSet` | `rusty::HashMap` / `rusty::HashSet` | Easy | Direct API match |
+| `Option<T>` | `rusty::Option<T>` | Easy | Direct API match |
+| `Result<T,E>` | `rusty::Result<T,E>` | Easy | Direct API match |
+| `String` / `&str` | `rusty::String` / `std::string_view` | Easy | Direct API match |
+| `Mutex<T>` / `RwLock<T>` | `rusty::Mutex<T>` / `rusty::RwLock<T>` | Easy | Data-protecting model |
+| `Cell<T>` / `RefCell<T>` | `rusty::Cell<T>` / `rusty::RefCell<T>` | Easy | Runtime borrow checks |
+| `fn()` / `unsafe fn()` | `rusty::SafeFn` / `rusty::UnsafeFn` | Easy | Safety-typed wrappers |
 | `async`/`await` | Coroutines | Hard | No standard executor |
 | Macros | Expand before transpile | Medium | Use `cargo expand` |
 | Modules | Namespaces + headers | Medium | Visibility gaps |
-| Error handling | `expected`/`optional` | Medium | `?` needs special handling |
 | Derive macros | Code generation | Medium | Per-derive mapping |
 | Unsafe blocks | Raw code | Easy | Just emit the code |
 | FFI (`extern "C"`) | `extern "C"` | Easy | Direct mapping |
