@@ -102,28 +102,54 @@ const int* r = &x;
 r = &y;  // rebinds r to point at y
 ```
 
-The mapping therefore depends on whether the reference binding is mutable (`let mut r: &T`):
+#### Transpilation Strategy: Static Analysis of Rebinding
 
-| Rust | C++ (binding is `let`) | C++ (binding is `let mut`) |
-|------|------------------------|---------------------------|
-| `&T` | `const T&` | `const T*` (rebindable) |
-| `&mut T` | `T&` | `T*` (rebindable) |
+The transpiler should analyze whether a reference binding is ever reassigned. If not, it can safely emit a C++ reference (more idiomatic, zero overhead). If rebinding occurs, it must fall back to a pointer.
 
-For function parameters, `&T` → `const T&` and `&mut T` → `T&` remain correct (parameters aren't rebound in typical code). For local variables with `let mut`, the transpiler must use pointers (or `std::reference_wrapper<T>`).
+**Step 1**: For each `let mut r: &T` binding, scan all subsequent assignments to `r` in the same scope.
 
-**Alternative**: Use `gsl::not_null<const T*>` to preserve the non-null guarantee that Rust references carry, at the cost of a library dependency.
+**Step 2**: Choose output based on the result:
 
-| Rust | C++ (general, safe) |
-|------|-----|
-| `&T` (parameter) | `const T&` |
-| `&mut T` (parameter) | `T&` |
-| `let r: &T = ...` | `const T& r = ...` |
-| `let mut r: &T = ...` | `gsl::not_null<const T*> r = &...` or `const T* r = &...` |
-| `let mut r: &mut T = ...` | `gsl::not_null<T*> r = &...` or `T* r = &...` |
-| `*const T` | `const T*` |
-| `*mut T` | `T*` |
+```rust
+// Case 1: No rebinding — emit C++ reference
+let mut r = &x;
+println!("{}", r);  // r is never reassigned
+```
+```cpp
+const int& r = x;            // safe: never rebound
+std::println("{}", r);
+```
 
-**Key insight**: Rust's `&T` is a shared (immutable) reference and `&mut T` is an exclusive (mutable) reference. For non-rebound bindings, C++ references work. For rebound bindings (`let mut`), pointers are required. The borrow checker rules are erased in the C++ output (they were enforced at the Rust level). Auto-deref also needs to be made explicit.
+```rust
+// Case 2: Rebinding detected — emit pointer
+let mut r = &x;
+r = &y;              // rebinding!
+println!("{}", *r);
+```
+```cpp
+const int* r = &x;           // must use pointer
+r = &y;                       // rebinding works
+std::println("{}", *r);
+```
+
+**Decision table**:
+
+| Rust | Rebound? | C++ output |
+|------|----------|------------|
+| `let r: &T = ...` | N/A (immutable binding) | `const T& r = ...` |
+| `let r: &mut T = ...` | N/A (immutable binding) | `T& r = ...` |
+| `let mut r: &T = ...` | No | `const T& r = ...` |
+| `let mut r: &T = ...` | Yes | `const T* r = &...` |
+| `let mut r: &mut T = ...` | No | `T& r = ...` |
+| `let mut r: &mut T = ...` | Yes | `T* r = &...` |
+| `&T` (function param) | No (typical) | `const T&` |
+| `&mut T` (function param) | No (typical) | `T&` |
+| `*const T` | — | `const T*` |
+| `*mut T` | — | `T*` |
+
+This produces the most idiomatic C++ output — references when possible, pointers only when necessary. The analysis is trivial since Rust's scoping rules make it a simple scan of assignments within the binding's scope.
+
+**Key insight**: Rust's `&T` is a shared (immutable) reference and `&mut T` is an exclusive (mutable) reference. The borrow checker rules are erased in the C++ output (they were enforced at the Rust level). Auto-deref (`*r` in Rust when using pointers) also needs adjustment: C++ references auto-deref, C++ pointers need explicit `*` or `->`.
 
 ### 1.6 Structs
 
@@ -177,75 +203,67 @@ auto b = std::move(a);  // explicit std::move needed
 
 ### 1.8 Smart Pointers
 
-Since rusty-cpp provides Rust-equivalent wrappers (in `include/rusty/`), the transpiler should prefer these over raw STL types. They preserve Rust semantics (ownership tracking, borrow checking) and are analyzable by the rusty-cpp checker.
+The transpiler maps directly to rusty-cpp wrappers (in `include/rusty/`), which mirror Rust's API surface and are analyzable by the rusty-cpp checker. This closes the loop: Rust → transpile → C++ → verify with rusty-cpp.
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `Box<T>` | `rusty::Box<T>` | `std::unique_ptr<T>` |
-| `Rc<T>` | `rusty::Rc<T>` | `std::shared_ptr<T>` |
-| `Arc<T>` | `rusty::Arc<T>` | `std::shared_ptr<T>` (already atomic) |
-| `Weak<T>` (from Rc/Arc) | `rusty::Weak<T>` | `std::weak_ptr<T>` |
-| `Cell<T>` | `rusty::Cell<T>` | `T` (mutable, non-thread-safe) |
-| `RefCell<T>` | `rusty::RefCell<T>` | Custom wrapper with runtime borrow checks |
-| `Mutex<T>` | `rusty::Mutex<T>` | `std::mutex` + `T` |
-| `RwLock<T>` | `rusty::RwLock<T>` | `std::shared_mutex` + `T` |
-| `UnsafeCell<T>` | `rusty::UnsafeCell<T>` | `T` (no safety wrapper) |
-| `MaybeUninit<T>` | `rusty::MaybeUninit<T>` | Uninitialized storage |
-
-**Why prefer rusty-cpp types**: The rusty-cpp wrappers mirror Rust's API surface (e.g. `rusty::Rc<T>` has `clone()`, `borrow()`, and move semantics matching Rust's `Rc<T>`). This means the transpiled code can be verified by the rusty-cpp analyzer, closing the loop: Rust → transpile → C++ → verify with rusty-cpp.
+| Rust | C++ |
+|------|-----|
+| `Box<T>` | `rusty::Box<T>` |
+| `Rc<T>` | `rusty::Rc<T>` |
+| `Arc<T>` | `rusty::Arc<T>` |
+| `Weak<T>` (from Rc/Arc) | `rusty::Weak<T>` |
+| `Cell<T>` | `rusty::Cell<T>` |
+| `RefCell<T>` | `rusty::RefCell<T>` |
+| `UnsafeCell<T>` | `rusty::UnsafeCell<T>` |
+| `MaybeUninit<T>` | `rusty::MaybeUninit<T>` |
 
 ### 1.9 Strings
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `String` | `rusty::String` | `std::string` |
-| `&str` | `rusty::str` / `std::string_view` | `std::string_view` |
-| `CString` | — | `std::string` (with null terminator guarantee) |
-| `&CStr` | — | `const char*` or `std::string_view` |
+| Rust | C++ |
+|------|-----|
+| `String` | `rusty::String` |
+| `&str` | `rusty::str` / `std::string_view` |
 
 ### 1.10 Collections
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `Vec<T>` | `rusty::Vec<T>` | `std::vector<T>` |
-| `HashMap<K,V>` | `rusty::HashMap<K,V>` | `std::unordered_map<K,V>` |
-| `BTreeMap<K,V>` | `rusty::BTreeMap<K,V>` | `std::map<K,V>` |
-| `HashSet<T>` | `rusty::HashSet<T>` | `std::unordered_set<T>` |
-| `BTreeSet<T>` | `rusty::BTreeSet<T>` | `std::set<T>` |
-| `VecDeque<T>` | `rusty::VecDeque<T>` | `std::deque<T>` |
-| `LinkedList<T>` | — | `std::list<T>` |
-| `BinaryHeap<T>` | — | `std::priority_queue<T>` |
+| Rust | C++ |
+|------|-----|
+| `Vec<T>` | `rusty::Vec<T>` |
+| `HashMap<K,V>` | `rusty::HashMap<K,V>` |
+| `BTreeMap<K,V>` | `rusty::BTreeMap<K,V>` |
+| `HashSet<T>` | `rusty::HashSet<T>` |
+| `BTreeSet<T>` | `rusty::BTreeSet<T>` |
+| `VecDeque<T>` | `rusty::VecDeque<T>` |
 
 ### 1.11 Error Handling
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `Option<T>` | `rusty::Option<T>` | `std::optional<T>` |
-| `Result<T, E>` | `rusty::Result<T, E>` | `std::expected<T, E>` (C++23) |
-| `panic!()` | `std::abort()` or `throw` | (configurable) |
-| `unwrap()` | `.unwrap()` | `.value()` (throws on None/Err) |
-| `?` operator | See §3.4 | |
+| Rust | C++ |
+|------|-----|
+| `Option<T>` | `rusty::Option<T>` |
+| `Result<T, E>` | `rusty::Result<T, E>` |
+| `panic!()` | `std::abort()` or `throw` (configurable) |
+| `unwrap()` | `.unwrap()` |
+| `?` operator | See §3.4 |
 
 ### 1.12 Concurrency Primitives
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `Mutex<T>` | `rusty::Mutex<T>` | `std::mutex` + `T` |
-| `RwLock<T>` | `rusty::RwLock<T>` | `std::shared_mutex` + `T` |
-| `Condvar` | `rusty::Condvar` | `std::condition_variable` |
-| `Barrier` | `rusty::Barrier` | `std::barrier` (C++20) |
-| `Once` | `rusty::Once` | `std::once_flag` + `std::call_once` |
-| `thread::spawn` | `rusty::thread::spawn` | `std::thread` |
+| Rust | C++ |
+|------|-----|
+| `Mutex<T>` | `rusty::Mutex<T>` |
+| `RwLock<T>` | `rusty::RwLock<T>` |
+| `Condvar` | `rusty::Condvar` |
+| `Barrier` | `rusty::Barrier` |
+| `Once` | `rusty::Once` |
+| `thread::spawn` | `rusty::thread::spawn` |
 
 ### 1.13 Function Pointers
 
-| Rust | C++ (rusty-cpp) | C++ (STL fallback) |
-|------|-----------------|-------------------|
-| `fn(A) -> B` | `rusty::SafeFn<B(A)>` | `B(*)(A)` |
-| `unsafe fn(A) -> B` | `rusty::UnsafeFn<B(A)>` | `B(*)(A)` |
-| `Fn(A) -> B` | `std::function<B(A)>` | `std::function<B(A)>` |
-| `FnMut(A) -> B` | `std::function<B(A)>` | `std::function<B(A)>` |
-| `FnOnce(A) -> B` | `std::move_only_function<B(A)>` | `std::move_only_function<B(A)>` (C++23) |
+| Rust | C++ |
+|------|-----|
+| `fn(A) -> B` | `rusty::SafeFn<B(A)>` |
+| `unsafe fn(A) -> B` | `rusty::UnsafeFn<B(A)>` |
+| `Fn(A) -> B` | `std::function<B(A)>` |
+| `FnMut(A) -> B` | `std::function<B(A)>` |
+| `FnOnce(A) -> B` | `std::move_only_function<B(A)>` (C++23) |
 
 ---
 
