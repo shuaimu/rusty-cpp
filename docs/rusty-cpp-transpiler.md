@@ -397,34 +397,6 @@ my_crate/                    →  my_crate.cppm (primary module interface)
 
 **Compiler support (as of 2026)**: GCC 14+, Clang 17+, and MSVC 19.34+ all support C++20 modules. CMake 3.28+ has `import std` support. Module support is production-ready for new projects.
 
-#### Fallback: Traditional Headers + Namespaces
-
-If C++20 modules are not available (legacy toolchains), fall back to namespaces + header/source pairs:
-
-```cpp
-// graphics.hpp (header)
-#pragma once
-namespace graphics {
-    void draw();
-    namespace internal { void helper(); }
-}
-
-// graphics.cpp (source)
-#include "graphics.hpp"
-namespace graphics {
-    void draw() { /* ... */ }
-    namespace internal { void helper() { /* ... */ }  }
-}
-```
-
-This requires the transpiler to:
-1. Split each Rust module into `.hpp` (declarations) + `.cpp` (definitions)
-2. Generate include guards
-3. Resolve include order to avoid circular dependencies
-4. Put template definitions in headers
-
-This is significantly more work than the C++20 module path.
-
 ### 2.6 Impl Blocks
 
 Rust splits methods across multiple `impl` blocks. In C++, all methods must be declared in the class body. The transpiler must **merge all `impl` blocks** for a type into a single class definition.
