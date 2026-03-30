@@ -482,54 +482,25 @@ struct Rectangle : Shape { double w; double h; };
 
 **Use `std::variant` (Option A)** as the default strategy. It preserves value semantics and is zero-overhead. For recursive enums (like linked lists or ASTs), use `std::variant` with `Box`→`std::unique_ptr` for the recursive case.
 
-### 3.2 Traits ⚠️⚠️ (Hardest Problem)
+### 3.2 Traits → Microsoft Proxy ⚠️⚠️
 
-Rust traits serve multiple roles that map to *different* C++ features:
+Rust traits map to [Proxy](https://github.com/ngcpp/proxy) facades. Proxy provides non-invasive, value-semantic type erasure — the closest C++ equivalent to Rust's trait system. Types just need the right methods; no inheritance required.
 
-| Rust trait usage | C++ mapping |
-|------------------|-------------|
-| Static dispatch (`T: Trait`) | C++20 Concepts + templates |
-| Dynamic dispatch (`dyn Trait`) | Virtual classes / Microsoft Proxy |
-| Default implementations | CRTP or default interface methods |
-| Trait objects (`Box<dyn Trait>`) | `std::unique_ptr<Interface>` or `pro::proxy<Facade>` |
-| Operator overloading (`Add`, `Deref`) | Operator overloading (member/free functions) |
-| Marker traits (`Send`, `Sync`, `Copy`) | Type traits / concepts (compile-time only) |
-| Trait bounds (`T: A + B`) | Concept conjunction (`A<T> && B<T>`) |
-| Associated types (`type Item`) | Template type aliases or nested `using` |
-| Supertraits (`trait B: A`) | Concept refinement or multiple inheritance |
+| Rust trait usage | C++ (Proxy) mapping |
+|------------------|---------------------|
+| `trait Foo { fn bar(&self); }` | `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` |
+| `dyn Trait` | `pro::proxy<Facade>` |
+| `Box<dyn Trait>` | `pro::proxy<Facade>` (owns the value) |
+| `&dyn Trait` | `pro::proxy_view<Facade>` (non-owning) |
+| `impl Trait for Type` | Just add the methods to the struct |
+| `T: Trait` (generic bound) | `pro::proxy<Facade>` or concept constraint |
+| `T: A + B` (multiple bounds) | Combine conventions in one facade |
+| Associated types (`type Item`) | Template type alias in facade |
+| Supertraits (`trait B: A`) | Facade inheriting conventions from another facade |
+| Operator traits (`Add`, `Index`) | C++ operator overloading (direct) |
+| Marker traits (`Send`, `Sync`) | `static_assert` or concept constraints |
 
-#### 3.2.1 Static Dispatch: Concepts (Recommended)
-
-```rust
-trait Drawable {
-    fn draw(&self);
-    fn area(&self) -> f64;
-}
-
-fn render<T: Drawable>(item: &T) {
-    item.draw();
-    println!("Area: {}", item.area());
-}
-```
-
-```cpp
-template<typename T>
-concept Drawable = requires(const T& t) {
-    { t.draw() } -> std::same_as<void>;
-    { t.area() } -> std::same_as<double>;
-};
-
-void render(const Drawable auto& item) {
-    item.draw();
-    std::println("Area: {}", item.area());
-}
-```
-
-**This works well** for generic/template code.
-
-#### 3.2.2 Dynamic Dispatch: Three Approaches
-
-**Approach 1: Virtual Interface Classes (Traditional)**
+#### 3.2.1 Trait Definition and Dynamic Dispatch
 
 ```rust
 trait Animal {
@@ -542,92 +513,80 @@ fn make_noise(animal: &dyn Animal) {
 ```
 
 ```cpp
-struct Animal {
-    virtual ~Animal() = default;
-    virtual std::string speak() const = 0;
-};
-
-void make_noise(const Animal& animal) {
-    std::println("{}", animal.speak());
-}
-```
-
-**Pros**: Idiomatic C++, well-understood.
-**Cons**: Requires inheritance, heap allocation for `Box<dyn Trait>`, invasive (implementor must inherit).
-
-**Approach 2: Microsoft Proxy Library (Non-Invasive, Recommended)**
-
-[microsoft/proxy](https://github.com/anthropics/proxy) provides Rust-like trait objects for C++ without inheritance:
-
-```cpp
 #include <proxy/proxy.h>
 
-// Define the "trait" as a facade
+// Trait definition → facade
 PRO_DEF_MEM_DISPATCH(MemSpeak, speak);
 
 struct AnimalFacade : pro::facade_builder
     ::add_convention<MemSpeak, std::string() const>
     ::build {};
 
-void make_noise(pro::proxy<AnimalFacade> animal) {
+// &dyn Animal → pro::proxy_view
+void make_noise(pro::proxy_view<AnimalFacade> animal) {
     std::println("{}", animal.invoke<MemSpeak>());
 }
 
-// Any type with a speak() method works — no inheritance required!
+// Any type with speak() satisfies the trait — no inheritance!
 struct Dog {
     std::string speak() const { return "Woof"; }
 };
 
 void example() {
-    auto dog = pro::make_proxy<AnimalFacade>(Dog{});
-    make_noise(std::move(dog));
+    Dog dog;
+    make_noise(pro::make_proxy_view<AnimalFacade>(dog));  // &dyn Animal
+
+    auto boxed = pro::make_proxy<AnimalFacade>(Dog{});    // Box<dyn Animal>
+    make_noise(boxed);
 }
 ```
 
-**Pros**: Non-invasive (no inheritance needed — like Rust traits), value semantics, small buffer optimization, C++20 standard compatible.
-**Cons**: Third-party library dependency, less familiar syntax.
+**Why Proxy is the right choice**:
+- **Non-invasive**: Types don't need to inherit anything — just have the right methods (exactly like Rust traits)
+- **Value semantics**: `pro::proxy` owns the value, like `Box<dyn Trait>`
+- **Small buffer optimization**: Avoids heap allocation for small types
+- **No vtable inheritance**: Dispatch tables are per-facade, not per-type
+- **C++20 compatible**: Works with standard compilers (GCC 14+, Clang 17+, MSVC 19.34+)
 
-**Approach 3: Type Erasure (Manual)**
-
-Hand-roll type erasure with a concept + internal vtable:
-
-```cpp
-class Animal {
-    struct Concept {
-        virtual ~Concept() = default;
-        virtual std::string speak() const = 0;
-    };
-    template<typename T>
-    struct Model : Concept {
-        T obj;
-        Model(T o) : obj(std::move(o)) {}
-        std::string speak() const override { return obj.speak(); }
-    };
-    std::unique_ptr<Concept> impl_;
-public:
-    template<typename T>
-    Animal(T obj) : impl_(std::make_unique<Model<T>>(std::move(obj))) {}
-    std::string speak() const { return impl_->speak(); }
-};
-```
-
-**Pros**: No dependencies, value-type semantics.
-**Cons**: Lots of boilerplate per trait, heap allocation.
-
-#### 3.2.3 Trait Implementations
+#### 3.2.2 Trait Implementation
 
 ```rust
-impl Drawable for Circle {
-    fn draw(&self) { /* ... */ }
-    fn area(&self) -> f64 { std::f64::consts::PI * self.radius * self.radius }
+impl Animal for Dog {
+    fn speak(&self) -> String { "Woof".to_string() }
+}
+impl Animal for Cat {
+    fn speak(&self) -> String { "Meow".to_string() }
 }
 ```
 
-For **static dispatch** (concepts): just add the methods directly to the struct.
+```cpp
+// Just define the methods — Proxy resolves them automatically
+struct Dog {
+    std::string speak() const { return "Woof"; }
+};
+struct Cat {
+    std::string speak() const { return "Meow"; }
+};
+// Both Dog and Cat automatically satisfy AnimalFacade
+```
 
-For **dynamic dispatch** (virtual): inherit from the interface and implement.
+#### 3.2.3 Multiple Trait Bounds
 
-For **Proxy**: just have the right methods — no ceremony needed.
+```rust
+fn process(item: &(dyn Display + Debug)) { ... }
+```
+
+```cpp
+PRO_DEF_MEM_DISPATCH(MemDisplay, display);
+PRO_DEF_MEM_DISPATCH(MemDebug, debug);
+
+struct DisplayDebugFacade : pro::facade_builder
+    ::add_convention<MemDisplay, std::string() const>
+    ::add_convention<MemDebug, std::string() const>
+    ::build {};
+
+void process(pro::proxy_view<DisplayDebugFacade> item) { ... }
+```
 
 #### 3.2.4 Default Trait Methods
 
@@ -640,41 +599,37 @@ trait Greet {
 }
 ```
 
-**Option A**: CRTP (Curiously Recurring Template Pattern)
-
 ```cpp
-template<typename Derived>
-struct Greet {
-    std::string greet() const {
-        return std::format("Hello, {}!", static_cast<const Derived*>(this)->name());
-    }
-};
+PRO_DEF_MEM_DISPATCH(MemName, name);
 
-struct Person : Greet<Person> {
-    std::string name() const { return "Alice"; }
-};
-```
+struct GreetFacade : pro::facade_builder
+    ::add_convention<MemName, std::string() const>
+    ::build {};
 
-**Option B**: Free function with concept constraint
-
-```cpp
-template<typename T>
-concept HasName = requires(const T& t) { { t.name() } -> std::convertible_to<std::string>; };
-
-template<HasName T>
-std::string greet(const T& t) {
-    return std::format("Hello, {}!", t.name());
+// Default method as free function
+std::string greet(pro::proxy_view<GreetFacade> self) {
+    return std::format("Hello, {}!", self.invoke<MemName>());
 }
 ```
 
-#### 3.2.5 Recommendation for Traits
+#### 3.2.5 Operator Traits
 
-Use a **hybrid approach**:
-- **Static dispatch (`impl Trait` / `T: Trait`)** → C++20 concepts + direct method impl
-- **Dynamic dispatch (`dyn Trait`)** → Microsoft Proxy library (closest to Rust semantics)
-- **Operator traits (`Add`, `Index`, etc.)** → C++ operator overloading
-- **Marker traits** → `concept` or `static_assert` constraints
-- **Default methods** → CRTP or free functions with concept constraints
+Rust's operator traits (`Add`, `Sub`, `Index`, `Deref`, etc.) map directly to C++ operator overloading — no Proxy needed:
+
+```rust
+impl Add for Point {
+    type Output = Point;
+    fn add(self, other: Point) -> Point {
+        Point { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+```
+
+```cpp
+Point operator+(Point lhs, const Point& rhs) {
+    return Point{ lhs.x + rhs.x, lhs.y + rhs.y };
+}
+```
 
 ### 3.3 Pattern Matching ⚠️
 
@@ -971,7 +926,7 @@ auto sum = vec
 fn process(item: &(dyn Display + Debug)) { ... }
 ```
 
-C++ cannot combine multiple virtual interfaces in a single type-erased pointer without multiple inheritance or Proxy facades combining conventions. With Proxy:
+Proxy handles this naturally by combining conventions in a single facade (see §3.2.3):
 
 ```cpp
 struct DisplayDebugFacade : pro::facade_builder
@@ -1014,8 +969,7 @@ std::generator<int> make_iter() {
 | Structs | Structs/classes | Easy | Merge impl blocks |
 | Enums (C-like) | `enum class` | Easy | Direct |
 | Enums (with data) | `std::variant` | Medium | See §3.1 |
-| Traits (static) | Concepts | Medium | See §3.2 |
-| Traits (dynamic) | Virtual/Proxy | Hard | See §3.2 |
+| Traits | Microsoft Proxy facades | Medium | See §3.2 |
 | Pattern matching | `std::visit` / switch | Medium | See §3.3 |
 | `?` operator | Macro / monadic | Medium | See §3.4 |
 | Closures | Lambdas | Easy | Capture mode mapping |
@@ -1084,23 +1038,9 @@ std::generator<int> make_iter() {
 1. **Macro Expander**: Use `cargo expand` to flatten all macros before processing
 2. **AST Parser**: Use `syn` crate to parse Rust into a typed AST
 3. **Type Resolution**: Resolve all types, infer where needed, map Rust types → C++ types
-4. **Trait Mapper**: Convert trait definitions to concepts/Proxy facades/virtual interfaces based on usage analysis
+4. **Trait Mapper**: Convert trait definitions to Proxy facades (`PRO_DEF_MEM_DISPATCH` + `pro::facade_builder`)
 5. **Lifetime Eraser**: Strip all lifetime annotations (they have no runtime effect)
 6. **Code Generator**: Emit idiomatic C++20 code
-
-### Trait Dispatch Decision Algorithm:
-
-```
-For each trait usage:
-  if only used in generic bounds (T: Trait) → emit Concept
-  if used as dyn Trait →
-    if invasive inheritance acceptable → emit virtual interface
-    else → emit Proxy facade
-  if used as impl Trait return → emit auto return type
-  if has default methods →
-    if static dispatch → emit CRTP or free functions
-    if dynamic dispatch → emit virtual with default impl
-```
 
 ---
 
@@ -1130,7 +1070,7 @@ No production-quality **Rust→C++** transpiler exists today. The closest concep
 
 ### Phase 2: Traits and Generics
 - Trait definitions → C++20 concepts
-- `dyn Trait` → Microsoft Proxy facades
+- All trait usages → Microsoft Proxy facades
 - Generic functions → constrained templates
 - Derive macros → generated operator overloads
 
@@ -1138,7 +1078,7 @@ No production-quality **Rust→C++** transpiler exists today. The closest concep
 - Async/await → C++20 coroutines
 - Complex pattern matching → `std::visit` with guards
 - Macro expansion via `cargo expand`
-- Module system → namespace + header organization
+- Module system → C++20 modules
 
 ### Phase 4: Ecosystem Integration
 - Standard library mapping (full `std::` equivalents)
@@ -1153,7 +1093,7 @@ No production-quality **Rust→C++** transpiler exists today. The closest concep
 Rust-to-C++ transpilation is **feasible** for the vast majority of Rust code. The language constructs map well because both languages share the same computational model (value semantics, deterministic destruction, zero-cost abstractions, monomorphized generics).
 
 The **three hardest problems** are:
-1. **Traits → C++**: Requires a hybrid approach (concepts + Proxy + virtual) based on usage analysis
+1. **Traits → C++**: Mapped uniformly to Microsoft Proxy facades (non-invasive, value-semantic)
 2. **Enums with data → `std::variant`**: Works but pattern matching is verbose
 3. **The `?` operator**: Requires a macro or monadic chaining
 
@@ -1161,6 +1101,7 @@ The **easiest wins** are:
 - All primitive types, functions, structs, and control flow map directly
 - Lifetimes simply disappear (they have no runtime semantics)
 - Move semantics map to `std::move` (with the borrow checker guaranteeing safety on the Rust side)
-- Smart pointers are near-identical (`Box`→`unique_ptr`, `Rc`→`shared_ptr`)
+- Smart pointers and collections map directly to rusty-cpp counterparts (`Box`→`rusty::Box`, `Vec`→`rusty::Vec`, etc.)
+- Modules map to C++20 modules (`pub` → `export`, `mod` → `import`)
 
 This approach effectively lets Rust serve as a **safe DSL for C++** — write in Rust with full safety guarantees, transpile to C++ for deployment in C++ codebases. The generated C++ can then be analyzed by rusty-cpp to verify that the safety properties are maintained.
