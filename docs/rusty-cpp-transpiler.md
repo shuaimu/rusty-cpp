@@ -81,14 +81,49 @@ int32_t read(const int32_t& x) { return x; }  // no deref needed
 void write(int32_t& x) { x = 42; }
 ```
 
-| Rust | C++ |
+#### The Rebinding Problem
+
+C++ references **cannot be rebound** — this is a critical semantic mismatch. Rust references behave more like non-null pointers:
+
+```rust
+let x = 5;
+let y = 10;
+let mut r = &x;  // r refers to x
+r = &y;           // r now refers to y — REBINDING
+```
+
+```cpp
+// WRONG — C++ reference version:
+int& r = x;
+r = y;   // assigns y's value into x, does NOT rebind r!
+
+// CORRECT — use pointer:
+const int* r = &x;
+r = &y;  // rebinds r to point at y
+```
+
+The mapping therefore depends on whether the reference binding is mutable (`let mut r: &T`):
+
+| Rust | C++ (binding is `let`) | C++ (binding is `let mut`) |
+|------|------------------------|---------------------------|
+| `&T` | `const T&` | `const T*` (rebindable) |
+| `&mut T` | `T&` | `T*` (rebindable) |
+
+For function parameters, `&T` → `const T&` and `&mut T` → `T&` remain correct (parameters aren't rebound in typical code). For local variables with `let mut`, the transpiler must use pointers (or `std::reference_wrapper<T>`).
+
+**Alternative**: Use `gsl::not_null<const T*>` to preserve the non-null guarantee that Rust references carry, at the cost of a library dependency.
+
+| Rust | C++ (general, safe) |
 |------|-----|
-| `&T` | `const T&` |
-| `&mut T` | `T&` |
+| `&T` (parameter) | `const T&` |
+| `&mut T` (parameter) | `T&` |
+| `let r: &T = ...` | `const T& r = ...` |
+| `let mut r: &T = ...` | `gsl::not_null<const T*> r = &...` or `const T* r = &...` |
+| `let mut r: &mut T = ...` | `gsl::not_null<T*> r = &...` or `T* r = &...` |
 | `*const T` | `const T*` |
 | `*mut T` | `T*` |
 
-**Key insight**: Rust's `&T` is a shared (immutable) reference → `const T&`. Rust's `&mut T` is an exclusive (mutable) reference → `T&`. The borrow checker rules are erased in the C++ output (they were enforced at the Rust level). Auto-deref also needs to be made explicit.
+**Key insight**: Rust's `&T` is a shared (immutable) reference and `&mut T` is an exclusive (mutable) reference. For non-rebound bindings, C++ references work. For rebound bindings (`let mut`), pointers are required. The borrow checker rules are erased in the C++ output (they were enforced at the Rust level). Auto-deref also needs to be made explicit.
 
 ### 1.6 Structs
 
