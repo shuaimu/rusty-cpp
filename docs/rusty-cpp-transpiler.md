@@ -425,7 +425,7 @@ struct Foo {
 
 ### 3.1 Enums with Data (Algebraic Data Types) ⚠️
 
-This is one of the hardest mappings. Rust enums are tagged unions with pattern matching.
+Rust enums are tagged unions with pattern matching. They map to `std::variant` + `std::visit`.
 
 ```rust
 enum Shape {
@@ -435,8 +435,6 @@ enum Shape {
 }
 ```
 
-#### Option A: `std::variant` (C++17)
-
 ```cpp
 struct Circle { double radius; };
 struct Rectangle { double w; double h; };
@@ -445,42 +443,7 @@ struct None_ {};
 using Shape = std::variant<Circle, Rectangle, None_>;
 ```
 
-**Pros**: Standard C++, type-safe, zero overhead.
-**Cons**: Verbose pattern matching via `std::visit`, variant types must be listed, no easy recursive types.
-
-#### Option B: Tagged Union (Manual)
-
-```cpp
-struct Shape {
-    enum Tag { Circle, Rectangle, None } tag;
-    union {
-        double circle_radius;
-        struct { double w; double h; } rectangle;
-    };
-};
-```
-
-**Pros**: Efficient, direct translation of the Rust memory layout.
-**Cons**: Not type-safe, manual tag management.
-
-#### Option C: Class Hierarchy with `std::variant`-like Dispatch
-
-Use a sealed class hierarchy (C++ has no `sealed` but the set of subclasses is fixed by the transpiler):
-
-```cpp
-struct Shape {
-    virtual ~Shape() = default;
-};
-struct Circle : Shape { double radius; };
-struct Rectangle : Shape { double w; double h; };
-```
-
-**Pros**: Natural C++ style, works with `dynamic_cast`.
-**Cons**: Heap allocation for polymorphism, vtable overhead, not a value type.
-
-#### Recommendation
-
-**Use `std::variant` (Option A)** as the default strategy. It preserves value semantics and is zero-overhead. For recursive enums (like linked lists or ASTs), use `std::variant` with `Box`→`std::unique_ptr` for the recursive case.
+Each variant becomes its own struct, and the enum becomes a `using` alias for `std::variant<...>`. This is type-safe, zero-overhead, and preserves value semantics. For recursive enums (like linked lists or ASTs), use `rusty::Box<T>` for the recursive case.
 
 ### 3.2 Traits → Microsoft Proxy ⚠️⚠️
 
@@ -641,7 +604,7 @@ match shape {
 }
 ```
 
-#### Using `std::visit` (matches §3.1 Option A):
+#### Using `std::visit`:
 
 ```cpp
 std::visit(overloaded{
