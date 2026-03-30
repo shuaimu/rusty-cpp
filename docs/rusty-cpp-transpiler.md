@@ -321,23 +321,109 @@ template<typename T>
 using Result = std::expected<T, MyError>;
 ```
 
-### 2.5 Modules → Namespaces
+### 2.5 Modules → C++20 Modules (Recommended) or Namespaces
+
+#### The Header/Source Problem
+
+Traditional C++ requires splitting code into headers (`.h` — declarations) and source files (`.cpp` — definitions). This creates complexity that doesn't exist in Rust:
+
+- Every public type/function needs a declaration in a header and a definition in a source file
+- Include guards (`#pragma once` / `#ifndef`) needed to prevent double inclusion
+- Circular dependencies between headers require forward declarations
+- Templates must be defined in headers (not source files)
+- ODR (One Definition Rule) violations are easy to introduce
+- Build times suffer from repeated header parsing
+
+Transpiling Rust's single-file modules into header/source pairs would be a significant source of complexity.
+
+#### Solution: C++20 Modules
+
+C++20 modules bypass the header/source split entirely and map almost 1:1 to Rust's module system:
 
 ```rust
-mod graphics {
-    pub fn draw() { }
-    mod internal { fn helper() { } }
-}
+// src/graphics/mod.rs
+pub mod shapes;           // public submodule
+mod internal;             // private submodule
+
+pub fn draw() { }
+pub(crate) fn helper() { }
+fn private_fn() { }
 ```
 
 ```cpp
-namespace graphics {
-    void draw() { }
-    namespace internal { void helper() { } }
-}
-// Visibility: Rust's pub/pub(crate)/private has no direct C++ equivalent.
-// The transpiler can use comments or [[deprecated]] to mark non-public items.
+// graphics.cppm (C++20 module interface unit)
+export module graphics;
+export import graphics.shapes;   // public submodule re-export
+import graphics.internal;        // private submodule (not exported)
+
+export void draw() { }           // pub → export
+void helper() { }                // pub(crate) → module-visible, not exported
+static void private_fn() { }     // private → static or in anonymous namespace
 ```
+
+**Mapping table**:
+
+| Rust | C++20 Modules |
+|------|---------------|
+| `mod foo;` | `import foo;` |
+| `pub mod foo;` | `export import foo;` |
+| `use crate::foo::Bar;` | `import foo;` (then use `foo::Bar`) |
+| `pub fn` | `export void fn()` |
+| `fn` (private) | `void fn()` (not exported) |
+| `pub(crate) fn` | `void fn()` (module-visible, not exported) |
+| `pub(super)` | No direct equivalent (not exported, parent imports) |
+| `pub struct` | `export struct` |
+| `pub use foo::Bar;` | `export using foo::Bar;` or `export import foo;` |
+
+**Why C++20 modules are ideal for transpilation**:
+
+1. **No header/source split** — one `.cppm` file per Rust module, definitions and declarations together
+2. **`export` = `pub`** — direct visibility mapping
+3. **No include guards** — modules are imported, not textually included
+4. **No circular dependency issues** — module imports are not textual
+5. **No ODR problems** — each entity has exactly one owning module
+6. **Templates work** — template definitions live in the module interface, no header needed
+7. **Faster builds** — modules are compiled once, not re-parsed per translation unit
+
+**Crate → module mapping**:
+
+```
+my_crate/                    →  my_crate.cppm (primary module interface)
+├── src/lib.rs               →  export module my_crate;
+├── src/foo.rs               →  my_crate.foo.cppm
+├── src/bar/mod.rs           →  my_crate.bar.cppm
+└── src/bar/baz.rs           →  my_crate.bar.baz.cppm
+```
+
+**Compiler support (as of 2026)**: GCC 14+, Clang 17+, and MSVC 19.34+ all support C++20 modules. CMake 3.28+ has `import std` support. Module support is production-ready for new projects.
+
+#### Fallback: Traditional Headers + Namespaces
+
+If C++20 modules are not available (legacy toolchains), fall back to namespaces + header/source pairs:
+
+```cpp
+// graphics.hpp (header)
+#pragma once
+namespace graphics {
+    void draw();
+    namespace internal { void helper(); }
+}
+
+// graphics.cpp (source)
+#include "graphics.hpp"
+namespace graphics {
+    void draw() { /* ... */ }
+    namespace internal { void helper() { /* ... */ }  }
+}
+```
+
+This requires the transpiler to:
+1. Split each Rust module into `.hpp` (declarations) + `.cpp` (definitions)
+2. Generate include guards
+3. Resolve include order to avoid circular dependencies
+4. Put template definitions in headers
+
+This is significantly more work than the C++20 module path.
 
 ### 2.6 Impl Blocks
 
@@ -976,7 +1062,7 @@ std::generator<int> make_iter() {
 | `fn()` / `unsafe fn()` | `rusty::SafeFn` / `rusty::UnsafeFn` | Easy | Safety-typed wrappers |
 | `async`/`await` | Coroutines | Hard | No standard executor |
 | Macros | Expand before transpile | Medium | Use `cargo expand` |
-| Modules | Namespaces + headers | Medium | Visibility gaps |
+| Modules | C++20 modules (`.cppm`) | Easy | `pub` → `export`, see §2.5 |
 | Derive macros | Code generation | Medium | Per-derive mapping |
 | Unsafe blocks | Raw code | Easy | Just emit the code |
 | FFI (`extern "C"`) | `extern "C"` | Easy | Direct mapping |
