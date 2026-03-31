@@ -913,19 +913,25 @@ fn make_iter() -> impl Iterator<Item = i32> {
 }
 ```
 
-```cpp
-// Option A: auto return (C++14) - works but not usable in headers/virtual
-auto make_iter() {
-    return std::views::iota(0, 10) | std::views::filter([](int x) { return x % 2 == 0; });
-}
+Both `impl Trait` and `dyn Trait` returns map uniformly to `pro::proxy<Facade>`. This trades static dispatch for a simpler, uniform transpilation rule — one mapping for all trait-typed returns.
 
-// Option B: std::generator (C++23)
-std::generator<int> make_iter() {
-    for (int i = 0; i < 10; ++i) {
-        if (i % 2 == 0) co_yield i;
-    }
+```cpp
+PRO_DEF_MEM_DISPATCH(MemNext, next);
+
+struct IteratorFacade : pro::facade_builder
+    ::add_convention<MemNext, rusty::Option<int32_t>()>
+    ::build {};
+
+pro::proxy<IteratorFacade> make_iter() {
+    return pro::make_proxy<IteratorFacade>(/* ... */);
 }
 ```
+
+| Rust | C++ |
+|------|-----|
+| `-> impl Trait` | `-> pro::proxy<Facade>` |
+| `-> Box<dyn Trait>` | `-> pro::proxy<Facade>` |
+| `-> &dyn Trait` | `-> pro::proxy_view<Facade>` |
 
 ---
 
