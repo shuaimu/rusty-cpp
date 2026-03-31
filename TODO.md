@@ -75,16 +75,17 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Type aliases → `using` declarations (done in Phase 0)
       - [x] *done* Unsafe blocks → emit raw code with `// unsafe` comment
       - [x] *done* FFI `extern "C"` → `extern "C"` (functions and blocks)
-    - [ ] Phase 2: rusty-cpp type mapping - standard library types
-      - [ ] Smart pointers: Box→rusty::Box, Rc→rusty::Rc, Arc→rusty::Arc, Weak→rusty::Weak
-      - [ ] Interior mutability: Cell→rusty::Cell, RefCell→rusty::RefCell, UnsafeCell→rusty::UnsafeCell
-      - [ ] Collections: Vec→rusty::Vec, HashMap→rusty::HashMap, HashSet→rusty::HashSet, BTreeMap→rusty::BTreeMap, BTreeSet→rusty::BTreeSet, VecDeque→rusty::VecDeque
-      - [ ] Strings: String→rusty::String, &str→std::string_view
-      - [ ] Error handling: Option→rusty::Option, Result→rusty::Result
-      - [ ] Concurrency: Mutex→rusty::Mutex, RwLock→rusty::RwLock, Condvar→rusty::Condvar, Barrier→rusty::Barrier, Once→rusty::Once
+    - [x] *done* Phase 2: rusty-cpp type mapping - standard library types
+      - [x] *done* Smart pointers: Box→rusty::Box, Rc→rusty::Rc, Arc→rusty::Arc, Weak→rusty::Weak
+      - [x] *done* Interior mutability: Cell→rusty::Cell, RefCell→rusty::RefCell, UnsafeCell→rusty::UnsafeCell
+      - [x] *done* Collections: Vec→rusty::Vec, HashMap→rusty::HashMap, HashSet→rusty::HashSet, BTreeMap→rusty::BTreeMap, BTreeSet→rusty::BTreeSet, VecDeque→rusty::VecDeque
+      - [x] *done* Strings: String→rusty::String, &str→std::string_view
+      - [x] *done* Error handling: Option→rusty::Option, Result→rusty::Result
+      - [x] *done* Concurrency: Mutex→rusty::Mutex, RwLock→rusty::RwLock, Condvar→rusty::Condvar, Barrier→rusty::Barrier, Once→rusty::Once
       - [ ] Function pointers: fn()→rusty::SafeFn, unsafe fn()→rusty::UnsafeFn
-      - [ ] Thread spawn: thread::spawn→rusty::thread::spawn
-      - [ ] MaybeUninit→rusty::MaybeUninit
+      - [x] *done* Thread spawn: thread::spawn→rusty::thread::spawn (via function path mapping)
+      - [x] *done* MaybeUninit→rusty::MaybeUninit
+      - [x] *done* Function path mapping: Box::new→rusty::Box::make, String::from, Vec::new, etc.
     - [ ] Phase 3: Enums with data and pattern matching - algebraic data types via std::variant
       - [ ] Enum with data → per-variant structs + `using Enum = std::variant<...>`
       - [ ] Recursive enums → use rusty::Box for the recursive variant field

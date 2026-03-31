@@ -861,6 +861,11 @@ impl CodeGen {
             return "(*this)".to_string();
         }
 
+        // Try mapping as a function/method path (e.g., Box::new → rusty::Box::make)
+        if let Some(cpp_fn) = types::map_function_path(&joined) {
+            return cpp_fn.to_string();
+        }
+
         // Try mapping as a standard type
         if let Some((cpp_type, _)) = types::map_std_type(&joined) {
             return cpp_type.to_string();
@@ -934,6 +939,12 @@ impl CodeGen {
                 path_str
             }
             syn::Type::Reference(r) => {
+                // Special case: &str → std::string_view (not const std::string_view&)
+                if let syn::Type::Path(tp) = r.elem.as_ref() {
+                    if tp.path.segments.len() == 1 && tp.path.segments[0].ident == "str" {
+                        return "std::string_view".to_string();
+                    }
+                }
                 let inner = self.map_type(&r.elem);
                 if r.mutability.is_some() {
                     format!("{}&", inner)
@@ -1862,5 +1873,103 @@ mod tests {
         assert!(!out.contains("std::move(a + b)"));
         // But the individual variables a and b don't get moved in a binary expr
         // because binary ops borrow their operands
+    }
+
+    // ── Phase 2: Standard library type mapping tests ────────────
+
+    #[test]
+    fn test_str_param() {
+        let out = transpile_str("fn f(s: &str) {}");
+        assert!(out.contains("std::string_view s"));
+    }
+
+    #[test]
+    fn test_box_new_mapping() {
+        let out = transpile_str("fn f() { let b = Box::new(42); }");
+        assert!(out.contains("rusty::Box::make(42)"));
+    }
+
+    #[test]
+    fn test_string_from_mapping() {
+        let out = transpile_str(r#"fn f() { let s = String::from("hello"); }"#);
+        assert!(out.contains("rusty::String::from("));
+    }
+
+    #[test]
+    fn test_vec_new_mapping() {
+        let out = transpile_str("fn f() { let v = Vec::new(); }");
+        assert!(out.contains("rusty::Vec::new_()"));
+    }
+
+    #[test]
+    fn test_condvar_type() {
+        let out = transpile_str("fn f(cv: Condvar) {}");
+        assert!(out.contains("rusty::Condvar cv"));
+    }
+
+    #[test]
+    fn test_barrier_type() {
+        let out = transpile_str("fn f(b: Barrier) {}");
+        assert!(out.contains("rusty::Barrier b"));
+    }
+
+    #[test]
+    fn test_once_type() {
+        let out = transpile_str("fn f(o: Once) {}");
+        assert!(out.contains("rusty::Once o"));
+    }
+
+    #[test]
+    fn test_nested_generic_types() {
+        let out = transpile_str("fn f(v: Vec<Option<String>>) {}");
+        assert!(out.contains("rusty::Vec<rusty::Option<rusty::String>>"));
+    }
+
+    #[test]
+    fn test_arc_mutex_nested() {
+        let out = transpile_str("fn f(m: Arc<Mutex<i32>>) {}");
+        assert!(out.contains("rusty::Arc<rusty::Mutex<int32_t>>"));
+    }
+
+    #[test]
+    fn test_rc_type() {
+        let out = transpile_str("fn f(r: Rc<i32>) {}");
+        assert!(out.contains("rusty::Rc<int32_t>"));
+    }
+
+    #[test]
+    fn test_weak_type() {
+        let out = transpile_str("fn f(w: Weak<i32>) {}");
+        assert!(out.contains("rusty::Weak<int32_t>"));
+    }
+
+    #[test]
+    fn test_cell_type() {
+        let out = transpile_str("fn f(c: Cell<i32>) {}");
+        assert!(out.contains("rusty::Cell<int32_t>"));
+    }
+
+    #[test]
+    fn test_refcell_type() {
+        let out = transpile_str("fn f(r: RefCell<String>) {}");
+        assert!(out.contains("rusty::RefCell<rusty::String>"));
+    }
+
+    #[test]
+    fn test_vecdeque_type() {
+        let out = transpile_str("fn f(d: VecDeque<i32>) {}");
+        assert!(out.contains("rusty::VecDeque<int32_t>"));
+    }
+
+    #[test]
+    fn test_btreemap_type() {
+        let out = transpile_str("fn f(m: BTreeMap<i32, String>) {}");
+        assert!(out.contains("rusty::BTreeMap<int32_t, rusty::String>"));
+    }
+
+    #[test]
+    fn test_maybe_uninit_type() {
+        let out = transpile_str("fn f(m: MaybeUninit<i32>) {}");
+        assert!(out.contains("rusty::MaybeUninit<int32_t>"));
     }
 }

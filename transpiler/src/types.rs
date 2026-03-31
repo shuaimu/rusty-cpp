@@ -54,10 +54,34 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Concurrency
         "Mutex" | "std::sync::Mutex" => Some(("rusty::Mutex", true)),
         "RwLock" | "std::sync::RwLock" => Some(("rusty::RwLock", true)),
+        "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
+        "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
+        "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
 
         // MaybeUninit
         "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
 
+        // str (bare type, not &str — &str handled at Type::Reference level)
+        "str" => Some(("std::string_view", false)),
+
+        _ => None,
+    }
+}
+
+/// Map Rust method/function paths that need renaming in C++.
+/// Returns the C++ replacement if the path should be rewritten.
+pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
+    match rust_path {
+        // Box::new → rusty::Box<T>::make (new is a C++ keyword)
+        "Box::new" => Some("rusty::Box::make"),
+        // String::from → rusty::String constructor
+        "String::from" => Some("rusty::String::from"),
+        "String::new" => Some("rusty::String::new_"),
+        // Vec::new
+        "Vec::new" => Some("rusty::Vec::new_"),
+        "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
+        // thread::spawn
+        "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
         _ => None,
     }
 }
@@ -104,5 +128,54 @@ mod tests {
             map_std_type("std::collections::HashMap"),
             Some(("rusty::HashMap", true))
         );
+    }
+
+    #[test]
+    fn test_smart_pointers() {
+        assert_eq!(map_std_type("Box"), Some(("rusty::Box", true)));
+        assert_eq!(map_std_type("Rc"), Some(("rusty::Rc", true)));
+        assert_eq!(map_std_type("Arc"), Some(("rusty::Arc", true)));
+        assert_eq!(map_std_type("Weak"), Some(("rusty::Weak", true)));
+    }
+
+    #[test]
+    fn test_interior_mutability() {
+        assert_eq!(map_std_type("Cell"), Some(("rusty::Cell", true)));
+        assert_eq!(map_std_type("RefCell"), Some(("rusty::RefCell", true)));
+        assert_eq!(map_std_type("UnsafeCell"), Some(("rusty::UnsafeCell", true)));
+    }
+
+    #[test]
+    fn test_collections() {
+        assert_eq!(map_std_type("Vec"), Some(("rusty::Vec", true)));
+        assert_eq!(map_std_type("HashMap"), Some(("rusty::HashMap", true)));
+        assert_eq!(map_std_type("HashSet"), Some(("rusty::HashSet", true)));
+        assert_eq!(map_std_type("BTreeMap"), Some(("rusty::BTreeMap", true)));
+        assert_eq!(map_std_type("BTreeSet"), Some(("rusty::BTreeSet", true)));
+        assert_eq!(map_std_type("VecDeque"), Some(("rusty::VecDeque", true)));
+    }
+
+    #[test]
+    fn test_concurrency() {
+        assert_eq!(map_std_type("Mutex"), Some(("rusty::Mutex", true)));
+        assert_eq!(map_std_type("RwLock"), Some(("rusty::RwLock", true)));
+        assert_eq!(map_std_type("Condvar"), Some(("rusty::Condvar", false)));
+        assert_eq!(map_std_type("Barrier"), Some(("rusty::Barrier", false)));
+        assert_eq!(map_std_type("Once"), Some(("rusty::Once", false)));
+    }
+
+    #[test]
+    fn test_str_type() {
+        assert_eq!(map_std_type("str"), Some(("std::string_view", false)));
+    }
+
+    #[test]
+    fn test_function_path_mapping() {
+        assert_eq!(map_function_path("Box::new"), Some("rusty::Box::make"));
+        assert_eq!(map_function_path("String::from"), Some("rusty::String::from"));
+        assert_eq!(map_function_path("String::new"), Some("rusty::String::new_"));
+        assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
+        assert_eq!(map_function_path("thread::spawn"), Some("rusty::thread::spawn"));
+        assert_eq!(map_function_path("Unknown::method"), None);
     }
 }
