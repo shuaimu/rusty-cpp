@@ -1,5 +1,15 @@
 # Rust-to-C++ Transpilation: Feasibility Analysis
 
+## Core Principle: Forward Correctness Guarantee
+
+**If valid Rust compiles, the transpiled C++ must compile and produce the same result.** This is the fundamental guarantee of the transpiler. If a Rust program passes `rustc` (type checking, borrow checking, lifetime checking), then the generated C++ code is guaranteed to compile and behave identically at runtime.
+
+**The reverse is explicitly not guaranteed.** If transpiled C++ happens to compile and run, that does not imply the original Rust source was valid. C++ is more permissive than Rust — it accepts programs that Rust would reject (use-after-move, data races, dangling references, etc.). The transpiler is a one-way correctness bridge: Rust's safety guarantees flow forward into the C++ output, but C++'s permissiveness does not flow backward to validate Rust source.
+
+In other words: Rust is the source of truth for correctness. The transpiler preserves semantics, not the other way around.
+
+---
+
 ## Executive Summary
 
 C++ is *almost* a superset of Rust in terms of expressible semantics — both are systems languages with value semantics, deterministic destruction, zero-cost abstractions, and compile-time generics. This makes Rust-to-C++ transpilation broadly feasible, with most language constructs having direct or near-direct mappings. The hard parts are the **trait system** (Rust's core abstraction), **enums with data** (algebraic data types), **pattern matching**, and **lifetime annotations** (which have no C++ equivalent but can be erased in the output). This document maps every major Rust construct to its C++ equivalent, flags the non-obvious cases, and proposes solutions.
