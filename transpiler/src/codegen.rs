@@ -113,6 +113,9 @@ impl CodeGen {
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
 
+        // Emit template prefix if generic
+        self.emit_template_prefix(&f.sig.generics);
+
         // Check for extern "C" ABI
         let abi_prefix = if let Some(abi) = &f.sig.abi {
             if let Some(name) = &abi.name {
@@ -159,6 +162,7 @@ impl CodeGen {
     fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name = &s.ident;
         let name_str = name.to_string();
+        self.emit_template_prefix(&s.generics);
         self.writeln(&format!("struct {} {{", name));
         self.indent += 1;
 
@@ -429,6 +433,9 @@ impl CodeGen {
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let name = escape_cpp_keyword(&method.sig.ident.to_string());
         let return_type = self.map_return_type(&method.sig.output);
+
+        // Emit template prefix for generic methods
+        self.emit_template_prefix(&method.sig.generics);
 
         // Analyze receiver to determine method kind
         let (qualifier, is_static) = match method.sig.inputs.first() {
@@ -1553,6 +1560,77 @@ impl CodeGen {
         }
     }
 
+    /// Emit a `template<typename T, typename U, ...>` prefix if the generics
+    /// have type parameters. Lifetime parameters are erased (skipped).
+    /// Trait bounds are emitted as `requires` clauses.
+    fn emit_template_prefix(&mut self, generics: &syn::Generics) {
+        let type_params: Vec<&syn::TypeParam> = generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let syn::GenericParam::Type(tp) = p {
+                    Some(tp)
+                } else {
+                    None // Skip lifetime and const params
+                }
+            })
+            .collect();
+
+        if type_params.is_empty() {
+            return;
+        }
+
+        let params_str: Vec<String> = type_params
+            .iter()
+            .map(|tp| format!("typename {}", tp.ident))
+            .collect();
+
+        self.writeln(&format!("template<{}>", params_str.join(", ")));
+
+        // Emit requires clause for trait bounds
+        let mut constraints: Vec<String> = Vec::new();
+
+        for tp in &type_params {
+            for bound in &tp.bounds {
+                if let syn::TypeParamBound::Trait(tb) = bound {
+                    let trait_name = tb
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    constraints.push(format!("{}Facade::is_satisfied_by<{}>()", trait_name, tp.ident));
+                }
+            }
+        }
+
+        // Also check where clause
+        if let Some(where_clause) = &generics.where_clause {
+            for pred in &where_clause.predicates {
+                if let syn::WherePredicate::Type(pt) = pred {
+                    let ty_name = self.map_type(&pt.bounded_ty);
+                    for bound in &pt.bounds {
+                        if let syn::TypeParamBound::Trait(tb) = bound {
+                            let trait_name = tb
+                                .path
+                                .segments
+                                .iter()
+                                .map(|s| s.ident.to_string())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            constraints.push(format!("{}Facade::is_satisfied_by<{}>()", trait_name, ty_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
+        }
+    }
+
     fn map_return_type(&self, output: &syn::ReturnType) -> String {
         match output {
             syn::ReturnType::Default => "void".to_string(),
@@ -2587,5 +2665,90 @@ mod tests {
         );
         // Default method should be emitted as a free function
         assert!(out.contains("rusty::String greet(pro::proxy_view<GreetFacade> _self)"));
+    }
+
+    // ── Phase 5: Generics / templates tests ─────────────────────
+
+    #[test]
+    fn test_generic_function() {
+        let out = transpile_str("fn identity<T>(x: T) -> T { x }");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("T identity(T x)"));
+    }
+
+    #[test]
+    fn test_generic_two_params() {
+        let out = transpile_str("fn pair<T, U>(a: T, b: U) {}");
+        assert!(out.contains("template<typename T, typename U>"));
+    }
+
+    #[test]
+    fn test_generic_struct() {
+        let out = transpile_str("struct Wrapper<T> { value: T }");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("struct Wrapper {"));
+        assert!(out.contains("T value;"));
+    }
+
+    #[test]
+    fn test_generic_method() {
+        let out = transpile_str(
+            r#"
+            struct S<T> { v: T }
+            impl<T> S<T> {
+                fn map<U>(&self, x: U) -> U { x }
+            }
+        "#,
+        );
+        // Struct should have template prefix
+        assert!(out.contains("template<typename T>"));
+        // Method should also have its own template
+        assert!(out.contains("template<typename U>"));
+    }
+
+    #[test]
+    fn test_trait_bound() {
+        let out = transpile_str("fn f<T: Clone>(x: T) {}");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("requires"));
+        assert!(out.contains("Clone"));
+    }
+
+    #[test]
+    fn test_multiple_bounds() {
+        let out = transpile_str("fn f<T: Clone + Send>(x: T) {}");
+        assert!(out.contains("requires"));
+        assert!(out.contains("&&"));
+    }
+
+    #[test]
+    fn test_where_clause() {
+        let out = transpile_str("fn f<T>(x: T) where T: Clone {}");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("requires"));
+        assert!(out.contains("Clone"));
+    }
+
+    #[test]
+    fn test_lifetime_erased() {
+        // Lifetime params should not appear in template
+        let out = transpile_str("fn f<'a>(x: &'a i32) -> &'a i32 { x }");
+        assert!(!out.contains("template"));
+        assert!(out.contains("const int32_t& f(const int32_t& x)"));
+    }
+
+    #[test]
+    fn test_generic_with_lifetime_mixed() {
+        // Only type params should appear, lifetimes erased
+        let out = transpile_str("fn f<'a, T>(x: &'a T) -> T { todo!() }");
+        assert!(out.contains("template<typename T>"));
+        assert!(!out.contains("'a"));
+    }
+
+    #[test]
+    fn test_no_template_without_generics() {
+        // Non-generic function should NOT have template prefix
+        let out = transpile_str("fn add(a: i32, b: i32) -> i32 { a + b }");
+        assert!(!out.contains("template"));
     }
 }

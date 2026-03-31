@@ -107,14 +107,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Operator traits (Add, Sub, Index, Deref) → C++ operator overloading
       - [ ] Marker traits (Send, Sync, Copy) → `static_assert` or concept constraints
       - [ ] Supertraits → facade composition
-    - [ ] Phase 5: Generics → templates with concepts
-      - [ ] Generic functions `fn foo<T>(x: T)` → `template<typename T> void foo(T x)`
-      - [ ] Trait bounds `T: Trait` → `requires` clause or concept constraint
-      - [ ] Multiple bounds `T: A + B` → `requires (A<T> && B<T>)`
-      - [ ] `where` clauses → `requires` clause
-      - [ ] Generic structs `struct Foo<T>` → `template<typename T> struct Foo`
-      - [ ] Generic impl blocks → template class method definitions
-      - [ ] Lifetime parameters in generics → erased
+    - [x] *done* Phase 5: Generics → templates with concepts
+      - [x] *done* Generic functions `fn foo<T>(x: T)` → `template<typename T> void foo(T x)`
+      - [x] *done* Trait bounds `T: Trait` → `requires` clause
+      - [x] *done* Multiple bounds `T: A + B` → `requires (...&&...)`
+      - [x] *done* `where` clauses → `requires` clause
+      - [x] *done* Generic structs `struct Foo<T>` → `template<typename T> struct Foo`
+      - [x] *done* Generic impl blocks → template class method definitions
+      - [x] *done* Lifetime parameters in generics → erased
     - [ ] Phase 6: Closures → C++ lambdas
       - [ ] Closure expressions → lambda expressions
       - [ ] Default captures (borrow environment) → `[&]` capture
