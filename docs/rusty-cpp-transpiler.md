@@ -1534,18 +1534,13 @@ int main() {
 
 Testing the transpiler against real crates reveals systematic gaps. These are categorized by root cause and proposed fix.
 
-### Gap 1: Generic Enums/Structs Lose Type Parameters
+### Gap 1: Generic Enums/Structs Lose Type Parameters — FIXED ✅
 
-**Problem:** `enum Either<L, R> { Left(L), Right(R) }` transpiles to variant structs using bare `L` and `R` as types, without template declarations.
+**Problem:** `enum Either<L, R> { Left(L), Right(R) }` transpiled to variant structs using bare `L` and `R` as types, without template declarations.
 
-**Current output (wrong):**
-```cpp
-struct Either_Left { L _0; };          // L is not declared
-struct Either_Right { R _0; };         // R is not declared
-using Either = std::variant<Either_Left, Either_Right>;
-```
+**Fix:** `emit_enum` now extracts type parameters from `ItemEnum.generics`, emits `template<typename ...>` prefix on each variant struct, and appends template args to the variant alias. Recursive generic enums get a template forward declaration.
 
-**Expected output:**
+**Output after fix:**
 ```cpp
 template<typename L, typename R>
 struct Either_Left { L _0; };
@@ -1650,7 +1645,7 @@ TEST_CASE("macros") {
 
 | Priority | Gap | Impact | Effort |
 |----------|-----|--------|--------|
-| 1 | Gap 1: Generic enums | Blocks most real crates | ~50 LOC |
+| 1 | Gap 1: Generic enums | ~~Blocks most real crates~~ **FIXED** | ~50 LOC |
 | 2 | Gap 3: Group use imports | Invalid C++ syntax | ~30 LOC |
 | 3 | Gap 2: `core::` mapping | Missing path | ~5 LOC |
 | 4 | Gap 4: Unhandled item kinds | Missing code | ~20 LOC |

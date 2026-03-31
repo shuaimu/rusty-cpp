@@ -416,6 +416,26 @@ impl CodeGen {
         let name = &e.ident;
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
 
+        // Collect type parameters (skip lifetimes)
+        let type_params: Vec<String> = e.generics.params.iter().filter_map(|p| {
+            if let syn::GenericParam::Type(tp) = p {
+                Some(tp.ident.to_string())
+            } else {
+                None
+            }
+        }).collect();
+        let has_generics = !type_params.is_empty();
+        let template_prefix = if has_generics {
+            format!("template<{}>", type_params.iter().map(|p| format!("typename {}", p)).collect::<Vec<_>>().join(", "))
+        } else {
+            String::new()
+        };
+        let template_args = if has_generics {
+            format!("<{}>", type_params.join(", "))
+        } else {
+            String::new()
+        };
+
         if has_data {
             // Check if any variant references the enum type itself (recursive)
             let is_recursive = e.variants.iter().any(|v| {
@@ -424,6 +444,9 @@ impl CodeGen {
 
             // Emit forward declarations for recursive enums
             if is_recursive {
+                if has_generics {
+                    self.writeln(&format!("{}", template_prefix));
+                }
                 self.writeln(&format!("struct {};  // forward declaration for recursion", name));
             }
 
@@ -433,6 +456,7 @@ impl CodeGen {
                 let vname = &variant.ident;
                 match &variant.fields {
                     syn::Fields::Named(fields) => {
+                        if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!("struct {}_{} {{", name, vname));
                         self.indent += 1;
                         for field in &fields.named {
@@ -444,6 +468,7 @@ impl CodeGen {
                         self.writeln("};");
                     }
                     syn::Fields::Unnamed(fields) => {
+                        if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!("struct {}_{} {{", name, vname));
                         self.indent += 1;
                         for (i, field) in fields.unnamed.iter().enumerate() {
@@ -454,19 +479,27 @@ impl CodeGen {
                         self.writeln("};");
                     }
                     syn::Fields::Unit => {
+                        if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!("struct {}_{} {{}};", name, vname));
                     }
                 }
             }
-            // Emit the variant type
+            // Emit the variant type — with template args if generic
             let variant_list: Vec<String> = e
                 .variants
                 .iter()
-                .map(|v| format!("{}_{}", name, v.ident))
+                .map(|v| {
+                    if has_generics {
+                        format!("{}_{}{}", name, v.ident, template_args)
+                    } else {
+                        format!("{}_{}", name, v.ident)
+                    }
+                })
                 .collect();
 
             if is_recursive {
                 // For recursive enums, use a struct wrapper (using alias can't be forward-declared)
+                if has_generics { self.writeln(&template_prefix); }
                 self.writeln(&format!(
                     "struct {} : std::variant<{}> {{",
                     name,
@@ -477,6 +510,7 @@ impl CodeGen {
                 self.indent -= 1;
                 self.writeln("};");
             } else {
+                if has_generics { self.writeln(&template_prefix); }
                 self.writeln(&format!(
                     "using {} = std::variant<{}>;",
                     name,
@@ -4549,5 +4583,53 @@ mod tests {
     fn test_use_crate_no_external_comment() {
         let out = transpile_str_module("use crate::types::Foo;", "my_app");
         assert!(!out.contains("// TODO: external crate"));
+    }
+
+    // ── Phase 15 Gap 1: Generic enum tests ──────────────────────
+
+    #[test]
+    fn test_generic_enum_two_params() {
+        let out = transpile_str("enum Either<L, R> { Left(L), Right(R) }");
+        assert!(out.contains("template<typename L, typename R>"));
+        assert!(out.contains("struct Either_Left {"));
+        assert!(out.contains("L _0;"));
+        assert!(out.contains("struct Either_Right {"));
+        assert!(out.contains("R _0;"));
+        assert!(out.contains("using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>"));
+    }
+
+    #[test]
+    fn test_generic_enum_one_param() {
+        let out = transpile_str("enum Maybe<T> { Just(T), Nothing }");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("struct Maybe_Just {"));
+        assert!(out.contains("T _0;"));
+        assert!(out.contains("Maybe_Just<T>"));
+        assert!(out.contains("Maybe_Nothing<T>"));
+    }
+
+    #[test]
+    fn test_generic_enum_named_fields() {
+        let out = transpile_str("enum Result<T, E> { Ok { value: T }, Err { error: E } }");
+        assert!(out.contains("template<typename T, typename E>"));
+        assert!(out.contains("T value;"));
+        assert!(out.contains("E error;"));
+    }
+
+    #[test]
+    fn test_generic_recursive_enum() {
+        let out = transpile_str("enum List<T> { Cons(T, Box<List<T>>), Nil }");
+        assert!(out.contains("template<typename T>"));
+        assert!(out.contains("struct List;  // forward declaration"));
+        assert!(out.contains("rusty::Box<List<T>>"));
+        assert!(out.contains("struct List : std::variant<List_Cons<T>, List_Nil<T>>"));
+    }
+
+    #[test]
+    fn test_non_generic_enum_unchanged() {
+        let out = transpile_str("enum Color { Red(u8), Green(u8), Blue(u8) }");
+        assert!(!out.contains("template"));
+        assert!(out.contains("struct Color_Red {"));
+        assert!(out.contains("using Color = std::variant<Color_Red, Color_Green, Color_Blue>"));
     }
 }

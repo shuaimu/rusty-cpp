@@ -191,12 +191,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Generate CMakeLists.txt with `add_subdirectory()` and `target_link_libraries()` for each dependency
       - [x] *done* E2E test: multi-crate workspace transpilation
     - [ ] Phase 15: Real-world crate transpilation fixes (see docs/rusty-cpp-transpiler.md §10.7)
-      - [ ] Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias
-        - [ ] In `emit_enum`, detect generics on `syn::ItemEnum` and emit `template<typename L, typename R>` on each variant struct
-        - [ ] Emit variant alias with template args: `using Either = std::variant<Either_Left<L,R>, Either_Right<L,R>>`
-        - [ ] For recursive generic enums, forward-declare with template params: `template<typename T> struct List;`
-        - [ ] Add unit tests: generic enum with 1 param, 2 params, nested generic types in fields
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 1 to mark as done with design notes
+      - [x] *done* Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias
+        - [x] *done* In `emit_enum`, detect generics on `syn::ItemEnum` and emit `template<typename L, typename R>` on each variant struct
+        - [x] *done* Emit variant alias with template args: `using Either = std::variant<Either_Left<L,R>, Either_Right<L,R>>`
+        - [x] *done* For recursive generic enums, forward-declare with template params: `template<typename T> struct List;`
+        - [x] *done* Add unit tests: generic enum with 1 param, 2 params, nested generic types in fields
+        - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 1 to mark as done with design notes
       - [ ] Gap 2: Map `core::` and `alloc::` paths same as `std::` in emit_use_tree
         - [ ] In `emit_use_tree`, add `"core"` and `"alloc"` cases that map to `std::`
         - [ ] Add unit test: `use core::convert::AsRef` → `using std::convert::AsRef`
