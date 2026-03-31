@@ -177,8 +177,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Auto-generate CMakeLists.txt in output dir (reuse `cmake::generate_cmake()`)
       - [x] *done* Crate-level `--verify`: run rusty-cpp-checker on each generated `.cppm` file
       - [x] *done* E2E test: create a multi-file Rust crate, transpile with `--crate`, verify all `.cppm` files and CMakeLists.txt are correct
-      - [ ] Handle `mod foo;` declarations: detect external module files and include them in the transpilation set
-      - [ ] Handle `use crate::` paths: rewrite `crate::` to the crate's C++20 module name
+      - [x] *done* Handle `mod foo;` declarations: already included via src/ file walk + emit_mod emits import
+      - [x] *done* Handle `use crate::` paths: rewrite `crate::` to the crate's module name, `self::` stripped, `super::` to parent
       - [ ] Crate-level `cargo expand` support: run `cargo expand` once for the whole crate, split expanded output by module
     - [ ] Phase 13: External crate dependency handling
       - [ ] Parse `[dependencies]` from Cargo.toml and detect external crate imports

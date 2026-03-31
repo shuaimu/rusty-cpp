@@ -729,11 +729,45 @@ impl CodeGen {
             syn::UseTree::Path(p) => {
                 let prefix = p.ident.to_string();
                 let rest = self.emit_use_tree(&p.tree);
-                format!("{}::{}", prefix, rest)
+
+                // Rewrite Rust path prefixes to C++ equivalents
+                match prefix.as_str() {
+                    "crate" => {
+                        // `use crate::foo` → module_name::foo
+                        if let Some(ref mod_name) = self.module_name {
+                            format!("{}::{}", mod_name, rest)
+                        } else {
+                            format!("{}", rest) // No module → just use the path
+                        }
+                    }
+                    "self" => {
+                        // `use self::foo` → same module
+                        format!("{}", rest)
+                    }
+                    "super" => {
+                        // `use super::foo` → parent module
+                        // Approximate: strip last segment from module name
+                        if let Some(ref mod_name) = self.module_name {
+                            if let Some(parent) = mod_name.rsplit_once('.') {
+                                format!("{}::{}", parent.0, rest)
+                            } else {
+                                format!("{}", rest)
+                            }
+                        } else {
+                            format!("{}", rest)
+                        }
+                    }
+                    // Map std library paths
+                    "std" => {
+                        // Check for known std submodules
+                        format!("std::{}", rest)
+                    }
+                    _ => format!("{}::{}", prefix, rest),
+                }
             }
             syn::UseTree::Name(n) => n.ident.to_string(),
             syn::UseTree::Rename(r) => {
-                format!("{} = {}",  r.rename, r.ident)
+                format!("{} = {}", r.rename, r.ident)
             }
             syn::UseTree::Glob(_) => "*".to_string(),
             syn::UseTree::Group(g) => {
@@ -3850,7 +3884,8 @@ mod tests {
     #[test]
     fn test_pub_use_export() {
         let out = transpile_str_module("pub use crate::types::MyType;", "my_crate");
-        assert!(out.contains("export using crate::types::MyType;"));
+        // crate:: is rewritten to the module name
+        assert!(out.contains("export using my_crate::types::MyType;"));
     }
 
     #[test]
@@ -4414,5 +4449,36 @@ mod tests {
         );
         assert!(out.contains("// Requires: BaseFacade"));
         assert!(out.contains("DerivedFacade"));
+    }
+
+    // ── use crate:: path rewriting tests ────────────────────────
+
+    #[test]
+    fn test_use_crate_rewritten() {
+        let out = transpile_str_module("use crate::utils::helper;", "my_crate");
+        assert!(out.contains("using my_crate::utils::helper;"));
+        // Should not contain bare "crate::" (only as part of "my_crate::")
+        assert!(!out.contains("using crate::"));
+    }
+
+    #[test]
+    fn test_use_self_rewritten() {
+        let out = transpile_str_module("use self::internal::Secret;", "my_crate");
+        assert!(out.contains("using internal::Secret;"));
+        assert!(!out.contains("self::"));
+    }
+
+    #[test]
+    fn test_use_std_preserved() {
+        let out = transpile_str("use std::collections::HashMap;");
+        assert!(out.contains("using std::collections::HashMap;"));
+    }
+
+    #[test]
+    fn test_use_crate_without_module_name() {
+        // Without --module-name, crate:: is stripped (just use the path)
+        let out = transpile_str("use crate::foo::bar;");
+        assert!(out.contains("using foo::bar;"));
+        assert!(!out.contains("crate::"));
     }
 }
