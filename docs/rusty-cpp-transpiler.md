@@ -727,7 +727,115 @@ If the transpiled C++ is then fed back into rusty-cpp for analysis, lifetime ann
 std::string_view longest(std::string_view x, std::string_view y);
 ```
 
-### 3.7 Async/Await ⚠️
+### 3.7 Async/Await → Pollable State Machine on C++20 Coroutines
+
+Rust's async model is a lazy, poll-based state machine. C++20 coroutines provide the state machine generation, but default to eager execution. The transpiler builds Rust's poll model on top of C++20 coroutines by customizing the `promise_type`.
+
+#### Core Types
+
+```cpp
+#include <coroutine>
+#include <functional>
+
+// Poll<T> — Rust's Poll enum
+template<typename T>
+struct Poll {
+    rusty::Option<T> value;  // None = Pending, Some = Ready
+
+    static Poll ready(T v) { return Poll{rusty::Option<T>::some(std::move(v))}; }
+    static Poll pending()  { return Poll{rusty::Option<T>::none()}; }
+    bool is_ready() const  { return value.is_some(); }
+};
+
+// Waker — notification callback for IO readiness
+struct Waker {
+    std::function<void()> wake_fn;
+    void wake() { if (wake_fn) wake_fn(); }
+};
+
+struct Context {
+    Waker* waker;
+};
+```
+
+#### Task<T> — The Lazy Coroutine Future
+
+```cpp
+template<typename T>
+class Task {
+public:
+    struct promise_type {
+        rusty::Option<T> result;
+        Context* current_ctx = nullptr;
+
+        Task get_return_object() {
+            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+
+        // KEY: suspend_always makes it LAZY — nothing runs until poll()
+        std::suspend_always initial_suspend() { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+
+        void return_value(T value) {
+            result = rusty::Option<T>::some(std::move(value));
+        }
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    // poll() — drives the state machine one step (like Rust's Future::poll)
+    Poll<T> poll(Context& cx) {
+        if (handle_.done()) {
+            return Poll<T>::ready(std::move(*handle_.promise().result));
+        }
+        handle_.promise().current_ctx = &cx;
+        handle_.resume();  // runs until next co_await or co_return
+        if (handle_.done()) {
+            return Poll<T>::ready(std::move(*handle_.promise().result));
+        }
+        return Poll<T>::pending();
+    }
+
+    ~Task() { if (handle_) handle_.destroy(); }
+    Task(Task&& o) : handle_(std::exchange(o.handle_, nullptr)) {}
+
+private:
+    Task(std::coroutine_handle<promise_type> h) : handle_(h) {}
+    std::coroutine_handle<promise_type> handle_;
+};
+```
+
+#### Executor — The Event Loop (like tokio)
+
+```cpp
+class Executor {
+    std::vector<std::function<Poll<void>(Context&)>> tasks;
+    std::queue<size_t> ready_queue;
+
+public:
+    void spawn(Task<void> task) {
+        tasks.push_back([t = std::move(task)](Context& cx) mutable {
+            return t.poll(cx);
+        });
+        ready_queue.push(tasks.size() - 1);
+    }
+
+    void run() {
+        while (!ready_queue.empty()) {
+            auto idx = ready_queue.front();
+            ready_queue.pop();
+
+            Waker waker{[this, idx]() { ready_queue.push(idx); }};
+            Context cx{&waker};
+
+            auto result = tasks[idx](cx);
+            // Pending → waker will re-enqueue when IO fires
+            // Ready → task is done
+        }
+    }
+};
+```
+
+#### Transpilation Example
 
 ```rust
 async fn fetch(url: &str) -> Result<String, Error> {
@@ -737,22 +845,49 @@ async fn fetch(url: &str) -> Result<String, Error> {
 }
 ```
 
-#### C++20 Coroutines:
-
 ```cpp
-Task<std::expected<std::string, Error>> fetch(std::string_view url) {
+Task<rusty::Result<rusty::String, Error>> fetch(std::string_view url) {
     auto response = co_await client.get(url).send();
-    if (!response) co_return std::unexpected(response.error());
-    auto body = co_await response->text();
-    if (!body) co_return std::unexpected(body.error());
-    co_return *body;
+    if (response.is_err()) co_return rusty::Result<rusty::String, Error>::err(response.unwrap_err());
+    auto body = co_await response.unwrap().text();
+    if (body.is_err()) co_return rusty::Result<rusty::String, Error>::err(body.unwrap_err());
+    co_return rusty::Result<rusty::String, Error>::ok(body.unwrap());
 }
 ```
 
-**Challenges**:
-- Rust's `async` is lazy (doesn't run until polled); C++ coroutines are eager by default
-- Rust has a standard executor model (tokio, async-std); C++ does not
-- The `Task<T>` type above is not standard — requires a library (cppcoro, folly, etc.)
+#### How It Works
+
+```
+┌──────────────────────────────────────────────────┐
+│  Executor                                        │
+│                                                  │
+│  loop:                                           │
+│    pick task from ready_queue                    │
+│    call task.poll(context)                       │
+│      │                                           │
+│      ├─ Ready(T) → task done                     │
+│      │                                           │
+│      └─ Pending → waker will re-enqueue          │
+│           │        when IO/timer fires           │
+│           ▼                                      │
+│    ┌─────────────────┐                           │
+│    │ C++20 coroutine │ (compiler-generated        │
+│    │                 │  state machine)            │
+│    │ co_await inner  │──► inner.poll(cx)          │
+│    │   Pending?      │   suspend, return Pending  │
+│    │   Ready?        │   continue to next state   │
+│    │                 │                           │
+│    │ co_return val   │──► return Ready(val)        │
+│    └─────────────────┘                           │
+└──────────────────────────────────────────────────┘
+```
+
+**Key design decisions**:
+- **`initial_suspend()` → `suspend_always`** — makes coroutines lazy, matching Rust semantics
+- **`poll()` wraps `handle_.resume()`** — one step of the state machine per call
+- **`Waker`** — callback mechanism so IO subsystems can notify the executor
+- **C++20 generates the state machine** — `co_await`/`co_return` map directly to Rust's `.await`
+- **Executor is a library, not language** — same as Rust (tokio is a library too)
 
 ### 3.8 Derive Macros
 
