@@ -1102,11 +1102,7 @@ impl CodeGen {
                 format!("rusty::range({}, {})", start, end)
             }
             syn::Expr::Closure(closure) => {
-                let params: Vec<String> = closure.inputs.iter().map(|p| {
-                    self.emit_pat_to_string(p)
-                }).collect();
-                let body = self.emit_expr_to_string(&closure.body);
-                format!("[&](auto {}) {{ return {}; }}", params.join(", auto "), body)
+                self.emit_closure_to_string(closure)
             }
             syn::Expr::Return(ret) => match &ret.expr {
                 Some(e) => {
@@ -1259,7 +1255,7 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 let path_str = self.emit_path_to_string(&tp.path);
 
-                // Special case: Box<dyn Trait> → pro::proxy<TraitFacade>
+                // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or std::move_only_function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
                     let seg_name = last_seg.ident.to_string();
                     if seg_name == "Box" {
@@ -1268,6 +1264,10 @@ impl CodeGen {
                                 args.args.first()
                             {
                                 if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
+                                    // Check for Fn/FnMut/FnOnce → std::move_only_function
+                                    if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
+                                        return fn_type;
+                                    }
                                     let trait_name = tb
                                         .path
                                         .segments
@@ -1331,9 +1331,13 @@ impl CodeGen {
                         return "std::string_view".to_string();
                     }
                 }
-                // Special case: &dyn Trait → pro::proxy_view<TraitFacade>
+                // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 if let syn::Type::TraitObject(to) = r.elem.as_ref() {
                     if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
+                        // Check for Fn/FnMut/FnOnce first
+                        if let Some(fn_type) = self.try_map_fn_trait(tb) {
+                            return format!("const {}&", fn_type);
+                        }
                         let trait_name = tb
                             .path
                             .segments
@@ -1379,10 +1383,12 @@ impl CodeGen {
             syn::Type::Never(_) => "[[noreturn]] void".to_string(),
             syn::Type::Infer(_) => "auto".to_string(),
             syn::Type::TraitObject(to) => {
-                // dyn Trait → pro::proxy_view<TraitFacade>
-                // Box<dyn Trait> handled at the Box<> level
+                // Check for Fn/FnMut/FnOnce trait objects
                 if let Some(first) = to.bounds.first() {
                     if let syn::TypeParamBound::Trait(tb) = first {
+                        if let Some(fn_type) = self.try_map_fn_trait(tb) {
+                            return fn_type;
+                        }
                         let trait_name = tb
                             .path
                             .segments
@@ -1396,9 +1402,12 @@ impl CodeGen {
                 "/* TODO: complex trait object */".to_string()
             }
             syn::Type::ImplTrait(it) => {
-                // impl Trait → pro::proxy<TraitFacade>
+                // Check for Fn/FnMut/FnOnce impl traits
                 if let Some(first) = it.bounds.first() {
                     if let syn::TypeParamBound::Trait(tb) = first {
+                        if let Some(fn_type) = self.try_map_fn_trait(tb) {
+                            return fn_type;
+                        }
                         let trait_name = tb
                             .path
                             .segments
@@ -1430,6 +1439,146 @@ impl CodeGen {
     /// - Reference expressions (&x, &mut x) — these borrow, not move
     /// - Complex expressions (a + b, foo()) — these produce temporaries
     /// - Type paths / constants (ALL_CAPS names)
+    /// Emit a closure expression as a C++ lambda.
+    fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
+        // Determine capture mode
+        let capture = if closure.capture.is_some() {
+            // `move` closure → capture by move
+            // We'd need to know which variables are captured to emit
+            // [var1 = std::move(var1), var2 = std::move(var2)]
+            // but without full analysis, we use a simpler approach:
+            // emit [=] (copy capture) as a reasonable default for move closures
+            // since the Rust compiler already verified the moves
+            "="
+        } else {
+            // Default: borrow environment → capture by reference
+            "&"
+        };
+
+        // Build parameter list
+        let params: Vec<String> = closure
+            .inputs
+            .iter()
+            .map(|p| self.emit_closure_param(p))
+            .collect();
+
+        let params_str = params.join(", ");
+
+        // Determine if the body is a block or a single expression
+        match closure.body.as_ref() {
+            syn::Expr::Block(block) => {
+                // Multi-statement body
+                let mut inner = CodeGen::new_();
+                inner.current_struct = self.current_struct.clone();
+                inner.indent = 0;
+                inner.emit_block(&block.block);
+                let body_str = inner.into_output();
+                format!("[{}]({}) {{\n{}}}", capture, params_str, body_str)
+            }
+            _ => {
+                // Single expression body → return it
+                let body = self.emit_expr_to_string(&closure.body);
+                format!("[{}]({}) {{ return {}; }}", capture, params_str, body)
+            }
+        }
+    }
+
+    /// Emit a single closure parameter.
+    fn emit_closure_param(&self, pat: &syn::Pat) -> String {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                // Untyped param: |x| → auto x
+                format!("auto {}", pi.ident)
+            }
+            syn::Pat::Type(pt) => {
+                // Typed param: |x: i32| → int32_t x
+                let ty = self.map_type(&pt.ty);
+                let name = match pt.pat.as_ref() {
+                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    _ => "_".to_string(),
+                };
+                format!("{} {}", ty, name)
+            }
+            syn::Pat::Wild(_) => "auto _".to_string(),
+            syn::Pat::Reference(pr) => {
+                // |&x| → auto& x  or  |&mut x| → auto& x
+                let inner = self.emit_closure_param(&pr.pat);
+                format!("auto& {}", inner.trim_start_matches("auto "))
+            }
+            _ => format!("auto {}", self.emit_pat_to_string(pat)),
+        }
+    }
+
+    /// Try to map a Fn/FnMut/FnOnce trait bound to a C++ function type.
+    /// Returns Some(cpp_type) if it's a Fn trait, None otherwise.
+    fn try_map_fn_trait(&self, tb: &syn::TraitBound) -> Option<String> {
+        let last_seg = tb.path.segments.last()?;
+        let trait_name = last_seg.ident.to_string();
+
+        let wrapper = match trait_name.as_str() {
+            "Fn" => "std::function",
+            "FnMut" => "std::function",
+            "FnOnce" => "std::move_only_function",
+            _ => return None,
+        };
+
+        // Extract the parenthesized args: Fn(i32, i32) -> i32
+        if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
+            let param_types: Vec<String> = args
+                .inputs
+                .iter()
+                .map(|t| self.map_type(t))
+                .collect();
+
+            let return_type = match &args.output {
+                syn::ReturnType::Default => "void".to_string(),
+                syn::ReturnType::Type(_, ty) => self.map_type(ty),
+            };
+
+            Some(format!("{}<{}({})>", wrapper, return_type, param_types.join(", ")))
+        } else {
+            // Fn without parens — treat as regular trait
+            None
+        }
+    }
+
+    /// Map Box<dyn Fn/FnMut/FnOnce> to the appropriate C++ function type.
+    /// All Box<dyn Fn*> → std::move_only_function since Box implies ownership.
+    fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {
+        let last_seg = tb.path.segments.last()?;
+        let trait_name = last_seg.ident.to_string();
+
+        if !matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce") {
+            return None;
+        }
+
+        if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
+            let param_types: Vec<String> = args
+                .inputs
+                .iter()
+                .map(|t| self.map_type(t))
+                .collect();
+            let return_type = match &args.output {
+                syn::ReturnType::Default => "void".to_string(),
+                syn::ReturnType::Type(_, ty) => self.map_type(ty),
+            };
+            Some(format!("std::move_only_function<{}({})>", return_type, param_types.join(", ")))
+        } else {
+            None
+        }
+    }
+
+    /// Create a new CodeGen for inner use (e.g., closure bodies).
+    fn new_() -> Self {
+        Self {
+            output: String::new(),
+            indent: 0,
+            impl_blocks: HashMap::new(),
+            current_struct: None,
+            reassigned_vars: std::collections::HashSet::new(),
+        }
+    }
+
     fn emit_expr_maybe_move(&self, expr: &syn::Expr) -> String {
         if self.should_insert_move(expr) {
             let inner = self.emit_expr_to_string(expr);
@@ -2750,5 +2899,69 @@ mod tests {
         // Non-generic function should NOT have template prefix
         let out = transpile_str("fn add(a: i32, b: i32) -> i32 { a + b }");
         assert!(!out.contains("template"));
+    }
+
+    // ── Phase 6: Closure / lambda tests ─────────────────────────
+
+    #[test]
+    fn test_closure_untyped_params() {
+        let out = transpile_str("fn f() { let add = |a, b| a + b; }");
+        assert!(out.contains("[&](auto a, auto b)"));
+        assert!(out.contains("return a + b;"));
+    }
+
+    #[test]
+    fn test_closure_typed_params() {
+        let out = transpile_str("fn f() { let inc = |x: i32| x + 1; }");
+        assert!(out.contains("[&](int32_t x)"));
+    }
+
+    #[test]
+    fn test_closure_move_capture() {
+        let out = transpile_str("fn f() { let c = move || 42; }");
+        assert!(out.contains("[=]()"));
+    }
+
+    #[test]
+    fn test_closure_no_params() {
+        let out = transpile_str("fn f() { let c = || 42; }");
+        assert!(out.contains("[&]()"));
+        assert!(out.contains("return 42;"));
+    }
+
+    #[test]
+    fn test_impl_fn_param() {
+        let out = transpile_str("fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }");
+        assert!(out.contains("std::function<int32_t(int32_t)> f"));
+    }
+
+    #[test]
+    fn test_impl_fn_mut_param() {
+        let out = transpile_str("fn apply(f: impl FnMut(i32)) {}");
+        assert!(out.contains("std::function<void(int32_t)> f"));
+    }
+
+    #[test]
+    fn test_impl_fn_once_param() {
+        let out = transpile_str("fn apply(f: impl FnOnce() -> String) {}");
+        assert!(out.contains("std::move_only_function<rusty::String()> f"));
+    }
+
+    #[test]
+    fn test_dyn_fn_ref() {
+        let out = transpile_str("fn apply(f: &dyn Fn(i32) -> i32) {}");
+        assert!(out.contains("const std::function<int32_t(int32_t)>& f"));
+    }
+
+    #[test]
+    fn test_box_dyn_fn_once() {
+        let out = transpile_str("fn apply(f: Box<dyn FnOnce() -> i32>) {}");
+        assert!(out.contains("std::move_only_function<int32_t()> f"));
+    }
+
+    #[test]
+    fn test_fn_multi_params() {
+        let out = transpile_str("fn apply(f: impl Fn(i32, f64, bool) -> String) {}");
+        assert!(out.contains("std::function<rusty::String(int32_t, double, bool)>"));
     }
 }

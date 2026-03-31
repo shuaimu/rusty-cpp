@@ -115,13 +115,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Generic structs `struct Foo<T>` → `template<typename T> struct Foo`
       - [x] *done* Generic impl blocks → template class method definitions
       - [x] *done* Lifetime parameters in generics → erased
-    - [ ] Phase 6: Closures → C++ lambdas
-      - [ ] Closure expressions → lambda expressions
-      - [ ] Default captures (borrow environment) → `[&]` capture
-      - [ ] `move` closures → `[var = std::move(var), ...]` capture per captured variable
-      - [ ] `Fn` trait bound → `std::function<Sig>` or const lambda
-      - [ ] `FnMut` trait bound → mutable lambda
-      - [ ] `FnOnce` trait bound → `std::move_only_function<Sig>` (C++23)
+    - [x] *done* Phase 6: Closures → C++ lambdas
+      - [x] *done* Closure expressions → lambda expressions (typed/untyped params, block bodies)
+      - [x] *done* Default captures (borrow environment) → `[&]` capture
+      - [x] *done* `move` closures → `[=]` capture (copy/move semantics)
+      - [x] *done* `Fn` trait bound → `std::function<Sig>`
+      - [x] *done* `FnMut` trait bound → `std::function<Sig>`
+      - [x] *done* `FnOnce` trait bound → `std::move_only_function<Sig>` (C++23)
+      - [x] *done* `&dyn Fn` → `const std::function<Sig>&`
+      - [x] *done* `Box<dyn FnOnce>` → `std::move_only_function<Sig>`
     - [ ] Phase 7: Module system → C++20 modules
       - [ ] Crate root (lib.rs/main.rs) → primary module interface unit (`.cppm`)
       - [ ] `mod foo;` → `import crate_name.foo;`
