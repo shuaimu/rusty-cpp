@@ -135,14 +135,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `pub use` re-exports → `export using`
       - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm` (build system level)
       - [x] *done* Inline `mod foo { ... }` → `namespace foo { ... }`
-    - [ ] Phase 8: Async/await → pollable state machine on C++20 coroutines
-      - [ ] Implement `Poll<T>` type (Ready/Pending using rusty::Option)
-      - [ ] Implement `Waker` and `Context` types for IO notification
-      - [ ] Implement `Task<T>` coroutine type with lazy `initial_suspend` and `poll(Context&)` method
-      - [ ] Implement `TaskAwaiter` so `Task<T>` is `co_await`-able
-      - [ ] Implement basic `Executor` event loop (spawn + run)
-      - [ ] `async fn` → `Task<T>` returning coroutine with `co_await`/`co_return`
-      - [ ] `.await` → `co_await`
+    - [x] *done* Phase 8: Async/await → pollable state machine on C++20 coroutines
+      - [x] *done* Implement `Poll<T>` type (Ready/Pending) in `include/rusty/async.hpp`
+      - [x] *done* Implement `Waker` and `Context` types for IO notification
+      - [x] *done* Implement `Task<T>` coroutine type with lazy `initial_suspend` and `poll(Context&)` method
+      - [x] *done* Implement `TaskAwaiter` so `Task<T>` is `co_await`-able
+      - [x] *done* Implement basic `Executor` event loop (spawn + run)
+      - [x] *done* `async fn` → `rusty::Task<T>` returning coroutine with `co_await`/`co_return`
+      - [x] *done* `.await` → `co_await`
       - [ ] Async error propagation: `?` inside async → manual check + `co_return` Err
     - [ ] Phase 9: Macros and derive
       - [ ] Integrate `cargo expand` as pre-processing step to flatten all macros

@@ -19,6 +19,9 @@ pub struct CodeGen {
     reassigned_vars: std::collections::HashSet<String>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
+    /// True when emitting inside an async function body.
+    /// Controls whether `return` emits `co_return` instead.
+    in_async: bool,
 }
 
 impl CodeGen {
@@ -30,6 +33,7 @@ impl CodeGen {
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
+            in_async: false,
         }
     }
 
@@ -131,6 +135,14 @@ impl CodeGen {
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
+        let is_async = f.sig.asyncness.is_some();
+
+        // Wrap return type in Task<> for async functions
+        let return_type = if is_async {
+            format!("rusty::Task<{}>", return_type)
+        } else {
+            return_type
+        };
 
         // Emit template prefix if generic
         self.emit_template_prefix(&f.sig.generics);
@@ -153,7 +165,13 @@ impl CodeGen {
         let export_prefix = if self.is_exported(&f.vis) { "export " } else { "" };
         self.writeln(&format!("{}{}{} {}({}) {{", export_prefix, abi_prefix, return_type, name, params));
         self.indent += 1;
+
+        // Async functions use co_return instead of return
+        let prev_async = self.in_async;
+        self.in_async = is_async;
         self.emit_block(&f.block);
+        self.in_async = prev_async;
+
         self.indent -= 1;
         self.writeln("}");
     }
@@ -603,8 +621,9 @@ impl CodeGen {
                 }
                 let expr_str = self.emit_expr_to_string(expr);
                 if is_tail && semi.is_none() {
-                    // Tail expression without semicolon → return
-                    self.writeln(&format!("return {};", expr_str));
+                    // Tail expression without semicolon → return (or co_return in async)
+                    let keyword = if self.in_async { "co_return" } else { "return" };
+                    self.writeln(&format!("{} {};", keyword, expr_str));
                 } else {
                     self.writeln(&format!("{};", expr_str));
                 }
@@ -1189,13 +1208,20 @@ impl CodeGen {
             syn::Expr::Closure(closure) => {
                 self.emit_closure_to_string(closure)
             }
-            syn::Expr::Return(ret) => match &ret.expr {
-                Some(e) => {
-                    let val = self.emit_expr_to_string(e);
-                    format!("return {}", val)
+            syn::Expr::Return(ret) => {
+                let keyword = if self.in_async { "co_return" } else { "return" };
+                match &ret.expr {
+                    Some(e) => {
+                        let val = self.emit_expr_to_string(e);
+                        format!("{} {}", keyword, val)
+                    }
+                    None => keyword.to_string(),
                 }
-                None => "return".to_string(),
-            },
+            }
+            syn::Expr::Await(aw) => {
+                let inner = self.emit_expr_to_string(&aw.base);
+                format!("co_await {}", inner)
+            }
             syn::Expr::Assign(a) => {
                 let left = self.emit_expr_to_string(&a.left);
                 let right = self.emit_expr_to_string(&a.right);
@@ -1662,6 +1688,7 @@ impl CodeGen {
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
+            in_async: false,
         }
     }
 
@@ -3130,5 +3157,57 @@ mod tests {
     fn test_submodule_name() {
         let out = transpile_str_module("mod sub;", "my_crate.parent");
         assert!(out.contains("import my_crate.parent.sub;"));
+    }
+
+    // ── Phase 8: Async/await tests ──────────────────────────────
+
+    #[test]
+    fn test_async_fn_returns_task() {
+        let out = transpile_str("async fn fetch() -> String { todo!() }");
+        assert!(out.contains("rusty::Task<rusty::String> fetch()"));
+    }
+
+    #[test]
+    fn test_async_fn_void_returns_task_void() {
+        let out = transpile_str("async fn work() {}");
+        assert!(out.contains("rusty::Task<void> work()"));
+    }
+
+    #[test]
+    fn test_await_to_co_await() {
+        let out = transpile_str("async fn f() -> i32 { let x = foo().await; x }");
+        assert!(out.contains("co_await foo()"));
+    }
+
+    #[test]
+    fn test_async_tail_co_return() {
+        let out = transpile_str("async fn f() -> i32 { 42 }");
+        assert!(out.contains("co_return 42;"));
+    }
+
+    #[test]
+    fn test_sync_fn_uses_return() {
+        let out = transpile_str("fn f() -> i32 { 42 }");
+        assert!(out.contains("return 42;"));
+        assert!(!out.contains("co_return"));
+    }
+
+    #[test]
+    fn test_async_explicit_return() {
+        let out = transpile_str("async fn f() -> i32 { return 42; }");
+        assert!(out.contains("co_return 42;"));
+    }
+
+    #[test]
+    fn test_async_chained_await() {
+        let out = transpile_str("async fn f() { client.get(url).send().await; }");
+        assert!(out.contains("co_await client.get(std::move(url)).send()"));
+    }
+
+    #[test]
+    fn test_async_with_params() {
+        let out = transpile_str("async fn process(data: Vec<i32>) -> bool { true }");
+        assert!(out.contains("rusty::Task<bool> process(rusty::Vec<int32_t> data)"));
+        assert!(out.contains("co_return true;"));
     }
 }
