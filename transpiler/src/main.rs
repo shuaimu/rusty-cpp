@@ -67,6 +67,21 @@ fn transpile_crate(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
 
+    // Report external dependencies
+    let deps = cmake::extract_dependencies(&cargo);
+    if !deps.is_empty() {
+        println!("\nExternal dependencies:");
+        for dep in &deps {
+            if dep.is_local {
+                println!("  {} (local: {})", dep.name, dep.path.as_deref().unwrap_or("?"));
+            } else {
+                println!("  {} = \"{}\" (external — types may need manual mapping)",
+                    dep.name, dep.version.as_deref().unwrap_or("*"));
+            }
+        }
+        println!();
+    }
+
     println!("Transpiling crate '{}' ({} source files)", crate_name, sources.len());
 
     // Step 2: Transpile each file with correct module name

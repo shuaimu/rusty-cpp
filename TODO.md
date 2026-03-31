@@ -181,8 +181,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Handle `use crate::` paths: rewrite `crate::` to the crate's module name, `self::` stripped, `super::` to parent
       - [ ] Crate-level `cargo expand` support: run `cargo expand` once for the whole crate, split expanded output by module
     - [ ] Phase 13: External crate dependency handling
-      - [ ] Parse `[dependencies]` from Cargo.toml and detect external crate imports
-      - [ ] Emit `// TODO: external crate 'foo'` comment for unresolvable imports
+      - [x] *done* Parse `[dependencies]` from Cargo.toml and detect external crate imports
+      - [x] *done* Emit `// TODO: external crate 'foo'` comment for unresolvable imports
       - [ ] Support user-provided type mapping files (`--type-map <file>`) for external crate types
       - [ ] Detect workspace members and path dependencies → recursively transpile them
     - [ ] Phase 14: Recursive dependency transpilation

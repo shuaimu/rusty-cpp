@@ -711,6 +711,21 @@ impl CodeGen {
 
     fn emit_use(&mut self, u: &syn::ItemUse) {
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
+
+        // Detect external crate imports
+        let root_ident = self.get_use_root(&u.tree);
+        let is_external = !matches!(
+            root_ident.as_str(),
+            "crate" | "self" | "super" | "std" | "core" | "alloc"
+        ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase());
+
+        if is_external {
+            self.writeln(&format!(
+                "// TODO: external crate '{}' — provide type mapping or transpile dependency",
+                root_ident
+            ));
+        }
+
         let use_str = self.emit_use_tree(&u.tree);
 
         if let Some(ref _module) = self.module_name {
@@ -721,6 +736,19 @@ impl CodeGen {
             }
         } else {
             self.writeln(&format!("using {};", use_str));
+        }
+    }
+
+    /// Get the root identifier of a use tree (first path segment).
+    fn get_use_root(&self, tree: &syn::UseTree) -> String {
+        match tree {
+            syn::UseTree::Path(p) => p.ident.to_string(),
+            syn::UseTree::Name(n) => n.ident.to_string(),
+            syn::UseTree::Rename(r) => r.ident.to_string(),
+            syn::UseTree::Group(g) => {
+                g.items.first().map_or(String::new(), |t| self.get_use_root(t))
+            }
+            syn::UseTree::Glob(_) => "*".to_string(),
         }
     }
 
@@ -4479,6 +4507,25 @@ mod tests {
         // Without --module-name, crate:: is stripped (just use the path)
         let out = transpile_str("use crate::foo::bar;");
         assert!(out.contains("using foo::bar;"));
-        assert!(!out.contains("crate::"));
+        assert!(!out.contains("using crate::"));
+    }
+
+    #[test]
+    fn test_use_external_crate_comment() {
+        let out = transpile_str("use serde::Serialize;");
+        assert!(out.contains("// TODO: external crate 'serde'"));
+        assert!(out.contains("using serde::Serialize;"));
+    }
+
+    #[test]
+    fn test_use_std_no_external_comment() {
+        let out = transpile_str("use std::io::Read;");
+        assert!(!out.contains("// TODO: external crate"));
+    }
+
+    #[test]
+    fn test_use_crate_no_external_comment() {
+        let out = transpile_str_module("use crate::types::Foo;", "my_app");
+        assert!(!out.contains("// TODO: external crate"));
     }
 }

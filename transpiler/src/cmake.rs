@@ -10,6 +10,51 @@ pub struct CargoToml {
     pub lib: Option<LibTarget>,
     #[serde(default, rename = "bin")]
     pub bins: Option<Vec<BinTarget>>,
+    #[serde(default)]
+    pub dependencies: Option<toml::value::Table>,
+}
+
+/// Information about an external crate dependency.
+#[derive(Debug, Clone)]
+pub struct CrateDep {
+    pub name: String,
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub is_local: bool,
+}
+
+/// Extract dependency information from the parsed Cargo.toml.
+pub fn extract_dependencies(cargo: &CargoToml) -> Vec<CrateDep> {
+    let mut deps = Vec::new();
+
+    if let Some(ref dep_table) = cargo.dependencies {
+        for (name, value) in dep_table {
+            match value {
+                toml::Value::String(version) => {
+                    deps.push(CrateDep {
+                        name: name.clone(),
+                        version: Some(version.clone()),
+                        path: None,
+                        is_local: false,
+                    });
+                }
+                toml::Value::Table(t) => {
+                    let version = t.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let path = t.get("path").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let is_local = path.is_some();
+                    deps.push(CrateDep {
+                        name: name.clone(),
+                        version,
+                        path,
+                        is_local,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    deps
 }
 
 #[derive(Deserialize)]
@@ -267,6 +312,7 @@ mod tests {
                 name: "hello".to_string(),
                 path: Some("src/main.rs".to_string()),
             }]),
+            dependencies: None,
         };
         let sources = vec![PathBuf::from("src/main.rs")];
         let cmake = generate_cmake(&cargo, &sources);
@@ -288,6 +334,7 @@ mod tests {
                 path: None,
             }),
             bins: None,
+            dependencies: None,
         };
         let sources = vec![
             PathBuf::from("src/lib.rs"),
@@ -298,5 +345,68 @@ mod tests {
         assert!(cmake.contains("add_library(my_lib"));
         assert!(cmake.contains("my-lib.cppm"));
         assert!(cmake.contains("my-lib.utils.cppm"));
+    }
+
+    #[test]
+    fn test_extract_dependencies_string_version() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+            [dependencies]
+            serde = "1.0"
+            rand = "0.8"
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.name == "serde" && d.version.as_deref() == Some("1.0") && !d.is_local));
+        assert!(deps.iter().any(|d| d.name == "rand" && !d.is_local));
+    }
+
+    #[test]
+    fn test_extract_dependencies_table_form() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+            [dependencies]
+            serde = { version = "1.0", features = ["derive"] }
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "serde");
+        assert_eq!(deps[0].version.as_deref(), Some("1.0"));
+        assert!(!deps[0].is_local);
+    }
+
+    #[test]
+    fn test_extract_dependencies_path() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+            [dependencies]
+            my_lib = { path = "../my_lib" }
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "my_lib");
+        assert_eq!(deps[0].path.as_deref(), Some("../my_lib"));
+        assert!(deps[0].is_local);
+    }
+
+    #[test]
+    fn test_extract_no_dependencies() {
+        let toml_str = r#"
+            [package]
+            name = "test"
+            version = "0.1.0"
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        let deps = extract_dependencies(&cargo);
+        assert!(deps.is_empty());
     }
 }
