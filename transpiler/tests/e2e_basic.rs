@@ -259,14 +259,12 @@ fn test_verify_flag_without_checker() {
 #[test]
 fn test_verify_flag_with_checker() {
     // If rusty-cpp-checker is available (built from same workspace), verify should work
-    // First check if the checker binary exists
     let checker = std::path::Path::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
         .parent()
         .unwrap()
         .join("rusty-cpp-checker");
 
     if !checker.exists() {
-        // Checker not built — skip this test
         return;
     }
 
@@ -286,4 +284,69 @@ fn test_verify_flag_with_checker() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Transpiled"));
+}
+
+#[test]
+fn test_crate_mode_basic() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"my_math\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"my_math\"\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub mod vector;\npub fn add(a: i32, b: i32) -> i32 { a + b }",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("vector.rs"),
+        "pub struct Vec2 { pub x: f64, pub y: f64 }",
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--output-dir")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(out_dir.join("my_math.cppm").exists());
+    assert!(out_dir.join("my_math.vector.cppm").exists());
+    assert!(out_dir.join("CMakeLists.txt").exists());
+
+    let lib_cpp = std::fs::read_to_string(out_dir.join("my_math.cppm")).unwrap();
+    assert!(lib_cpp.contains("export module my_math;"));
+    assert!(lib_cpp.contains("export int32_t add("));
+
+    let vec_cpp = std::fs::read_to_string(out_dir.join("my_math.vector.cppm")).unwrap();
+    assert!(vec_cpp.contains("export module my_math.vector;"));
+    assert!(vec_cpp.contains("export struct Vec2"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Transpiling crate 'my_math'"));
+    assert!(stdout.contains("2 files transpiled"));
+}
+
+#[test]
+fn test_crate_mode_missing_cargo_toml() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("nonexistent.toml").to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
 }

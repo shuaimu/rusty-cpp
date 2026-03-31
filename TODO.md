@@ -171,15 +171,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Documentation comments `///` → Doxygen `///` (functions, structs, fields)
       - [x] *done* Integration with rusty-cpp analyzer: --verify flag runs rusty-cpp-checker on transpiled output
     - [ ] Phase 12: Whole-crate transpilation (`--crate` mode) - see docs/rusty-cpp-transpiler.md §10
-      - [ ] `--crate` orchestration: add `--crate <Cargo.toml>` and `--output-dir <dir>` CLI flags
-      - [ ] Crate discovery: parse Cargo.toml for crate name, walk `src/` for all `.rs` files, build (rs_path, module_name, cppm_path) list
-      - [ ] Per-file transpilation loop: iterate files, call `transpile()` with correct module name, write each `.cppm` to output dir
-      - [ ] Auto-generate CMakeLists.txt in output dir (reuse `cmake::generate_cmake()`)
+      - [x] *done* `--crate` orchestration: add `--crate <Cargo.toml>` and `--output-dir <dir>` CLI flags
+      - [x] *done* Crate discovery: parse Cargo.toml for crate name, walk `src/` for all `.rs` files, build (rs_path, module_name, cppm_path) list
+      - [x] *done* Per-file transpilation loop: iterate files, call `transpile()` with correct module name, write each `.cppm` to output dir
+      - [x] *done* Auto-generate CMakeLists.txt in output dir (reuse `cmake::generate_cmake()`)
+      - [x] *done* Crate-level `--verify`: run rusty-cpp-checker on each generated `.cppm` file
+      - [x] *done* E2E test: create a multi-file Rust crate, transpile with `--crate`, verify all `.cppm` files and CMakeLists.txt are correct
       - [ ] Handle `mod foo;` declarations: detect external module files and include them in the transpilation set
       - [ ] Handle `use crate::` paths: rewrite `crate::` to the crate's C++20 module name
       - [ ] Crate-level `cargo expand` support: run `cargo expand` once for the whole crate, split expanded output by module
-      - [ ] Crate-level `--verify`: run rusty-cpp-checker on each generated `.cppm` file
-      - [ ] E2E test: create a multi-file Rust crate, transpile with `--crate`, verify all `.cppm` files and CMakeLists.txt are correct
     - [ ] Phase 13: External crate dependency handling
       - [ ] Parse `[dependencies]` from Cargo.toml and detect external crate imports
       - [ ] Emit `// TODO: external crate 'foo'` comment for unresolvable imports

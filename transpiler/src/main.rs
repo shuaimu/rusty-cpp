@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 mod cmake;
@@ -11,8 +11,8 @@ mod types;
 #[command(name = "rusty-cpp-transpiler")]
 #[command(about = "Transpile Rust source code to C++ using rusty-cpp types")]
 struct Cli {
-    /// Input Rust source file (.rs)
-    input: PathBuf,
+    /// Input Rust source file (.rs) — not needed with --crate
+    input: Option<PathBuf>,
 
     /// Output C++ module file (.cppm)
     #[arg(short, long)]
@@ -30,21 +30,116 @@ struct Cli {
     #[arg(long)]
     cmake: Option<PathBuf>,
 
+    /// Transpile an entire Rust crate (provide path to Cargo.toml)
+    #[arg(long)]
+    crate_: Option<PathBuf>,
+
+    /// Output directory for --crate mode (default: ./cpp_out/)
+    #[arg(long, default_value = "cpp_out")]
+    output_dir: PathBuf,
+
     /// Run rusty-cpp analyzer on transpiled output to verify safety
     #[arg(long)]
     verify: bool,
 }
 
+/// Transpile an entire Rust crate in one command.
+/// Walks all .rs files, transpiles each with the correct module name,
+/// and generates CMakeLists.txt.
+fn transpile_crate(
+    cargo_toml_path: &Path,
+    output_dir: &Path,
+    verify: bool,
+) -> Result<(), String> {
+    // Step 1: Parse Cargo.toml and discover source files
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let project_dir = cargo_toml_path
+        .parent()
+        .unwrap_or(Path::new("."));
+    let crate_name = &cargo.package.name;
+    let sources = cmake::collect_source_files(project_dir);
+
+    if sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+
+    // Create output directory
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| format!("Failed to create output dir: {}", e))?;
+
+    println!("Transpiling crate '{}' ({} source files)", crate_name, sources.len());
+
+    // Step 2: Transpile each file with correct module name
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for rs_path in &sources {
+        let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
+        let full_rs_path = project_dir.join(rs_path);
+        let full_cppm_path = output_dir.join(&cppm_path);
+
+        let source = match std::fs::read_to_string(&full_rs_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  Error reading {}: {}", full_rs_path.display(), e);
+                error_count += 1;
+                continue;
+            }
+        };
+
+        match transpile::transpile(&source, Some(&module_name)) {
+            Ok(cpp_output) => {
+                if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
+                    eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
+                    error_count += 1;
+                    continue;
+                }
+                println!("  {} → {} (module: {})", rs_path.display(), cppm_path.display(), module_name);
+                success_count += 1;
+
+                // Optional verification
+                if verify {
+                    match run_rusty_cpp_checker(&full_cppm_path) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            eprintln!("  Verify {}: {}", cppm_path.display(), e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Error transpiling {}: {}", rs_path.display(), e);
+                error_count += 1;
+            }
+        }
+    }
+
+    // Step 3: Generate CMakeLists.txt
+    let cmake_content = cmake::generate_cmake(&cargo, &sources);
+    let cmake_path = output_dir.join("CMakeLists.txt");
+    std::fs::write(&cmake_path, &cmake_content)
+        .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;
+
+    println!("\nGenerated {}", cmake_path.display());
+    println!(
+        "Done: {} files transpiled, {} errors",
+        success_count, error_count
+    );
+
+    if error_count > 0 {
+        Err(format!("{} files failed to transpile", error_count))
+    } else {
+        Ok(())
+    }
+}
+
 /// Run `cargo expand` on the input file's crate to get macro-expanded source.
-/// Requires `cargo-expand` to be installed (`cargo install cargo-expand`).
-fn run_cargo_expand(input_path: &std::path::Path) -> Result<String, String> {
-    // Find the crate root by looking for Cargo.toml
+fn run_cargo_expand(input_path: &Path) -> Result<String, String> {
     let mut dir = input_path
         .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .unwrap_or(Path::new("."))
         .to_path_buf();
 
-    // Walk up to find Cargo.toml
     loop {
         if dir.join("Cargo.toml").exists() {
             break;
@@ -76,11 +171,11 @@ fn run_cargo_expand(input_path: &std::path::Path) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))
 }
 
-fn generate_cmake_from_cargo(cargo_toml_path: &std::path::Path) -> Result<(), String> {
+fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
     let project_dir = cargo_toml_path
         .parent()
-        .unwrap_or(std::path::Path::new("."));
+        .unwrap_or(Path::new("."));
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
@@ -94,7 +189,6 @@ fn generate_cmake_from_cargo(cargo_toml_path: &std::path::Path) -> Result<(), St
 
     println!("Generated {}", cmake_path.display());
 
-    // Also print the file mapping for reference
     println!("\nFile mapping:");
     for source in &sources {
         let (cppm, module) = cmake::map_rs_to_cppm(source, &cargo.package.name);
@@ -106,6 +200,18 @@ fn generate_cmake_from_cargo(cargo_toml_path: &std::path::Path) -> Result<(), St
 
 fn main() {
     let cli = Cli::parse();
+
+    // Handle --crate: transpile entire crate
+    if let Some(ref cargo_toml_path) = cli.crate_ {
+        match transpile_crate(cargo_toml_path, &cli.output_dir, cli.verify) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+        return;
+    }
 
     // Handle --cmake: generate CMakeLists.txt from Cargo.toml
     if let Some(ref cargo_toml_path) = cli.cmake {
@@ -119,7 +225,15 @@ fn main() {
         return;
     }
 
-    let input_path = &cli.input;
+    // Single-file mode: require input
+    let input_path = match &cli.input {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: input file required (or use --crate for whole-crate mode)");
+            process::exit(1);
+        }
+    };
+
     if !input_path.exists() {
         eprintln!("Error: input file '{}' not found", input_path.display());
         process::exit(1);
@@ -171,7 +285,6 @@ fn main() {
         }
     }
 
-    // Optionally verify transpiled output with rusty-cpp analyzer
     if cli.verify {
         match run_rusty_cpp_checker(&output_path) {
             Ok(()) => {
@@ -186,8 +299,7 @@ fn main() {
 }
 
 /// Run the rusty-cpp-checker on the transpiled C++ output to verify safety.
-fn run_rusty_cpp_checker(cpp_path: &std::path::Path) -> Result<(), String> {
-    // Try to find rusty-cpp-checker in PATH or adjacent to this binary
+fn run_rusty_cpp_checker(cpp_path: &Path) -> Result<(), String> {
     let checker = find_checker_binary();
 
     let output = std::process::Command::new(&checker)
@@ -221,9 +333,7 @@ fn run_rusty_cpp_checker(cpp_path: &std::path::Path) -> Result<(), String> {
 }
 
 /// Find the rusty-cpp-checker binary.
-/// Looks in: same directory as this binary, then PATH.
 fn find_checker_binary() -> String {
-    // Try adjacent to this binary
     if let Ok(self_path) = std::env::current_exe() {
         if let Some(dir) = self_path.parent() {
             let adjacent = dir.join("rusty-cpp-checker");
@@ -232,6 +342,5 @@ fn find_checker_binary() -> String {
             }
         }
     }
-    // Fall back to PATH
     "rusty-cpp-checker".to_string()
 }
