@@ -86,6 +86,72 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
     }
 }
 
+/// User-provided type mappings loaded from a TOML file.
+/// Format:
+/// ```toml
+/// # Map crate::Type to C++ type
+/// [serde]
+/// Serialize = "serde::Serialize"
+/// Deserialize = "serde::Deserialize"
+///
+/// [tokio.runtime]
+/// Runtime = "tokio::Runtime"
+/// ```
+///
+/// Each section is a crate/module name, and each key-value maps a Rust type to a C++ type.
+/// The Rust path "crate::Type" maps to the value string.
+#[derive(Default, Clone)]
+pub struct UserTypeMap {
+    /// Maps Rust type path (e.g., "serde::Serialize") to C++ type string.
+    pub mappings: std::collections::HashMap<String, String>,
+}
+
+impl UserTypeMap {
+    /// Load type mappings from a TOML file.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read type map file '{}': {}", path.display(), e))?;
+
+        let table: toml::value::Table = toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse type map file: {}", e))?;
+
+        let mut mappings = std::collections::HashMap::new();
+        Self::flatten_table("", &table, &mut mappings);
+        Ok(Self { mappings })
+    }
+
+    /// Recursively flatten nested TOML tables into dotted paths.
+    /// [serde] Serialize = "..." → "serde::Serialize" = "..."
+    fn flatten_table(
+        prefix: &str,
+        table: &toml::value::Table,
+        result: &mut std::collections::HashMap<String, String>,
+    ) {
+        for (key, value) in table {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{}::{}", prefix, key)
+            };
+
+            match value {
+                toml::Value::String(s) => {
+                    result.insert(path, s.clone());
+                }
+                toml::Value::Table(t) => {
+                    Self::flatten_table(&path, t, result);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Look up a type path in the user mappings.
+    pub fn lookup(&self, rust_path: &str) -> Option<&str> {
+        self.mappings.get(rust_path).map(|s| s.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +243,43 @@ mod tests {
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
         assert_eq!(map_function_path("thread::spawn"), Some("rusty::thread::spawn"));
         assert_eq!(map_function_path("Unknown::method"), None);
+    }
+
+    #[test]
+    fn test_user_type_map_flat() {
+        let toml_str = r#"
+            [serde]
+            Serialize = "serde::Serialize"
+            Deserialize = "serde::Deserialize"
+        "#;
+        let table: toml::value::Table = toml::from_str(toml_str).unwrap();
+        let mut mappings = std::collections::HashMap::new();
+        UserTypeMap::flatten_table("", &table, &mut mappings);
+        assert_eq!(mappings.get("serde::Serialize").map(|s| s.as_str()), Some("serde::Serialize"));
+        assert_eq!(mappings.get("serde::Deserialize").map(|s| s.as_str()), Some("serde::Deserialize"));
+    }
+
+    #[test]
+    fn test_user_type_map_nested() {
+        let toml_str = r#"
+            [tokio]
+            [tokio.runtime]
+            Runtime = "tokio::runtime::Runtime"
+        "#;
+        let table: toml::value::Table = toml::from_str(toml_str).unwrap();
+        let mut mappings = std::collections::HashMap::new();
+        UserTypeMap::flatten_table("", &table, &mut mappings);
+        assert_eq!(
+            mappings.get("tokio::runtime::Runtime").map(|s| s.as_str()),
+            Some("tokio::runtime::Runtime")
+        );
+    }
+
+    #[test]
+    fn test_user_type_map_lookup() {
+        let mut map = UserTypeMap::default();
+        map.mappings.insert("serde::Serialize".to_string(), "/* Serialize */".to_string());
+        assert_eq!(map.lookup("serde::Serialize"), Some("/* Serialize */"));
+        assert_eq!(map.lookup("unknown::Type"), None);
     }
 }

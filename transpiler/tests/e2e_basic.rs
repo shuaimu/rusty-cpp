@@ -350,3 +350,32 @@ fn test_crate_mode_missing_cargo_toml() {
 
     assert!(!output.status.success());
 }
+
+#[test]
+fn test_type_map_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    let output_path = dir.path().join("test.cppm");
+    let type_map = dir.path().join("types.toml");
+
+    std::fs::write(&input, "fn f(s: serde::Serialize) {}").unwrap();
+    std::fs::write(
+        &type_map,
+        "[serde]\nSerialize = \"custom::Serialize\"\n",
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("--type-map")
+        .arg(type_map.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    assert!(cpp.contains("custom::Serialize"));
+}

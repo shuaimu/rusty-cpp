@@ -1,12 +1,22 @@
 use crate::codegen::CodeGen;
+use crate::types::UserTypeMap;
 
 /// Transpile Rust source code to C++ code.
 /// If `module_name` is provided, emit C++20 module declarations.
 pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
+    transpile_with_type_map(rust_source, module_name, &UserTypeMap::default())
+}
+
+/// Transpile with user-provided type mappings for external crate types.
+pub fn transpile_with_type_map(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+) -> Result<String, String> {
     let file: syn::File =
         syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
 
-    let mut codegen = CodeGen::new();
+    let mut codegen = CodeGen::with_type_map(type_map.clone());
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
 }

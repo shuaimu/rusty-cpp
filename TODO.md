@@ -183,7 +183,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [ ] Phase 13: External crate dependency handling
       - [x] *done* Parse `[dependencies]` from Cargo.toml and detect external crate imports
       - [x] *done* Emit `// TODO: external crate 'foo'` comment for unresolvable imports
-      - [ ] Support user-provided type mapping files (`--type-map <file>`) for external crate types
+      - [x] *done* Support user-provided type mapping files (`--type-map <file>`) for external crate types
       - [ ] Detect workspace members and path dependencies → recursively transpile them
     - [ ] Phase 14: Recursive dependency transpilation
       - [ ] Build dependency graph from Cargo.toml `[dependencies]` with `path = "..."` entries

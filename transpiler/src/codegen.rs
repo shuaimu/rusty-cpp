@@ -25,6 +25,8 @@ pub struct CodeGen {
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
+    /// User-provided type mappings for external crate types.
+    user_type_map: types::UserTypeMap,
 }
 
 impl CodeGen {
@@ -38,6 +40,15 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
             in_async: false,
+            user_type_map: types::UserTypeMap::default(),
+        }
+    }
+
+    /// Create a CodeGen with user-provided type mappings.
+    pub fn with_type_map(type_map: types::UserTypeMap) -> Self {
+        Self {
+            user_type_map: type_map,
+            ..Self::new()
         }
     }
 
@@ -2029,6 +2040,11 @@ impl CodeGen {
             return "(*this)".to_string();
         }
 
+        // Try user-provided type mappings first (highest priority)
+        if let Some(cpp_type) = self.user_type_map.lookup(&joined) {
+            return cpp_type.to_string();
+        }
+
         // Try mapping as a function/method path (e.g., Box::new → rusty::Box::make)
         if let Some(cpp_fn) = types::map_function_path(&joined) {
             return cpp_fn.to_string();
@@ -2440,6 +2456,7 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
             in_async: false,
+            user_type_map: types::UserTypeMap::default(),
         }
     }
 

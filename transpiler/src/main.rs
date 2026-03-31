@@ -41,6 +41,10 @@ struct Cli {
     /// Run rusty-cpp analyzer on transpiled output to verify safety
     #[arg(long)]
     verify: bool,
+
+    /// User-provided type mapping file for external crate types (TOML format)
+    #[arg(long)]
+    type_map: Option<PathBuf>,
 }
 
 /// Transpile an entire Rust crate in one command.
@@ -49,6 +53,7 @@ struct Cli {
 fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
+    type_map: &types::UserTypeMap,
     verify: bool,
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
@@ -102,7 +107,7 @@ fn transpile_crate(
             }
         };
 
-        match transpile::transpile(&source, Some(&module_name)) {
+        match transpile::transpile_with_type_map(&source, Some(&module_name), type_map) {
             Ok(cpp_output) => {
                 if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
                     eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
@@ -216,9 +221,25 @@ fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
 fn main() {
     let cli = Cli::parse();
 
+    // Load user type map if provided
+    let type_map = if let Some(ref type_map_path) = cli.type_map {
+        match types::UserTypeMap::load(type_map_path) {
+            Ok(tm) => {
+                println!("Loaded {} type mappings from {}", tm.mappings.len(), type_map_path.display());
+                tm
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        types::UserTypeMap::default()
+    };
+
     // Handle --crate: transpile entire crate
     if let Some(ref cargo_toml_path) = cli.crate_ {
-        match transpile_crate(cargo_toml_path, &cli.output_dir, cli.verify) {
+        match transpile_crate(cargo_toml_path, &cli.output_dir, &type_map, cli.verify) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -278,7 +299,7 @@ fn main() {
         }
     };
 
-    let cpp_output = match transpile::transpile(&source, cli.module_name.as_deref()) {
+    let cpp_output = match transpile::transpile_with_type_map(&source, cli.module_name.as_deref(), &type_map) {
         Ok(output) => output,
         Err(e) => {
             eprintln!("Transpilation error: {}", e);
