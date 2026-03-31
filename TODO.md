@@ -52,7 +52,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* Phase 0: Project scaffolding
       - [x] *done* Create `transpiler/` directory with its own Cargo.toml (binary crate, part of workspace)
       - [x] *done* Add `syn` (full features) and `quote` as dependencies for Rust AST parsing
-      - [ ] Add `cargo-expand` integration for macro expansion before transpilation
+      - [x] *done* Add `cargo-expand` integration for macro expansion before transpilation (--expand flag)
       - [x] *done* Set up CLI: `rusty-cpp-transpiler input.rs -o output.cppm` with basic arg parsing
       - [x] *done* Set up end-to-end test harness: transpile .rs → .cppm, compile with g++/clang++, run and compare output
     - [x] *done* Phase 1: Core language (MVP) - primitive types, functions, structs, control flow
@@ -145,7 +145,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `.await` → `co_await`
       - [x] *done* Async error propagation: `?` inside async → `RUSTY_CO_TRY()` (uses `co_return`)
     - [x] *done* Phase 9: Macros and derive
-      - [ ] Integrate `cargo expand` as pre-processing step to flatten all macros
+      - [x] *done* Integrate `cargo expand` as pre-processing step to flatten all macros (via --expand flag)
       - [x] *done* `println!`/`eprintln!`/`print!` → `std::println`/`std::print` (C++23)
       - [x] *done* `format!` → `std::format` (C++23)
       - [x] *done* `vec![1,2,3]` → `rusty::Vec{1,2,3}` (initializer list)

@@ -144,3 +144,45 @@ enum Shape {
     assert!(cpp.contains("struct Shape_None"));
     assert!(cpp.contains("using Shape = std::variant<"));
 }
+
+#[test]
+fn test_expand_flag_without_cargo_toml() {
+    // --expand on a file with no Cargo.toml should fail gracefully
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    std::fs::write(&input, "fn main() {}").unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("--expand")
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cargo.toml") || stderr.contains("cargo expand"));
+}
+
+#[test]
+fn test_module_name_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("lib.rs");
+    let output_path = dir.path().join("lib.cppm");
+
+    std::fs::write(&input, "pub fn hello() {}").unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("-m")
+        .arg("my_crate")
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success());
+
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    assert!(cpp.contains("export module my_crate;"));
+    assert!(cpp.contains("export void hello()"));
+}

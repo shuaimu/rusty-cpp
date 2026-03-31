@@ -21,9 +21,50 @@ struct Cli {
     #[arg(short, long)]
     module_name: Option<String>,
 
-    /// Expand macros before transpilation (requires cargo-expand)
+    /// Expand macros before transpilation (requires cargo-expand installed)
     #[arg(long)]
     expand: bool,
+}
+
+/// Run `cargo expand` on the input file's crate to get macro-expanded source.
+/// Requires `cargo-expand` to be installed (`cargo install cargo-expand`).
+fn run_cargo_expand(input_path: &std::path::Path) -> Result<String, String> {
+    // Find the crate root by looking for Cargo.toml
+    let mut dir = input_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    // Walk up to find Cargo.toml
+    loop {
+        if dir.join("Cargo.toml").exists() {
+            break;
+        }
+        if !dir.pop() {
+            return Err("Could not find Cargo.toml for cargo expand".to_string());
+        }
+    }
+
+    eprintln!("Running cargo expand in {}...", dir.display());
+
+    let output = std::process::Command::new("cargo")
+        .arg("expand")
+        .arg("--theme=none")
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to run `cargo expand`: {}. Install with: cargo install cargo-expand",
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("cargo expand failed:\n{}", stderr));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))
 }
 
 fn main() {
@@ -41,11 +82,21 @@ fn main() {
         p
     });
 
-    let source = match std::fs::read_to_string(input_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading '{}': {}", input_path.display(), e);
-            process::exit(1);
+    let source = if cli.expand {
+        match run_cargo_expand(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        match std::fs::read_to_string(input_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading '{}': {}", input_path.display(), e);
+                process::exit(1);
+            }
         }
     };
 
