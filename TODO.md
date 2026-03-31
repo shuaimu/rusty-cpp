@@ -191,12 +191,50 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Generate CMakeLists.txt with `add_subdirectory()` and `target_link_libraries()` for each dependency
       - [x] *done* E2E test: multi-crate workspace transpilation
     - [ ] Phase 15: Real-world crate transpilation fixes (see docs/rusty-cpp-transpiler.md §10.7)
-      - [ ] Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias (~50 LOC)
-      - [ ] Gap 2: Map `core::` paths same as `std::` in emit_use_tree (~5 LOC)
-      - [ ] Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations (~30 LOC)
-      - [ ] Gap 4: Handle unhandled syn::Item kinds (ExternCrate, top-level Macro, macro_rules) (~20 LOC)
-      - [ ] Gap 5: Nested function definitions → hoist to module scope or convert to lambdas (~40 LOC)
-      - [ ] Gap 6: Slice/range syntax — open ranges `..`, `..len`, index with range (~30 LOC)
-      - [ ] Gap 7: Array repeat initializer `[0u8; 256]` and byte string literals `b"..."` (~20 LOC)
-      - [ ] Gap 8: `Self` in trait method signatures — leave as-is or map to auto (~10 LOC)
-      - [ ] Re-test `either` crate: verify transpiled output compiles with g++/clang++
+      - [ ] Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias
+        - [ ] In `emit_enum`, detect generics on `syn::ItemEnum` and emit `template<typename L, typename R>` on each variant struct
+        - [ ] Emit variant alias with template args: `using Either = std::variant<Either_Left<L,R>, Either_Right<L,R>>`
+        - [ ] For recursive generic enums, forward-declare with template params: `template<typename T> struct List;`
+        - [ ] Add unit tests: generic enum with 1 param, 2 params, nested generic types in fields
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 1 to mark as done with design notes
+      - [ ] Gap 2: Map `core::` and `alloc::` paths same as `std::` in emit_use_tree
+        - [ ] In `emit_use_tree`, add `"core"` and `"alloc"` cases that map to `std::`
+        - [ ] Add unit test: `use core::convert::AsRef` → `using std::convert::AsRef`
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 2 to mark as done
+      - [ ] Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations
+        - [ ] In `emit_use`, detect when use tree is `Path { tree: Group }` and expand into multiple `using` lines
+        - [ ] Handle nested groups: `use std::io::{self, Read, Write}` → 3 separate using declarations
+        - [ ] Handle `self` in groups: `use std::io::{self}` → `using std::io`
+        - [ ] Add unit tests: simple group, nested group, group with self, group with rename
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 3 to mark as done
+      - [ ] Gap 4: Handle unhandled syn::Item kinds
+        - [ ] `Item::ExternCrate` → emit `// extern crate foo` comment (no-op in C++20 modules)
+        - [ ] `Item::Macro` (top-level `macro_rules!` definitions) → emit `// macro_rules! name { ... }` comment (compile-time only)
+        - [ ] Add unit tests for ExternCrate and top-level Macro items
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 4 to mark as done
+      - [ ] Gap 5: Nested function definitions → convert to lambdas
+        - [ ] In `emit_stmt`, detect `Stmt::Item(Item::Fn(...))` inside a function body
+        - [ ] Emit as `const auto fn_name = [&](params) -> ret { body };` instead of nested function
+        - [ ] Preserve original name so call sites work unchanged
+        - [ ] Add unit tests: nested fn called, nested fn with params/return type, nested fn with captures
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 5 to mark as done
+      - [ ] Gap 6: Slice/range syntax — open ranges and index-with-range
+        - [ ] Handle `Expr::Range` with missing start (e.g., `..len`) → `rusty::range(0, len)`
+        - [ ] Handle `Expr::Range` with missing end (e.g., `start..`) → `rusty::range_from(start)`
+        - [ ] Handle `Expr::Range` with both missing (e.g., `..`) → `rusty::range_full()`
+        - [ ] Handle inclusive ranges `..=` (RangeInclusive)
+        - [ ] Add unit tests for each range variant
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 6 to mark as done
+      - [ ] Gap 7: Array repeat initializer and byte string literals
+        - [ ] Handle `Expr::Repeat` (`[0u8; 256]`) → `std::array<uint8_t, 256>` filled with value
+        - [ ] Handle `Lit::ByteStr` (`b"hello"`) → `std::array<uint8_t, N>` or `uint8_t[]` literal
+        - [ ] Add unit tests for repeat array and byte string
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 7 to mark as done
+      - [ ] Gap 8: `Self` in trait method signatures
+        - [ ] In trait method emission, when return type or param type is `Self`, emit `auto` for return or the facade's proxy type for params
+        - [ ] Add unit test: trait with `fn new() -> Self` and `fn consume(self)`
+        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 8 to mark as done
+      - [ ] Re-test `either` crate after all gaps fixed
+        - [ ] Run `rusty-cpp-transpiler --crate` on either and verify zero `// TODO:` comments in output
+        - [ ] Attempt to compile transpiled output with `g++ -std=c++20` (document any remaining compiler errors)
+        - [ ] Document results in docs/rusty-cpp-transpiler.md §10.7 as a status update
