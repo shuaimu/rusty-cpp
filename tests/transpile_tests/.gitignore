@@ -1,0 +1,16 @@
+# Ignore downloaded crate source files
+# Only track the test script and expected outputs
+*/src/
+*/Cargo.toml
+*/Cargo.lock
+*/.git/
+*/target/
+
+# Transpiled output
+*/cpp_out/
+*.cppm
+
+# But track these:
+!run_tests.sh
+!README.md
+!.gitignore
