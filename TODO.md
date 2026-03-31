@@ -62,19 +62,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Expression-to-statement conversion: detect tail expressions (no semicolon) and insert `return`
       - [x] *done* Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
       - [x] *done* `break` with value from loop → immediately-invoked lambda wrapper
-      - [ ] References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
+      - [x] *done* References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
       - [ ] References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
       - [ ] Implicit move insertion: insert `std::move()` at every Rust move point
-      - [ ] Lifetime erasure: strip all lifetime annotations from output
-      - [ ] Struct definitions: merge all `impl` blocks into single struct/class definition
-      - [ ] Method receiver mapping: `&self` → const method, `&mut self` → non-const, `self` → by-value
-      - [ ] Associated functions (`Self::new(...)`) → static methods
-      - [ ] C-like enums → `enum class`
-      - [ ] Tuple types → `std::tuple`, destructuring → structured bindings
-      - [ ] Arrays `[T; N]` → `std::array<T, N>`, slices `&[T]` → `std::span<const T>`
-      - [ ] Type aliases → `using` declarations
-      - [ ] Unsafe blocks → emit raw code without safety wrappers
-      - [ ] FFI `extern "C"` → `extern "C"` (direct mapping)
+      - [x] *done* Lifetime erasure: strip all lifetime annotations from output
+      - [x] *done* Struct definitions: merge all `impl` blocks into single struct/class definition
+      - [x] *done* Method receiver mapping: `&self` → const method, `&mut self` → non-const, `self` → by-value
+      - [x] *done* Associated functions (`Self::new(...)`) → static methods (+ C++ keyword escaping: `new`→`new_`)
+      - [x] *done* C-like enums → `enum class` (done in Phase 0)
+      - [x] *done* Tuple types → `std::tuple`, destructuring → structured bindings
+      - [x] *done* Arrays `[T; N]` → `std::array<T, N>`, slices `&[T]` → `std::span<const T>` (done in Phase 0)
+      - [x] *done* Type aliases → `using` declarations (done in Phase 0)
+      - [x] *done* Unsafe blocks → emit raw code with `// unsafe` comment
+      - [x] *done* FFI `extern "C"` → `extern "C"` (functions and blocks)
     - [ ] Phase 2: rusty-cpp type mapping - standard library types
       - [ ] Smart pointers: Box→rusty::Box, Rc→rusty::Rc, Arc→rusty::Arc, Weak→rusty::Weak
       - [ ] Interior mutability: Cell→rusty::Cell, RefCell→rusty::RefCell, UnsafeCell→rusty::UnsafeCell
