@@ -55,7 +55,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Add `cargo-expand` integration for macro expansion before transpilation
       - [x] *done* Set up CLI: `rusty-cpp-transpiler input.rs -o output.cppm` with basic arg parsing
       - [x] *done* Set up end-to-end test harness: transpile .rs → .cppm, compile with g++/clang++, run and compare output
-    - [ ] Phase 1: Core language (MVP) - primitive types, functions, structs, control flow
+    - [x] *done* Phase 1: Core language (MVP) - primitive types, functions, structs, control flow
       - [x] *done* Primitive type mapping: i32→int32_t, f64→double, bool→bool, char→char32_t, usize→size_t, etc.
       - [x] *done* Variable declarations: `let x = ...` → `const auto x = ...`, `let mut x = ...` → `auto x = ...`
       - [x] *done* Function declarations: Rust fn → C++ function with explicit return statements
@@ -64,7 +64,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `break` with value from loop → immediately-invoked lambda wrapper
       - [x] *done* References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
       - [x] *done* References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
-      - [ ] Implicit move insertion: insert `std::move()` at every Rust move point
+      - [x] *done* Implicit move insertion: insert `std::move()` at every Rust move point
       - [x] *done* Lifetime erasure: strip all lifetime annotations from output
       - [x] *done* Struct definitions: merge all `impl` blocks into single struct/class definition
       - [x] *done* Method receiver mapping: `&self` → const method, `&mut self` → non-const, `self` → by-value

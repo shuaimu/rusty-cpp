@@ -596,7 +596,8 @@ impl CodeGen {
                             ));
                         }
                     } else {
-                        let expr_str = self.emit_expr_to_string(&init.expr);
+                        // For `let y = x` where x is a local variable → insert std::move
+                        let expr_str = self.emit_expr_maybe_move(&init.expr);
                         self.writeln(&format!(
                             "{}{} {} = {};",
                             qualifier, type_str, name, expr_str
@@ -670,7 +671,7 @@ impl CodeGen {
                 let args: Vec<String> = call
                     .args
                     .iter()
-                    .map(|a| self.emit_expr_to_string(a))
+                    .map(|a| self.emit_expr_maybe_move(a))
                     .collect();
                 format!("{}({})", func, args.join(", "))
             }
@@ -679,7 +680,7 @@ impl CodeGen {
                 let args: Vec<String> = mc
                     .args
                     .iter()
-                    .map(|a| self.emit_expr_to_string(a))
+                    .map(|a| self.emit_expr_maybe_move(a))
                     .collect();
                 // Check if receiver is `self` — in C++ methods, call directly
                 let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
@@ -968,6 +969,65 @@ impl CodeGen {
             syn::Type::Never(_) => "[[noreturn]] void".to_string(),
             syn::Type::Infer(_) => "auto".to_string(),
             _ => "/* TODO: type */".to_string(),
+        }
+    }
+
+    /// Emit an expression, wrapping local variable paths in std::move().
+    /// In Rust, passing a non-Copy variable by value moves it. In C++, we need
+    /// explicit std::move() to get move semantics. For Copy types, std::move()
+    /// is a harmless no-op (the copy still happens).
+    ///
+    /// We wrap in std::move when:
+    /// - The expression is a simple variable path (single ident)
+    /// - It's not `self`, `true`, `false`, `Self`, or an ALL_CAPS constant
+    /// - It's not a reference expression (&x)
+    ///
+    /// We do NOT wrap:
+    /// - Literals (1, "hello", true)
+    /// - Reference expressions (&x, &mut x) — these borrow, not move
+    /// - Complex expressions (a + b, foo()) — these produce temporaries
+    /// - Type paths / constants (ALL_CAPS names)
+    fn emit_expr_maybe_move(&self, expr: &syn::Expr) -> String {
+        if self.should_insert_move(expr) {
+            let inner = self.emit_expr_to_string(expr);
+            format!("std::move({})", inner)
+        } else {
+            self.emit_expr_to_string(expr)
+        }
+    }
+
+    /// Determine whether an expression represents a local variable that should
+    /// be wrapped in std::move() when used by value.
+    fn should_insert_move(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Path(path) => {
+                // Only single-segment paths (local variables)
+                if path.path.segments.len() != 1 {
+                    return false;
+                }
+                let name = path.path.segments[0].ident.to_string();
+
+                // Skip keywords and special names
+                if matches!(
+                    name.as_str(),
+                    "self" | "Self" | "true" | "false" | "None" | "Some" | "Ok" | "Err"
+                ) {
+                    return false;
+                }
+
+                // Skip ALL_CAPS names (likely constants)
+                if name.chars().all(|c| c.is_uppercase() || c == '_') && name.len() > 1 {
+                    return false;
+                }
+
+                // Skip names that start with uppercase (likely type names or enum variants)
+                if name.starts_with(|c: char| c.is_uppercase()) {
+                    return false;
+                }
+
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1716,5 +1776,91 @@ mod tests {
         let out = transpile_str("fn f() { let x = 5; let mut r = &x; }");
         assert!(out.contains("auto& r = x;") || out.contains("const auto& r = x;"));
         assert!(!out.contains("auto* r"));
+    }
+
+    // ── Implicit move insertion tests ───────────────────────────
+
+    #[test]
+    fn test_move_on_variable_binding() {
+        // let b = a → auto b = std::move(a)
+        let out = transpile_str("fn f() { let a = 1; let b = a; }");
+        assert!(out.contains("std::move(a)"));
+    }
+
+    #[test]
+    fn test_move_on_function_call_arg() {
+        // consume(x) → consume(std::move(x))
+        let out = transpile_str("fn f() { let x = 1; consume(x); }");
+        assert!(out.contains("consume(std::move(x))"));
+    }
+
+    #[test]
+    fn test_move_on_method_call_arg() {
+        // v.push(item) → v.push(std::move(item))
+        let out = transpile_str("fn f() { let item = 1; v.push(item); }");
+        assert!(out.contains("v.push(std::move(item))"));
+    }
+
+    #[test]
+    fn test_no_move_on_literal() {
+        let out = transpile_str("fn f() { let x = 42; consume(42); }");
+        assert!(!out.contains("std::move(42)"));
+        assert!(out.contains("consume(42)"));
+    }
+
+    #[test]
+    fn test_no_move_on_reference() {
+        // &x should NOT be wrapped in move
+        let out = transpile_str("fn f() { let x = 1; let r = &x; }");
+        assert!(out.contains("const auto& r = x;"));
+        assert!(!out.contains("std::move"));
+    }
+
+    #[test]
+    fn test_no_move_on_ref_arg() {
+        // borrow(&x) should not move — the & creates a reference
+        let out = transpile_str("fn f() { let x = 1; borrow(&x); }");
+        assert!(!out.contains("std::move(&x)"));
+    }
+
+    #[test]
+    fn test_no_move_on_constant() {
+        // ALL_CAPS names are constants, not moved
+        let out = transpile_str("fn f() { let x = MAX_SIZE; }");
+        assert!(!out.contains("std::move(MAX_SIZE)"));
+    }
+
+    #[test]
+    fn test_no_move_on_type_name() {
+        // Uppercase names are types/constructors, not moved
+        let out = transpile_str("fn f() { let x = Default; }");
+        assert!(!out.contains("std::move(Default)"));
+    }
+
+    #[test]
+    fn test_no_move_on_bool() {
+        let out = transpile_str("fn f() { let x = true; }");
+        assert!(!out.contains("std::move"));
+    }
+
+    #[test]
+    fn test_no_move_on_none() {
+        let out = transpile_str("fn f() { let x = None; }");
+        assert!(!out.contains("std::move"));
+    }
+
+    #[test]
+    fn test_move_multiple_args() {
+        let out = transpile_str("fn f() { let a = 1; let b = 2; process(a, b); }");
+        assert!(out.contains("process(std::move(a), std::move(b))"));
+    }
+
+    #[test]
+    fn test_no_move_on_expression() {
+        // Complex expressions produce temporaries — no need for std::move
+        let out = transpile_str("fn f() { let x = a + b; }");
+        assert!(!out.contains("std::move(a + b)"));
+        // But the individual variables a and b don't get moved in a binary expr
+        // because binary ops borrow their operands
     }
 }
