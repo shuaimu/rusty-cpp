@@ -2080,6 +2080,26 @@ impl CodeGen {
                 }
                 "auto".to_string()
             }
+            syn::Type::BareFn(bf) => {
+                // fn(A, B) -> C → rusty::SafeFn<C(A, B)>
+                // unsafe fn(A, B) -> C → rusty::UnsafeFn<C(A, B)>
+                let param_types: Vec<String> = bf
+                    .inputs
+                    .iter()
+                    .map(|arg| self.map_type(&arg.ty))
+                    .collect();
+                let return_type = match &bf.output {
+                    syn::ReturnType::Default => "void".to_string(),
+                    syn::ReturnType::Type(_, ty) => self.map_type(ty),
+                };
+                let wrapper = if bf.unsafety.is_some() {
+                    "rusty::UnsafeFn"
+                } else {
+                    "rusty::SafeFn"
+                };
+                format!("{}<{}({})>", wrapper, return_type, param_types.join(", "))
+            }
+            syn::Type::Paren(p) => self.map_type(&p.elem),
             _ => "/* TODO: type */".to_string(),
         }
     }
@@ -4149,5 +4169,39 @@ mod tests {
         );
         assert!(out.contains("int32_t add("));
         assert!(!out.contains("operator+"));
+    }
+
+    // ── Function pointer type tests ─────────────────────────────
+
+    #[test]
+    fn test_fn_pointer_safe() {
+        let out = transpile_str("fn f(callback: fn(i32) -> i32) {}");
+        assert!(out.contains("rusty::SafeFn<int32_t(int32_t)>"));
+    }
+
+    #[test]
+    fn test_fn_pointer_unsafe() {
+        let out = transpile_str("fn f(callback: unsafe fn(i32) -> i32) {}");
+        assert!(out.contains("rusty::UnsafeFn<int32_t(int32_t)>"));
+    }
+
+    #[test]
+    fn test_fn_pointer_void() {
+        let out = transpile_str("fn f(callback: fn()) {}");
+        assert!(out.contains("rusty::SafeFn<void()>"));
+    }
+
+    #[test]
+    fn test_fn_pointer_multi_param() {
+        let out = transpile_str("fn f(callback: fn(i32, f64) -> bool) {}");
+        assert!(out.contains("rusty::SafeFn<bool(int32_t, double)>"));
+    }
+
+    #[test]
+    fn test_pub_crate_not_exported() {
+        // pub(crate) should not generate export in module mode
+        let out = transpile_str_module("pub(crate) fn internal() {}", "my_crate");
+        assert!(!out.contains("export void internal"));
+        assert!(out.contains("void internal()"));
     }
 }

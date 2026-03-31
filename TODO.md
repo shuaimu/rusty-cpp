@@ -82,7 +82,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Strings: String→rusty::String, &str→std::string_view
       - [x] *done* Error handling: Option→rusty::Option, Result→rusty::Result
       - [x] *done* Concurrency: Mutex→rusty::Mutex, RwLock→rusty::RwLock, Condvar→rusty::Condvar, Barrier→rusty::Barrier, Once→rusty::Once
-      - [ ] Function pointers: fn()→rusty::SafeFn, unsafe fn()→rusty::UnsafeFn
+      - [x] *done* Function pointers: fn()→rusty::SafeFn, unsafe fn()→rusty::UnsafeFn
       - [x] *done* Thread spawn: thread::spawn→rusty::thread::spawn (via function path mapping)
       - [x] *done* MaybeUninit→rusty::MaybeUninit
       - [x] *done* Function path mapping: Box::new→rusty::Box::make, String::from, Vec::new, etc.
@@ -130,7 +130,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `pub mod foo;` → `export import crate_name.foo;`
       - [x] *done* `pub` items → `export` declarations (functions, structs)
       - [x] *done* Private items → non-exported (module-internal)
-      - [ ] `pub(crate)` → module-visible but not exported
+      - [x] *done* `pub(crate)` → module-visible but not exported (naturally handled: Restricted != Public)
       - [x] *done* `use` statements → `using` declarations
       - [x] *done* `pub use` re-exports → `export using`
       - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm` (build system level)
@@ -143,7 +143,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Implement basic `Executor` event loop (spawn + run)
       - [x] *done* `async fn` → `rusty::Task<T>` returning coroutine with `co_await`/`co_return`
       - [x] *done* `.await` → `co_await`
-      - [ ] Async error propagation: `?` inside async → manual check + `co_return` Err
+      - [x] *done* Async error propagation: `?` inside async → `RUSTY_CO_TRY()` (uses `co_return`)
     - [x] *done* Phase 9: Macros and derive
       - [ ] Integrate `cargo expand` as pre-processing step to flatten all macros
       - [x] *done* `println!`/`eprintln!`/`print!` → `std::println`/`std::print` (C++23)
