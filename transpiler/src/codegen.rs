@@ -13,6 +13,10 @@ pub struct CodeGen {
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     current_struct: Option<String>,
+    /// Set of variable names that are reassigned in the current block.
+    /// Used for reference rebinding detection: if a `let mut r: &T` variable
+    /// is reassigned, emit it as a pointer instead of a reference.
+    reassigned_vars: std::collections::HashSet<String>,
 }
 
 impl CodeGen {
@@ -22,6 +26,7 @@ impl CodeGen {
             indent: 0,
             impl_blocks: HashMap::new(),
             current_struct: None,
+            reassigned_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -368,6 +373,10 @@ impl CodeGen {
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
+        // Pre-scan: find variables that are reassigned (for reference rebinding detection)
+        let reassigned = collect_reassigned_vars(&block.stmts);
+        let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
+
         let stmts = &block.stmts;
         let len = stmts.len();
 
@@ -375,6 +384,8 @@ impl CodeGen {
             let is_last = i == len - 1;
             self.emit_stmt(stmt, is_last);
         }
+
+        self.reassigned_vars = prev;
     }
 
     fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -563,6 +574,27 @@ impl CodeGen {
                         self.writeln("}");
                         self.indent -= 1;
                         self.writeln("}();");
+                    } else if self.is_ref_init(&init.expr) {
+                        let inner = self.extract_ref_inner(&init.expr);
+                        if is_mut && self.reassigned_vars.contains(&name.to_string()) {
+                            // Reference rebinding detected: `let mut r = &x; ... r = &y;`
+                            // Emit as pointer instead of reference
+                            let ptr_type = self.map_ref_as_pointer_type(local, &init.expr);
+                            self.writeln(&format!(
+                                "{} {} = &{};",
+                                ptr_type, name, inner
+                            ));
+                        } else {
+                            // No rebinding: `let r = &x` → `const auto& r = x`
+                            //               `let r = &mut x` → `auto& r = x`
+                            let is_mut_ref = matches!(&*init.expr, syn::Expr::Reference(r) if r.mutability.is_some());
+                            let ref_qualifier = if is_mut_ref { "" } else { "const " };
+                            let ref_type = self.map_ref_as_ref_type(local, &init.expr);
+                            self.writeln(&format!(
+                                "{}{} {} = {};",
+                                ref_qualifier, ref_type, name, inner
+                            ));
+                        }
                     } else {
                         let expr_str = self.emit_expr_to_string(&init.expr);
                         self.writeln(&format!(
@@ -939,6 +971,74 @@ impl CodeGen {
         }
     }
 
+    /// Check if an initializer expression is a reference (`&expr` or `&mut expr`).
+    fn is_ref_init(&self, expr: &syn::Expr) -> bool {
+        matches!(expr, syn::Expr::Reference(_))
+    }
+
+    /// Extract the inner expression from a reference expression, as a string.
+    fn extract_ref_inner(&self, expr: &syn::Expr) -> String {
+        if let syn::Expr::Reference(r) = expr {
+            self.emit_expr_to_string(&r.expr)
+        } else {
+            self.emit_expr_to_string(expr)
+        }
+    }
+
+    /// For a reference binding that will become a pointer, determine the pointer type.
+    /// `let mut r = &x` where x: T → `const T*`
+    /// `let mut r = &mut x` where x: T → `T*`
+    /// `let mut r: &T = &x` → `const T*`
+    /// `let mut r: &mut T = &mut x` → `T*`
+    fn map_ref_as_pointer_type(&self, local: &syn::Local, init_expr: &syn::Expr) -> String {
+        // If there's a type annotation, use it
+        if let Some(ty) = get_local_type(local) {
+            if let syn::Type::Reference(r) = ty {
+                let inner = self.map_type(&r.elem);
+                return if r.mutability.is_some() {
+                    format!("{}*", inner)
+                } else {
+                    format!("const {}*", inner)
+                };
+            }
+        }
+        // Infer from the init expression
+        if let syn::Expr::Reference(r) = init_expr {
+            if r.mutability.is_some() {
+                "auto*".to_string()
+            } else {
+                "const auto*".to_string()
+            }
+        } else {
+            "auto*".to_string()
+        }
+    }
+
+    /// For a non-rebound reference binding, determine the reference type.
+    /// `let r = &x` → `auto&` (the const qualifier is added separately)
+    /// `let r = &mut x` → `auto&` (mutable, no const)
+    fn map_ref_as_ref_type(&self, local: &syn::Local, init_expr: &syn::Expr) -> String {
+        if let Some(ty) = get_local_type(local) {
+            if let syn::Type::Reference(r) = ty {
+                let inner = self.map_type(&r.elem);
+                return if r.mutability.is_some() {
+                    format!("{}&", inner)
+                } else {
+                    format!("const {}&", inner)
+                };
+            }
+        }
+        if let syn::Expr::Reference(r) = init_expr {
+            if r.mutability.is_some() {
+                "auto&".to_string()
+            } else {
+                "auto&".to_string()
+            }
+        } else {
+            "auto&".to_string()
+        }
+    }
+
     /// If a block contains exactly one expression (tail expr), return its string form.
     fn block_single_expr(&self, block: &syn::Block) -> Option<String> {
         if block.stmts.len() == 1 {
@@ -996,6 +1096,73 @@ fn escape_cpp_keyword(name: &str) -> String {
             format!("{}_", name)
         }
         _ => name.to_string(),
+    }
+}
+
+/// Scan a list of statements and collect the names of variables that are reassigned.
+/// This is used for reference rebinding detection: `let mut r = &x; r = &y;`
+/// means `r` should be emitted as a pointer, not a reference.
+fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+    let mut result = std::collections::HashSet::new();
+    for stmt in stmts {
+        collect_assignments_in_stmt(stmt, &mut result);
+    }
+    result
+}
+
+/// Recursively collect assignment targets from a statement.
+fn collect_assignments_in_stmt(stmt: &syn::Stmt, result: &mut std::collections::HashSet<String>) {
+    match stmt {
+        syn::Stmt::Expr(expr, _) => collect_assignments_in_expr(expr, result),
+        _ => {}
+    }
+}
+
+/// Recursively collect assignment targets from an expression.
+fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::HashSet<String>) {
+    match expr {
+        syn::Expr::Assign(assign) => {
+            // `r = ...` → r is reassigned
+            if let syn::Expr::Path(path) = assign.left.as_ref() {
+                if path.path.segments.len() == 1 {
+                    result.insert(path.path.segments[0].ident.to_string());
+                }
+            }
+        }
+        syn::Expr::Block(block) => {
+            for s in &block.block.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+        }
+        syn::Expr::If(if_expr) => {
+            for s in &if_expr.then_branch.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+            if let Some((_, else_branch)) = &if_expr.else_branch {
+                collect_assignments_in_expr(else_branch, result);
+            }
+        }
+        syn::Expr::While(w) => {
+            for s in &w.body.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+        }
+        syn::Expr::Loop(l) => {
+            for s in &l.body.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+        }
+        syn::Expr::ForLoop(f) => {
+            for s in &f.body.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+        }
+        syn::Expr::Unsafe(u) => {
+            for s in &u.block.stmts {
+                collect_assignments_in_stmt(s, result);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1496,5 +1663,58 @@ mod tests {
         let out = transpile_str("fn f() { let mut x: i32 = 5; }");
         assert!(out.contains("int32_t x = 5;"));
         assert!(!out.contains("const"));
+    }
+
+    // ── Reference rebinding tests ───────────────────────────────
+
+    #[test]
+    fn test_ref_no_rebind_emits_reference() {
+        let out = transpile_str("fn f() { let x = 5; let r = &x; }");
+        assert!(out.contains("const auto& r = x;"));
+    }
+
+    #[test]
+    fn test_ref_rebind_emits_pointer() {
+        let out = transpile_str("fn f() { let x = 5; let y = 10; let mut r = &x; r = &y; }");
+        assert!(out.contains("const auto* r = &x;"));
+    }
+
+    #[test]
+    fn test_mut_ref_no_rebind_emits_reference() {
+        let out = transpile_str("fn f() { let mut x = 5; let mr = &mut x; }");
+        assert!(out.contains("auto& mr = x;"));
+    }
+
+    #[test]
+    fn test_mut_ref_rebind_emits_pointer() {
+        let out = transpile_str(
+            "fn f() { let mut x = 5; let mut y = 10; let mut mr = &mut x; mr = &mut y; }",
+        );
+        assert!(out.contains("auto* mr = &x;"));
+    }
+
+    #[test]
+    fn test_ref_rebind_in_if_branch() {
+        // Rebinding inside if branch should still be detected
+        let out = transpile_str(
+            "fn f() { let x = 5; let y = 10; let mut r = &x; if true { r = &y; } }",
+        );
+        assert!(out.contains("const auto* r = &x;"));
+    }
+
+    #[test]
+    fn test_ref_rebind_in_loop() {
+        let out = transpile_str(
+            "fn f() { let x = 5; let y = 10; let mut r = &x; loop { r = &y; break; } }",
+        );
+        assert!(out.contains("const auto* r = &x;"));
+    }
+
+    #[test]
+    fn test_no_rebind_mut_binding_stays_reference() {
+        // let mut r = &x with no reassignment → reference, not pointer
+        let out = transpile_str("fn f() { let x = 5; let mut r = &x; }");
+        assert!(out.contains("auto& r = x;") || out.contains("const auto& r = x;"));
+        assert!(!out.contains("auto* r"));
     }
 }

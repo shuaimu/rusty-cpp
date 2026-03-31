@@ -63,7 +63,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
       - [x] *done* `break` with value from loop → immediately-invoked lambda wrapper
       - [x] *done* References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
-      - [ ] References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
+      - [x] *done* References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
       - [ ] Implicit move insertion: insert `std::move()` at every Rust move point
       - [x] *done* Lifetime erasure: strip all lifetime annotations from output
       - [x] *done* Struct definitions: merge all `impl` blocks into single struct/class definition
