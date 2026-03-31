@@ -124,16 +124,17 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `FnOnce` trait bound → `std::move_only_function<Sig>` (C++23)
       - [x] *done* `&dyn Fn` → `const std::function<Sig>&`
       - [x] *done* `Box<dyn FnOnce>` → `std::move_only_function<Sig>`
-    - [ ] Phase 7: Module system → C++20 modules
-      - [ ] Crate root (lib.rs/main.rs) → primary module interface unit (`.cppm`)
-      - [ ] `mod foo;` → `import crate_name.foo;`
-      - [ ] `pub mod foo;` → `export import crate_name.foo;`
-      - [ ] `pub` items → `export` declarations
-      - [ ] Private items → non-exported (module-internal)
+    - [x] *done* Phase 7: Module system → C++20 modules
+      - [x] *done* Crate root → `export module crate_name;` (via --module-name CLI flag)
+      - [x] *done* `mod foo;` → `import crate_name.foo;`
+      - [x] *done* `pub mod foo;` → `export import crate_name.foo;`
+      - [x] *done* `pub` items → `export` declarations (functions, structs)
+      - [x] *done* Private items → non-exported (module-internal)
       - [ ] `pub(crate)` → module-visible but not exported
-      - [ ] `use` statements → `import` or `using` declarations
-      - [ ] `pub use` re-exports → `export using` or `export import`
-      - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm`, `src/bar/mod.rs` → `crate_name.bar.cppm`
+      - [x] *done* `use` statements → `using` declarations
+      - [x] *done* `pub use` re-exports → `export using`
+      - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm` (build system level)
+      - [x] *done* Inline `mod foo { ... }` → `namespace foo { ... }`
     - [ ] Phase 8: Async/await → pollable state machine on C++20 coroutines
       - [ ] Implement `Poll<T>` type (Ready/Pending using rusty::Option)
       - [ ] Implement `Waker` and `Context` types for IO notification

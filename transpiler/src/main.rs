@@ -17,6 +17,10 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    /// C++20 module name (e.g., "my_crate" or "my_crate.submodule")
+    #[arg(short, long)]
+    module_name: Option<String>,
+
     /// Expand macros before transpilation (requires cargo-expand)
     #[arg(long)]
     expand: bool,
@@ -45,7 +49,7 @@ fn main() {
         }
     };
 
-    let cpp_output = match transpile::transpile(&source) {
+    let cpp_output = match transpile::transpile(&source, cli.module_name.as_deref()) {
         Ok(output) => output,
         Err(e) => {
             eprintln!("Transpilation error: {}", e);
