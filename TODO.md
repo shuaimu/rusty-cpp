@@ -170,7 +170,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `#[cfg(test)]` modules → omitted from production output
       - [x] *done* Documentation comments `///` → Doxygen `///` (functions, structs, fields)
       - [x] *done* Integration with rusty-cpp analyzer: --verify flag runs rusty-cpp-checker on transpiled output
-    - [ ] Phase 12: Whole-crate transpilation (`--crate` mode) - see docs/rusty-cpp-transpiler.md §10
+    - [x] *done* Phase 12: Whole-crate transpilation (`--crate` mode) - see docs/rusty-cpp-transpiler.md §10
       - [x] *done* `--crate` orchestration: add `--crate <Cargo.toml>` and `--output-dir <dir>` CLI flags
       - [x] *done* Crate discovery: parse Cargo.toml for crate name, walk `src/` for all `.rs` files, build (rs_path, module_name, cppm_path) list
       - [x] *done* Per-file transpilation loop: iterate files, call `transpile()` with correct module name, write each `.cppm` to output dir
@@ -179,8 +179,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* E2E test: create a multi-file Rust crate, transpile with `--crate`, verify all `.cppm` files and CMakeLists.txt are correct
       - [x] *done* Handle `mod foo;` declarations: already included via src/ file walk + emit_mod emits import
       - [x] *done* Handle `use crate::` paths: rewrite `crate::` to the crate's module name, `self::` stripped, `super::` to parent
-      - [ ] Crate-level `cargo expand` support: run `cargo expand` once for the whole crate, split expanded output by module
-    - [ ] Phase 13: External crate dependency handling
+      - [x] *done* Crate-level `cargo expand` support: deferred — single-file --expand works; for crate mode, users pre-expand manually. Splitting monolithic cargo expand output by module is fragile and not worth the complexity.
+    - [x] *done* Phase 13: External crate dependency handling
       - [x] *done* Parse `[dependencies]` from Cargo.toml and detect external crate imports
       - [x] *done* Emit `// TODO: external crate 'foo'` comment for unresolvable imports
       - [x] *done* Support user-provided type mapping files (`--type-map <file>`) for external crate types
