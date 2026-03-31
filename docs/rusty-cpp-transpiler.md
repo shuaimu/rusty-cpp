@@ -870,10 +870,7 @@ Rust prevents implementing external traits for external types (orphan rule). C++
 
 ### 4.5 No Null
 
-Rust has no null — `Option<T>` is used instead. In C++, raw pointers can be null. The transpiler should:
-- Map `Option<T>` → `std::optional<T>` for values
-- Map `Option<&T>` → `T*` (nullable pointer) or `std::optional<std::reference_wrapper<T>>`
-- Map `Option<Box<T>>` → `std::unique_ptr<T>` (already nullable)
+Rust has no null — `Option<T>` is used instead. The transpiler maps all `Option` usage to `rusty::Option<T>`, which preserves Rust's semantics (no implicit null, explicit `Some`/`None`, `.unwrap()`, `.map()`, etc.).
 
 ### 4.6 Iterators
 
