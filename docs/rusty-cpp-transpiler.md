@@ -1241,9 +1241,7 @@ int main() {
 }
 ```
 
-There are **two approaches** to achieve this, each with different trade-offs:
-
-### 10.2 Approach A: Full Transpilation (Rust Source → C++ Source)
+### 10.2 Approach: Full Transpilation (Rust Source → C++ Source)
 
 Convert the entire Rust crate into C++ source files that compile natively with a C++ compiler.
 
@@ -1283,54 +1281,13 @@ rusty-cpp-transpiler --crate Cargo.toml --output-dir build/
 
 **Current status:** Single-file transpilation works (243 tests). Missing: crate-level orchestration.
 
-### 10.3 Approach B: FFI Binding (Rust Library → C++ Header + Linked Library)
+### 10.3 Implementation Plan for Whole-Crate Transpilation
 
-Compile the Rust crate as a native library (`.a`/`.so`/`.dylib`) and generate C++ headers for the public API.
-
-```
-my_rust_crate/                     Output:
-├── Cargo.toml                     ├── libmy_rust_crate.a    (compiled Rust)
-├── src/                    →      ├── my_rust_crate.hpp     (C++ header)
-│   └── lib.rs                     └── CMakeLists.txt        (links library)
-```
-
-**Workflow:**
-```bash
-# Compile Rust as C library + generate bindings
-rusty-cpp-transpiler --bind Cargo.toml --output-dir build/
-
-# This produces:
-#   build/libmy_rust_crate.a          (cargo build --release)
-#   build/my_rust_crate.hpp           (cbindgen-generated header)
-#   build/CMakeLists.txt              (find_library + target_link)
-```
-
-**Pros:**
-- Works with any Rust crate (no transpilation limitations)
-- Rust code stays in Rust — full ecosystem compatibility
-- Incremental: only the public API boundary is exposed
-- Battle-tested approach (cxx, cbindgen are mature)
-
-**Cons:**
-- Requires Rust toolchain at build time
-- FFI boundary has overhead (no inlining across boundary)
-- Limited type mapping across FFI (no generics, no traits)
-- C++ side can't see Rust implementation details
-- Debugging across FFI boundary is harder
-
-**Current status:** Not implemented. Would use `cbindgen` or `cxx` under the hood.
-
-### 10.4 Recommended: Approach A with Fallback to B
-
-Use **full transpilation** (Approach A) as the primary strategy — it aligns with our core principle that Rust is a safe DSL for C++. Fall back to **FFI binding** (Approach B) for crates that can't be transpiled (e.g., heavy proc macro usage, FFI-heavy crates, crates with inline assembly).
-
-### 10.5 Implementation Plan for Whole-Crate Transpilation
-
-#### Phase A: `--crate` Mode (Orchestration Layer)
+#### Step 1: `--crate` Mode (Orchestration Layer)
 
 Add a `--crate <Cargo.toml>` flag that transpiles an entire Rust crate in one command.
 
-**Step 1: Crate Discovery**
+**1a: Crate Discovery**
 ```
 Input:  Cargo.toml path
 Output: List of (rs_path, module_name, cppm_path) tuples
@@ -1340,7 +1297,7 @@ Output: List of (rs_path, module_name, cppm_path) tuples
 - Use existing `cmake::map_rs_to_cppm()` for file→module mapping
 - Build module dependency graph from `mod` and `use` statements
 
-**Step 2: Per-File Transpilation**
+**1b: Per-File Transpilation**
 ```
 For each .rs file in topological order:
   1. Read source (or cargo expand)
@@ -1351,7 +1308,7 @@ For each .rs file in topological order:
 - Each file gets its own `CodeGen` instance with correct module name
 - Output directory mirrors the flat module naming: `crate.module.submodule.cppm`
 
-**Step 3: Build System Generation**
+**1c: Build System Generation**
 ```
 Output: CMakeLists.txt in output directory
 ```
@@ -1359,7 +1316,7 @@ Output: CMakeLists.txt in output directory
 - Add `find_package(rusty-cpp)` for rusty:: headers
 - Add C++20 module support flags
 
-**Step 4: Verification (Optional)**
+**1d: Verification (Optional)**
 ```
 If --verify: run rusty-cpp-checker on each .cppm file
 ```
@@ -1367,7 +1324,7 @@ If --verify: run rusty-cpp-checker on each .cppm file
 
 **Estimated effort:** ~200 LOC in `main.rs` (new `transpile_crate()` function).
 
-#### Phase B: External Crate Handling
+#### Step 2: External Crate Handling
 
 When the crate depends on external crates (`[dependencies]` in Cargo.toml):
 
@@ -1375,28 +1332,21 @@ When the crate depends on external crates (`[dependencies]` in Cargo.toml):
 |----------------|----------|
 | Rust std lib (`std::`, `core::`) | Mapped to `rusty::` types (already done) |
 | Crates with `rusty::` equivalents | Map types via extended `types.rs` |
-| Crates that can be transpiled | Recursively transpile (future) |
-| Crates that can't be transpiled | FFI binding fallback (Approach B) |
-| `serde`, `tokio`, etc. (complex) | Require manual mapping or skip |
+| Crates that can be transpiled | Recursively transpile |
+| `serde`, `tokio`, etc. (complex) | Require manual type mapping files |
 
-For MVP, external crates should emit a `// TODO: external crate` comment and continue.
+For MVP, external crates should emit a `// TODO: external crate` comment and continue. Users can provide manual type mappings for specific crates via a configuration file.
 
-#### Phase C: `--bind` Mode (FFI Alternative)
+#### Step 3: Recursive Dependency Transpilation
 
-For crates that can't be transpiled, add FFI binding generation:
+For crates that depend on other transpilable crates:
 
-```bash
-rusty-cpp-transpiler --bind Cargo.toml --output-dir build/
-```
+1. Parse `[dependencies]` from Cargo.toml
+2. Check if each dependency has a local path (workspace member or path dependency)
+3. Recursively transpile dependencies first
+4. Generate CMake `add_subdirectory()` or `FetchContent` for each dependency
 
-1. Run `cargo build --release` to compile the Rust library
-2. Run `cbindgen` to generate C header from `#[no_mangle] pub extern "C"` functions
-3. Wrap C header in C++ header with rusty:: type annotations
-4. Generate CMakeLists.txt that links the Rust `.a`/`.so`
-
-**Estimated effort:** ~300 LOC (new `bind.rs` module).
-
-### 10.6 End-to-End Example
+### 10.4 End-to-End Example
 
 **Rust crate** (`my_math/`):
 ```rust
@@ -1489,7 +1439,7 @@ int main() {
 }
 ```
 
-### 10.7 Current State and Gaps
+### 10.5 Current State and Gaps
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -1500,14 +1450,58 @@ int main() {
 | CMakeLists.txt generation | Done ✅ | Binary and library targets |
 | `cargo expand` integration | Done ✅ | `--expand` flag |
 | Analyzer verification | Done ✅ | `--verify` flag |
-| **`--crate` mode** | **Not done** | Orchestration layer needed |
+| **`--crate` mode** | **Not done** | Orchestration layer (~200 LOC) |
 | **External crate handling** | **Not done** | Dependency resolution |
-| **`--bind` mode (FFI)** | **Not done** | Alternative approach |
-| **Recursive crate transpilation** | **Not done** | For dependency crates |
+| **Recursive transpilation** | **Not done** | For dependency crates |
 
-### 10.8 Priority Order
+### 10.6 Priority Order
 
 1. **`--crate` mode** — highest impact, ~200 LOC, enables whole-crate transpilation
 2. **External crate detection** — graceful handling when dependencies can't be mapped
-3. **`--bind` mode** — alternative for non-transpilable crates
-4. **Recursive dependency transpilation** — full dependency graph resolution
+3. **Recursive dependency transpilation** — full dependency graph resolution
+
+---
+
+## 11. Wrong Approaches (Rejected)
+
+This section documents approaches that were considered and rejected, to avoid revisiting them.
+
+### 11.1 FFI Binding Instead of Transpilation
+
+**Rejected approach:** Compile Rust as a native library (`.a`/`.so`) and generate C++ headers for the FFI boundary using tools like `cbindgen` or `cxx`.
+
+**Why it was rejected:**
+- **Violates the core principle.** Our guarantee is: if Rust compiles, the transpiled C++ compiles and behaves identically. FFI binding doesn't transpile — it wraps. The C++ code doesn't mirror the Rust logic; it calls into an opaque binary.
+- **Limited type mapping.** FFI can only expose `extern "C"` compatible types. No generics, no traits, no `Option<T>`, no `Result<T,E>`, no closures. The rich Rust type system is lost at the FFI boundary.
+- **Requires Rust toolchain at C++ build time.** The whole point of transpilation is that the output is self-contained C++ — no Rust compiler needed to build the C++ project.
+- **No inlining across boundary.** The C++ compiler can't optimize across the FFI boundary. With transpilation, everything is native C++ and fully optimizable.
+- **Debugging across FFI is painful.** Stack traces cross language boundaries, breakpoints need both debuggers, and variable inspection is limited.
+- **Duplicates existing tools.** `cbindgen` and `cxx` already do this well. We don't need to reimplement them. Our value is in transpilation, not wrapping.
+
+**When FFI is actually appropriate (outside this project):** When you have a large existing Rust library that you can't or won't transpile, and you only need a narrow API surface exposed to C++. Use `cxx` or `cbindgen` directly for that — don't use the rusty-cpp transpiler.
+
+### 11.2 Using C++ Headers Instead of C++20 Modules
+
+**Rejected approach:** Transpile each Rust module into a `.hpp`/`.cpp` pair instead of a `.cppm` module interface unit.
+
+**Why it was rejected:**
+- Forces splitting declarations and definitions across two files per module
+- Requires include guards, forward declarations, and careful include ordering
+- Template definitions must go in headers (not source files)
+- Circular dependencies require manual forward declarations
+- Build times suffer from repeated header parsing
+- C++20 modules solve all of these problems and map 1:1 to Rust modules
+
+See §2.5 for the full rationale.
+
+### 11.3 Multiple Trait Object Implementations (Virtual + CRTP + Type Erasure)
+
+**Rejected approach:** Use a hybrid of virtual interfaces, CRTP, and manual type erasure to map Rust traits, choosing the approach based on usage analysis.
+
+**Why it was rejected:**
+- Complexity explosion: the transpiler must analyze whether each trait is used statically, dynamically, or both, and choose different implementations
+- Three different trait representations means three different calling conventions
+- Microsoft Proxy provides a single, uniform solution that handles all cases
+- Proxy is non-invasive (like Rust traits), has value semantics, and supports SBO
+
+We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
