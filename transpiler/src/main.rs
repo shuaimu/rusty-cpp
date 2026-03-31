@@ -72,13 +72,32 @@ fn transpile_crate(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output dir: {}", e))?;
 
-    // Report external dependencies
+    // Detect and handle dependencies
     let deps = cmake::extract_dependencies(&cargo);
+    let mut local_dep_dirs: Vec<String> = Vec::new();
+
     if !deps.is_empty() {
-        println!("\nExternal dependencies:");
+        println!("\nDependencies:");
         for dep in &deps {
             if dep.is_local {
-                println!("  {} (local: {})", dep.name, dep.path.as_deref().unwrap_or("?"));
+                let dep_path = dep.path.as_deref().unwrap_or("?");
+                println!("  {} (local: {}) — will transpile recursively", dep.name, dep_path);
+
+                // Recursively transpile local path dependencies
+                let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
+                if dep_cargo_toml.exists() {
+                    let dep_out_dir = output_dir.join(&dep.name);
+                    match transpile_crate(&dep_cargo_toml, &dep_out_dir, type_map, verify) {
+                        Ok(()) => {
+                            local_dep_dirs.push(dep.name.clone());
+                        }
+                        Err(e) => {
+                            eprintln!("  Warning: failed to transpile dependency '{}': {}", dep.name, e);
+                        }
+                    }
+                } else {
+                    eprintln!("  Warning: Cargo.toml not found for local dep '{}' at {}", dep.name, dep_cargo_toml.display());
+                }
             } else {
                 println!("  {} = \"{}\" (external — types may need manual mapping)",
                     dep.name, dep.version.as_deref().unwrap_or("*"));
@@ -134,8 +153,31 @@ fn transpile_crate(
         }
     }
 
-    // Step 3: Generate CMakeLists.txt
-    let cmake_content = cmake::generate_cmake(&cargo, &sources);
+    // Step 3: Generate CMakeLists.txt (with local dependency subdirectories)
+    let mut cmake_content = cmake::generate_cmake(&cargo, &sources);
+
+    // Add add_subdirectory() for each local dependency
+    if !local_dep_dirs.is_empty() {
+        cmake_content.push_str("# Local dependencies (transpiled)\n");
+        for dep_name in &local_dep_dirs {
+            cmake_content.push_str(&format!("add_subdirectory({})\n", dep_name));
+        }
+        cmake_content.push('\n');
+
+        // Link dependencies to the main target
+        let target_name = cargo.lib.as_ref()
+            .and_then(|l| l.name.clone())
+            .unwrap_or_else(|| crate_name.replace('-', "_"));
+        for dep_name in &local_dep_dirs {
+            cmake_content.push_str(&format!(
+                "target_link_libraries({} PRIVATE {})\n",
+                target_name,
+                dep_name.replace('-', "_")
+            ));
+        }
+        cmake_content.push('\n');
+    }
+
     let cmake_path = output_dir.join("CMakeLists.txt");
     std::fs::write(&cmake_path, &cmake_content)
         .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;

@@ -379,3 +379,66 @@ fn test_type_map_flag() {
     let cpp = std::fs::read_to_string(&output_path).unwrap();
     assert!(cpp.contains("custom::Serialize"));
 }
+
+#[test]
+fn test_crate_mode_with_path_dependency() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create dependency crate: my_utils
+    let utils_dir = dir.path().join("my_utils");
+    let utils_src = utils_dir.join("src");
+    std::fs::create_dir_all(&utils_src).unwrap();
+    std::fs::write(
+        utils_dir.join("Cargo.toml"),
+        "[package]\nname = \"my_utils\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"my_utils\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        utils_src.join("lib.rs"),
+        "pub fn helper() -> i32 { 42 }",
+    )
+    .unwrap();
+
+    // Create main crate: my_app (depends on my_utils via path)
+    let app_dir = dir.path().join("my_app");
+    let app_src = app_dir.join("src");
+    std::fs::create_dir_all(&app_src).unwrap();
+    std::fs::write(
+        app_dir.join("Cargo.toml"),
+        "[package]\nname = \"my_app\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"my_app\"\n\n[dependencies]\nmy_utils = { path = \"../my_utils\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_src.join("lib.rs"),
+        "pub fn run() -> i32 { my_utils::helper() }",
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(app_dir.join("Cargo.toml").to_str().unwrap())
+        .arg("--output-dir")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Main crate output
+    assert!(out_dir.join("my_app.cppm").exists());
+
+    // Dependency crate output (in subdirectory)
+    assert!(out_dir.join("my_utils").join("my_utils.cppm").exists());
+    assert!(out_dir.join("my_utils").join("CMakeLists.txt").exists());
+
+    // Main CMakeLists.txt should have add_subdirectory and target_link_libraries
+    let cmake = std::fs::read_to_string(out_dir.join("CMakeLists.txt")).unwrap();
+    assert!(cmake.contains("add_subdirectory(my_utils)"));
+    assert!(cmake.contains("target_link_libraries(my_app"));
+
+    // Stdout should mention recursive transpilation
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("will transpile recursively"));
+}

@@ -184,9 +184,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Parse `[dependencies]` from Cargo.toml and detect external crate imports
       - [x] *done* Emit `// TODO: external crate 'foo'` comment for unresolvable imports
       - [x] *done* Support user-provided type mapping files (`--type-map <file>`) for external crate types
-      - [ ] Detect workspace members and path dependencies → recursively transpile them
-    - [ ] Phase 14: Recursive dependency transpilation
-      - [ ] Build dependency graph from Cargo.toml `[dependencies]` with `path = "..."` entries
-      - [ ] Topological sort of workspace crates for correct transpilation order
-      - [ ] Generate top-level CMakeLists.txt with `add_subdirectory()` for each transpiled crate
-      - [ ] E2E test: multi-crate workspace transpilation
+      - [x] *done* Detect workspace members and path dependencies → recursively transpile them
+    - [x] *done* Phase 14: Recursive dependency transpilation
+      - [x] *done* Build dependency graph from Cargo.toml `[dependencies]` with `path = "..."` entries
+      - [x] *done* Recursively transpile local path dependencies before main crate
+      - [x] *done* Generate CMakeLists.txt with `add_subdirectory()` and `target_link_libraries()` for each dependency
+      - [x] *done* E2E test: multi-crate workspace transpilation
