@@ -448,7 +448,250 @@ impl CodeGen {
                 self.writeln("}");
                 true
             }
+            syn::Expr::Match(match_expr) => {
+                self.emit_match(match_expr);
+                true
+            }
             _ => false,
+        }
+    }
+
+    fn emit_match(&mut self, match_expr: &syn::ExprMatch) {
+        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+
+        // Decide strategy: switch (for literals/wildcards) or std::visit (for variant patterns)
+        if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+            self.emit_match_as_switch(&scrutinee, &match_expr.arms);
+        } else {
+            self.emit_match_as_visit(&scrutinee, &match_expr.arms);
+        }
+    }
+
+    /// Check if all match arms use literal patterns, wildcards, or ident bindings.
+    fn all_arms_are_literal_or_wild(&self, arms: &[syn::Arm]) -> bool {
+        arms.iter().all(|arm| {
+            matches!(
+                &arm.pat,
+                syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_)
+                    | syn::Pat::Or(_) | syn::Pat::Range(_)
+            )
+        })
+    }
+
+    fn emit_match_as_switch(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
+        self.writeln(&format!("switch ({}) {{", scrutinee));
+        for arm in arms {
+            match &arm.pat {
+                syn::Pat::Wild(_) => {
+                    self.writeln("default: {");
+                }
+                syn::Pat::Lit(lit) => {
+                    let val = self.emit_lit(&lit.lit);
+                    self.writeln(&format!("case {}: {{", val));
+                }
+                syn::Pat::Or(or_pat) => {
+                    // Multiple patterns: `1 | 2 | 3 =>`
+                    for (i, case) in or_pat.cases.iter().enumerate() {
+                        if let syn::Pat::Lit(lit) = case {
+                            let val = self.emit_lit(&lit.lit);
+                            if i < or_pat.cases.len() - 1 {
+                                self.writeln(&format!("case {}:", val));
+                            } else {
+                                self.writeln(&format!("case {}: {{", val));
+                            }
+                        } else if let syn::Pat::Wild(_) = case {
+                            self.writeln("default: {");
+                        }
+                    }
+                }
+                syn::Pat::Ident(pi) => {
+                    // Catch-all binding: `x =>`  acts like default
+                    let name = &pi.ident;
+                    self.writeln("default: {");
+                    self.indent += 1;
+                    self.writeln(&format!("auto {} = {};", name, scrutinee));
+                    self.indent -= 1;
+                }
+                syn::Pat::Range(_) => {
+                    self.writeln("// TODO: range pattern in switch");
+                    self.writeln("default: {");
+                }
+                _ => {
+                    self.writeln("// TODO: unhandled switch pattern");
+                    self.writeln("default: {");
+                }
+            }
+
+            self.indent += 1;
+
+            // Emit guard if present
+            if let Some((_, guard)) = &arm.guard {
+                let guard_str = self.emit_expr_to_string(guard);
+                self.writeln(&format!("if ({}) {{", guard_str));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                self.emit_arm_body(&arm.body);
+            }
+
+            self.writeln("break;");
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        self.writeln("}");
+    }
+
+    fn emit_match_as_visit(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
+        // Emit: std::visit(overloaded { [](Type& v) { ... }, ... }, scrutinee);
+        self.writeln(&format!("std::visit(overloaded {{"));
+        self.indent += 1;
+
+        for arm in arms {
+            self.emit_visit_arm(arm);
+        }
+
+        self.indent -= 1;
+        self.writeln(&format!("}}, {});", scrutinee));
+    }
+
+    fn emit_visit_arm(&mut self, arm: &syn::Arm) {
+        match &arm.pat {
+            syn::Pat::TupleStruct(ts) => {
+                // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
+                let path = self.emit_path_to_string(&ts.path);
+                // Convert :: to _ for variant struct name
+                let cpp_type = path.replace("::", "_");
+                let bindings = self.extract_tuple_struct_bindings(&ts.elems);
+
+                self.write_indent();
+                self.output.push_str(&format!("[](const {}& _v) {{", cpp_type));
+
+                if !bindings.is_empty() || arm.guard.is_some() {
+                    self.output.push('\n');
+                    self.indent += 1;
+                    // Emit bindings
+                    for (i, name) in bindings.iter().enumerate() {
+                        if name != "_" {
+                            self.writeln(&format!("const auto& {} = _v._{};", name, i));
+                        }
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        self.writeln(&format!("if ({}) {{", guard_str));
+                        self.indent += 1;
+                        self.emit_arm_body(&arm.body);
+                        self.indent -= 1;
+                        self.writeln("}");
+                    } else {
+                        self.emit_arm_body(&arm.body);
+                    }
+                    self.indent -= 1;
+                    self.writeln("},");
+                } else {
+                    let body_str = self.emit_expr_to_string(&arm.body);
+                    self.output.push_str(&format!(" {}; }},\n", body_str));
+                }
+            }
+            syn::Pat::Struct(ps) => {
+                // Pattern like `Shape::Rect { w, h }` → [](const Shape_Rect& _v) { ... }
+                let path = self.emit_path_to_string(&ps.path);
+                let cpp_type = path.replace("::", "_");
+
+                self.write_indent();
+                self.output.push_str(&format!("[](const {}& _v) {{\n", cpp_type));
+                self.indent += 1;
+
+                // Emit field bindings
+                for field_pat in &ps.fields {
+                    let field_name = field_pat.member.clone();
+                    let field_name_str = match &field_name {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                    };
+                    let binding_name = match &*field_pat.pat {
+                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        _ => field_name_str.clone(),
+                    };
+                    self.writeln(&format!("const auto& {} = _v.{};", binding_name, field_name_str));
+                }
+
+                if let Some((_, guard)) = &arm.guard {
+                    let guard_str = self.emit_expr_to_string(guard);
+                    self.writeln(&format!("if ({}) {{", guard_str));
+                    self.indent += 1;
+                    self.emit_arm_body(&arm.body);
+                    self.indent -= 1;
+                    self.writeln("}");
+                } else {
+                    self.emit_arm_body(&arm.body);
+                }
+
+                self.indent -= 1;
+                self.writeln("},");
+            }
+            syn::Pat::Path(pp) => {
+                // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
+                let path = self.emit_path_to_string(&pp.path);
+                let cpp_type = path.replace("::", "_");
+
+                self.write_indent();
+                self.output.push_str(&format!("[](const {}&) {{\n", cpp_type));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.indent -= 1;
+                self.writeln("},");
+            }
+            syn::Pat::Wild(_) => {
+                // Wildcard: `_ =>` → [](const auto&) { ... }
+                self.write_indent();
+                self.output.push_str("[](const auto&) {\n");
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.indent -= 1;
+                self.writeln("},");
+            }
+            syn::Pat::Ident(pi) => {
+                // Catch-all binding: `x =>` → [](const auto& x) { ... }
+                let name = &pi.ident;
+                self.write_indent();
+                self.output.push_str(&format!("[](const auto& {}) {{\n", name));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.indent -= 1;
+                self.writeln("},");
+            }
+            _ => {
+                self.writeln("// TODO: unhandled match pattern");
+                self.writeln("[](const auto&) {},");
+            }
+        }
+    }
+
+    fn extract_tuple_struct_bindings(
+        &self,
+        elems: &syn::punctuated::Punctuated<syn::Pat, syn::token::Comma>,
+    ) -> Vec<String> {
+        elems
+            .iter()
+            .map(|p| match p {
+                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                syn::Pat::Wild(_) => "_".to_string(),
+                _ => "/* TODO */".to_string(),
+            })
+            .collect()
+    }
+
+    fn emit_arm_body(&mut self, body: &syn::Expr) {
+        // If the body is a block, emit its statements
+        if let syn::Expr::Block(block) = body {
+            self.emit_block(&block.block);
+        } else if self.try_emit_control_flow(body) {
+            // Control flow handled
+        } else {
+            let body_str = self.emit_expr_to_string(body);
+            self.writeln(&format!("{};", body_str));
         }
     }
 
@@ -1971,5 +2214,98 @@ mod tests {
     fn test_maybe_uninit_type() {
         let out = transpile_str("fn f(m: MaybeUninit<i32>) {}");
         assert!(out.contains("rusty::MaybeUninit<int32_t>"));
+    }
+
+    // ── Phase 3: Match expression tests ─────────────────────────
+
+    #[test]
+    fn test_match_int_switch() {
+        let out = transpile_str("fn f(x: i32) { match x { 1 => { a(); } 2 => { b(); } _ => { c(); } } }");
+        assert!(out.contains("switch (x) {"));
+        assert!(out.contains("case 1: {"));
+        assert!(out.contains("case 2: {"));
+        assert!(out.contains("default: {"));
+        assert!(out.contains("break;"));
+    }
+
+    #[test]
+    fn test_match_multi_pattern() {
+        let out = transpile_str("fn f(x: i32) { match x { 1 | 2 | 3 => { ok(); } _ => {} } }");
+        assert!(out.contains("case 1:"));
+        assert!(out.contains("case 2:"));
+        assert!(out.contains("case 3: {"));
+    }
+
+    #[test]
+    fn test_match_enum_visit() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            fn f(e: E) { match e { E::A(x) => { use_x(x); } E::B => { b(); } } }
+        "#,
+        );
+        assert!(out.contains("std::visit(overloaded {"));
+        assert!(out.contains("[](const E_A& _v)"));
+        assert!(out.contains("const auto& x = _v._0;"));
+        assert!(out.contains("[](const E_B&)"));
+    }
+
+    #[test]
+    fn test_match_struct_variant() {
+        let out = transpile_str(
+            r#"
+            enum M { Point { x: f64, y: f64 } }
+            fn f(m: M) { match m { M::Point { x, y } => { use_point(x, y); } } }
+        "#,
+        );
+        assert!(out.contains("[](const M_Point& _v)"));
+        assert!(out.contains("const auto& x = _v.x;"));
+        assert!(out.contains("const auto& y = _v.y;"));
+    }
+
+    #[test]
+    fn test_match_wildcard_arm() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            fn f(e: E) { match e { E::A(x) => { a(); } _ => { other(); } } }
+        "#,
+        );
+        assert!(out.contains("[](const auto&) {"));
+        assert!(out.contains("other();"));
+    }
+
+    #[test]
+    fn test_match_with_guard() {
+        let out = transpile_str(
+            "fn f(x: i32) { match x { n if n > 0 => { pos(); } _ => { neg(); } } }",
+        );
+        // Guard should use if-else inside the case
+        assert!(out.contains("if ("));
+    }
+
+    #[test]
+    fn test_match_unit_variant() {
+        let out = transpile_str(
+            r#"
+            enum E { A, B, C }
+            fn f(e: E) { match e { E::A => { a(); } E::B => { b(); } E::C => { c(); } } }
+        "#,
+        );
+        assert!(out.contains("std::visit(overloaded {"));
+        assert!(out.contains("[](const E_A&)"));
+        assert!(out.contains("[](const E_B&)"));
+        assert!(out.contains("[](const E_C&)"));
+    }
+
+    #[test]
+    fn test_match_catch_all_binding() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            fn f(e: E) { match e { E::A(x) => { a(); } other => { b(); } } }
+        "#,
+        );
+        assert!(out.contains("[](const auto& other)"));
     }
 }

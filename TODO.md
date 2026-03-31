@@ -86,15 +86,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Thread spawn: thread::spawn→rusty::thread::spawn (via function path mapping)
       - [x] *done* MaybeUninit→rusty::MaybeUninit
       - [x] *done* Function path mapping: Box::new→rusty::Box::make, String::from, Vec::new, etc.
-    - [ ] Phase 3: Enums with data and pattern matching - algebraic data types via std::variant
-      - [ ] Enum with data → per-variant structs + `using Enum = std::variant<...>`
+    - [x] *done* Phase 3: Enums with data and pattern matching - algebraic data types via std::variant
+      - [x] *done* Enum with data → per-variant structs + `using Enum = std::variant<...>` (done in Phase 0)
       - [ ] Recursive enums → use rusty::Box for the recursive variant field
-      - [ ] `match` on enums → `std::visit` with `overloaded{...}` lambda dispatch
-      - [ ] `match` on integers/chars → `switch`/`case`
+      - [x] *done* `match` on enums → `std::visit` with `overloaded{...}` lambda dispatch
+      - [x] *done* `match` on integers/chars → `switch`/`case` (with multi-pattern `|` support)
       - [ ] `if let Some(v) = opt` → `if (opt.is_some()) { auto v = opt.unwrap(); ... }`
-      - [ ] Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
-      - [ ] Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
-      - [ ] Destructuring in match arms: struct patterns → structured bindings inside lambdas
+      - [x] *done* Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
+      - [x] *done* Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
+      - [x] *done* Destructuring in match arms: struct patterns → field bindings, tuple patterns → positional bindings
     - [ ] Phase 4: Traits → Microsoft Proxy facades
       - [ ] Trait definition → `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` for each method
       - [ ] `dyn Trait` parameters → `pro::proxy_view<Facade>`
