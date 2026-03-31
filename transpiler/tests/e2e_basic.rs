@@ -231,3 +231,59 @@ path = "src/main.rs"
     assert!(cmake.contains("add_executable(hello"));
     assert!(cmake.contains("hello.cppm"));
 }
+
+#[test]
+fn test_verify_flag_without_checker() {
+    // --verify should attempt to run rusty-cpp-checker and fail gracefully if not found
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    let output_path = dir.path().join("test.cppm");
+
+    std::fs::write(&input, "fn f() { let x = 42; }").unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("--verify")
+        .output()
+        .expect("failed to run");
+
+    // Transpilation should succeed (file written) even if verify fails
+    assert!(output_path.exists(), "output file should be written before verification");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Transpiled"));
+}
+
+#[test]
+fn test_verify_flag_with_checker() {
+    // If rusty-cpp-checker is available (built from same workspace), verify should work
+    // First check if the checker binary exists
+    let checker = std::path::Path::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .parent()
+        .unwrap()
+        .join("rusty-cpp-checker");
+
+    if !checker.exists() {
+        // Checker not built — skip this test
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    let output_path = dir.path().join("test.cppm");
+
+    std::fs::write(&input, "fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("--verify")
+        .output()
+        .expect("failed to run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Transpiled"));
+}

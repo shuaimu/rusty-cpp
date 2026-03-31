@@ -169,4 +169,4 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `#[test]` functions → `TEST_CASE("name") { ... }` (Catch2 style)
       - [x] *done* `#[cfg(test)]` modules → omitted from production output
       - [x] *done* Documentation comments `///` → Doxygen `///` (functions, structs, fields)
-      - [ ] Integration with rusty-cpp analyzer: run analyzer on transpiled output to verify safety
+      - [x] *done* Integration with rusty-cpp analyzer: --verify flag runs rusty-cpp-checker on transpiled output

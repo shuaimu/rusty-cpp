@@ -29,6 +29,10 @@ struct Cli {
     /// Generate CMakeLists.txt from Cargo.toml (provide path to Cargo.toml)
     #[arg(long)]
     cmake: Option<PathBuf>,
+
+    /// Run rusty-cpp analyzer on transpiled output to verify safety
+    #[arg(long)]
+    verify: bool,
 }
 
 /// Run `cargo expand` on the input file's crate to get macro-expanded source.
@@ -166,4 +170,68 @@ fn main() {
             process::exit(1);
         }
     }
+
+    // Optionally verify transpiled output with rusty-cpp analyzer
+    if cli.verify {
+        match run_rusty_cpp_checker(&output_path) {
+            Ok(()) => {
+                println!("Verification passed: no safety violations found.");
+            }
+            Err(e) => {
+                eprintln!("Verification: {}", e);
+                process::exit(2);
+            }
+        }
+    }
+}
+
+/// Run the rusty-cpp-checker on the transpiled C++ output to verify safety.
+fn run_rusty_cpp_checker(cpp_path: &std::path::Path) -> Result<(), String> {
+    // Try to find rusty-cpp-checker in PATH or adjacent to this binary
+    let checker = find_checker_binary();
+
+    let output = std::process::Command::new(&checker)
+        .arg(cpp_path)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to run `{}`: {}. Ensure rusty-cpp-checker is installed and in PATH.",
+                checker, e
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !stdout.is_empty() {
+        eprint!("{}", stdout);
+    }
+    if !stderr.is_empty() {
+        eprint!("{}", stderr);
+    }
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "rusty-cpp-checker found issues (exit code: {})",
+            output.status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+/// Find the rusty-cpp-checker binary.
+/// Looks in: same directory as this binary, then PATH.
+fn find_checker_binary() -> String {
+    // Try adjacent to this binary
+    if let Ok(self_path) = std::env::current_exe() {
+        if let Some(dir) = self_path.parent() {
+            let adjacent = dir.join("rusty-cpp-checker");
+            if adjacent.exists() {
+                return adjacent.to_string_lossy().to_string();
+            }
+        }
+    }
+    // Fall back to PATH
+    "rusty-cpp-checker".to_string()
 }
