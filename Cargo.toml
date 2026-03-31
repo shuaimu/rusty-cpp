@@ -1,5 +1,14 @@
 [workspace]
 members = [".", "transpiler"]
+exclude = [
+    "tests/transpile_tests/either",
+    "tests/transpile_tests/tap",
+    "tests/transpile_tests/cfg-if",
+    "tests/transpile_tests/take_mut",
+    "tests/transpile_tests/arrayvec",
+    "tests/transpile_tests/semver",
+    "tests/transpile_tests/bitflags",
+]
 resolver = "3"
 
 [package]

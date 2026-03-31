@@ -190,3 +190,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Recursively transpile local path dependencies before main crate
       - [x] *done* Generate CMakeLists.txt with `add_subdirectory()` and `target_link_libraries()` for each dependency
       - [x] *done* E2E test: multi-crate workspace transpilation
+    - [ ] Phase 15: Real-world crate transpilation fixes (see docs/rusty-cpp-transpiler.md §10.7)
+      - [ ] Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias (~50 LOC)
+      - [ ] Gap 2: Map `core::` paths same as `std::` in emit_use_tree (~5 LOC)
+      - [ ] Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations (~30 LOC)
+      - [ ] Gap 4: Handle unhandled syn::Item kinds (ExternCrate, top-level Macro, macro_rules) (~20 LOC)
+      - [ ] Gap 5: Nested function definitions → hoist to module scope or convert to lambdas (~40 LOC)
+      - [ ] Gap 6: Slice/range syntax — open ranges `..`, `..len`, index with range (~30 LOC)
+      - [ ] Gap 7: Array repeat initializer `[0u8; 256]` and byte string literals `b"..."` (~20 LOC)
+      - [ ] Gap 8: `Self` in trait method signatures — leave as-is or map to auto (~10 LOC)
+      - [ ] Re-test `either` crate: verify transpiled output compiles with g++/clang++

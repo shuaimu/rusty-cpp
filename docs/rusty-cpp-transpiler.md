@@ -1530,6 +1530,139 @@ int main() {
 
 ---
 
+## 10.7 Real-World Transpilation Gaps (from `either` crate testing)
+
+Testing the transpiler against real crates reveals systematic gaps. These are categorized by root cause and proposed fix.
+
+### Gap 1: Generic Enums/Structs Lose Type Parameters
+
+**Problem:** `enum Either<L, R> { Left(L), Right(R) }` transpiles to variant structs using bare `L` and `R` as types, without template declarations.
+
+**Current output (wrong):**
+```cpp
+struct Either_Left { L _0; };          // L is not declared
+struct Either_Right { R _0; };         // R is not declared
+using Either = std::variant<Either_Left, Either_Right>;
+```
+
+**Expected output:**
+```cpp
+template<typename L, typename R>
+struct Either_Left { L _0; };
+template<typename L, typename R>
+struct Either_Right { R _0; };
+template<typename L, typename R>
+using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
+```
+
+**Fix:** In `emit_enum`, propagate the enum's generic parameters to each variant struct and to the variant alias. Reuse the existing `emit_template_prefix` logic.
+
+**Estimated effort:** ~50 LOC in `codegen.rs::emit_enum`.
+
+### Gap 2: `core::` Path Not Mapped
+
+**Problem:** `use core::convert::AsRef` emits `using core::convert::AsRef` but `core::` is not a valid C++ namespace. In Rust, `core` is the no-std version of `std`.
+
+**Fix:** Map `core::` to the same handling as `std::` in `emit_use_tree`. Both should pass through as `std::` or be recognized as internal Rust paths that don't need mapping.
+
+**Estimated effort:** ~5 LOC in `emit_use_tree`.
+
+### Gap 3: Group Use Imports Emit Invalid C++
+
+**Problem:** `use std::io::{Read, Write, Seek}` emits `using std::io::{Read, Write, Seek}` but C++ doesn't support brace group imports.
+
+**Current output (wrong):**
+```cpp
+using std::io::{Read, Write, Seek};
+```
+
+**Expected output:**
+```cpp
+using std::io::Read;
+using std::io::Write;
+using std::io::Seek;
+```
+
+**Fix:** In `emit_use`, when the use tree contains a `UseTree::Group`, expand it into multiple separate `using` declarations.
+
+**Estimated effort:** ~30 LOC in `emit_use`.
+
+### Gap 4: Unhandled `syn::Item` Kinds
+
+**Problem:** Several item kinds emit `// TODO: unhandled item kind`:
+- `Item::ExternCrate` — `extern crate foo;`
+- `Item::Macro` (top-level macro invocations like `macro_rules!`)
+- `Item::Verbatim` (unparsed items)
+
+**Fix:**
+- `Item::ExternCrate` → skip or emit `import`
+- `Item::Macro` (top-level) → expand or emit comment with macro name
+- Handle `macro_rules!` definitions — either skip (they're compile-time only) or emit a comment
+
+**Estimated effort:** ~20 LOC in `emit_item`.
+
+### Gap 5: `Self` in Trait Method Signatures
+
+**Problem:** In trait method signatures, `Self` appears as a return type or parameter type but there's no current struct context to resolve it.
+
+**Current output:** `Either<Self, Self>` (wrong — `Self` is unresolved)
+
+**Expected output:** In a trait context, `Self` should remain as a template parameter or be mapped to the proxy's value type.
+
+**Fix:** In trait method signatures, leave `Self` as-is (it's the implementor's type — Proxy handles this). Or replace with `auto` for return types.
+
+**Estimated effort:** ~10 LOC.
+
+### Gap 6: Slice/Range Syntax Not Fully Handled
+
+**Problem:** Rust slice syntax `&mockdata[..]`, `&buf[..len]` and range syntax `0..10` in non-for contexts don't fully transpile.
+
+**Current output:** `mockdata[rusty::range(, )]` (empty args), `/* TODO: expr */`
+
+**Fix:** Handle `Expr::Range` with missing start/end (open ranges), and `Expr::Index` with range arguments. Map `..` to appropriate C++ span/range operations.
+
+**Estimated effort:** ~30 LOC in `emit_expr_to_string`.
+
+### Gap 7: Array/Vec Literal Initialization
+
+**Problem:** `[0x00; 256]` (repeat initializer) and `b"\xff"` (byte string literals) aren't handled.
+
+**Fix:** `[val; N]` → `std::array<T, N>` filled with val. Byte string literals → `uint8_t[]` or `std::span<const uint8_t>`.
+
+**Estimated effort:** ~20 LOC.
+
+### Gap 8: Nested Function Definitions
+
+**Problem:** Rust allows defining functions inside other functions. The transpiler emits them as nested C++ functions, which is invalid (C++ doesn't allow nested function definitions).
+
+**Current output (wrong):**
+```cpp
+TEST_CASE("macros") {
+    Either<uint32_t, uint32_t> a() { ... }  // nested fn — invalid C++
+}
+```
+
+**Fix:** Either hoist nested functions to module scope (with a unique name), or convert them to lambdas.
+
+**Estimated effort:** ~40 LOC.
+
+### Priority Order for Fixes
+
+| Priority | Gap | Impact | Effort |
+|----------|-----|--------|--------|
+| 1 | Gap 1: Generic enums | Blocks most real crates | ~50 LOC |
+| 2 | Gap 3: Group use imports | Invalid C++ syntax | ~30 LOC |
+| 3 | Gap 2: `core::` mapping | Missing path | ~5 LOC |
+| 4 | Gap 4: Unhandled item kinds | Missing code | ~20 LOC |
+| 5 | Gap 8: Nested functions | Invalid C++ | ~40 LOC |
+| 6 | Gap 6: Slice/range syntax | Missing expressions | ~30 LOC |
+| 7 | Gap 7: Array literals | Missing expressions | ~20 LOC |
+| 8 | Gap 5: Self in traits | Cosmetic | ~10 LOC |
+
+Total estimated: ~205 LOC to fix all gaps.
+
+---
+
 ## 11. Wrong Approaches (Rejected)
 
 This section documents approaches that were considered and rejected, to avoid revisiting them.
