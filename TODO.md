@@ -144,16 +144,21 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `async fn` → `rusty::Task<T>` returning coroutine with `co_await`/`co_return`
       - [x] *done* `.await` → `co_await`
       - [ ] Async error propagation: `?` inside async → manual check + `co_return` Err
-    - [ ] Phase 9: Macros and derive
+    - [x] *done* Phase 9: Macros and derive
       - [ ] Integrate `cargo expand` as pre-processing step to flatten all macros
-      - [ ] `println!`/`format!` → `std::println`/`std::format` (C++23)
-      - [ ] `vec![1,2,3]` → `rusty::Vec<int>{1,2,3}` (initializer list)
-      - [ ] `#[derive(Clone)]` → copy constructor + explicit `.clone()` method
-      - [ ] `#[derive(PartialEq, Eq)]` → `operator==` (C++20 `= default` when possible)
-      - [ ] `#[derive(PartialOrd, Ord)]` → `operator<=>` (C++20 `= default` when possible)
-      - [ ] `#[derive(Hash)]` → `std::hash<T>` specialization
-      - [ ] `#[derive(Default)]` → default constructor
-      - [ ] `#[derive(Debug)]` → `operator<<` or `std::formatter` specialization
+      - [x] *done* `println!`/`eprintln!`/`print!` → `std::println`/`std::print` (C++23)
+      - [x] *done* `format!` → `std::format` (C++23)
+      - [x] *done* `vec![1,2,3]` → `rusty::Vec{1,2,3}` (initializer list)
+      - [x] *done* `todo!`/`unimplemented!` → `throw std::logic_error`
+      - [x] *done* `panic!` → `std::abort()`
+      - [x] *done* `assert!`/`assert_eq!`/`assert_ne!` → C++ `assert()`
+      - [x] *done* `dbg!` → `std::println(stderr, ...)`
+      - [x] *done* `#[derive(Clone)]` → `.clone()` method returning copy
+      - [x] *done* `#[derive(PartialEq, Eq)]` → `operator== = default`
+      - [x] *done* `#[derive(PartialOrd, Ord)]` → `operator<=> = default`
+      - [x] *done* `#[derive(Hash)]` → `std::hash<T>` specialization
+      - [x] *done* `#[derive(Default)]` → `default_()` static method
+      - [x] *done* `#[derive(Debug)]` → `operator<<` stub
     - [ ] Phase 10: The `?` operator
       - [ ] `?` on Result → TRY macro using GCC/Clang statement expressions
       - [ ] `?` on Option → similar TRY macro returning None

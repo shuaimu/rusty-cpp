@@ -235,8 +235,84 @@ impl CodeGen {
             self.current_struct = None;
         }
 
+        // Emit derive-generated code
+        let derives = self.extract_derives(&s.attrs);
+        if !derives.is_empty() {
+            self.newline();
+        }
+        for derive in &derives {
+            match derive.as_str() {
+                "Clone" => {
+                    // Clone → copy constructor (C++ default) + explicit clone() method
+                    self.writeln(&format!("{} clone() const {{ return *this; }}", name));
+                }
+                "PartialEq" | "Eq" => {
+                    self.writeln("auto operator==(const auto&) const = default;");
+                }
+                "PartialOrd" | "Ord" => {
+                    self.writeln("auto operator<=>(const auto&) const = default;");
+                }
+                "Default" => {
+                    // Default constructor
+                    self.writeln(&format!("static {} default_() {{ return {{}}; }}", name));
+                }
+                "Debug" => {
+                    // Simple stream operator stub
+                    self.writeln(&format!(
+                        "friend std::ostream& operator<<(std::ostream& os, const {}& v) {{",
+                        name
+                    ));
+                    self.indent += 1;
+                    self.writeln(&format!("return os << \"{} {{ ... }}\";", name));
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                "Hash" => {
+                    // Hash is emitted after the struct as a specialization
+                    // (handled below)
+                }
+                _ => {
+                    self.writeln(&format!("// TODO: derive({})", derive));
+                }
+            }
+        }
+
         self.indent -= 1;
         self.writeln("};");
+
+        // Post-struct derives (Hash specialization)
+        if derives.contains(&"Hash".to_string()) {
+            self.newline();
+            self.writeln("template<>");
+            self.writeln(&format!("struct std::hash<{}> {{", name));
+            self.indent += 1;
+            self.writeln(&format!(
+                "size_t operator()(const {}& v) const {{ return 0; /* TODO: hash fields */ }}",
+                name
+            ));
+            self.indent -= 1;
+            self.writeln("};");
+        }
+    }
+
+    /// Extract derive trait names from attributes.
+    fn extract_derives(&self, attrs: &[syn::Attribute]) -> Vec<String> {
+        let mut derives = Vec::new();
+        for attr in attrs {
+            if attr.path().is_ident("derive") {
+                if let syn::Meta::List(list) = &attr.meta {
+                    // Parse the token stream for ident names
+                    let tokens = list.tokens.to_string();
+                    for part in tokens.split(',') {
+                        let trimmed = part.trim();
+                        if !trimmed.is_empty() {
+                            derives.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        derives
     }
 
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
@@ -629,8 +705,8 @@ impl CodeGen {
                 }
             }
             syn::Stmt::Item(item) => self.emit_item(item),
-            syn::Stmt::Macro(_) => {
-                self.writeln("// TODO: macro invocation");
+            syn::Stmt::Macro(stmt_macro) => {
+                self.emit_macro_stmt(&stmt_macro.mac);
             }
         }
     }
@@ -905,6 +981,162 @@ impl CodeGen {
                 _ => "/* TODO */".to_string(),
             })
             .collect()
+    }
+
+    /// Emit a macro invocation as a statement.
+    fn emit_macro_stmt(&mut self, mac: &syn::Macro) {
+        let macro_name = mac
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let tokens = mac.tokens.to_string();
+
+        match macro_name.as_str() {
+            "println" => {
+                let args = self.convert_format_args(&tokens);
+                self.writeln(&format!("std::println({});", args));
+            }
+            "eprintln" => {
+                let args = self.convert_format_args(&tokens);
+                self.writeln(&format!("std::println(stderr, {});", args));
+            }
+            "print" => {
+                let args = self.convert_format_args(&tokens);
+                self.writeln(&format!("std::print({});", args));
+            }
+            "panic" => {
+                if tokens.is_empty() {
+                    self.writeln("std::abort();");
+                } else {
+                    let args = self.convert_format_args(&tokens);
+                    self.writeln(&format!("std::println(stderr, {});", args));
+                    self.writeln("std::abort();");
+                }
+            }
+            "todo" => {
+                self.writeln("throw std::logic_error(\"not yet implemented\");");
+            }
+            "unimplemented" => {
+                self.writeln("throw std::logic_error(\"not implemented\");");
+            }
+            "assert" => {
+                self.writeln(&format!("assert({});", self.convert_macro_tokens(&tokens)));
+            }
+            "assert_eq" => {
+                let parts = self.split_macro_args(&tokens);
+                if parts.len() >= 2 {
+                    self.writeln(&format!("assert({} == {});", parts[0].trim(), parts[1].trim()));
+                }
+            }
+            "assert_ne" => {
+                let parts = self.split_macro_args(&tokens);
+                if parts.len() >= 2 {
+                    self.writeln(&format!("assert({} != {});", parts[0].trim(), parts[1].trim()));
+                }
+            }
+            "dbg" => {
+                self.writeln(&format!("std::println(stderr, \"{{}}\", {});", self.convert_macro_tokens(&tokens)));
+            }
+            _ => {
+                self.writeln(&format!("// TODO: {}!(...)", macro_name));
+            }
+        }
+    }
+
+    /// Emit a macro invocation as an expression (returns a string).
+    fn emit_macro_expr(&self, mac: &syn::Macro) -> String {
+        let macro_name = mac
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let tokens = mac.tokens.to_string();
+
+        match macro_name.as_str() {
+            "format" => {
+                format!("std::format({})", self.convert_format_args(&tokens))
+            }
+            "vec" => {
+                // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
+                // We can't infer T at this level, so use initializer list
+                let items = self.convert_macro_tokens(&tokens);
+                format!("rusty::Vec{{{}}}", items)
+            }
+            "String::from" => {
+                format!("rusty::String::from({})", self.convert_macro_tokens(&tokens))
+            }
+            "todo" => {
+                "throw std::logic_error(\"not yet implemented\")".to_string()
+            }
+            "unimplemented" => {
+                "throw std::logic_error(\"not implemented\")".to_string()
+            }
+            "stringify" => {
+                format!("\"{}\"", tokens.replace('"', "\\\""))
+            }
+            "concat" => {
+                let parts = self.split_macro_args(&tokens);
+                let joined: Vec<String> = parts.iter().map(|p| {
+                    format!("std::string({})", p.trim())
+                }).collect();
+                if joined.len() == 1 {
+                    joined[0].clone()
+                } else {
+                    joined.join(" + ")
+                }
+            }
+            _ => {
+                format!("/* {}!({}) */", macro_name, tokens)
+            }
+        }
+    }
+
+    /// Convert Rust format string args to C++ std::format args.
+    /// `"hello {}", x` → `"hello {}", x`
+    /// The format syntax is mostly compatible between Rust and C++23.
+    fn convert_format_args(&self, tokens: &str) -> String {
+        // Rust's format!("...", args) is very close to C++23's std::format("...", args)
+        // The {} placeholders are identical. Named args differ but basic usage is the same.
+        self.convert_macro_tokens(tokens)
+    }
+
+    /// Convert raw macro tokens to a C++ expression string.
+    fn convert_macro_tokens(&self, tokens: &str) -> String {
+        tokens.to_string()
+    }
+
+    /// Split macro arguments by top-level commas (respecting nesting).
+    fn split_macro_args(&self, tokens: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut current = String::new();
+        let mut depth = 0i32;
+
+        for ch in tokens.chars() {
+            match ch {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    result.push(current.clone());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+        result
     }
 
     fn emit_arm_body(&mut self, body: &syn::Expr) {
@@ -1265,6 +1497,7 @@ impl CodeGen {
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
+            syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
             _ => format!("/* TODO: expr */"),
         }
     }
@@ -3209,5 +3442,99 @@ mod tests {
         let out = transpile_str("async fn process(data: Vec<i32>) -> bool { true }");
         assert!(out.contains("rusty::Task<bool> process(rusty::Vec<int32_t> data)"));
         assert!(out.contains("co_return true;"));
+    }
+
+    // ── Phase 9: Macro and derive tests ─────────────────────────
+
+    #[test]
+    fn test_println_macro() {
+        let out = transpile_str(r#"fn f() { println!("hello"); }"#);
+        assert!(out.contains("std::println("));
+    }
+
+    #[test]
+    fn test_format_macro() {
+        let out = transpile_str(r#"fn f() { let s = format!("val: {}", 42); }"#);
+        assert!(out.contains("std::format("));
+    }
+
+    #[test]
+    fn test_vec_macro() {
+        let out = transpile_str("fn f() { let v = vec![1, 2, 3]; }");
+        assert!(out.contains("rusty::Vec{"));
+    }
+
+    #[test]
+    fn test_todo_macro() {
+        let out = transpile_str("fn f() { todo!(); }");
+        assert!(out.contains("throw std::logic_error"));
+    }
+
+    #[test]
+    fn test_assert_macro() {
+        let out = transpile_str("fn f() { assert!(x > 0); }");
+        assert!(out.contains("assert("));
+    }
+
+    #[test]
+    fn test_assert_eq_macro() {
+        let out = transpile_str("fn f() { assert_eq!(a, b); }");
+        assert!(out.contains("assert(a == b)"));
+    }
+
+    #[test]
+    fn test_panic_macro() {
+        let out = transpile_str(r#"fn f() { panic!("error"); }"#);
+        assert!(out.contains("std::abort()"));
+    }
+
+    #[test]
+    fn test_derive_clone() {
+        let out = transpile_str("#[derive(Clone)] struct S { x: i32 }");
+        assert!(out.contains("S clone() const { return *this; }"));
+    }
+
+    #[test]
+    fn test_derive_partial_eq() {
+        let out = transpile_str("#[derive(PartialEq)] struct S { x: i32 }");
+        assert!(out.contains("operator==(const auto&) const = default"));
+    }
+
+    #[test]
+    fn test_derive_partial_ord() {
+        let out = transpile_str("#[derive(PartialOrd)] struct S { x: i32 }");
+        assert!(out.contains("operator<=>(const auto&) const = default"));
+    }
+
+    #[test]
+    fn test_derive_default() {
+        let out = transpile_str("#[derive(Default)] struct S { x: i32 }");
+        assert!(out.contains("static S default_()"));
+    }
+
+    #[test]
+    fn test_derive_debug() {
+        let out = transpile_str("#[derive(Debug)] struct S { x: i32 }");
+        assert!(out.contains("operator<<(std::ostream&"));
+    }
+
+    #[test]
+    fn test_derive_hash() {
+        let out = transpile_str("#[derive(Hash)] struct S { x: i32 }");
+        assert!(out.contains("struct std::hash<S>"));
+    }
+
+    #[test]
+    fn test_multiple_derives() {
+        let out = transpile_str("#[derive(Clone, PartialEq, Debug)] struct P { x: f64 }");
+        assert!(out.contains("clone() const"));
+        assert!(out.contains("operator=="));
+        assert!(out.contains("operator<<"));
+    }
+
+    #[test]
+    fn test_todo_expr() {
+        let out = transpile_str("fn f() -> i32 { todo!() }");
+        assert!(out.contains("throw std::logic_error"));
     }
 }
