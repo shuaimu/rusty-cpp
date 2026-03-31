@@ -95,15 +95,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
       - [x] *done* Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
       - [x] *done* Destructuring in match arms: struct patterns → field bindings, tuple patterns → positional bindings
-    - [ ] Phase 4: Traits → Microsoft Proxy facades
-      - [ ] Trait definition → `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` for each method
-      - [ ] `dyn Trait` parameters → `pro::proxy_view<Facade>`
-      - [ ] `Box<dyn Trait>` parameters/returns → `pro::proxy<Facade>`
-      - [ ] `impl Trait` return position → `pro::proxy<Facade>` (unified mapping)
-      - [ ] `&dyn Trait` → `pro::proxy_view<Facade>`
+    - [x] *done* Phase 4: Traits → Microsoft Proxy facades
+      - [x] *done* Trait definition → `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` for each method
+      - [x] *done* `dyn Trait` parameters → `pro::proxy_view<Facade>`
+      - [x] *done* `Box<dyn Trait>` parameters/returns → `pro::proxy<Facade>`
+      - [x] *done* `impl Trait` return position → `pro::proxy<Facade>` (unified mapping)
+      - [x] *done* `&dyn Trait` → `pro::proxy_view<Facade>`
       - [ ] Multiple trait bounds (`T: A + B`) → combine conventions in single facade
-      - [ ] Trait implementation → just emit methods on the struct (Proxy resolves automatically)
-      - [ ] Default trait methods → free functions taking `pro::proxy_view<Facade>`
+      - [x] *done* Trait implementation → just emit methods on the struct (Proxy resolves automatically)
+      - [x] *done* Default trait methods → free functions taking `pro::proxy_view<Facade>`
       - [ ] Operator traits (Add, Sub, Index, Deref) → C++ operator overloading
       - [ ] Marker traits (Send, Sync, Copy) → `static_assert` or concept constraints
       - [ ] Supertraits → facade composition

@@ -101,6 +101,7 @@ impl CodeGen {
             syn::Item::Static(s) => self.emit_static(s),
             syn::Item::Impl(i) => self.emit_impl_block(i),
             syn::Item::ForeignMod(fm) => self.emit_foreign_mod(fm),
+            syn::Item::Trait(t) => self.emit_trait(t),
             _ => {
                 self.writeln("// TODO: unhandled item kind");
             }
@@ -271,6 +272,118 @@ impl CodeGen {
         let ty = self.map_type(&s.ty);
         let expr = self.emit_expr_to_string(&s.expr);
         self.writeln(&format!("static {} {} = {};", ty, name, expr));
+    }
+
+    fn emit_trait(&mut self, t: &syn::ItemTrait) {
+        let trait_name = &t.ident;
+
+        // Step 1: Emit PRO_DEF_MEM_DISPATCH for each method
+        let mut methods: Vec<(String, String, String, bool)> = Vec::new(); // (dispatch_name, method_name, signature, is_const)
+
+        for item in &t.items {
+            if let syn::TraitItem::Fn(method) = item {
+                let method_name = method.sig.ident.to_string();
+                let escaped_name = escape_cpp_keyword(&method_name);
+                let dispatch_name = format!("Mem{}_{}", trait_name, escaped_name);
+
+                // Determine if const (from &self)
+                let is_const = matches!(
+                    method.sig.inputs.first(),
+                    Some(syn::FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none()
+                );
+
+                // Build the signature: return_type(param_types...) [const]
+                let return_type = self.map_return_type(&method.sig.output);
+                let param_types: Vec<String> = method
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::FnArg::Receiver(_) => None,
+                        syn::FnArg::Typed(pt) => Some(self.map_type(&pt.ty)),
+                    })
+                    .collect();
+
+                let sig = if param_types.is_empty() {
+                    format!("{}()", return_type)
+                } else {
+                    format!("{}({})", return_type, param_types.join(", "))
+                };
+
+                self.writeln(&format!(
+                    "PRO_DEF_MEM_DISPATCH(Mem{}_{}, {});",
+                    trait_name, escaped_name, escaped_name
+                ));
+
+                methods.push((dispatch_name, escaped_name, sig, is_const));
+            }
+        }
+
+        self.newline();
+
+        // Step 2: Emit facade_builder struct
+        self.writeln(&format!(
+            "struct {}Facade : pro::facade_builder",
+            trait_name
+        ));
+        self.indent += 1;
+        for (i, (dispatch_name, _, sig, is_const)) in methods.iter().enumerate() {
+            let const_suffix = if *is_const { " const" } else { "" };
+            if i == methods.len() - 1 {
+                self.writeln(&format!(
+                    "::add_convention<{}, {}{}>"  ,
+                    dispatch_name, sig, const_suffix
+                ));
+                self.writeln("::build {};");
+            } else {
+                self.writeln(&format!(
+                    "::add_convention<{}, {}{}>",
+                    dispatch_name, sig, const_suffix
+                ));
+            }
+        }
+        if methods.is_empty() {
+            self.writeln("::build {};");
+        }
+        self.indent -= 1;
+
+        // Step 3: Emit default method implementations as free functions
+        for item in &t.items {
+            if let syn::TraitItem::Fn(method) = item {
+                if let Some(default_body) = &method.default {
+                    let method_name = escape_cpp_keyword(&method.sig.ident.to_string());
+                    let return_type = self.map_return_type(&method.sig.output);
+
+                    // Build params (replacing self with proxy_view)
+                    let mut params = vec![format!(
+                        "pro::proxy_view<{}Facade> _self",
+                        trait_name
+                    )];
+                    for arg in &method.sig.inputs {
+                        if let syn::FnArg::Typed(pt) = arg {
+                            let ty = self.map_type(&pt.ty);
+                            let name = match pt.pat.as_ref() {
+                                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                                _ => "_".to_string(),
+                            };
+                            params.push(format!("{} {}", ty, name));
+                        }
+                    }
+
+                    self.newline();
+                    self.writeln(&format!(
+                        "{} {}({}) {{",
+                        return_type,
+                        method_name,
+                        params.join(", ")
+                    ));
+                    self.indent += 1;
+                    self.emit_block(default_body);
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+            }
+        }
     }
 
     fn emit_impl_block(&mut self, i: &syn::ItemImpl) {
@@ -1139,6 +1252,29 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 let path_str = self.emit_path_to_string(&tp.path);
 
+                // Special case: Box<dyn Trait> → pro::proxy<TraitFacade>
+                if let Some(last_seg) = tp.path.segments.last() {
+                    let seg_name = last_seg.ident.to_string();
+                    if seg_name == "Box" {
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            if let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
+                                args.args.first()
+                            {
+                                if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
+                                    let trait_name = tb
+                                        .path
+                                        .segments
+                                        .iter()
+                                        .map(|s| s.ident.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("::");
+                                    return format!("pro::proxy<{}Facade>", trait_name);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Check if the last segment has generic arguments
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
@@ -1188,6 +1324,19 @@ impl CodeGen {
                         return "std::string_view".to_string();
                     }
                 }
+                // Special case: &dyn Trait → pro::proxy_view<TraitFacade>
+                if let syn::Type::TraitObject(to) = r.elem.as_ref() {
+                    if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
+                        let trait_name = tb
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        return format!("pro::proxy_view<{}Facade>", trait_name);
+                    }
+                }
                 let inner = self.map_type(&r.elem);
                 if r.mutability.is_some() {
                     format!("{}&", inner)
@@ -1222,6 +1371,39 @@ impl CodeGen {
             }
             syn::Type::Never(_) => "[[noreturn]] void".to_string(),
             syn::Type::Infer(_) => "auto".to_string(),
+            syn::Type::TraitObject(to) => {
+                // dyn Trait → pro::proxy_view<TraitFacade>
+                // Box<dyn Trait> handled at the Box<> level
+                if let Some(first) = to.bounds.first() {
+                    if let syn::TypeParamBound::Trait(tb) = first {
+                        let trait_name = tb
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        return format!("pro::proxy_view<{}Facade>", trait_name);
+                    }
+                }
+                "/* TODO: complex trait object */".to_string()
+            }
+            syn::Type::ImplTrait(it) => {
+                // impl Trait → pro::proxy<TraitFacade>
+                if let Some(first) = it.bounds.first() {
+                    if let syn::TypeParamBound::Trait(tb) = first {
+                        let trait_name = tb
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        return format!("pro::proxy<{}Facade>", trait_name);
+                    }
+                }
+                "auto".to_string()
+            }
             _ => "/* TODO: type */".to_string(),
         }
     }
@@ -2307,5 +2489,103 @@ mod tests {
         "#,
         );
         assert!(out.contains("[](const auto& other)"));
+    }
+
+    // ── Phase 4: Trait / Proxy facade tests ─────────────────────
+
+    #[test]
+    fn test_trait_dispatch_macros() {
+        let out = transpile_str("trait Drawable { fn draw(&self); fn area(&self) -> f64; }");
+        assert!(out.contains("PRO_DEF_MEM_DISPATCH(MemDrawable_draw, draw);"));
+        assert!(out.contains("PRO_DEF_MEM_DISPATCH(MemDrawable_area, area);"));
+    }
+
+    #[test]
+    fn test_trait_facade_builder() {
+        let out = transpile_str("trait Drawable { fn draw(&self); fn area(&self) -> f64; }");
+        assert!(out.contains("struct DrawableFacade : pro::facade_builder"));
+        assert!(out.contains("::add_convention<MemDrawable_draw, void() const>"));
+        assert!(out.contains("::add_convention<MemDrawable_area, double() const>"));
+        assert!(out.contains("::build {};"));
+    }
+
+    #[test]
+    fn test_trait_mut_method() {
+        let out = transpile_str("trait Mutator { fn mutate(&mut self); }");
+        // &mut self → no const suffix
+        assert!(out.contains("::add_convention<MemMutator_mutate, void()>"));
+        assert!(!out.contains("void() const"));
+    }
+
+    #[test]
+    fn test_trait_method_with_params() {
+        let out = transpile_str("trait Adder { fn add(&self, x: i32, y: i32) -> i32; }");
+        assert!(out.contains("::add_convention<MemAdder_add, int32_t(int32_t, int32_t) const>"));
+    }
+
+    #[test]
+    fn test_dyn_trait_param() {
+        let out = transpile_str(
+            "trait Foo { fn bar(&self); } fn f(x: &dyn Foo) {}",
+        );
+        assert!(out.contains("pro::proxy_view<FooFacade> x"));
+    }
+
+    #[test]
+    fn test_box_dyn_trait() {
+        let out = transpile_str(
+            "trait Foo { fn bar(&self); } fn f(x: Box<dyn Foo>) {}",
+        );
+        assert!(out.contains("pro::proxy<FooFacade> x"));
+    }
+
+    #[test]
+    fn test_impl_trait_return() {
+        let out = transpile_str(
+            "trait Foo { fn bar(&self); } fn f() -> impl Foo { todo!() }",
+        );
+        assert!(out.contains("pro::proxy<FooFacade> f()"));
+    }
+
+    #[test]
+    fn test_trait_with_keyword_method() {
+        let out = transpile_str("trait Builder { fn new(&self) -> Self; }");
+        assert!(out.contains("PRO_DEF_MEM_DISPATCH(MemBuilder_new_, new_);"));
+    }
+
+    #[test]
+    fn test_trait_impl_just_methods() {
+        // impl Trait for Type → just emit methods on the struct (Proxy auto-resolves)
+        let out = transpile_str(
+            r#"
+            struct Dog { name: String }
+            trait Animal { fn speak(&self) -> String; }
+            impl Animal for Dog {
+                fn speak(&self) -> String { self.name }
+            }
+        "#,
+        );
+        // Methods should be in the struct
+        assert!(out.contains("struct Dog {"));
+        assert!(out.contains("rusty::String speak() const"));
+    }
+
+    #[test]
+    fn test_empty_trait() {
+        let out = transpile_str("trait Marker {}");
+        assert!(out.contains("struct MarkerFacade : pro::facade_builder"));
+        assert!(out.contains("::build {};"));
+    }
+
+    #[test]
+    fn test_trait_default_method() {
+        let out = transpile_str(
+            r#"trait Greet {
+                fn name(&self) -> String;
+                fn greet(&self) -> String { self.name() }
+            }"#,
+        );
+        // Default method should be emitted as a free function
+        assert!(out.contains("rusty::String greet(pro::proxy_view<GreetFacade> _self)"));
     }
 }
