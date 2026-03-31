@@ -1216,3 +1216,298 @@ The **easiest wins** are:
 - Modules map to C++20 modules (`pub` → `export`, `mod` → `import`)
 
 This approach effectively lets Rust serve as a **safe DSL for C++** — write in Rust with full safety guarantees, transpile to C++ for deployment in C++ codebases. The generated C++ can then be analyzed by rusty-cpp to verify that the safety properties are maintained.
+
+---
+
+## 10. Whole-Crate Transpilation: Using Rust Crates in C++
+
+### 10.1 The Goal
+
+A C++ project should be able to use a Rust crate as easily as any other C++ dependency:
+
+```cmake
+# CMakeLists.txt
+find_package(my_rust_crate REQUIRED)
+target_link_libraries(my_app PRIVATE my_rust_crate)
+```
+
+```cpp
+// main.cpp
+import my_rust_crate;
+import my_rust_crate.utils;
+
+int main() {
+    auto result = my_rust_crate::process(42);
+}
+```
+
+There are **two approaches** to achieve this, each with different trade-offs:
+
+### 10.2 Approach A: Full Transpilation (Rust Source → C++ Source)
+
+Convert the entire Rust crate into C++ source files that compile natively with a C++ compiler.
+
+```
+my_rust_crate/                     my_rust_crate_cpp/
+├── Cargo.toml                     ├── CMakeLists.txt
+├── src/                    →      ├── my_rust_crate.cppm
+│   ├── lib.rs                     ├── my_rust_crate.utils.cppm
+│   ├── utils.rs                   ├── my_rust_crate.types.cppm
+│   └── types.rs                   └── my_rust_crate.internal.cppm
+```
+
+**Workflow:**
+```bash
+# One command transpiles the entire crate
+rusty-cpp-transpiler --crate Cargo.toml --output-dir build/
+
+# This produces:
+#   build/my_crate.cppm              (from src/lib.rs)
+#   build/my_crate.utils.cppm        (from src/utils.rs)
+#   build/my_crate.types.cppm        (from src/types.rs)
+#   build/CMakeLists.txt             (generated build system)
+```
+
+**Pros:**
+- No Rust toolchain needed at build time — pure C++ output
+- Full integration with C++ build systems (CMake, Bazel, etc.)
+- C++ IDE support (autocomplete, debugging, refactoring)
+- Can be checked by rusty-cpp analyzer after transpilation
+- Zero runtime FFI overhead — everything is native C++
+
+**Cons:**
+- Not all Rust code can be transpiled (unsafe blocks, proc macros, complex trait impls)
+- External crate dependencies require recursive transpilation or manual bindings
+- Generated C++ may be less idiomatic than hand-written C++
+- Transpilation must be re-run when Rust source changes
+
+**Current status:** Single-file transpilation works (243 tests). Missing: crate-level orchestration.
+
+### 10.3 Approach B: FFI Binding (Rust Library → C++ Header + Linked Library)
+
+Compile the Rust crate as a native library (`.a`/`.so`/`.dylib`) and generate C++ headers for the public API.
+
+```
+my_rust_crate/                     Output:
+├── Cargo.toml                     ├── libmy_rust_crate.a    (compiled Rust)
+├── src/                    →      ├── my_rust_crate.hpp     (C++ header)
+│   └── lib.rs                     └── CMakeLists.txt        (links library)
+```
+
+**Workflow:**
+```bash
+# Compile Rust as C library + generate bindings
+rusty-cpp-transpiler --bind Cargo.toml --output-dir build/
+
+# This produces:
+#   build/libmy_rust_crate.a          (cargo build --release)
+#   build/my_rust_crate.hpp           (cbindgen-generated header)
+#   build/CMakeLists.txt              (find_library + target_link)
+```
+
+**Pros:**
+- Works with any Rust crate (no transpilation limitations)
+- Rust code stays in Rust — full ecosystem compatibility
+- Incremental: only the public API boundary is exposed
+- Battle-tested approach (cxx, cbindgen are mature)
+
+**Cons:**
+- Requires Rust toolchain at build time
+- FFI boundary has overhead (no inlining across boundary)
+- Limited type mapping across FFI (no generics, no traits)
+- C++ side can't see Rust implementation details
+- Debugging across FFI boundary is harder
+
+**Current status:** Not implemented. Would use `cbindgen` or `cxx` under the hood.
+
+### 10.4 Recommended: Approach A with Fallback to B
+
+Use **full transpilation** (Approach A) as the primary strategy — it aligns with our core principle that Rust is a safe DSL for C++. Fall back to **FFI binding** (Approach B) for crates that can't be transpiled (e.g., heavy proc macro usage, FFI-heavy crates, crates with inline assembly).
+
+### 10.5 Implementation Plan for Whole-Crate Transpilation
+
+#### Phase A: `--crate` Mode (Orchestration Layer)
+
+Add a `--crate <Cargo.toml>` flag that transpiles an entire Rust crate in one command.
+
+**Step 1: Crate Discovery**
+```
+Input:  Cargo.toml path
+Output: List of (rs_path, module_name, cppm_path) tuples
+```
+- Parse Cargo.toml for crate name and targets
+- Walk `src/` to find all `.rs` files
+- Use existing `cmake::map_rs_to_cppm()` for file→module mapping
+- Build module dependency graph from `mod` and `use` statements
+
+**Step 2: Per-File Transpilation**
+```
+For each .rs file in topological order:
+  1. Read source (or cargo expand)
+  2. Call transpile(source, module_name)
+  3. Write .cppm to output directory
+```
+- Reuse existing `transpile()` function — no changes needed
+- Each file gets its own `CodeGen` instance with correct module name
+- Output directory mirrors the flat module naming: `crate.module.submodule.cppm`
+
+**Step 3: Build System Generation**
+```
+Output: CMakeLists.txt in output directory
+```
+- Reuse existing `cmake::generate_cmake()` — already handles multi-file mapping
+- Add `find_package(rusty-cpp)` for rusty:: headers
+- Add C++20 module support flags
+
+**Step 4: Verification (Optional)**
+```
+If --verify: run rusty-cpp-checker on each .cppm file
+```
+- Reuse existing `--verify` infrastructure
+
+**Estimated effort:** ~200 LOC in `main.rs` (new `transpile_crate()` function).
+
+#### Phase B: External Crate Handling
+
+When the crate depends on external crates (`[dependencies]` in Cargo.toml):
+
+| Dependency Type | Strategy |
+|----------------|----------|
+| Rust std lib (`std::`, `core::`) | Mapped to `rusty::` types (already done) |
+| Crates with `rusty::` equivalents | Map types via extended `types.rs` |
+| Crates that can be transpiled | Recursively transpile (future) |
+| Crates that can't be transpiled | FFI binding fallback (Approach B) |
+| `serde`, `tokio`, etc. (complex) | Require manual mapping or skip |
+
+For MVP, external crates should emit a `// TODO: external crate` comment and continue.
+
+#### Phase C: `--bind` Mode (FFI Alternative)
+
+For crates that can't be transpiled, add FFI binding generation:
+
+```bash
+rusty-cpp-transpiler --bind Cargo.toml --output-dir build/
+```
+
+1. Run `cargo build --release` to compile the Rust library
+2. Run `cbindgen` to generate C header from `#[no_mangle] pub extern "C"` functions
+3. Wrap C header in C++ header with rusty:: type annotations
+4. Generate CMakeLists.txt that links the Rust `.a`/`.so`
+
+**Estimated effort:** ~300 LOC (new `bind.rs` module).
+
+### 10.6 End-to-End Example
+
+**Rust crate** (`my_math/`):
+```rust
+// src/lib.rs
+pub mod vector;
+
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+
+// src/vector.rs
+pub struct Vec2 { pub x: f64, pub y: f64 }
+
+impl Vec2 {
+    pub fn new(x: f64, y: f64) -> Self { Vec2 { x, y } }
+    pub fn length(&self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
+}
+
+impl std::ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, other: Vec2) -> Vec2 {
+        Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+```
+
+**Transpile:**
+```bash
+rusty-cpp-transpiler --crate my_math/Cargo.toml --output-dir build/
+```
+
+**Generated C++ output:**
+
+`build/my_math.cppm`:
+```cpp
+export module my_math;
+
+export import my_math.vector;
+
+export int32_t add(int32_t a, int32_t b) {
+    return a + b;
+}
+```
+
+`build/my_math.vector.cppm`:
+```cpp
+export module my_math.vector;
+
+export struct Vec2 {
+    double x;
+    double y;
+
+    static Vec2 new_(double x, double y) {
+        return Vec2{.x = x, .y = y};
+    }
+    double length() const {
+        return std::sqrt(x * x + y * y);
+    }
+    Vec2 operator+(Vec2 other) {
+        return Vec2{.x = x + other.x, .y = y + other.y};
+    }
+};
+```
+
+`build/CMakeLists.txt`:
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(my_math VERSION 0.1.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+
+add_library(my_math
+    my_math.cppm
+    my_math.vector.cppm
+)
+target_sources(my_math PUBLIC FILE_SET CXX_MODULES FILES
+    my_math.cppm
+    my_math.vector.cppm
+)
+```
+
+**Use from C++:**
+```cpp
+import my_math;
+import my_math.vector;
+
+int main() {
+    auto v1 = Vec2::new_(1.0, 2.0);
+    auto v2 = Vec2::new_(3.0, 4.0);
+    auto v3 = v1 + v2;
+    auto len = v3.length();
+    auto sum = my_math::add(1, 2);
+}
+```
+
+### 10.7 Current State and Gaps
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Single-file transpilation | Done ✅ | 243 tests, all language features |
+| Type mapping (rusty::) | Done ✅ | All std lib types covered |
+| C++20 module declarations | Done ✅ | export/import/pub handling |
+| File-to-module mapping | Done ✅ | `cmake::map_rs_to_cppm()` |
+| CMakeLists.txt generation | Done ✅ | Binary and library targets |
+| `cargo expand` integration | Done ✅ | `--expand` flag |
+| Analyzer verification | Done ✅ | `--verify` flag |
+| **`--crate` mode** | **Not done** | Orchestration layer needed |
+| **External crate handling** | **Not done** | Dependency resolution |
+| **`--bind` mode (FFI)** | **Not done** | Alternative approach |
+| **Recursive crate transpilation** | **Not done** | For dependency crates |
+
+### 10.8 Priority Order
+
+1. **`--crate` mode** — highest impact, ~200 LOC, enables whole-crate transpilation
+2. **External crate detection** — graceful handling when dependencies can't be mapped
+3. **`--bind` mode** — alternative for non-transpilable crates
+4. **Recursive dependency transpilation** — full dependency graph resolution
