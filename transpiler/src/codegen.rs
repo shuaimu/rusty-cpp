@@ -401,6 +401,16 @@ impl CodeGen {
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
 
         if has_data {
+            // Check if any variant references the enum type itself (recursive)
+            let is_recursive = e.variants.iter().any(|v| {
+                self.variant_references_type(v, &name.to_string())
+            });
+
+            // Emit forward declarations for recursive enums
+            if is_recursive {
+                self.writeln(&format!("struct {};  // forward declaration for recursion", name));
+            }
+
             // Enum with data → per-variant structs + std::variant
             self.writeln("// Algebraic data type");
             for variant in &e.variants {
@@ -432,17 +442,31 @@ impl CodeGen {
                     }
                 }
             }
-            // Emit the variant alias
+            // Emit the variant type
             let variant_list: Vec<String> = e
                 .variants
                 .iter()
                 .map(|v| format!("{}_{}", name, v.ident))
                 .collect();
-            self.writeln(&format!(
-                "using {} = std::variant<{}>;",
-                name,
-                variant_list.join(", ")
-            ));
+
+            if is_recursive {
+                // For recursive enums, use a struct wrapper (using alias can't be forward-declared)
+                self.writeln(&format!(
+                    "struct {} : std::variant<{}> {{",
+                    name,
+                    variant_list.join(", ")
+                ));
+                self.indent += 1;
+                self.writeln("using variant::variant;");
+                self.indent -= 1;
+                self.writeln("};");
+            } else {
+                self.writeln(&format!(
+                    "using {} = std::variant<{}>;",
+                    name,
+                    variant_list.join(", ")
+                ));
+            }
         } else {
             // C-like enum → enum class
             self.writeln(&format!("enum class {} {{", name));
@@ -451,6 +475,46 @@ impl CodeGen {
             self.writeln(&variants.join(",\n    "));
             self.indent -= 1;
             self.writeln("};");
+        }
+    }
+
+    /// Check if a variant's fields reference a given type name (for recursion detection).
+    fn variant_references_type(&self, variant: &syn::Variant, type_name: &str) -> bool {
+        match &variant.fields {
+            syn::Fields::Named(fields) => {
+                fields.named.iter().any(|f| self.type_references_name(&f.ty, type_name))
+            }
+            syn::Fields::Unnamed(fields) => {
+                fields.unnamed.iter().any(|f| self.type_references_name(&f.ty, type_name))
+            }
+            syn::Fields::Unit => false,
+        }
+    }
+
+    /// Check if a type references a given name (recursively through generics).
+    fn type_references_name(&self, ty: &syn::Type, name: &str) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                tp.path.segments.iter().any(|seg| {
+                    if seg.ident == name {
+                        return true;
+                    }
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| {
+                            if let syn::GenericArgument::Type(t) = arg {
+                                self.type_references_name(t, name)
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_references_name(&r.elem, name),
+            syn::Type::Ptr(p) => self.type_references_name(&p.elem, name),
+            _ => false,
         }
     }
 
@@ -476,6 +540,15 @@ impl CodeGen {
 
     fn emit_trait(&mut self, t: &syn::ItemTrait) {
         let trait_name = &t.ident;
+
+        // Check for known marker traits — emit as concepts
+        let trait_name_str = trait_name.to_string();
+        if matches!(trait_name_str.as_str(), "Send" | "Sync" | "Copy" | "Clone" | "Sized" | "Unpin") {
+            self.writeln(&format!("// Marker trait: {}", trait_name));
+            self.writeln(&format!("template<typename T>"));
+            self.writeln(&format!("concept {} = true;  // marker trait — no runtime check", trait_name));
+            return;
+        }
 
         // Step 1: Emit PRO_DEF_MEM_DISPATCH for each method
         let mut methods: Vec<(String, String, String, bool)> = Vec::new(); // (dispatch_name, method_name, signature, is_const)
@@ -4203,5 +4276,55 @@ mod tests {
         let out = transpile_str_module("pub(crate) fn internal() {}", "my_crate");
         assert!(!out.contains("export void internal"));
         assert!(out.contains("void internal()"));
+    }
+
+    // ── Recursive enum tests ────────────────────────────────────
+
+    #[test]
+    fn test_recursive_enum_forward_decl() {
+        let out = transpile_str("enum List { Cons(i32, Box<List>), Nil }");
+        assert!(out.contains("struct List;  // forward declaration"));
+    }
+
+    #[test]
+    fn test_recursive_enum_struct_wrapper() {
+        let out = transpile_str("enum List { Cons(i32, Box<List>), Nil }");
+        assert!(out.contains("struct List : std::variant<"));
+        assert!(out.contains("using variant::variant;"));
+    }
+
+    #[test]
+    fn test_non_recursive_enum_uses_using() {
+        let out = transpile_str("enum Simple { A(i32), B(f64) }");
+        assert!(out.contains("using Simple = std::variant<"));
+        assert!(!out.contains("struct Simple;  // forward"));
+    }
+
+    #[test]
+    fn test_recursive_enum_box_field() {
+        let out = transpile_str("enum Expr { Num(f64), Add(Box<Expr>, Box<Expr>) }");
+        assert!(out.contains("rusty::Box<Expr> _0;"));
+        assert!(out.contains("struct Expr;  // forward"));
+    }
+
+    // ── Marker trait tests ──────────────────────────────────────
+
+    #[test]
+    fn test_marker_trait_send() {
+        let out = transpile_str("trait Send {}");
+        assert!(out.contains("concept Send = true;"));
+    }
+
+    #[test]
+    fn test_marker_trait_copy() {
+        let out = transpile_str("trait Copy {}");
+        assert!(out.contains("concept Copy = true;"));
+    }
+
+    #[test]
+    fn test_regular_trait_not_concept() {
+        let out = transpile_str("trait Foo { fn bar(&self); }");
+        assert!(!out.contains("concept"));
+        assert!(out.contains("FooFacade"));
     }
 }

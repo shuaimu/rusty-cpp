@@ -88,7 +88,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Function path mapping: Box::new→rusty::Box::make, String::from, Vec::new, etc.
     - [x] *done* Phase 3: Enums with data and pattern matching - algebraic data types via std::variant
       - [x] *done* Enum with data → per-variant structs + `using Enum = std::variant<...>` (done in Phase 0)
-      - [ ] Recursive enums → use rusty::Box for the recursive variant field
+      - [x] *done* Recursive enums → forward declaration + struct wrapper inheriting std::variant
       - [x] *done* `match` on enums → `std::visit` with `overloaded{...}` lambda dispatch
       - [x] *done* `match` on integers/chars → `switch`/`case` (with multi-pattern `|` support)
       - [x] *done* `if let Some(v) = opt` → `if (opt.is_some()) { auto v = opt.unwrap(); ... }`
@@ -105,7 +105,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Trait implementation → just emit methods on the struct (Proxy resolves automatically)
       - [x] *done* Default trait methods → free functions taking `pro::proxy_view<Facade>`
       - [x] *done* Operator traits (Add, Sub, Mul, Div, Neg, Not, Index, Deref, PartialEq, etc.) → C++ operator overloading
-      - [ ] Marker traits (Send, Sync, Copy) → `static_assert` or concept constraints
+      - [x] *done* Marker traits (Send, Sync, Copy, Clone, Sized, Unpin) → C++20 concept = true
       - [ ] Supertraits → facade composition
     - [x] *done* Phase 5: Generics → templates with concepts
       - [x] *done* Generic functions `fn foo<T>(x: T)` → `template<typename T> void foo(T x)`
