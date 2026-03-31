@@ -208,6 +208,11 @@ impl CodeGen {
         // Emit doc comments
         self.emit_doc_comments(&f.attrs);
 
+        // Emit @unsafe annotation for unsafe functions
+        if f.sig.unsafety.is_some() {
+            self.writeln("// @unsafe");
+        }
+
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
@@ -1007,7 +1012,7 @@ impl CodeGen {
                 true
             }
             syn::Expr::Unsafe(unsafe_expr) => {
-                self.writeln("// unsafe");
+                self.writeln("// @unsafe");
                 self.writeln("{");
                 self.indent += 1;
                 self.emit_block(&unsafe_expr.block);
@@ -3273,7 +3278,7 @@ mod tests {
     #[test]
     fn test_unsafe_block() {
         let out = transpile_str("fn f() { unsafe { let x = 1; } }");
-        assert!(out.contains("// unsafe"));
+        assert!(out.contains("// @unsafe"));
         assert!(out.contains("const auto x = 1;"));
     }
 

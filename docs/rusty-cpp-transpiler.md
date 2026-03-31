@@ -727,7 +727,75 @@ If the transpiled C++ is then fed back into rusty-cpp for analysis, lifetime ann
 std::string_view longest(std::string_view x, std::string_view y);
 ```
 
-### 3.7 Async/Await → Pollable State Machine on C++20 Coroutines
+### 3.7 Unsafe Code → rusty-cpp @unsafe Annotations
+
+Rust's `unsafe` marks code regions where the programmer takes responsibility for safety invariants. In the transpiled C++, we preserve these boundaries using rusty-cpp's `@unsafe` annotation system, closing the loop for analyzer verification.
+
+#### Unsafe Blocks
+
+```rust
+fn safe_wrapper() {
+    let x = 42;
+    unsafe {
+        let ptr = &x as *const i32;
+        let val = *ptr;
+    }
+}
+```
+
+```cpp
+void safe_wrapper() {
+    const auto x = 42;
+    // @unsafe
+    {
+        const auto ptr = static_cast<const int32_t*>(&x);
+        const auto val = *ptr;
+    }
+}
+```
+
+The `unsafe { }` block becomes a `// @unsafe` annotated block. The rusty-cpp analyzer will skip safety checks inside `@unsafe` blocks, matching Rust's semantics.
+
+#### Unsafe Functions
+
+```rust
+unsafe fn dangerous(ptr: *mut i32) {
+    *ptr = 42;
+}
+```
+
+```cpp
+// @unsafe
+void dangerous(int32_t* ptr) {
+    *ptr = 42;
+}
+```
+
+`unsafe fn` becomes a `// @unsafe` annotated function. In rusty-cpp's two-state model, calling this function from `@safe` code requires an `@unsafe { }` block.
+
+#### Raw Pointers
+
+Raw pointer operations pass through naturally — C++ pointers are inherently unsafe:
+
+| Rust | C++ |
+|------|-----|
+| `*const T` | `const T*` |
+| `*mut T` | `T*` |
+| `ptr as *const T` | `static_cast<const T*>(ptr)` |
+| `*ptr` (deref) | `*ptr` |
+| `&x as *const T` | `static_cast<const T*>(&x)` |
+
+#### Design Decision
+
+The transpiler emits `// @unsafe` (not just `// unsafe`) so that the rusty-cpp analyzer can enforce safety boundaries on the transpiled output. This means:
+
+1. Transpiled safe code is checked by the analyzer (borrow rules, pointer safety)
+2. Transpiled unsafe blocks are skipped by the analyzer (programmer responsibility)
+3. The safety boundary is preserved across the transpilation — Rust's `unsafe` maps exactly to rusty-cpp's `@unsafe`
+
+This is consistent with the forward correctness guarantee: if Rust's borrow checker approved the safe code, the transpiled C++ should also pass the rusty-cpp analyzer's checks.
+
+### 3.8 Async/Await → Pollable State Machine on C++20 Coroutines
 
 Rust's async model is a lazy, poll-based state machine. C++20 coroutines provide the state machine generation, but default to eager execution. The transpiler builds Rust's poll model on top of C++20 coroutines by customizing the `promise_type`.
 
