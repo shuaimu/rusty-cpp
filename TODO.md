@@ -104,7 +104,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Multiple trait bounds (`T: A + B`) → combine conventions in single facade
       - [x] *done* Trait implementation → just emit methods on the struct (Proxy resolves automatically)
       - [x] *done* Default trait methods → free functions taking `pro::proxy_view<Facade>`
-      - [ ] Operator traits (Add, Sub, Index, Deref) → C++ operator overloading
+      - [x] *done* Operator traits (Add, Sub, Mul, Div, Neg, Not, Index, Deref, PartialEq, etc.) → C++ operator overloading
       - [ ] Marker traits (Send, Sync, Copy) → `static_assert` or concept constraints
       - [ ] Supertraits → facade composition
     - [x] *done* Phase 5: Generics → templates with concepts

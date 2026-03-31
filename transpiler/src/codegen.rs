@@ -11,6 +11,8 @@ pub struct CodeGen {
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
+    /// Maps (type_name, method_name) → C++ operator name for operator trait impls.
+    operator_renames: HashMap<(String, String), String>,
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     current_struct: Option<String>,
@@ -31,6 +33,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             impl_blocks: HashMap::new(),
+            operator_renames: HashMap::new(),
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
@@ -76,8 +79,23 @@ impl CodeGen {
                         .map(|s| s.ident.to_string())
                         .collect::<Vec<_>>()
                         .join("::");
-                    let entry = self.impl_blocks.entry(type_name).or_default();
+
+                    // Check if this is an operator trait impl
+                    let op_name = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
+                        let trait_name = path.segments.last()?.ident.to_string();
+                        map_operator_trait(&trait_name).map(|s| s.to_string())
+                    });
+
+                    let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     for impl_item in &impl_block.items {
+                        // Record operator rename mapping
+                        if let (Some(op), syn::ImplItem::Fn(method)) = (&op_name, impl_item) {
+                            let method_name = method.sig.ident.to_string();
+                            self.operator_renames.insert(
+                                (type_name.clone(), method_name),
+                                op.clone(),
+                            );
+                        }
                         entry.push(impl_item.clone());
                     }
                 }
@@ -669,6 +687,14 @@ impl CodeGen {
             }
             syn::ImplItem::Type(t) => {
                 let name = &t.ident;
+                // Skip `type Output = ...` from operator trait impls
+                if name == "Output" {
+                    if let Some(ref struct_name) = self.current_struct {
+                        if self.operator_renames.keys().any(|(s, _)| s == struct_name) {
+                            return;
+                        }
+                    }
+                }
                 let ty = self.map_type(&t.ty);
                 self.writeln(&format!("using {} = {};", name, ty));
             }
@@ -679,7 +705,19 @@ impl CodeGen {
     }
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
-        let name = escape_cpp_keyword(&method.sig.ident.to_string());
+        let method_ident = method.sig.ident.to_string();
+
+        // Check if this method is an operator trait impl (renamed)
+        let name = if let Some(ref struct_name) = self.current_struct {
+            if let Some(op) = self.operator_renames.get(&(struct_name.clone(), method_ident.clone())) {
+                op.clone()
+            } else {
+                escape_cpp_keyword(&method_ident)
+            }
+        } else {
+            escape_cpp_keyword(&method_ident)
+        };
+
         let return_type = self.map_return_type(&method.sig.output);
 
         // Emit template prefix for generic methods
@@ -2196,6 +2234,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             impl_blocks: HashMap::new(),
+            operator_renames: HashMap::new(),
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
             module_name: None,
@@ -2431,6 +2470,34 @@ impl CodeGen {
 }
 
 /// Escape C++ reserved keywords by appending an underscore.
+/// Map Rust operator trait names to C++ operator function names.
+fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
+    match trait_name {
+        "Add" => Some("operator+"),
+        "Sub" => Some("operator-"),
+        "Mul" => Some("operator*"),
+        "Div" => Some("operator/"),
+        "Rem" => Some("operator%"),
+        "Neg" => Some("operator-"),
+        "Not" => Some("operator!"),
+        "BitAnd" => Some("operator&"),
+        "BitOr" => Some("operator|"),
+        "BitXor" => Some("operator^"),
+        "Shl" => Some("operator<<"),
+        "Shr" => Some("operator>>"),
+        "AddAssign" => Some("operator+="),
+        "SubAssign" => Some("operator-="),
+        "MulAssign" => Some("operator*="),
+        "DivAssign" => Some("operator/="),
+        "RemAssign" => Some("operator%="),
+        "Index" => Some("operator[]"),
+        "Deref" => Some("operator*"),
+        "PartialEq" => Some("operator=="),
+        "PartialOrd" => Some("operator<=>"),
+        _ => None,
+    }
+}
+
 fn escape_cpp_keyword(name: &str) -> String {
     match name {
         "new" | "delete" | "class" | "template" | "virtual" | "override" | "final"
@@ -3968,5 +4035,119 @@ mod tests {
             "fn f(opt: Option<i32>) { if let None = opt { nothing(); } }",
         );
         assert!(out.contains("if (opt.is_none()) {"));
+    }
+
+    // ── Operator trait tests ────────────────────────────────────
+
+    #[test]
+    fn test_impl_add_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { x: f64 }
+            impl std::ops::Add for V {
+                type Output = V;
+                fn add(self, other: V) -> V { V { x: self.x + other.x } }
+            }
+        "#,
+        );
+        assert!(out.contains("operator+("));
+        assert!(!out.contains("using Output"));
+    }
+
+    #[test]
+    fn test_impl_sub_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { x: f64 }
+            impl std::ops::Sub for V {
+                type Output = V;
+                fn sub(self, other: V) -> V { V { x: self.x - other.x } }
+            }
+        "#,
+        );
+        assert!(out.contains("operator-("));
+    }
+
+    #[test]
+    fn test_impl_neg_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { x: f64 }
+            impl std::ops::Neg for V {
+                type Output = V;
+                fn neg(self) -> V { V { x: -self.x } }
+            }
+        "#,
+        );
+        assert!(out.contains("operator-()"));
+    }
+
+    #[test]
+    fn test_impl_partial_eq_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { x: f64 }
+            impl PartialEq for V {
+                fn eq(&self, other: &V) -> bool { self.x == other.x }
+            }
+        "#,
+        );
+        assert!(out.contains("operator==("));
+    }
+
+    #[test]
+    fn test_impl_mul_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { x: f64 }
+            impl std::ops::Mul for V {
+                type Output = V;
+                fn mul(self, other: V) -> V { V { x: self.x * other.x } }
+            }
+        "#,
+        );
+        assert!(out.contains("operator*("));
+    }
+
+    #[test]
+    fn test_impl_index_operator() {
+        let out = transpile_str(
+            r#"
+            struct V { data: Vec<i32> }
+            impl std::ops::Index<usize> for V {
+                type Output = i32;
+                fn index(&self, i: usize) -> &i32 { todo!() }
+            }
+        "#,
+        );
+        assert!(out.contains("operator[]("));
+    }
+
+    #[test]
+    fn test_output_type_suppressed() {
+        // `type Output = T` from operator traits should not appear in output
+        let out = transpile_str(
+            r#"
+            struct N { v: i32 }
+            impl std::ops::Add for N {
+                type Output = N;
+                fn add(self, other: N) -> N { N { v: self.v + other.v } }
+            }
+        "#,
+        );
+        assert!(!out.contains("using Output"));
+    }
+
+    #[test]
+    fn test_non_operator_method_unchanged() {
+        // Regular impl methods should not be affected by operator renaming
+        let out = transpile_str(
+            r#"
+            struct S { v: i32 }
+            impl S { fn add(&self, x: i32) -> i32 { self.v + x } }
+        "#,
+        );
+        assert!(out.contains("int32_t add("));
+        assert!(!out.contains("operator+"));
     }
 }
