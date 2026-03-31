@@ -48,3 +48,115 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* rusty::String - owned UTF-8 string with safe mutation and no null terminator assumptions
     - [x] *done* rusty::HashMap<K, V> - hash map with safe iteration and no iterator invalidation on lookup
     - [x] *done* rusty::HashSet<T> - hash set with safe iteration and no iterator invalidation on lookup
+  - [ ] Rust-to-C++ Transpiler - transpile Rust source to C++ using rusty-cpp types (see docs/rusty-cpp-transpiler.md)
+    - [ ] Phase 0: Project scaffolding
+      - [ ] Create `transpiler/` directory with its own Cargo.toml (binary crate, part of workspace)
+      - [ ] Add `syn` (full features) and `quote` as dependencies for Rust AST parsing
+      - [ ] Add `cargo-expand` integration for macro expansion before transpilation
+      - [ ] Set up CLI: `rusty-cpp-transpiler input.rs -o output.cppm` with basic arg parsing
+      - [ ] Set up end-to-end test harness: transpile .rs → .cppm, compile with g++/clang++, run and compare output
+    - [ ] Phase 1: Core language (MVP) - primitive types, functions, structs, control flow
+      - [ ] Primitive type mapping: i32→int32_t, f64→double, bool→bool, char→char32_t, usize→size_t, etc.
+      - [ ] Variable declarations: `let x = ...` → `const auto x = ...`, `let mut x = ...` → `auto x = ...`
+      - [ ] Function declarations: Rust fn → C++ function with explicit return statements
+      - [ ] Expression-to-statement conversion: detect tail expressions (no semicolon) and insert `return`
+      - [ ] Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
+      - [ ] `break` with value from loop → immediately-invoked lambda wrapper
+      - [ ] References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
+      - [ ] References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
+      - [ ] Implicit move insertion: insert `std::move()` at every Rust move point
+      - [ ] Lifetime erasure: strip all lifetime annotations from output
+      - [ ] Struct definitions: merge all `impl` blocks into single struct/class definition
+      - [ ] Method receiver mapping: `&self` → const method, `&mut self` → non-const, `self` → by-value
+      - [ ] Associated functions (`Self::new(...)`) → static methods
+      - [ ] C-like enums → `enum class`
+      - [ ] Tuple types → `std::tuple`, destructuring → structured bindings
+      - [ ] Arrays `[T; N]` → `std::array<T, N>`, slices `&[T]` → `std::span<const T>`
+      - [ ] Type aliases → `using` declarations
+      - [ ] Unsafe blocks → emit raw code without safety wrappers
+      - [ ] FFI `extern "C"` → `extern "C"` (direct mapping)
+    - [ ] Phase 2: rusty-cpp type mapping - standard library types
+      - [ ] Smart pointers: Box→rusty::Box, Rc→rusty::Rc, Arc→rusty::Arc, Weak→rusty::Weak
+      - [ ] Interior mutability: Cell→rusty::Cell, RefCell→rusty::RefCell, UnsafeCell→rusty::UnsafeCell
+      - [ ] Collections: Vec→rusty::Vec, HashMap→rusty::HashMap, HashSet→rusty::HashSet, BTreeMap→rusty::BTreeMap, BTreeSet→rusty::BTreeSet, VecDeque→rusty::VecDeque
+      - [ ] Strings: String→rusty::String, &str→std::string_view
+      - [ ] Error handling: Option→rusty::Option, Result→rusty::Result
+      - [ ] Concurrency: Mutex→rusty::Mutex, RwLock→rusty::RwLock, Condvar→rusty::Condvar, Barrier→rusty::Barrier, Once→rusty::Once
+      - [ ] Function pointers: fn()→rusty::SafeFn, unsafe fn()→rusty::UnsafeFn
+      - [ ] Thread spawn: thread::spawn→rusty::thread::spawn
+      - [ ] MaybeUninit→rusty::MaybeUninit
+    - [ ] Phase 3: Enums with data and pattern matching - algebraic data types via std::variant
+      - [ ] Enum with data → per-variant structs + `using Enum = std::variant<...>`
+      - [ ] Recursive enums → use rusty::Box for the recursive variant field
+      - [ ] `match` on enums → `std::visit` with `overloaded{...}` lambda dispatch
+      - [ ] `match` on integers/chars → `switch`/`case`
+      - [ ] `if let Some(v) = opt` → `if (opt.is_some()) { auto v = opt.unwrap(); ... }`
+      - [ ] Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
+      - [ ] Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
+      - [ ] Destructuring in match arms: struct patterns → structured bindings inside lambdas
+    - [ ] Phase 4: Traits → Microsoft Proxy facades
+      - [ ] Trait definition → `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` for each method
+      - [ ] `dyn Trait` parameters → `pro::proxy_view<Facade>`
+      - [ ] `Box<dyn Trait>` parameters/returns → `pro::proxy<Facade>`
+      - [ ] `impl Trait` return position → `pro::proxy<Facade>` (unified mapping)
+      - [ ] `&dyn Trait` → `pro::proxy_view<Facade>`
+      - [ ] Multiple trait bounds (`T: A + B`) → combine conventions in single facade
+      - [ ] Trait implementation → just emit methods on the struct (Proxy resolves automatically)
+      - [ ] Default trait methods → free functions taking `pro::proxy_view<Facade>`
+      - [ ] Operator traits (Add, Sub, Index, Deref) → C++ operator overloading
+      - [ ] Marker traits (Send, Sync, Copy) → `static_assert` or concept constraints
+      - [ ] Supertraits → facade composition
+    - [ ] Phase 5: Generics → templates with concepts
+      - [ ] Generic functions `fn foo<T>(x: T)` → `template<typename T> void foo(T x)`
+      - [ ] Trait bounds `T: Trait` → `requires` clause or concept constraint
+      - [ ] Multiple bounds `T: A + B` → `requires (A<T> && B<T>)`
+      - [ ] `where` clauses → `requires` clause
+      - [ ] Generic structs `struct Foo<T>` → `template<typename T> struct Foo`
+      - [ ] Generic impl blocks → template class method definitions
+      - [ ] Lifetime parameters in generics → erased
+    - [ ] Phase 6: Closures → C++ lambdas
+      - [ ] Closure expressions → lambda expressions
+      - [ ] Default captures (borrow environment) → `[&]` capture
+      - [ ] `move` closures → `[var = std::move(var), ...]` capture per captured variable
+      - [ ] `Fn` trait bound → `std::function<Sig>` or const lambda
+      - [ ] `FnMut` trait bound → mutable lambda
+      - [ ] `FnOnce` trait bound → `std::move_only_function<Sig>` (C++23)
+    - [ ] Phase 7: Module system → C++20 modules
+      - [ ] Crate root (lib.rs/main.rs) → primary module interface unit (`.cppm`)
+      - [ ] `mod foo;` → `import crate_name.foo;`
+      - [ ] `pub mod foo;` → `export import crate_name.foo;`
+      - [ ] `pub` items → `export` declarations
+      - [ ] Private items → non-exported (module-internal)
+      - [ ] `pub(crate)` → module-visible but not exported
+      - [ ] `use` statements → `import` or `using` declarations
+      - [ ] `pub use` re-exports → `export using` or `export import`
+      - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm`, `src/bar/mod.rs` → `crate_name.bar.cppm`
+    - [ ] Phase 8: Async/await → pollable state machine on C++20 coroutines
+      - [ ] Implement `Poll<T>` type (Ready/Pending using rusty::Option)
+      - [ ] Implement `Waker` and `Context` types for IO notification
+      - [ ] Implement `Task<T>` coroutine type with lazy `initial_suspend` and `poll(Context&)` method
+      - [ ] Implement `TaskAwaiter` so `Task<T>` is `co_await`-able
+      - [ ] Implement basic `Executor` event loop (spawn + run)
+      - [ ] `async fn` → `Task<T>` returning coroutine with `co_await`/`co_return`
+      - [ ] `.await` → `co_await`
+      - [ ] Async error propagation: `?` inside async → manual check + `co_return` Err
+    - [ ] Phase 9: Macros and derive
+      - [ ] Integrate `cargo expand` as pre-processing step to flatten all macros
+      - [ ] `println!`/`format!` → `std::println`/`std::format` (C++23)
+      - [ ] `vec![1,2,3]` → `rusty::Vec<int>{1,2,3}` (initializer list)
+      - [ ] `#[derive(Clone)]` → copy constructor + explicit `.clone()` method
+      - [ ] `#[derive(PartialEq, Eq)]` → `operator==` (C++20 `= default` when possible)
+      - [ ] `#[derive(PartialOrd, Ord)]` → `operator<=>` (C++20 `= default` when possible)
+      - [ ] `#[derive(Hash)]` → `std::hash<T>` specialization
+      - [ ] `#[derive(Default)]` → default constructor
+      - [ ] `#[derive(Debug)]` → `operator<<` or `std::formatter` specialization
+    - [ ] Phase 10: The `?` operator
+      - [ ] `?` on Result → TRY macro using GCC/Clang statement expressions
+      - [ ] `?` on Option → similar TRY macro returning None
+      - [ ] Monadic chaining fallback: `.and_then()` / `.transform()` on rusty::Result/rusty::Option
+    - [ ] Phase 11: Build system and testing integration
+      - [ ] Cargo.toml → CMakeLists.txt generation (dependencies, build flags, features)
+      - [ ] `#[test]` functions → test framework (Catch2 or Google Test) test cases
+      - [ ] `#[cfg(test)]` modules → conditional compilation in CMake
+      - [ ] Documentation comments `///` → Doxygen `///`
+      - [ ] Integration with rusty-cpp analyzer: run analyzer on transpiled output to verify safety
