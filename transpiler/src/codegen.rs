@@ -2045,7 +2045,7 @@ impl CodeGen {
             return cpp_type.to_string();
         }
 
-        // Try mapping as a function/method path (e.g., Box::new → rusty::Box::make)
+        // Try mapping as a function/method path (e.g., Box::new → rusty::Box::new_)
         if let Some(cpp_fn) = types::map_function_path(&joined) {
             return cpp_fn.to_string();
         }
@@ -3454,7 +3454,7 @@ mod tests {
     #[test]
     fn test_box_new_mapping() {
         let out = transpile_str("fn f() { let b = Box::new(42); }");
-        assert!(out.contains("rusty::Box::make(42)"));
+        assert!(out.contains("rusty::Box::new_(42)"));
     }
 
     #[test]

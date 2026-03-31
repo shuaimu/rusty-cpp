@@ -48,8 +48,13 @@ public:
     // Default constructor - empty vec
     Vec() : data_(nullptr), size_(0), capacity_(0) {}
     
-    // Factory method - Vec::make()
+    // Factory method - Vec::new_() (Rust's Vec::new, _ suffix because `new` is C++ keyword)
     // @lifetime: owned
+    static Vec<T> new_() {
+        return Vec<T>();
+    }
+
+    // Alias for backward compatibility
     static Vec<T> make() {
         return Vec<T>();
     }

@@ -62,6 +62,11 @@ public:
     String() : data_(nullptr), len_(0), capacity_(0) {}
     
     // @lifetime: owned
+    static String new_() {
+        return String();
+    }
+
+    // Alias for backward compatibility
     static auto make() {
         return String();
     }

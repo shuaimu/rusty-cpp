@@ -72,8 +72,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 /// Returns the C++ replacement if the path should be rewritten.
 pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
     match rust_path {
-        // Box::new → rusty::Box<T>::make (new is a C++ keyword)
-        "Box::new" => Some("rusty::Box::make"),
+        // Box::new → rusty::Box<T>::new_ (new is a C++ keyword, _ suffix for consistency)
+        "Box::new" => Some("rusty::Box::new_"),
         // String::from → rusty::String constructor
         "String::from" => Some("rusty::String::from"),
         "String::new" => Some("rusty::String::new_"),
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_function_path_mapping() {
-        assert_eq!(map_function_path("Box::new"), Some("rusty::Box::make"));
+        assert_eq!(map_function_path("Box::new"), Some("rusty::Box::new_"));
         assert_eq!(map_function_path("String::from"), Some("rusty::String::from"));
         assert_eq!(map_function_path("String::new"), Some("rusty::String::new_"));
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));

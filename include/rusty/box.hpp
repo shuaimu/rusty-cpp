@@ -29,7 +29,16 @@ public:
     // @lifetime: owned
     explicit Box(T* p) : ptr(p) {}
 
-    // Factory method - Box::make()
+    // Factory method - Box::new_() (Rust's Box::new, renamed because `new` is a C++ keyword)
+    // @lifetime: owned
+    static Box<T> new_(T value) {
+        // @unsafe
+        {
+            return Box<T>(new T(std::move(value)));
+        }
+    }
+
+    // Alias for backward compatibility
     // @lifetime: owned
     static Box<T> make(T value) {
         // @unsafe
