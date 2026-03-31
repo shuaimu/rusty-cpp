@@ -200,6 +200,10 @@ impl CodeGen {
         match stmt {
             syn::Stmt::Local(local) => self.emit_local(local),
             syn::Stmt::Expr(expr, semi) => {
+                // Control flow expressions are emitted as statements directly
+                if self.try_emit_control_flow(expr) {
+                    return;
+                }
                 let expr_str = self.emit_expr_to_string(expr);
                 if is_tail && semi.is_none() {
                     // Tail expression without semicolon → return
@@ -212,6 +216,129 @@ impl CodeGen {
             syn::Stmt::Macro(_) => {
                 self.writeln("// TODO: macro invocation");
             }
+        }
+    }
+
+    /// Try to emit an expression as a control flow statement.
+    /// Returns true if it was handled, false if it should go through emit_expr_to_string.
+    fn try_emit_control_flow(&mut self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::If(if_expr) => {
+                self.emit_if(if_expr);
+                true
+            }
+            syn::Expr::While(while_expr) => {
+                self.emit_while(while_expr);
+                true
+            }
+            syn::Expr::Loop(loop_expr) => {
+                self.emit_loop(loop_expr);
+                true
+            }
+            syn::Expr::ForLoop(for_expr) => {
+                self.emit_for_loop(for_expr);
+                true
+            }
+            syn::Expr::Block(block_expr) => {
+                self.writeln("{");
+                self.indent += 1;
+                self.emit_block(&block_expr.block);
+                self.indent -= 1;
+                self.writeln("}");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_if(&mut self, if_expr: &syn::ExprIf) {
+        self.emit_if_inner(if_expr, true);
+    }
+
+    fn emit_if_inner(&mut self, if_expr: &syn::ExprIf, first: bool) {
+        let cond = self.emit_expr_to_string(&if_expr.cond);
+        if first {
+            self.writeln(&format!("if ({}) {{", cond));
+        } else {
+            // Continuation of else-if chain — "} else if (...) {" already on current line
+            self.output.push_str(&format!("if ({}) {{\n", cond));
+        }
+        self.indent += 1;
+        self.emit_block(&if_expr.then_branch);
+        self.indent -= 1;
+
+        if let Some((_, else_branch)) = &if_expr.else_branch {
+            match else_branch.as_ref() {
+                syn::Expr::If(else_if) => {
+                    self.write_indent();
+                    self.output.push_str("} else ");
+                    self.emit_if_inner(else_if, false);
+                    return;
+                }
+                syn::Expr::Block(block) => {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_block(&block.block);
+                    self.indent -= 1;
+                }
+                _ => {
+                    let else_str = self.emit_expr_to_string(else_branch);
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.writeln(&format!("{};", else_str));
+                    self.indent -= 1;
+                }
+            }
+        }
+        self.writeln("}");
+    }
+
+    fn emit_while(&mut self, while_expr: &syn::ExprWhile) {
+        let cond = self.emit_expr_to_string(&while_expr.cond);
+        self.writeln(&format!("while ({}) {{", cond));
+        self.indent += 1;
+        self.emit_block(&while_expr.body);
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
+    fn emit_loop(&mut self, loop_expr: &syn::ExprLoop) {
+        // Check if this loop uses break-with-value.
+        // If a loop has `break <expr>`, it's used as a value-producing loop.
+        // We emit it as-is, and when used as `let x = loop { ... break val; }`,
+        // the break-with-value is handled by emit_expr_to_string emitting `return val`.
+        // The enclosing `let x = loop { ... }` should wrap in a lambda —
+        // but that's handled at the let-binding level.
+        self.writeln("while (true) {");
+        self.indent += 1;
+        self.emit_block(&loop_expr.body);
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
+    fn emit_for_loop(&mut self, for_expr: &syn::ExprForLoop) {
+        let pat = self.emit_pat_to_string(&for_expr.pat);
+        let iter = self.emit_expr_to_string(&for_expr.expr);
+
+        // Rust `for x in expr` → C++ `for (auto& x : expr)` or `for (auto x : expr)`
+        // Use auto&& to handle both references and values correctly
+        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter));
+        self.indent += 1;
+        self.emit_block(&for_expr.body);
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
+    fn emit_pat_to_string(&self, pat: &syn::Pat) -> String {
+        match pat {
+            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            syn::Pat::Wild(_) => "_".to_string(),
+            syn::Pat::Tuple(pt) => {
+                let elems: Vec<String> = pt.elems.iter().map(|p| self.emit_pat_to_string(p)).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            syn::Pat::Reference(pr) => self.emit_pat_to_string(&pr.pat),
+            _ => "/* TODO: pattern */".to_string(),
         }
     }
 
@@ -232,11 +359,27 @@ impl CodeGen {
                 let qualifier = if is_mut { "" } else { "const " };
 
                 if let Some(init) = &local.init {
-                    let expr_str = self.emit_expr_to_string(&init.expr);
-                    self.writeln(&format!(
-                        "{}{} {} = {};",
-                        qualifier, type_str, name, expr_str
-                    ));
+                    // Special case: `let x = loop { ... break val; }` → lambda wrapper
+                    if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
+                        self.writeln(&format!(
+                            "{}{} {} = [&]() {{",
+                            qualifier, type_str, name
+                        ));
+                        self.indent += 1;
+                        self.writeln("while (true) {");
+                        self.indent += 1;
+                        self.emit_block(&loop_expr.body);
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.indent -= 1;
+                        self.writeln("}();");
+                    } else {
+                        let expr_str = self.emit_expr_to_string(&init.expr);
+                        self.writeln(&format!(
+                            "{}{} {} = {};",
+                            qualifier, type_str, name, expr_str
+                        ));
+                    }
                 } else {
                     self.writeln(&format!("{}{} {};", qualifier, type_str, name));
                 }
@@ -297,8 +440,40 @@ impl CodeGen {
                 }
             }
             syn::Expr::If(if_expr) => {
-                let cond = self.emit_expr_to_string(&if_expr.cond);
-                format!("/* if {} {{ ... }} */", cond)
+                // If used as an expression (e.g., `let x = if c { 1 } else { 2 };`)
+                // → C++ ternary when simple
+                if let Some((_, else_branch)) = &if_expr.else_branch {
+                    let cond = self.emit_expr_to_string(&if_expr.cond);
+                    if let (Some(then_val), Some(else_val)) =
+                        (self.block_single_expr(&if_expr.then_branch), self.expr_single_value(else_branch))
+                    {
+                        return format!("({} ? {} : {})", cond, then_val, else_val);
+                    }
+                }
+                format!("/* TODO: if-expression */")
+            }
+            syn::Expr::Break(brk) => {
+                match &brk.expr {
+                    Some(val) => {
+                        let v = self.emit_expr_to_string(val);
+                        format!("return {}", v)  // break-with-value inside lambda wrapper
+                    }
+                    None => "break".to_string(),
+                }
+            }
+            syn::Expr::Continue(_) => "continue".to_string(),
+            syn::Expr::Range(range) => {
+                // Rust range `a..b` → we need a range helper; for now emit for use in for-loops
+                let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e)).unwrap_or_default();
+                let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e)).unwrap_or_default();
+                format!("rusty::range({}, {})", start, end)
+            }
+            syn::Expr::Closure(closure) => {
+                let params: Vec<String> = closure.inputs.iter().map(|p| {
+                    self.emit_pat_to_string(p)
+                }).collect();
+                let body = self.emit_expr_to_string(&closure.body);
+                format!("[&](auto {}) {{ return {}; }}", params.join(", auto "), body)
             }
             syn::Expr::Return(ret) => match &ret.expr {
                 Some(e) => {
@@ -495,6 +670,24 @@ impl CodeGen {
             syn::Type::Never(_) => "[[noreturn]] void".to_string(),
             syn::Type::Infer(_) => "auto".to_string(),
             _ => "/* TODO: type */".to_string(),
+        }
+    }
+
+    /// If a block contains exactly one expression (tail expr), return its string form.
+    fn block_single_expr(&self, block: &syn::Block) -> Option<String> {
+        if block.stmts.len() == 1 {
+            if let syn::Stmt::Expr(expr, None) = &block.stmts[0] {
+                return Some(self.emit_expr_to_string(expr));
+            }
+        }
+        None
+    }
+
+    /// Extract the single value from an else branch expression.
+    fn expr_single_value(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Block(block) => self.block_single_expr(&block.block),
+            _ => Some(self.emit_expr_to_string(expr)),
         }
     }
 
@@ -719,5 +912,126 @@ mod tests {
     fn test_hashmap_type() {
         let out = transpile_str("fn f(m: HashMap<String, i32>) {}");
         assert!(out.contains("rusty::HashMap<rusty::String, int32_t>"));
+    }
+
+    // ── Control flow tests ──────────────────────────────────────
+
+    #[test]
+    fn test_if_simple() {
+        let out = transpile_str("fn f(x: i32) { if x > 0 { x; } }");
+        assert!(out.contains("if (x > 0) {"));
+        assert!(out.contains("x;"));
+        assert!(out.contains("}"));
+    }
+
+    #[test]
+    fn test_if_else() {
+        let out = transpile_str("fn f(x: i32) { if x > 0 { x; } else { 0; } }");
+        assert!(out.contains("if (x > 0) {"));
+        assert!(out.contains("} else {"));
+    }
+
+    #[test]
+    fn test_if_else_if() {
+        let out = transpile_str(
+            "fn f(x: i32) { if x > 0 { 1; } else if x < 0 { 2; } else { 0; } }",
+        );
+        assert!(out.contains("if (x > 0) {"));
+        assert!(out.contains("} else if (x < 0) {"));
+        assert!(out.contains("} else {"));
+    }
+
+    #[test]
+    fn test_if_tail_expr_returns() {
+        // When if/else is the tail expression of a function, each branch gets `return`
+        let out = transpile_str("fn f(c: bool) -> i32 { if c { 1 } else { 0 } }");
+        assert!(out.contains("if (c) {"));
+        assert!(out.contains("return 1;"));
+        assert!(out.contains("return 0;"));
+    }
+
+    #[test]
+    fn test_if_expr_as_ternary() {
+        // When if/else is used in a let binding with simple branches → ternary
+        let out = transpile_str("fn f(c: bool) { let x = if c { 1 } else { 0 }; }");
+        assert!(out.contains("(c ? 1 : 0)"));
+    }
+
+    #[test]
+    fn test_while_loop() {
+        let out = transpile_str("fn f() { let mut x = 10; while x > 0 { x = x - 1; } }");
+        assert!(out.contains("while (x > 0) {"));
+    }
+
+    #[test]
+    fn test_infinite_loop() {
+        let out = transpile_str("fn f() { loop { break; } }");
+        assert!(out.contains("while (true) {"));
+        assert!(out.contains("break;"));
+    }
+
+    #[test]
+    fn test_for_in_range() {
+        let out = transpile_str("fn f() { for i in 0..10 { i; } }");
+        assert!(out.contains("for (auto&& i : rusty::range(0, 10)) {"));
+    }
+
+    #[test]
+    fn test_for_in_variable() {
+        let out = transpile_str("fn f() { for x in items { x; } }");
+        assert!(out.contains("for (auto&& x : items) {"));
+    }
+
+    #[test]
+    fn test_break_continue() {
+        let out = transpile_str("fn f() { loop { if true { break; } continue; } }");
+        assert!(out.contains("break;"));
+        assert!(out.contains("continue;"));
+    }
+
+    #[test]
+    fn test_loop_break_with_value() {
+        let out = transpile_str(
+            "fn f() { let result = loop { if true { break 42; } }; }",
+        );
+        assert!(out.contains("[&]()"));
+        assert!(out.contains("while (true)"));
+        assert!(out.contains("return 42;"));
+        assert!(out.contains("}();"));
+    }
+
+    #[test]
+    fn test_nested_if_in_loop() {
+        let out = transpile_str(
+            "fn f() { while true { if true { break; } else { continue; } } }",
+        );
+        assert!(out.contains("while (true) {"));
+        assert!(out.contains("if (true) {"));
+        assert!(out.contains("break;"));
+        assert!(out.contains("} else {"));
+        assert!(out.contains("continue;"));
+    }
+
+    #[test]
+    fn test_nested_loops() {
+        let out = transpile_str(
+            "fn f() { for i in 0..5 { for j in 0..5 { i; } } }",
+        );
+        assert!(out.contains("for (auto&& i : rusty::range(0, 5)) {"));
+        assert!(out.contains("for (auto&& j : rusty::range(0, 5)) {"));
+    }
+
+    #[test]
+    fn test_if_with_let_binding() {
+        let out = transpile_str("fn f() { if true { let x = 1; x; } }");
+        assert!(out.contains("if (true) {"));
+        assert!(out.contains("const auto x = 1;"));
+    }
+
+    #[test]
+    fn test_closure_basic() {
+        let out = transpile_str("fn f() { let add = |a, b| a + b; }");
+        assert!(out.contains("[&]"));
+        assert!(out.contains("return a + b;"));
     }
 }

@@ -60,8 +60,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Variable declarations: `let x = ...` → `const auto x = ...`, `let mut x = ...` → `auto x = ...`
       - [x] *done* Function declarations: Rust fn → C++ function with explicit return statements
       - [x] *done* Expression-to-statement conversion: detect tail expressions (no semicolon) and insert `return`
-      - [ ] Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
-      - [ ] `break` with value from loop → immediately-invoked lambda wrapper
+      - [x] *done* Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
+      - [x] *done* `break` with value from loop → immediately-invoked lambda wrapper
       - [ ] References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`
       - [ ] References (with rebinding): detect reassignment of `let mut r: &T`, emit `const T*` / `T*` instead
       - [ ] Implicit move insertion: insert `std::move()` at every Rust move point
