@@ -1498,6 +1498,16 @@ impl CodeGen {
                 format!("std::make_tuple({})", elems.join(", "))
             }
             syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
+            syn::Expr::Try(try_expr) => {
+                // Rust `expr?` → C++ `RUSTY_TRY(expr)`
+                // Uses GCC/Clang statement expressions to unwrap or early-return
+                let inner = self.emit_expr_to_string(&try_expr.expr);
+                if self.in_async {
+                    format!("RUSTY_CO_TRY({})", inner)
+                } else {
+                    format!("RUSTY_TRY({})", inner)
+                }
+            }
             _ => format!("/* TODO: expr */"),
         }
     }
@@ -3536,5 +3546,56 @@ mod tests {
     fn test_todo_expr() {
         let out = transpile_str("fn f() -> i32 { todo!() }");
         assert!(out.contains("throw std::logic_error"));
+    }
+
+    // ── Phase 10: ? operator tests ──────────────────────────────
+
+    #[test]
+    fn test_try_on_result() {
+        let out = transpile_str(
+            "fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }",
+        );
+        assert!(out.contains("RUSTY_TRY(parse())"));
+    }
+
+    #[test]
+    fn test_try_on_method_call() {
+        let out = transpile_str(
+            "fn f() -> Result<i32, String> { let x = foo.bar()?; Ok(x) }",
+        );
+        assert!(out.contains("RUSTY_TRY(foo.bar())"));
+    }
+
+    #[test]
+    fn test_try_in_async() {
+        let out = transpile_str(
+            "async fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }",
+        );
+        assert!(out.contains("RUSTY_CO_TRY(parse())"));
+    }
+
+    #[test]
+    fn test_try_with_await() {
+        let out = transpile_str(
+            "async fn f() -> Result<String, String> { let x = fetch().await?; Ok(x) }",
+        );
+        assert!(out.contains("RUSTY_CO_TRY(co_await fetch())"));
+    }
+
+    #[test]
+    fn test_try_chained() {
+        let out = transpile_str(
+            "fn f() -> Result<i32, String> { let x = a()?.b()?; Ok(x) }",
+        );
+        // Inner ? → RUSTY_TRY, outer ? wraps the method call on the result
+        assert!(out.contains("RUSTY_TRY("));
+    }
+
+    #[test]
+    fn test_try_not_in_sync() {
+        // In sync context, should use RUSTY_TRY not RUSTY_CO_TRY
+        let out = transpile_str("fn f() -> Result<i32, String> { let x = g()?; Ok(x) }");
+        assert!(out.contains("RUSTY_TRY("));
+        assert!(!out.contains("RUSTY_CO_TRY"));
     }
 }
