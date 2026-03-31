@@ -101,12 +101,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `Box<dyn Trait>` parameters/returns → `pro::proxy<Facade>`
       - [x] *done* `impl Trait` return position → `pro::proxy<Facade>` (unified mapping)
       - [x] *done* `&dyn Trait` → `pro::proxy_view<Facade>`
-      - [ ] Multiple trait bounds (`T: A + B`) → combine conventions in single facade
+      - [x] *done* Multiple trait bounds (`dyn A + B`, `impl A + B`, `Box<dyn A + B>`) → combined `AAndBFacade`
       - [x] *done* Trait implementation → just emit methods on the struct (Proxy resolves automatically)
       - [x] *done* Default trait methods → free functions taking `pro::proxy_view<Facade>`
       - [x] *done* Operator traits (Add, Sub, Mul, Div, Neg, Not, Index, Deref, PartialEq, etc.) → C++ operator overloading
       - [x] *done* Marker traits (Send, Sync, Copy, Clone, Sized, Unpin) → C++20 concept = true
-      - [ ] Supertraits → facade composition
+      - [x] *done* Supertraits → comment noting required facades (`// Requires: BaseFacade`)
     - [x] *done* Phase 5: Generics → templates with concepts
       - [x] *done* Generic functions `fn foo<T>(x: T)` → `template<typename T> void foo(T x)`
       - [x] *done* Trait bounds `T: Trait` → `requires` clause

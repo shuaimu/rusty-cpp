@@ -550,6 +550,20 @@ impl CodeGen {
             return;
         }
 
+        // Collect supertrait names
+        let supertraits: Vec<String> = t.supertraits.iter().filter_map(|b| {
+            if let syn::TypeParamBound::Trait(tb) = b {
+                Some(tb.path.segments.last()?.ident.to_string())
+            } else {
+                None
+            }
+        }).collect();
+
+        if !supertraits.is_empty() {
+            let supers = supertraits.iter().map(|s| format!("{}Facade", s)).collect::<Vec<_>>().join(", ");
+            self.writeln(&format!("// Requires: {}", supers));
+        }
+
         // Step 1: Emit PRO_DEF_MEM_DISPATCH for each method
         let mut methods: Vec<(String, String, String, bool)> = Vec::new(); // (dispatch_name, method_name, signature, is_const)
 
@@ -1996,19 +2010,27 @@ impl CodeGen {
                             if let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                             {
+                                // Check for Fn → move_only_function
                                 if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
-                                    // Check for Fn/FnMut/FnOnce → std::move_only_function
                                     if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
                                         return fn_type;
                                     }
-                                    let trait_name = tb
-                                        .path
-                                        .segments
-                                        .iter()
-                                        .map(|s| s.ident.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join("::");
-                                    return format!("pro::proxy<{}Facade>", trait_name);
+                                }
+                                // Collect all trait names for multi-bound
+                                let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
+                                    if let syn::TypeParamBound::Trait(tb) = b {
+                                        Some(tb.path.segments.last()?.ident.to_string())
+                                    } else {
+                                        None
+                                    }
+                                }).collect();
+                                if !trait_names.is_empty() {
+                                    let facade = if trait_names.len() == 1 {
+                                        format!("{}Facade", trait_names[0])
+                                    } else {
+                                        format!("{}Facade", trait_names.join("And"))
+                                    };
+                                    return format!("pro::proxy<{}>", facade);
                                 }
                             }
                         }
@@ -2065,20 +2087,29 @@ impl CodeGen {
                     }
                 }
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
+                // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 if let syn::Type::TraitObject(to) = r.elem.as_ref() {
+                    // Check for Fn first
                     if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
-                        // Check for Fn/FnMut/FnOnce first
                         if let Some(fn_type) = self.try_map_fn_trait(tb) {
                             return format!("const {}&", fn_type);
                         }
-                        let trait_name = tb
-                            .path
-                            .segments
-                            .iter()
-                            .map(|s| s.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        return format!("pro::proxy_view<{}Facade>", trait_name);
+                    }
+                    // Collect all trait names for multi-bound
+                    let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
+                        if let syn::TypeParamBound::Trait(tb) = b {
+                            Some(tb.path.segments.last()?.ident.to_string())
+                        } else {
+                            None
+                        }
+                    }).collect();
+                    if !trait_names.is_empty() {
+                        let facade_name = if trait_names.len() == 1 {
+                            format!("{}Facade", trait_names[0])
+                        } else {
+                            format!("{}Facade", trait_names.join("And"))
+                        };
+                        return format!("pro::proxy_view<{}>", facade_name);
                     }
                 }
                 let inner = self.map_type(&r.elem);
@@ -2116,42 +2147,57 @@ impl CodeGen {
             syn::Type::Never(_) => "[[noreturn]] void".to_string(),
             syn::Type::Infer(_) => "auto".to_string(),
             syn::Type::TraitObject(to) => {
-                // Check for Fn/FnMut/FnOnce trait objects
+                // Check for Fn traits first (single bound)
                 if let Some(first) = to.bounds.first() {
                     if let syn::TypeParamBound::Trait(tb) = first {
                         if let Some(fn_type) = self.try_map_fn_trait(tb) {
                             return fn_type;
                         }
-                        let trait_name = tb
-                            .path
-                            .segments
-                            .iter()
-                            .map(|s| s.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        return format!("pro::proxy_view<{}Facade>", trait_name);
                     }
                 }
-                "/* TODO: complex trait object */".to_string()
+                // Collect all trait names
+                let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
+                    if let syn::TypeParamBound::Trait(tb) = b {
+                        Some(tb.path.segments.last()?.ident.to_string())
+                    } else {
+                        None
+                    }
+                }).collect();
+                if trait_names.len() == 1 {
+                    format!("pro::proxy_view<{}Facade>", trait_names[0])
+                } else if trait_names.len() > 1 {
+                    // Multiple bounds: combine facade names
+                    let combined = trait_names.join("And");
+                    format!("pro::proxy_view<{}Facade>", combined)
+                } else {
+                    "/* TODO: complex trait object */".to_string()
+                }
             }
             syn::Type::ImplTrait(it) => {
-                // Check for Fn/FnMut/FnOnce impl traits
+                // Check for Fn traits first
                 if let Some(first) = it.bounds.first() {
                     if let syn::TypeParamBound::Trait(tb) = first {
                         if let Some(fn_type) = self.try_map_fn_trait(tb) {
                             return fn_type;
                         }
-                        let trait_name = tb
-                            .path
-                            .segments
-                            .iter()
-                            .map(|s| s.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        return format!("pro::proxy<{}Facade>", trait_name);
                     }
                 }
-                "auto".to_string()
+                // Collect all trait names
+                let trait_names: Vec<String> = it.bounds.iter().filter_map(|b| {
+                    if let syn::TypeParamBound::Trait(tb) = b {
+                        Some(tb.path.segments.last()?.ident.to_string())
+                    } else {
+                        None
+                    }
+                }).collect();
+                if trait_names.len() == 1 {
+                    format!("pro::proxy<{}Facade>", trait_names[0])
+                } else if trait_names.len() > 1 {
+                    let combined = trait_names.join("And");
+                    format!("pro::proxy<{}Facade>", combined)
+                } else {
+                    "auto".to_string()
+                }
             }
             syn::Type::BareFn(bf) => {
                 // fn(A, B) -> C → rusty::SafeFn<C(A, B)>
@@ -4326,5 +4372,47 @@ mod tests {
         let out = transpile_str("trait Foo { fn bar(&self); }");
         assert!(!out.contains("concept"));
         assert!(out.contains("FooFacade"));
+    }
+
+    // ── Multiple trait bounds and supertrait tests ───────────────
+
+    #[test]
+    fn test_dyn_multi_trait() {
+        let out = transpile_str(
+            "trait A { fn a(&self); } trait B { fn b(&self); } fn f(x: &(dyn A + B)) {}",
+        );
+        assert!(out.contains("pro::proxy_view<AAndBFacade>"));
+    }
+
+    #[test]
+    fn test_impl_multi_trait() {
+        let out = transpile_str(
+            "trait A { fn a(&self); } trait B { fn b(&self); } fn f(x: impl A + B) {}",
+        );
+        assert!(out.contains("pro::proxy<AAndBFacade>"));
+    }
+
+    #[test]
+    fn test_box_dyn_multi_trait() {
+        let out = transpile_str(
+            "trait A { fn a(&self); } trait B { fn b(&self); } fn f(x: Box<dyn A + B>) {}",
+        );
+        assert!(out.contains("pro::proxy<AAndBFacade>"));
+    }
+
+    #[test]
+    fn test_single_trait_no_and() {
+        let out = transpile_str("trait A { fn a(&self); } fn f(x: &dyn A) {}");
+        assert!(out.contains("pro::proxy_view<AFacade>"));
+        assert!(!out.contains("And"));
+    }
+
+    #[test]
+    fn test_supertrait_comment() {
+        let out = transpile_str(
+            "trait Base { fn base(&self); } trait Derived: Base { fn derived(&self); }",
+        );
+        assert!(out.contains("// Requires: BaseFacade"));
+        assert!(out.contains("DerivedFacade"));
     }
 }
