@@ -1224,7 +1224,206 @@ impl CodeGen {
         self.emit_if_inner(if_expr, true);
     }
 
+    /// Emit `if let Pattern = expr { ... } else { ... }` as C++ code.
+    fn emit_if_let(
+        &mut self,
+        let_expr: &syn::ExprLet,
+        then_branch: &syn::Block,
+        else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
+        first: bool,
+    ) {
+        let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+
+        match &*let_expr.pat {
+            syn::Pat::TupleStruct(ts) => {
+                let path_str = ts.path.segments.iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+
+                match path_str.as_str() {
+                    "Some" | "Option::Some" => {
+                        // if let Some(v) = opt → if (opt.is_some()) { auto v = opt.unwrap(); ... }
+                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
+                        let cond = format!("{}.is_some()", scrutinee);
+                        self.emit_if_let_body(&cond, &binding, &scrutinee, "unwrap", then_branch, else_branch, first);
+                    }
+                    "Ok" | "Result::Ok" => {
+                        // if let Ok(v) = result → if (result.is_ok()) { auto v = result.unwrap(); ... }
+                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
+                        let cond = format!("{}.is_ok()", scrutinee);
+                        self.emit_if_let_body(&cond, &binding, &scrutinee, "unwrap", then_branch, else_branch, first);
+                    }
+                    "Err" | "Result::Err" => {
+                        // if let Err(e) = result → if (result.is_err()) { auto e = result.unwrap_err(); ... }
+                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
+                        let cond = format!("{}.is_err()", scrutinee);
+                        self.emit_if_let_body(&cond, &binding, &scrutinee, "unwrap_err", then_branch, else_branch, first);
+                    }
+                    _ => {
+                        // Generic enum variant: if let Variant(x) = val
+                        // → if (std::holds_alternative<Variant>(val)) { ... }
+                        let cpp_type = path_str.replace("::", "_");
+                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
+                        let cond = format!("std::holds_alternative<{}>({})", cpp_type, scrutinee);
+
+                        if first {
+                            self.writeln(&format!("if ({}) {{", cond));
+                        } else {
+                            self.output.push_str(&format!("if ({}) {{\n", cond));
+                        }
+                        self.indent += 1;
+                        // Emit bindings
+                        for (i, name) in binding.iter().enumerate() {
+                            if name != "_" {
+                                self.writeln(&format!(
+                                    "const auto& {} = std::get<{}>({})._{};",
+                                    name, cpp_type, scrutinee, i
+                                ));
+                            }
+                        }
+                        self.emit_block(then_branch);
+                        self.indent -= 1;
+                        self.emit_if_let_else(else_branch);
+                    }
+                }
+            }
+            syn::Pat::Ident(pi) => {
+                let name = pi.ident.to_string();
+                // Check for known enum variants that parse as idents
+                let cond = match name.as_str() {
+                    "None" => Some(format!("{}.is_none()", scrutinee)),
+                    _ => None,
+                };
+
+                if let Some(cond) = cond {
+                    if first {
+                        self.writeln(&format!("if ({}) {{", cond));
+                    } else {
+                        self.output.push_str(&format!("if ({}) {{\n", cond));
+                    }
+                    self.indent += 1;
+                    self.emit_block(then_branch);
+                    self.indent -= 1;
+                    self.emit_if_let_else(else_branch);
+                } else {
+                    // if let x = expr → if (true) { auto x = expr; ... } (always matches)
+                    if first {
+                        self.writeln("if (true) {");
+                    } else {
+                        self.output.push_str("if (true) {\n");
+                    }
+                    self.indent += 1;
+                    self.writeln(&format!("auto {} = {};", name, scrutinee));
+                    self.emit_block(then_branch);
+                    self.indent -= 1;
+                    self.emit_if_let_else(else_branch);
+                }
+            }
+            syn::Pat::Path(pp) => {
+                // if let None = opt → if (opt.is_none())
+                let path_str = pp.path.segments.iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let cond = match path_str.as_str() {
+                    "None" | "Option::None" => format!("{}.is_none()", scrutinee),
+                    _ => {
+                        let cpp_type = path_str.replace("::", "_");
+                        format!("std::holds_alternative<{}>({})", cpp_type, scrutinee)
+                    }
+                };
+                if first {
+                    self.writeln(&format!("if ({}) {{", cond));
+                } else {
+                    self.output.push_str(&format!("if ({}) {{\n", cond));
+                }
+                self.indent += 1;
+                self.emit_block(then_branch);
+                self.indent -= 1;
+                self.emit_if_let_else(else_branch);
+            }
+            _ => {
+                // Fallback
+                if first {
+                    self.writeln("if (/* TODO: if let pattern */) {");
+                } else {
+                    self.output.push_str("if (/* TODO: if let pattern */) {\n");
+                }
+                self.indent += 1;
+                self.emit_block(then_branch);
+                self.indent -= 1;
+                self.emit_if_let_else(else_branch);
+            }
+        }
+    }
+
+    /// Helper for common if-let patterns (Some/Ok/Err).
+    fn emit_if_let_body(
+        &mut self,
+        cond: &str,
+        bindings: &[String],
+        scrutinee: &str,
+        unwrap_method: &str,
+        then_branch: &syn::Block,
+        else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
+        first: bool,
+    ) {
+        if first {
+            self.writeln(&format!("if ({}) {{", cond));
+        } else {
+            self.output.push_str(&format!("if ({}) {{\n", cond));
+        }
+        self.indent += 1;
+
+        // Emit bindings
+        if bindings.len() == 1 && bindings[0] != "_" {
+            self.writeln(&format!(
+                "auto {} = {}.{}();",
+                bindings[0], scrutinee, unwrap_method
+            ));
+        }
+
+        self.emit_block(then_branch);
+        self.indent -= 1;
+        self.emit_if_let_else(else_branch);
+    }
+
+    /// Emit the else branch of an if-let, if present.
+    fn emit_if_let_else(&mut self, else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>) {
+        if let Some((_, else_expr)) = else_branch {
+            match else_expr.as_ref() {
+                syn::Expr::If(else_if) => {
+                    self.write_indent();
+                    self.output.push_str("} else ");
+                    self.emit_if_inner(else_if, false);
+                    return;
+                }
+                syn::Expr::Block(block) => {
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_block(&block.block);
+                    self.indent -= 1;
+                }
+                _ => {
+                    let else_str = self.emit_expr_to_string(else_expr);
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.writeln(&format!("{};", else_str));
+                    self.indent -= 1;
+                }
+            }
+        }
+        self.writeln("}");
+    }
+
     fn emit_if_inner(&mut self, if_expr: &syn::ExprIf, first: bool) {
+        // Check for `if let` pattern
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            self.emit_if_let(let_expr, &if_expr.then_branch, &if_expr.else_branch, first);
+            return;
+        }
+
         let cond = self.emit_expr_to_string(&if_expr.cond);
         if first {
             self.writeln(&format!("if ({}) {{", cond));
@@ -3722,5 +3921,52 @@ mod tests {
         let out = transpile_str("fn regular() {}");
         assert!(!out.contains("TEST_CASE"));
         assert!(out.contains("void regular()"));
+    }
+
+    // ── if let pattern tests ────────────────────────────────────
+
+    #[test]
+    fn test_if_let_some() {
+        let out = transpile_str(
+            "fn f(opt: Option<i32>) { if let Some(v) = opt { use_v(v); } }",
+        );
+        assert!(out.contains("if (opt.is_some()) {"));
+        assert!(out.contains("auto v = opt.unwrap();"));
+    }
+
+    #[test]
+    fn test_if_let_some_with_else() {
+        let out = transpile_str(
+            "fn f(opt: Option<i32>) { if let Some(v) = opt { ok(v); } else { fail(); } }",
+        );
+        assert!(out.contains("if (opt.is_some()) {"));
+        assert!(out.contains("} else {"));
+        assert!(out.contains("fail();"));
+    }
+
+    #[test]
+    fn test_if_let_ok() {
+        let out = transpile_str(
+            "fn f(r: Result<i32, String>) { if let Ok(v) = r { use_v(v); } }",
+        );
+        assert!(out.contains("if (r.is_ok()) {"));
+        assert!(out.contains("auto v = r.unwrap();"));
+    }
+
+    #[test]
+    fn test_if_let_err() {
+        let out = transpile_str(
+            "fn f(r: Result<i32, String>) { if let Err(e) = r { report(e); } }",
+        );
+        assert!(out.contains("if (r.is_err()) {"));
+        assert!(out.contains("auto e = r.unwrap_err();"));
+    }
+
+    #[test]
+    fn test_if_let_none() {
+        let out = transpile_str(
+            "fn f(opt: Option<i32>) { if let None = opt { nothing(); } }",
+        );
+        assert!(out.contains("if (opt.is_none()) {"));
     }
 }

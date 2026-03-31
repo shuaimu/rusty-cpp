@@ -91,7 +91,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Recursive enums → use rusty::Box for the recursive variant field
       - [x] *done* `match` on enums → `std::visit` with `overloaded{...}` lambda dispatch
       - [x] *done* `match` on integers/chars → `switch`/`case` (with multi-pattern `|` support)
-      - [ ] `if let Some(v) = opt` → `if (opt.is_some()) { auto v = opt.unwrap(); ... }`
+      - [x] *done* `if let Some(v) = opt` → `if (opt.is_some()) { auto v = opt.unwrap(); ... }`
       - [x] *done* Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
       - [x] *done* Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
       - [x] *done* Destructuring in match arms: struct patterns → field bindings, tuple patterns → positional bindings
