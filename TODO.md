@@ -49,17 +49,17 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
     - [x] *done* rusty::HashMap<K, V> - hash map with safe iteration and no iterator invalidation on lookup
     - [x] *done* rusty::HashSet<T> - hash set with safe iteration and no iterator invalidation on lookup
   - [ ] Rust-to-C++ Transpiler - transpile Rust source to C++ using rusty-cpp types (see docs/rusty-cpp-transpiler.md)
-    - [ ] Phase 0: Project scaffolding
-      - [ ] Create `transpiler/` directory with its own Cargo.toml (binary crate, part of workspace)
-      - [ ] Add `syn` (full features) and `quote` as dependencies for Rust AST parsing
+    - [x] *done* Phase 0: Project scaffolding
+      - [x] *done* Create `transpiler/` directory with its own Cargo.toml (binary crate, part of workspace)
+      - [x] *done* Add `syn` (full features) and `quote` as dependencies for Rust AST parsing
       - [ ] Add `cargo-expand` integration for macro expansion before transpilation
-      - [ ] Set up CLI: `rusty-cpp-transpiler input.rs -o output.cppm` with basic arg parsing
-      - [ ] Set up end-to-end test harness: transpile .rs → .cppm, compile with g++/clang++, run and compare output
+      - [x] *done* Set up CLI: `rusty-cpp-transpiler input.rs -o output.cppm` with basic arg parsing
+      - [x] *done* Set up end-to-end test harness: transpile .rs → .cppm, compile with g++/clang++, run and compare output
     - [ ] Phase 1: Core language (MVP) - primitive types, functions, structs, control flow
-      - [ ] Primitive type mapping: i32→int32_t, f64→double, bool→bool, char→char32_t, usize→size_t, etc.
-      - [ ] Variable declarations: `let x = ...` → `const auto x = ...`, `let mut x = ...` → `auto x = ...`
-      - [ ] Function declarations: Rust fn → C++ function with explicit return statements
-      - [ ] Expression-to-statement conversion: detect tail expressions (no semicolon) and insert `return`
+      - [x] *done* Primitive type mapping: i32→int32_t, f64→double, bool→bool, char→char32_t, usize→size_t, etc.
+      - [x] *done* Variable declarations: `let x = ...` → `const auto x = ...`, `let mut x = ...` → `auto x = ...`
+      - [x] *done* Function declarations: Rust fn → C++ function with explicit return statements
+      - [x] *done* Expression-to-statement conversion: detect tail expressions (no semicolon) and insert `return`
       - [ ] Control flow: if/else, while, loop→`while(true)`, for-in→range-based for
       - [ ] `break` with value from loop → immediately-invoked lambda wrapper
       - [ ] References (no rebinding): `&T` → `const T&`, `&mut T` → `T&`

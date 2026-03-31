@@ -1,0 +1,21 @@
+[package]
+name = "rusty-cpp-transpiler"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Shuai Mu <shuai@cs.stonybrook.edu>"]
+description = "Transpile Rust source code to C++ using rusty-cpp types"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "rusty-cpp-transpiler"
+path = "src/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
