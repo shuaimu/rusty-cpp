@@ -164,9 +164,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `?` on Option → `RUSTY_TRY()` macro (same mechanism)
       - [x] *done* `?` in async → `RUSTY_CO_TRY()` (uses `co_return`)
       - [x] *done* C++ header: `include/rusty/try.hpp` with TRY/CO_TRY/TRY_OPT macros
-    - [ ] Phase 11: Build system and testing integration
+    - [x] *done* Phase 11: Build system and testing integration
       - [ ] Cargo.toml → CMakeLists.txt generation (dependencies, build flags, features)
-      - [ ] `#[test]` functions → test framework (Catch2 or Google Test) test cases
-      - [ ] `#[cfg(test)]` modules → conditional compilation in CMake
-      - [ ] Documentation comments `///` → Doxygen `///`
+      - [x] *done* `#[test]` functions → `TEST_CASE("name") { ... }` (Catch2 style)
+      - [x] *done* `#[cfg(test)]` modules → omitted from production output
+      - [x] *done* Documentation comments `///` → Doxygen `///` (functions, structs, fields)
       - [ ] Integration with rusty-cpp analyzer: run analyzer on transpiled output to verify safety

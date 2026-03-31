@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use quote::ToTokens;
 use syn;
 
 use crate::types;
@@ -131,7 +132,53 @@ impl CodeGen {
         self.module_name.is_some() && matches!(vis, syn::Visibility::Public(_))
     }
 
+    /// Emit doc comments from attributes as Doxygen-style `///` comments.
+    fn emit_doc_comments(&mut self, attrs: &[syn::Attribute]) {
+        for attr in attrs {
+            if attr.path().is_ident("doc") {
+                if let syn::Meta::NameValue(nv) = &attr.meta {
+                    if let syn::Expr::Lit(lit) = &nv.value {
+                        if let syn::Lit::Str(s) = &lit.lit {
+                            let text = s.value();
+                            if text.is_empty() {
+                                self.writeln("///");
+                            } else {
+                                self.writeln(&format!("///{}", text));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if attributes contain `#[test]`.
+    fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| a.path().is_ident("test"))
+    }
+
+    /// Check if attributes contain `#[cfg(test)]`.
+    fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            if a.path().is_ident("cfg") {
+                // Check if it's cfg(test)
+                let tokens = a.meta.to_token_stream().to_string();
+                tokens.contains("test")
+            } else {
+                false
+            }
+        })
+    }
+
     fn emit_function(&mut self, f: &syn::ItemFn) {
+        // Skip #[cfg(test)] functions in non-test output
+        // (they'll be emitted separately as test cases)
+
+        let is_test = Self::has_test_attr(&f.attrs);
+
+        // Emit doc comments
+        self.emit_doc_comments(&f.attrs);
+
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
@@ -146,6 +193,16 @@ impl CodeGen {
 
         // Emit template prefix if generic
         self.emit_template_prefix(&f.sig.generics);
+
+        // Emit test case wrapper if #[test]
+        if is_test {
+            self.writeln(&format!("TEST_CASE(\"{}\") {{", name));
+            self.indent += 1;
+            self.emit_block(&f.block);
+            self.indent -= 1;
+            self.writeln("}");
+            return;
+        }
 
         // Check for extern "C" ABI
         let abi_prefix = if let Some(abi) = &f.sig.abi {
@@ -200,6 +257,10 @@ impl CodeGen {
     fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name = &s.ident;
         let name_str = name.to_string();
+
+        // Emit doc comments
+        self.emit_doc_comments(&s.attrs);
+
         self.emit_template_prefix(&s.generics);
         let export_prefix = if self.is_exported(&s.vis) { "export " } else { "" };
         self.writeln(&format!("{}struct {} {{", export_prefix, name));
@@ -209,6 +270,8 @@ impl CodeGen {
         match &s.fields {
             syn::Fields::Named(fields) => {
                 for field in &fields.named {
+                    // Emit field doc comments
+                    self.emit_doc_comments(&field.attrs);
                     let field_name = field.ident.as_ref().unwrap();
                     let field_type = self.map_type(&field.ty);
                     self.writeln(&format!("{} {};", field_type, field_name));
@@ -506,6 +569,12 @@ impl CodeGen {
     }
 
     fn emit_mod(&mut self, m: &syn::ItemMod) {
+        // Skip #[cfg(test)] modules — test code is not transpiled into production output
+        if Self::has_cfg_test(&m.attrs) {
+            self.writeln("// #[cfg(test)] module omitted");
+            return;
+        }
+
         let mod_name = &m.ident;
         let is_pub = matches!(m.vis, syn::Visibility::Public(_));
 
@@ -3597,5 +3666,61 @@ mod tests {
         let out = transpile_str("fn f() -> Result<i32, String> { let x = g()?; Ok(x) }");
         assert!(out.contains("RUSTY_TRY("));
         assert!(!out.contains("RUSTY_CO_TRY"));
+    }
+
+    // ── Phase 11: Doc comments, tests, build integration ────────
+
+    #[test]
+    fn test_doc_comment_on_function() {
+        let out = transpile_str("/// Does something.\nfn f() {}");
+        assert!(out.contains("/// Does something."));
+    }
+
+    #[test]
+    fn test_doc_comment_on_struct() {
+        let out = transpile_str("/// A point.\nstruct Point { x: f64 }");
+        assert!(out.contains("/// A point."));
+        assert!(out.contains("struct Point"));
+    }
+
+    #[test]
+    fn test_doc_comment_on_field() {
+        let out = transpile_str("struct S {\n/// The value.\nx: i32\n}");
+        assert!(out.contains("/// The value."));
+        assert!(out.contains("int32_t x;"));
+    }
+
+    #[test]
+    fn test_doc_comment_multiline() {
+        let out = transpile_str("/// Line 1.\n/// Line 2.\nfn f() {}");
+        assert!(out.contains("/// Line 1."));
+        assert!(out.contains("/// Line 2."));
+    }
+
+    #[test]
+    fn test_test_attr_to_test_case() {
+        let out = transpile_str("#[test]\nfn test_add() { assert!(true); }");
+        assert!(out.contains("TEST_CASE(\"test_add\")"));
+    }
+
+    #[test]
+    fn test_test_function_body() {
+        let out = transpile_str("#[test]\nfn test_math() { let x = 1 + 2; }");
+        assert!(out.contains("TEST_CASE(\"test_math\") {"));
+        assert!(out.contains("const auto x = 1 + 2;"));
+    }
+
+    #[test]
+    fn test_cfg_test_module_omitted() {
+        let out = transpile_str("#[cfg(test)]\nmod tests { fn t() {} }");
+        assert!(out.contains("// #[cfg(test)] module omitted"));
+        assert!(!out.contains("namespace tests"));
+    }
+
+    #[test]
+    fn test_normal_function_no_test_case() {
+        let out = transpile_str("fn regular() {}");
+        assert!(!out.contains("TEST_CASE"));
+        assert!(out.contains("void regular()"));
     }
 }
