@@ -2,6 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process;
 
+mod cmake;
 mod codegen;
 mod transpile;
 mod types;
@@ -24,6 +25,10 @@ struct Cli {
     /// Expand macros before transpilation (requires cargo-expand installed)
     #[arg(long)]
     expand: bool,
+
+    /// Generate CMakeLists.txt from Cargo.toml (provide path to Cargo.toml)
+    #[arg(long)]
+    cmake: Option<PathBuf>,
 }
 
 /// Run `cargo expand` on the input file's crate to get macro-expanded source.
@@ -67,8 +72,48 @@ fn run_cargo_expand(input_path: &std::path::Path) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))
 }
 
+fn generate_cmake_from_cargo(cargo_toml_path: &std::path::Path) -> Result<(), String> {
+    let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
+    let project_dir = cargo_toml_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let sources = cmake::collect_source_files(project_dir);
+
+    if sources.is_empty() {
+        return Err("No .rs source files found in src/".to_string());
+    }
+
+    let cmake_content = cmake::generate_cmake(&cargo, &sources);
+    let cmake_path = project_dir.join("CMakeLists.txt");
+    std::fs::write(&cmake_path, &cmake_content)
+        .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;
+
+    println!("Generated {}", cmake_path.display());
+
+    // Also print the file mapping for reference
+    println!("\nFile mapping:");
+    for source in &sources {
+        let (cppm, module) = cmake::map_rs_to_cppm(source, &cargo.package.name);
+        println!("  {} → {} (module: {})", source.display(), cppm.display(), module);
+    }
+
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // Handle --cmake: generate CMakeLists.txt from Cargo.toml
+    if let Some(ref cargo_toml_path) = cli.cmake {
+        match generate_cmake_from_cargo(cargo_toml_path) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+        return;
+    }
 
     let input_path = &cli.input;
     if !input_path.exists() {

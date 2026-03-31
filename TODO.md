@@ -133,7 +133,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `pub(crate)` → module-visible but not exported (naturally handled: Restricted != Public)
       - [x] *done* `use` statements → `using` declarations
       - [x] *done* `pub use` re-exports → `export using`
-      - [ ] File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm` (build system level)
+      - [x] *done* File-to-module mapping: `src/foo.rs` → `crate_name.foo.cppm`, `src/bar/mod.rs` → `crate_name.bar.cppm`
       - [x] *done* Inline `mod foo { ... }` → `namespace foo { ... }`
     - [x] *done* Phase 8: Async/await → pollable state machine on C++20 coroutines
       - [x] *done* Implement `Poll<T>` type (Ready/Pending) in `include/rusty/async.hpp`
@@ -165,7 +165,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* `?` in async → `RUSTY_CO_TRY()` (uses `co_return`)
       - [x] *done* C++ header: `include/rusty/try.hpp` with TRY/CO_TRY/TRY_OPT macros
     - [x] *done* Phase 11: Build system and testing integration
-      - [ ] Cargo.toml → CMakeLists.txt generation (dependencies, build flags, features)
+      - [x] *done* Cargo.toml → CMakeLists.txt generation (--cmake flag, project/targets/modules)
       - [x] *done* `#[test]` functions → `TEST_CASE("name") { ... }` (Catch2 style)
       - [x] *done* `#[cfg(test)]` modules → omitted from production output
       - [x] *done* Documentation comments `///` → Doxygen `///` (functions, structs, fields)

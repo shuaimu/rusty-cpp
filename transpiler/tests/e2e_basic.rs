@@ -186,3 +186,48 @@ fn test_module_name_flag() {
     assert!(cpp.contains("export module my_crate;"));
     assert!(cpp.contains("export void hello()"));
 }
+
+#[test]
+fn test_cmake_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+
+    // Create a minimal Cargo.toml
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "hello"
+version = "1.0.0"
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
+"#,
+    )
+    .unwrap();
+
+    // Create source files
+    std::fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
+    std::fs::write(src_dir.join("utils.rs"), "pub fn helper() {}").unwrap();
+
+    // Run with --cmake flag (pass a dummy input file since it's required)
+    let output = transpiler_bin()
+        .arg(src_dir.join("main.rs").to_str().unwrap())
+        .arg("--cmake")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify CMakeLists.txt was created
+    let cmake_path = dir.path().join("CMakeLists.txt");
+    assert!(cmake_path.exists());
+
+    let cmake = std::fs::read_to_string(&cmake_path).unwrap();
+    assert!(cmake.contains("project(hello VERSION 1.0.0"));
+    assert!(cmake.contains("add_executable(hello"));
+    assert!(cmake.contains("hello.cppm"));
+}
