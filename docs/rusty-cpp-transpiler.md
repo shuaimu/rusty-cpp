@@ -1866,6 +1866,25 @@ Design rationale:
 - Keep one call-emission path to avoid behavior drift between normal expression emission and expected-type-aware emission.
 - Keep inference local and syntax-directed (no global type-inference pass yet), consistent with rejected over-complex approaches in §11.
 
+### 10.13 Phase 18 Progress: Blocker 1 (Leaf 3) — DONE
+
+Added assignment-context type propagation for variant constructors:
+
+- During codegen, local bindings are tracked per lexical block with explicit type info when available.
+- For assignment expressions `lhs = rhs`, when `lhs` is a simple local variable with a known typed binding, that type is passed as expected context to `rhs`.
+- This enables cases like `let mut e: Either<i32, i32> = Left(1); e = Right(2);` to emit `e = Right<int32_t, int32_t>(2);`.
+- Shadowing is respected by scope lookup (inner untyped `let e = ...` does not inherit outer typed context).
+
+Tests added:
+
+- Assignment to typed local emits explicit template args.
+- Shadowed untyped local assignment remains untyped while outer typed assignment still emits template args.
+
+Design rationale:
+
+- The implementation uses scoped local binding metadata instead of a global inference engine.
+- This follows the rejected-approach guidance in §11 by avoiding broad, high-complexity machinery when a deterministic local solution is sufficient.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

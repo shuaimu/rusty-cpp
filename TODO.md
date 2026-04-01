@@ -260,9 +260,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Blocker 1: Type context propagation for variant constructors
         - [x] *done* In `emit_local`, when `let` has a type annotation (e.g., `let e: Either<i32, i32> = Left(2)`), pass the type to the initializer expression emitter
         - [x] *done* In `emit_expr_to_string` for `Expr::Call`, when calling a variant constructor and expected type is known, emit explicit template args
-        - [ ] Handle assignment context: `e = Right(2)` where `e` is typed — infer template args from target variable type
-        - [ ] Add unit tests: typed let with variant constructor, untyped let (should still work via auto), assignment to typed var
-        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+        - [x] *done* Handle assignment context: `e = Right(2)` where `e` is typed — infer template args from target variable type
+        - [x] *done* Add unit tests: typed let with variant constructor, untyped let (should still work via auto), assignment to typed var
+        - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] Blocker 2: UFCS trait method calls → direct method calls
         - [ ] Detect `Trait::method(receiver, args)` pattern (free function call where first arg is `&self`/`&mut self`)
         - [ ] Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods

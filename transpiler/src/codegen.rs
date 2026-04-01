@@ -20,6 +20,9 @@ pub struct CodeGen {
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
     reassigned_vars: std::collections::HashSet<String>,
+    /// Scoped local bindings for expected-type propagation in expression emission.
+    /// `None` means the binding exists but has no explicit type annotation.
+    local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
     /// True when emitting inside an async function body.
@@ -38,6 +41,7 @@ impl CodeGen {
             operator_renames: HashMap::new(),
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
+            local_bindings: Vec::new(),
             module_name: None,
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
@@ -1114,6 +1118,7 @@ impl CodeGen {
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
+        self.local_bindings.push(HashMap::new());
 
         let stmts = &block.stmts;
         let len = stmts.len();
@@ -1123,6 +1128,7 @@ impl CodeGen {
             self.emit_stmt(stmt, is_last);
         }
 
+        self.local_bindings.pop();
         self.reassigned_vars = prev;
     }
 
@@ -1962,6 +1968,7 @@ impl CodeGen {
 
     fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
+        self.register_local_binding_pattern(pat);
 
         match pat {
             syn::Pat::Ident(pat_ident) => {
@@ -2059,6 +2066,47 @@ impl CodeGen {
                 self.writeln("// TODO: complex pattern binding");
             }
         }
+    }
+
+    /// Register local bindings in the current scope for expected-type lookup.
+    fn register_local_binding_pattern(&mut self, pat: &syn::Pat) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                self.register_local_binding(pi.ident.to_string(), None);
+            }
+            syn::Pat::Type(pt) => {
+                if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
+                    self.register_local_binding(pi.ident.to_string(), Some((*pt.ty).clone()));
+                } else {
+                    self.register_local_binding_pattern(&pt.pat);
+                }
+            }
+            syn::Pat::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.register_local_binding_pattern(elem);
+                }
+            }
+            syn::Pat::Reference(r) => {
+                self.register_local_binding_pattern(&r.pat);
+            }
+            _ => {}
+        }
+    }
+
+    fn register_local_binding(&mut self, name: String, ty: Option<syn::Type>) {
+        if let Some(scope) = self.local_bindings.last_mut() {
+            scope.insert(name, ty);
+        }
+    }
+
+    /// Look up the nearest in-scope local binding type for a variable name.
+    fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
+        for scope in self.local_bindings.iter().rev() {
+            if let Some(maybe_ty) = scope.get(name) {
+                return maybe_ty.clone();
+            }
+        }
+        None
     }
 
     /// Emit an expression with optional expected type context from its parent.
@@ -2302,7 +2350,17 @@ impl CodeGen {
             }
             syn::Expr::Assign(a) => {
                 let left = self.emit_expr_to_string(&a.left);
-                let right = self.emit_expr_to_string(&a.right);
+                let expected_ty = if let syn::Expr::Path(path) = a.left.as_ref() {
+                    if path.path.segments.len() == 1 {
+                        let name = path.path.segments[0].ident.to_string();
+                        self.lookup_local_binding_type(&name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let right = self.emit_expr_to_string_with_expected(&a.right, expected_ty.as_ref());
                 format!("{} = {}", left, right)
             }
             syn::Expr::Struct(s) => {
@@ -2881,6 +2939,7 @@ impl CodeGen {
             operator_renames: HashMap::new(),
             current_struct: None,
             reassigned_vars: std::collections::HashSet::new(),
+            local_bindings: Vec::new(),
             module_name: None,
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
@@ -5370,5 +5429,38 @@ mod tests {
         let out = transpile_str("fn f() { let o: Option<i32> = Some(2); }");
         assert!(out.contains("const rusty::Option<int32_t> o = std::make_optional(2);"));
         assert!(!out.contains("Some<int32_t>"));
+    }
+
+    #[test]
+    fn test_typed_assignment_variant_constructor_gets_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let mut e: Either<i32, i32> = Left(1);
+                e = Right(2);
+            }
+        "#,
+        );
+        assert!(out.contains("e = Right<int32_t, int32_t>(2);"));
+    }
+
+    #[test]
+    fn test_untyped_shadow_blocks_outer_assignment_type_context() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let mut e: Either<i32, i32> = Left(1);
+                {
+                    let mut e = Left(3);
+                    e = Right(4);
+                }
+                e = Right(2);
+            }
+        "#,
+        );
+        assert!(out.contains("e = Right(4);"));
+        assert!(out.contains("e = Right<int32_t, int32_t>(2);"));
     }
 }
