@@ -270,7 +270,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] Blocker 3: Rust iterator protocol and std::io using declarations
-        - [ ] Skip `using std::io` (not a valid C++ namespace) — add to Rust-only imports list or map to `using namespace rusty::io`
+        - [x] *done* Skip `using std::io` (not a valid C++ namespace) — map `use std::io` to `namespace io = rusty::io`, remap concrete `std::io::*` imports to `rusty::io::*`, and skip Rust-only io trait imports
         - [ ] Handle `.collect()` on ranges — emit as range-to-vector conversion or skip
         - [ ] Add unit tests: using std::io skipped, range().collect() handled
         - [ ] Update docs/rusty-cpp-transpiler.md with design notes

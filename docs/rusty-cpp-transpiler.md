@@ -1955,6 +1955,30 @@ Design rationale:
 - We do not globally strip `&` from all method-call arguments, which would be over-broad and risk semantic regressions.
 - This keeps behavior explicit, local, and auditable in line with §11 rejected-approach guidance.
 
+### 10.17 Phase 18 Progress: Blocker 3 (Leaf 1) — DONE
+
+Implemented dedicated `std::io` import rewriting in `emit_use`:
+
+- `use std::io;` now emits `namespace io = rusty::io;` (valid C++ alias, preserves `io::...` call sites).
+- Concrete imports are remapped to valid C++ rusty namespace paths:
+  - `use std::io::SeekFrom;` → `using rusty::io::SeekFrom;`
+  - `use std::io::stdin;` → `using rusty::io::stdin_;` (matches existing function-path mapping)
+- Trait-only imports are skipped as Rust-only comments:
+  - `use std::io::Read;` → `// Rust-only: using std::io::Read;`
+  - same rule for `Write`, `Seek`, `BufRead`, and other non-runtime io trait paths
+
+Tests added/updated:
+
+- Group import tests now assert mixed behavior (`Read` skipped, `SeekFrom` remapped).
+- `use std::io::{self, BufRead}` now asserts namespace alias + Rust-only trait comment.
+- New unit tests cover module alias emission, type/function remapping, and trait import skipping.
+
+Design rationale:
+
+- Keep `io::...` references valid by introducing a namespace alias instead of silently dropping the module import.
+- Remap only runtime-relevant io symbols to `rusty::io`, and skip trait-only imports that have no concrete C++ `std::io` counterpart.
+- This avoids broad namespace rewrites while still removing invalid `using std::io...` output.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2018,3 +2042,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It changes semantics outside UFCS rewrite scope and can break valid address-of usage.
 - It is hard to reason about because the transformation is non-local and affects unrelated call paths.
 - A targeted normalization limited to UFCS-rewritten calls provides the required behavior for common trait-method patterns without broad regressions.
+
+### 11.6 Treating Rust `std::io` Imports as Native C++ `std::io`
+
+**Rejected approach:** Keep emitting `using std::io;` / `using std::io::Read;` directly and assume C++ provides an equivalent namespace tree.
+
+**Why it was rejected:**
+- C++ standard library has no `std::io` namespace, so these declarations are invalid and break compilation.
+- It conflates Rust trait imports with runtime io types; only some names map to `rusty::io` runtime support.
+- A scoped rewrite (`std::io` module alias + concrete io remap + trait-import skip) is more accurate and avoids over-broad namespace manipulation.

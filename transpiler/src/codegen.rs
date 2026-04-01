@@ -896,10 +896,16 @@ impl CodeGen {
 
         let export_prefix = if is_pub && self.module_name.is_some() { "export " } else { "" };
         for path in &paths {
-            if is_rust_only_import(path) {
-                self.writeln(&format!("// Rust-only: using {};", path));
-            } else {
-                self.writeln(&format!("{}using {};", export_prefix, path));
+            match classify_use_import(path) {
+                UseImportAction::RustOnly => {
+                    self.writeln(&format!("// Rust-only: using {};", path));
+                }
+                UseImportAction::Using(mapped_path) => {
+                    self.writeln(&format!("{}using {};", export_prefix, mapped_path));
+                }
+                UseImportAction::Raw(statement) => {
+                    self.writeln(&format!("{}{}", export_prefix, statement));
+                }
             }
         }
     }
@@ -3279,6 +3285,44 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
     }
 }
 
+enum UseImportAction {
+    RustOnly,
+    Using(String),
+    Raw(String),
+}
+
+fn classify_use_import(path: &str) -> UseImportAction {
+    if let Some(action) = rewrite_std_io_import(path) {
+        return action;
+    }
+    if is_rust_only_import(path) {
+        return UseImportAction::RustOnly;
+    }
+    UseImportAction::Using(path.to_string())
+}
+
+fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
+    // `use std::io;` imports the module name itself; alias it to rusty::io.
+    if path == "std::io" {
+        return Some(UseImportAction::Raw("namespace io = rusty::io;".to_string()));
+    }
+
+    let io_item = path.strip_prefix("std::io::")?;
+    let action = match io_item {
+        // Runtime I/O types have direct rusty::io equivalents.
+        "Cursor" | "Error" | "Result" | "SeekFrom" | "Stdin" | "Stdout" | "Stderr" => {
+            UseImportAction::Using(format!("rusty::io::{}", io_item))
+        }
+        // Function renames match existing path mapping (`stdin` → `stdin_`, etc.).
+        "stdin" => UseImportAction::Using("rusty::io::stdin_".to_string()),
+        "stdout" => UseImportAction::Using("rusty::io::stdout_".to_string()),
+        "stderr" => UseImportAction::Using("rusty::io::stderr_".to_string()),
+        // Read/Write/Seek/BufRead and related trait imports are Rust-only.
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
 /// Check if a using path refers to a Rust-only trait/module with no C++ equivalent.
 /// These are silently skipped (commented out) since they have no meaning in C++.
 fn is_rust_only_import(path: &str) -> bool {
@@ -5233,17 +5277,18 @@ mod tests {
 
     #[test]
     fn test_use_group_expanded() {
-        let out = transpile_str("use std::io::{Read, Write};");
-        assert!(out.contains("using std::io::Read;"));
-        assert!(out.contains("using std::io::Write;"));
+        let out = transpile_str("use std::io::{Read, SeekFrom};");
+        assert!(out.contains("// Rust-only: using std::io::Read;"));
+        assert!(out.contains("using rusty::io::SeekFrom;"));
         assert!(!out.contains("{"));
     }
 
     #[test]
     fn test_use_group_with_self() {
         let out = transpile_str("use std::io::{self, BufRead};");
-        assert!(out.contains("using std::io;"));
-        assert!(out.contains("using std::io::BufRead;"));
+        assert!(out.contains("namespace io = rusty::io;"));
+        assert!(out.contains("// Rust-only: using std::io::BufRead;"));
+        assert!(!out.contains("using std::io;"));
     }
 
     #[test]
@@ -5405,10 +5450,37 @@ mod tests {
 
     #[test]
     fn test_non_rust_only_imports_kept() {
-        let out = transpile_str("use std::io::Read;");
-        // std::io is real C++ — should NOT be marked Rust-only
-        assert!(out.contains("using std::io::Read;"));
+        let out = transpile_str("use std::collections::HashMap;");
+        assert!(out.contains("using std::collections::HashMap;"));
         assert!(!out.contains("Rust-only"));
+    }
+
+    #[test]
+    fn test_std_io_module_import_emits_namespace_alias() {
+        let out = transpile_str("use std::io;");
+        assert!(out.contains("namespace io = rusty::io;"));
+        assert!(!out.contains("using std::io;"));
+    }
+
+    #[test]
+    fn test_std_io_type_import_remapped_to_rusty_io() {
+        let out = transpile_str("use std::io::SeekFrom;");
+        assert!(out.contains("using rusty::io::SeekFrom;"));
+        assert!(!out.contains("using std::io::SeekFrom;"));
+    }
+
+    #[test]
+    fn test_std_io_function_import_remapped_to_underscore_variant() {
+        let out = transpile_str("use std::io::stdin;");
+        assert!(out.contains("using rusty::io::stdin_;"));
+        assert!(!out.contains("using std::io::stdin;"));
+    }
+
+    #[test]
+    fn test_std_io_trait_imports_skipped() {
+        let out = transpile_str("use std::io::Read;");
+        assert!(out.contains("// Rust-only: using std::io::Read;"));
+        assert!(!out.contains("\nusing std::io::Read;"));
     }
 
     #[test]
