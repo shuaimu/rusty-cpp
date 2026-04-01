@@ -1929,6 +1929,32 @@ Design rationale:
 - Argument-level semantic normalization (e.g., converting `&mut buf` to `buf` for known APIs) remains in the next leaf task.
 - This follows §11 by preferring a narrow, auditable transformation over broad, risky rewrites.
 
+### 10.16 Phase 18 Progress: Blocker 2 (Leaf 3/4/5) — DONE
+
+Extended UFCS rewrite to cover common method-call patterns and added explicit test coverage:
+
+- For UFCS-rewritten calls, non-receiver reference arguments are normalized:
+  - `&arg` / `&mut arg` emit as `arg` in method argument position.
+- Common patterns now emit as intended:
+  - `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
+  - `io::Write::write(&mut writer, &buf)` → `writer.write(buf)`
+  - `Iterator::next(&it)` → `it.next()`
+- Custom trait UFCS pattern is covered:
+  - `MyTrait::apply(&obj, &value)` → `obj.apply(value)`
+
+Tests added/updated:
+
+- Updated Read-pattern rewrite assertion to require `cursor.read(buf)`.
+- Added Write-pattern rewrite test.
+- Added Iterator-pattern rewrite test.
+- Added custom trait method rewrite test.
+
+Design rationale:
+
+- Normalization is intentionally limited to UFCS-rewritten calls only.
+- We do not globally strip `&` from all method-call arguments, which would be over-broad and risk semantic regressions.
+- This keeps behavior explicit, local, and auditable in line with §11 rejected-approach guidance.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -1983,3 +2009,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - This can silently rewrite valid namespaced free functions into incorrect method calls.
 - It introduces hard-to-diagnose regressions because many Rust paths use namespaces that are not trait dispatch.
 - A conservative trait-shape guard (including trait-segment naming convention) keeps rewrite scope predictable and testable.
+
+### 11.5 Global Reference-Stripping for Method Arguments
+
+**Rejected approach:** Strip `&`/`&mut` from all emitted method-call arguments across the transpiler.
+
+**Why it was rejected:**
+- It changes semantics outside UFCS rewrite scope and can break valid address-of usage.
+- It is hard to reason about because the transformation is non-local and affects unrelated call paths.
+- A targeted normalization limited to UFCS-rewritten calls provides the required behavior for common trait-method patterns without broad regressions.

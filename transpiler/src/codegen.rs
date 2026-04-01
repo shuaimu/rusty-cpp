@@ -2151,7 +2151,12 @@ impl CodeGen {
                     .args
                     .iter()
                     .skip(1)
-                    .map(|a| self.emit_expr_maybe_move(a))
+                    .map(|a| match a {
+                        // For UFCS-to-method rewrite, non-receiver reference args are
+                        // method arguments, not C++ address-of operations.
+                        syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                        _ => self.emit_expr_maybe_move(a),
+                    })
                     .collect();
                 let is_self = matches!(
                     receiver_ref.expr.as_ref(),
@@ -5604,7 +5609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_ufcs_trait_call_as_method_call() {
+    fn test_emit_ufcs_read_call_common_pattern() {
         let expr: syn::Expr = syn::parse_str("io::Read::read(&mut cursor, &mut buf)").unwrap();
         let call = match expr {
             syn::Expr::Call(c) => c,
@@ -5612,7 +5617,7 @@ mod tests {
         };
         let cg = CodeGen::new();
         let out = cg.emit_call_expr_to_string(&call, None);
-        assert_eq!(out, "cursor.read(&buf)");
+        assert_eq!(out, "cursor.read(buf)");
     }
 
     #[test]
@@ -5625,5 +5630,41 @@ mod tests {
         let cg = CodeGen::new();
         let out = cg.emit_call_expr_to_string(&call, None);
         assert_eq!(out, "tick(1)");
+    }
+
+    #[test]
+    fn test_emit_ufcs_write_call_common_pattern() {
+        let expr: syn::Expr = syn::parse_str("io::Write::write(&mut writer, &buf)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "writer.write(buf)");
+    }
+
+    #[test]
+    fn test_emit_ufcs_iterator_next_common_pattern() {
+        let expr: syn::Expr = syn::parse_str("Iterator::next(&it)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "it.next()");
+    }
+
+    #[test]
+    fn test_emit_ufcs_custom_trait_method_common_pattern() {
+        let expr: syn::Expr = syn::parse_str("MyTrait::apply(&obj, &value)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "obj.apply(value)");
     }
 }

@@ -266,9 +266,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Blocker 2: UFCS trait method calls → direct method calls
         - [x] *done* Detect `Trait::method(receiver, args)` pattern (free function call where first arg is `&self`/`&mut self`)
         - [x] *done* Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods
-        - [ ] Handle common patterns: `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
-        - [ ] Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
-        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+        - [x] *done* Handle common patterns: `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
+        - [x] *done* Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
+        - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] Blocker 3: Rust iterator protocol and std::io using declarations
         - [ ] Skip `using std::io` (not a valid C++ namespace) — add to Rust-only imports list or map to `using namespace rusty::io`
         - [ ] Handle `.collect()` on ranges — emit as range-to-vector conversion or skip
