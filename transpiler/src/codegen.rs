@@ -1474,13 +1474,17 @@ impl CodeGen {
             "assert_eq" => {
                 let parts = self.split_macro_args(&tokens);
                 if parts.len() >= 2 {
-                    self.writeln(&format!("assert({} == {});", parts[0].trim(), parts[1].trim()));
+                    let left = self.convert_macro_tokens(parts[0].trim());
+                    let right = self.convert_macro_tokens(parts[1].trim());
+                    self.writeln(&format!("assert(({} == {}));", left, right));
                 }
             }
             "assert_ne" => {
                 let parts = self.split_macro_args(&tokens);
                 if parts.len() >= 2 {
-                    self.writeln(&format!("assert({} != {});", parts[0].trim(), parts[1].trim()));
+                    let left = self.convert_macro_tokens(parts[0].trim());
+                    let right = self.convert_macro_tokens(parts[1].trim());
+                    self.writeln(&format!("assert(({} != {}));", left, right));
                 }
             }
             "dbg" => {
@@ -1552,8 +1556,25 @@ impl CodeGen {
     }
 
     /// Convert raw macro tokens to a C++ expression string.
+    /// Applies basic Rust→C++ token transformations.
     fn convert_macro_tokens(&self, tokens: &str) -> String {
-        tokens.to_string()
+        let mut result = tokens.to_string();
+        // Replace Rust Option/Result constructors in token context
+        result = result.replace("None", "std::nullopt");
+        // Replace Some(x) or Some (x) → std::make_optional(x)
+        // Normalize "Some (" to "Some(" first
+        result = result.replace("Some (", "Some(");
+        while let Some(pos) = result.find("Some(") {
+            if let Some(end) = find_matching_paren(&result, pos + 4) {
+                let inner = &result[pos + 5..end].to_string();
+                result = format!("{}std::make_optional({}){}", &result[..pos], inner, &result[end + 1..]);
+            } else {
+                break;
+            }
+        }
+        // Replace &mut with & (C++ doesn't have &mut)
+        result = result.replace("& mut ", "&");
+        result
     }
 
     /// Split macro arguments by top-level commas (respecting nesting).
@@ -2064,6 +2085,22 @@ impl CodeGen {
             }
             syn::Expr::Call(call) => {
                 let func = self.emit_expr_to_string(&call.func);
+
+                // Map Rust Option::Some(x) → std::optional{x}
+                if func == "Some" && call.args.len() == 1 {
+                    let arg = self.emit_expr_to_string(&call.args[0]);
+                    return format!("std::make_optional({})", arg);
+                }
+                // Map Ok(x) and Err(x) for Result
+                if func == "Ok" && call.args.len() == 1 {
+                    let arg = self.emit_expr_to_string(&call.args[0]);
+                    return format!("rusty::Result::ok({})", arg);
+                }
+                if func == "Err" && call.args.len() == 1 {
+                    let arg = self.emit_expr_to_string(&call.args[0]);
+                    return format!("rusty::Result::err({})", arg);
+                }
+
                 let args: Vec<String> = call
                     .args
                     .iter()
@@ -2305,6 +2342,11 @@ impl CodeGen {
         // Resolve `self` to `(*this)` — for field access, `self.x` becomes `this->x`
         if segments.len() == 1 && segments[0] == "self" {
             return "(*this)".to_string();
+        }
+
+        // Map Rust Option constructors
+        if segments.len() == 1 && segments[0] == "None" {
+            return "std::nullopt".to_string();
         }
 
         // Try user-provided type mappings first (highest priority)
@@ -3023,6 +3065,28 @@ fn is_rust_only_import(path: &str) -> bool {
         }
     }
     false
+}
+
+/// Find the matching closing paren for an opening paren at `open_pos`.
+fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.get(open_pos) != Some(&b'(') {
+        return std::option::Option::None;
+    }
+    let mut depth = 1i32;
+    for i in (open_pos + 1)..bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return std::option::Option::Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    std::option::Option::None
 }
 
 fn escape_cpp_keyword(name: &str) -> String {
@@ -4352,7 +4416,7 @@ mod tests {
     #[test]
     fn test_assert_eq_macro() {
         let out = transpile_str("fn f() { assert_eq!(a, b); }");
-        assert!(out.contains("assert(a == b)"));
+        assert!(out.contains("assert((a == b))"));
     }
 
     #[test]

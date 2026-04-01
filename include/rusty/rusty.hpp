@@ -32,6 +32,9 @@
 #include "rusty/btreemap.hpp"
 #include "rusty/btreeset.hpp"
 
+// Arrays and ranges
+#include "rusty/array.hpp"
+
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
 

@@ -1814,13 +1814,24 @@ May need small fixes for:
 
 **Estimated effort:** ~30 LOC for edge cases surfaced during testing.
 
-#### Action Plan
+#### Action Plan — ALL DONE ✅
 
-1. **Run `cargo expand` on either** — test the `--crate --expand` pipeline, see what the expanded transpiled output looks like
-2. **Fix any new transpilation gaps** surfaced by the expanded code
-3. **Add template arg deduction** for variant constructors in typed contexts
-4. **Write full C++ test suite** that mirrors all 7 of either's `#[test]` functions
-5. **Compare outputs** — verify the C++ version produces the same results as `cargo test`
+All 5 steps completed:
+1. ✅ `cargo expand` on either — all methods transpiled
+2. ✅ UFCS types, auto-derived attrs handled
+3. ✅ Variant constructors return `auto` for implicit conversion
+4. ✅ All 7 test functions pass in C++ (test_either_parity.cpp)
+5. ✅ Side-by-side: Rust 7/7 pass, C++ 7/7 pass
+
+#### Additional Fixes (from transpiled test compilation)
+
+**Macro token processing:** `assert_eq!` and `assert_ne!` now process their token arguments through `convert_macro_tokens()`, which:
+- Replaces `None` → `std::nullopt`
+- Replaces `Some(x)` → `std::make_optional(x)`
+- Replaces `& mut` → `&`
+- Wraps comparisons in extra parens to avoid macro comma issues
+
+**rusty::array_repeat:** Added `include/rusty/array.hpp` with `array_repeat(val, count)` (returns `std::vector<T>`) and range types (`range`, `range_inclusive`, `range_from`, `range_to`, `range_full`).
 
 ---
 
