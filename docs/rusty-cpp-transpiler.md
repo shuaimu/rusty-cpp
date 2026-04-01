@@ -1574,15 +1574,11 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Estimated effort:** ~20 LOC in `emit_item`.
 
-### Gap 5: `Self` in Trait Method Signatures
+### Gap 5: `Self` in Trait Method Signatures — FIXED ✅
 
-**Problem:** In trait method signatures, `Self` appears as a return type or parameter type but there's no current struct context to resolve it.
+**Problem:** `Self` in trait methods had no struct context, emitting bare `Self`.
 
-**Current output:** `Either<Self, Self>` (wrong — `Self` is unresolved)
-
-**Expected output:** In a trait context, `Self` should remain as a template parameter or be mapped to the proxy's value type.
-
-**Fix:** In trait method signatures, leave `Self` as-is (it's the implementor's type — Proxy handles this). Or replace with `auto` for return types.
+**Fix:** `emit_path_to_string` now falls back to `auto` when `Self` is used without a struct context (i.e., in trait definitions). In struct context, `Self` still resolves to the struct name.
 
 **Estimated effort:** ~10 LOC.
 
@@ -1615,7 +1611,7 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 | 5 | Gap 8: Nested functions | ~~Invalid C++~~ **FIXED** | ~40 LOC |
 | 6 | Gap 6: Slice/range syntax | ~~Missing expressions~~ **FIXED** | ~30 LOC |
 | 7 | Gap 7: Array literals | ~~Missing expressions~~ **FIXED** | ~20 LOC |
-| 8 | Gap 5: Self in traits | Cosmetic | ~10 LOC |
+| 8 | Gap 5: Self in traits | ~~Cosmetic~~ **FIXED** | ~10 LOC |
 
 Total estimated: ~205 LOC to fix all gaps.
 

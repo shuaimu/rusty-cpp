@@ -2155,10 +2155,13 @@ impl CodeGen {
         let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         let joined = segments.join("::");
 
-        // Resolve `Self` to current struct name
+        // Resolve `Self` to current struct name, or `auto` in trait context
         if segments.len() == 1 && segments[0] == "Self" {
             if let Some(ref struct_name) = self.current_struct {
                 return struct_name.clone();
+            } else {
+                // In trait context, Self = the implementing type → use auto
+                return "auto".to_string();
             }
         }
 
@@ -4884,5 +4887,26 @@ mod tests {
         let out = transpile_str(r#"fn f() { let b = b"hello"; }"#);
         assert!(out.contains("std::array<uint8_t,"));
         assert!(out.contains("0x68")); // 'h'
+    }
+
+    // ── Phase 15 Gap 8: Self in trait signatures ────────────────
+
+    #[test]
+    fn test_self_in_trait_return_auto() {
+        let out = transpile_str("trait Builder { fn build(&self) -> Self; }");
+        // Self in trait context → auto
+        assert!(out.contains("auto() const"));
+    }
+
+    #[test]
+    fn test_self_in_struct_resolved() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn new() -> Self { Foo {} } }
+        "#,
+        );
+        // Self in struct context → struct name
+        assert!(out.contains("static Foo new_()"));
     }
 }
