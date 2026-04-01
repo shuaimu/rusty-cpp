@@ -242,7 +242,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Category F: `&mut` already handled correctly in parsed code (only appears in macro tokens)
       - [x] *done* Category E: Match-as-expression → IIFE with switch or std::visit
       - [x] *done* Category A: `cargo expand` wired into `--crate --expand` mode
-    - [ ] Phase 17: Full test parity — cargo test → transpile → g++ → same results (see docs/rusty-cpp-transpiler.md §10.10)
+    - [x] *done* Phase 17: Full test parity — cargo test → transpile → g++ → same results (see docs/rusty-cpp-transpiler.md §10.10)
       - [x] *done* Fix 1: Run `cargo expand` on either and transpile the expanded output
         - [x] *done* Run `--crate --expand` on either: 2019 lines expanded → 1713 lines C++, all user methods present
         - [x] *done* Remaining 10 TODOs are in auto-derived trait impls (PartialEq/Ord/Hash), not user-facing API
@@ -255,4 +255,4 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Handle `<T as Trait>::Assoc` (UFCS) → `T::Assoc` via QSelf handling in map_type
         - [x] *done* `#[automatically_derived]` and `#[doc(hidden)]` already silently skipped by syn
         - [x] *done* Unit test for UFCS associated type projection
-      - [ ] End-to-end: write C++ tests for all 7 of either's #[test] functions and verify same output as cargo test
+      - [x] *done* End-to-end: all 7 of either's #[test] functions pass in C++ with same results as cargo test
