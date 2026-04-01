@@ -201,12 +201,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* In `emit_use_tree`, add `"core"` and `"alloc"` cases that map to `std::`
         - [x] *done* Add unit test: `use core::convert::AsRef` → `using std::convert::AsRef`
         - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 2 to mark as done
-      - [ ] Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations
-        - [ ] In `emit_use`, detect when use tree is `Path { tree: Group }` and expand into multiple `using` lines
-        - [ ] Handle nested groups: `use std::io::{self, Read, Write}` → 3 separate using declarations
-        - [ ] Handle `self` in groups: `use std::io::{self}` → `using std::io`
-        - [ ] Add unit tests: simple group, nested group, group with self, group with rename
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 3 to mark as done
+      - [x] *done* Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations
+        - [x] *done* Replaced emit_use_tree with flatten_use_tree that returns Vec<String> of expanded paths
+        - [x] *done* Handle nested groups: `use std::io::{self, Read, Write}` → 3 separate using declarations
+        - [x] *done* Handle `self` in groups: `use std::io::{self}` → `using std::io`
+        - [x] *done* Add unit tests: simple group, nested group, group with self, crate rewriting
+        - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 3 to mark as done
       - [ ] Gap 4: Handle unhandled syn::Item kinds
         - [ ] `Item::ExternCrate` → emit `// extern crate foo` comment (no-op in C++20 modules)
         - [ ] `Item::Macro` (top-level `macro_rules!` definitions) → emit `// macro_rules! name { ... }` comment (compile-time only)

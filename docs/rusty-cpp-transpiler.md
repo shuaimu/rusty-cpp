@@ -1560,25 +1560,11 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Fix:** `emit_use_tree` now maps `core::` and `alloc::` identically to `std::` (they're Rust's no-std equivalents). Single match arm: `"std" | "core" | "alloc" => format!("std::{}", rest)`. Also excluded from external crate detection.
 
-### Gap 3: Group Use Imports Emit Invalid C++
+### Gap 3: Group Use Imports Emit Invalid C++ — FIXED ✅
 
-**Problem:** `use std::io::{Read, Write, Seek}` emits `using std::io::{Read, Write, Seek}` but C++ doesn't support brace group imports.
+**Problem:** `use std::io::{Read, Write, Seek}` emitted invalid C++ brace group syntax.
 
-**Current output (wrong):**
-```cpp
-using std::io::{Read, Write, Seek};
-```
-
-**Expected output:**
-```cpp
-using std::io::Read;
-using std::io::Write;
-using std::io::Seek;
-```
-
-**Fix:** In `emit_use`, when the use tree contains a `UseTree::Group`, expand it into multiple separate `using` declarations.
-
-**Estimated effort:** ~30 LOC in `emit_use`.
+**Fix:** Replaced `emit_use_tree` (single string) with `flatten_use_tree` (returns `Vec<String>` of expanded paths). Groups are recursively expanded with the parent prefix. `self` in groups maps to the parent path. Path prefixes (crate/core/alloc/std) handled during flattening.
 
 ### Gap 4: Unhandled `syn::Item` Kinds
 
@@ -1644,7 +1630,7 @@ TEST_CASE("macros") {
 | Priority | Gap | Impact | Effort |
 |----------|-----|--------|--------|
 | 1 | Gap 1: Generic enums | ~~Blocks most real crates~~ **FIXED** | ~50 LOC |
-| 2 | Gap 3: Group use imports | Invalid C++ syntax | ~30 LOC |
+| 2 | Gap 3: Group use imports | ~~Invalid C++ syntax~~ **FIXED** | ~30 LOC |
 | 3 | Gap 2: `core::` mapping | ~~Missing path~~ **FIXED** | ~5 LOC |
 | 4 | Gap 4: Unhandled item kinds | Missing code | ~20 LOC |
 | 5 | Gap 8: Nested functions | Invalid C++ | ~40 LOC |

@@ -776,16 +776,93 @@ impl CodeGen {
             ));
         }
 
-        let use_str = self.emit_use_tree(&u.tree);
+        // Flatten group imports into separate using declarations
+        let paths = self.flatten_use_tree(&u.tree, "");
 
-        if let Some(ref _module) = self.module_name {
-            if is_pub {
-                self.writeln(&format!("export using {};", use_str));
-            } else {
-                self.writeln(&format!("using {};", use_str));
+        let export_prefix = if is_pub && self.module_name.is_some() { "export " } else { "" };
+        for path in &paths {
+            self.writeln(&format!("{}using {};", export_prefix, path));
+        }
+    }
+
+    /// Flatten a use tree into a list of fully-qualified C++ paths.
+    /// Handles groups by expanding each item with the parent prefix.
+    fn flatten_use_tree(&self, tree: &syn::UseTree, prefix: &str) -> Vec<String> {
+        match tree {
+            syn::UseTree::Path(p) => {
+                let ident = p.ident.to_string();
+
+                // Map path prefixes (crate::, self::, core::, etc.)
+                let mapped = match ident.as_str() {
+                    "crate" => {
+                        if let Some(ref mod_name) = self.module_name {
+                            mod_name.clone()
+                        } else {
+                            return self.flatten_use_tree(&p.tree, prefix);
+                        }
+                    }
+                    "self" => return self.flatten_use_tree(&p.tree, prefix),
+                    "super" => {
+                        if let Some(ref mod_name) = self.module_name {
+                            if let Some((parent, _)) = mod_name.rsplit_once('.') {
+                                parent.to_string()
+                            } else {
+                                return self.flatten_use_tree(&p.tree, prefix);
+                            }
+                        } else {
+                            return self.flatten_use_tree(&p.tree, prefix);
+                        }
+                    }
+                    "std" | "core" | "alloc" => "std".to_string(),
+                    _ => ident,
+                };
+
+                let new_prefix = if prefix.is_empty() {
+                    mapped
+                } else {
+                    format!("{}::{}", prefix, mapped)
+                };
+
+                self.flatten_use_tree(&p.tree, &new_prefix)
             }
-        } else {
-            self.writeln(&format!("using {};", use_str));
+            syn::UseTree::Name(n) => {
+                let full = if prefix.is_empty() {
+                    n.ident.to_string()
+                } else {
+                    format!("{}::{}", prefix, n.ident)
+                };
+                vec![full]
+            }
+            syn::UseTree::Rename(r) => {
+                let full = if prefix.is_empty() {
+                    format!("{} = {}", r.rename, r.ident)
+                } else {
+                    format!("{}::{} = {}::{}", prefix, r.rename, prefix, r.ident)
+                };
+                vec![full]
+            }
+            syn::UseTree::Glob(_) => {
+                // `use foo::*` → just use the namespace
+                vec![format!("namespace {}", prefix)]
+            }
+            syn::UseTree::Group(g) => {
+                // Expand each item in the group with the current prefix
+                let mut result = Vec::new();
+                for item in &g.items {
+                    match item {
+                        syn::UseTree::Name(n) if n.ident == "self" => {
+                            // `use foo::{self}` → `using foo`
+                            if !prefix.is_empty() {
+                                result.push(prefix.to_string());
+                            }
+                        }
+                        _ => {
+                            result.extend(self.flatten_use_tree(item, prefix));
+                        }
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -802,58 +879,7 @@ impl CodeGen {
         }
     }
 
-    fn emit_use_tree(&self, tree: &syn::UseTree) -> String {
-        match tree {
-            syn::UseTree::Path(p) => {
-                let prefix = p.ident.to_string();
-                let rest = self.emit_use_tree(&p.tree);
 
-                // Rewrite Rust path prefixes to C++ equivalents
-                match prefix.as_str() {
-                    "crate" => {
-                        // `use crate::foo` → module_name::foo
-                        if let Some(ref mod_name) = self.module_name {
-                            format!("{}::{}", mod_name, rest)
-                        } else {
-                            format!("{}", rest) // No module → just use the path
-                        }
-                    }
-                    "self" => {
-                        // `use self::foo` → same module
-                        format!("{}", rest)
-                    }
-                    "super" => {
-                        // `use super::foo` → parent module
-                        // Approximate: strip last segment from module name
-                        if let Some(ref mod_name) = self.module_name {
-                            if let Some(parent) = mod_name.rsplit_once('.') {
-                                format!("{}::{}", parent.0, rest)
-                            } else {
-                                format!("{}", rest)
-                            }
-                        } else {
-                            format!("{}", rest)
-                        }
-                    }
-                    // Map std/core/alloc library paths — core and alloc are Rust's
-                    // no-std equivalents of std, map them identically
-                    "std" | "core" | "alloc" => {
-                        format!("std::{}", rest)
-                    }
-                    _ => format!("{}::{}", prefix, rest),
-                }
-            }
-            syn::UseTree::Name(n) => n.ident.to_string(),
-            syn::UseTree::Rename(r) => {
-                format!("{} = {}", r.rename, r.ident)
-            }
-            syn::UseTree::Glob(_) => "*".to_string(),
-            syn::UseTree::Group(g) => {
-                let items: Vec<String> = g.items.iter().map(|t| self.emit_use_tree(t)).collect();
-                format!("{{{}}}", items.join(", "))
-            }
-        }
-    }
 
     fn emit_impl_block(&mut self, i: &syn::ItemImpl) {
         // This is called for impl blocks whose struct wasn't found in the same file.
@@ -4653,5 +4679,44 @@ mod tests {
     fn test_use_core_no_external_crate_comment() {
         let out = transpile_str("use core::fmt::Display;");
         assert!(!out.contains("// TODO: external crate"));
+    }
+
+    // ── Phase 15 Gap 3: Group use import expansion ──────────────
+
+    #[test]
+    fn test_use_group_expanded() {
+        let out = transpile_str("use std::io::{Read, Write};");
+        assert!(out.contains("using std::io::Read;"));
+        assert!(out.contains("using std::io::Write;"));
+        assert!(!out.contains("{"));
+    }
+
+    #[test]
+    fn test_use_group_with_self() {
+        let out = transpile_str("use std::io::{self, BufRead};");
+        assert!(out.contains("using std::io;"));
+        assert!(out.contains("using std::io::BufRead;"));
+    }
+
+    #[test]
+    fn test_use_group_core_mapped() {
+        let out = transpile_str("use core::convert::{AsRef, AsMut};");
+        assert!(out.contains("using std::convert::AsRef;"));
+        assert!(out.contains("using std::convert::AsMut;"));
+    }
+
+    #[test]
+    fn test_use_group_crate_rewritten() {
+        let out = transpile_str_module("use crate::types::{Foo, Bar};", "my_app");
+        assert!(out.contains("using my_app::types::Foo;"));
+        assert!(out.contains("using my_app::types::Bar;"));
+    }
+
+    #[test]
+    fn test_use_group_three_items() {
+        let out = transpile_str("use std::collections::{HashMap, HashSet, BTreeMap};");
+        assert!(out.contains("using std::collections::HashMap;"));
+        assert!(out.contains("using std::collections::HashSet;"));
+        assert!(out.contains("using std::collections::BTreeMap;"));
     }
 }
