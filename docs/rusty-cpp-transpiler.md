@@ -1885,6 +1885,26 @@ Design rationale:
 - The implementation uses scoped local binding metadata instead of a global inference engine.
 - This follows the rejected-approach guidance in §11 by avoiding broad, high-complexity machinery when a deterministic local solution is sufficient.
 
+### 10.14 Phase 18 Progress: Blocker 2 (Leaf 1) — DONE
+
+Added UFCS trait-call detection for call expressions:
+
+- Detects call-shape candidates of the form `Trait::method(&receiver, ...)` and `module::Trait::method(&mut receiver, ...)`.
+- Detection is implemented as a dedicated helper (`detect_ufcs_trait_method_call`) and wired into call emission as a preparatory step for subsequent rewrite tasks.
+- Captured metadata includes full function path, method name, receiver mutability, and non-receiver argument count.
+
+Tests added:
+
+- Positive detection for mutable receiver (`io::Read::read(&mut cursor, &mut buf)`).
+- Positive detection for shared receiver (`Iterator::next(&it)`).
+- Negative detection for non-reference first arg.
+- Negative detection for plain function calls without trait-style path.
+
+Design rationale:
+
+- Keep this step strictly about pattern recognition, deferring semantic rewrite to later leaf tasks to keep changes auditable and low risk.
+- This follows §11 guidance by avoiding premature broad transformations before pattern coverage is validated.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

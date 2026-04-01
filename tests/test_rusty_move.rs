@@ -6,36 +6,36 @@
 /// - For const references: Compile error (use = to copy)
 
 use std::process::Command;
-use std::fs;
+use std::io::Write;
 use std::path::Path;
+use tempfile::Builder;
 
 fn run_checker(code: &str) -> String {
     run_checker_with_name(code, "test")
 }
 
 fn run_checker_with_name(code: &str, test_name: &str) -> String {
-    let temp_dir = std::env::temp_dir();
-    // Use unique filename per test to avoid race conditions
-    let unique_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let test_file = temp_dir.join(format!("test_rusty_move_{}_{}.cpp", test_name, unique_id));
-
     // Use the project's include directory directly
     let include_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
 
-    fs::write(&test_file, code).unwrap();
+    let mut test_file = Builder::new()
+        .prefix(&format!("test_rusty_move_{}_", test_name))
+        .suffix(".cpp")
+        .tempfile()
+        .expect("Failed to create temp source file");
+    test_file
+        .write_all(code.as_bytes())
+        .expect("Failed to write test source");
+    test_file
+        .flush()
+        .expect("Failed to flush test source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-checker"))
-        .arg(&test_file)
+        .arg(test_file.path())
         .arg("-I")
         .arg(&include_dir)
         .output()
         .expect("Failed to run checker");
-
-    // Clean up temp file
-    let _ = fs::remove_file(&test_file);
 
     String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr)

@@ -4,6 +4,14 @@ use syn;
 
 use crate::types;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UfcsTraitCallInfo {
+    function_path: String,
+    method_name: String,
+    receiver_is_mut: bool,
+    non_receiver_arg_count: usize,
+}
+
 /// Code generation context tracking indentation and output buffer.
 pub struct CodeGen {
     output: String,
@@ -2128,6 +2136,10 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // Phase 18 Blocker 2 (leaf 1): detect UFCS trait-method call pattern.
+        // Rewriting is handled by subsequent tasks.
+        let _ufcs_trait_call = self.detect_ufcs_trait_method_call(call);
+
         if let Some(ty) = expected_ty {
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
                 return emitted;
@@ -2157,6 +2169,40 @@ impl CodeGen {
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
         format!("{}({})", func, args.join(", "))
+    }
+
+    /// Detect UFCS trait method calls in the form `Trait::method(&self, args...)`
+    /// or `module::Trait::method(&mut self, args...)`.
+    fn detect_ufcs_trait_method_call(&self, call: &syn::ExprCall) -> Option<UfcsTraitCallInfo> {
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+
+        if func_path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+
+        // First argument must be an explicit reference: `&receiver` or `&mut receiver`.
+        let receiver_ref = match call.args.first() {
+            Some(syn::Expr::Reference(r)) => r,
+            _ => return None,
+        };
+
+        let method_name = func_path.segments.last()?.ident.to_string();
+        let function_path = func_path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+
+        Some(UfcsTraitCallInfo {
+            function_path,
+            method_name,
+            receiver_is_mut: receiver_ref.mutability.is_some(),
+            non_receiver_arg_count: call.args.len().saturating_sub(1),
+        })
     }
 
     /// If this is a variant-constructor call like `Left(2)` and the expected type
@@ -5462,5 +5508,61 @@ mod tests {
         );
         assert!(out.contains("e = Right(4);"));
         assert!(out.contains("e = Right<int32_t, int32_t>(2);"));
+    }
+
+    // ── Phase 18 Blocker 2: UFCS trait method call detection ────
+
+    #[test]
+    fn test_detect_ufcs_trait_call_with_mut_receiver() {
+        let expr: syn::Expr = syn::parse_str("io::Read::read(&mut cursor, &mut buf)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let info = cg.detect_ufcs_trait_method_call(&call).expect("should detect UFCS call");
+
+        assert_eq!(info.function_path, "io::Read::read");
+        assert_eq!(info.method_name, "read");
+        assert!(info.receiver_is_mut);
+        assert_eq!(info.non_receiver_arg_count, 1);
+    }
+
+    #[test]
+    fn test_detect_ufcs_trait_call_with_shared_receiver() {
+        let expr: syn::Expr = syn::parse_str("Iterator::next(&it)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let info = cg.detect_ufcs_trait_method_call(&call).expect("should detect UFCS call");
+
+        assert_eq!(info.function_path, "Iterator::next");
+        assert_eq!(info.method_name, "next");
+        assert!(!info.receiver_is_mut);
+        assert_eq!(info.non_receiver_arg_count, 0);
+    }
+
+    #[test]
+    fn test_detect_ufcs_trait_call_rejects_non_reference_receiver() {
+        let expr: syn::Expr = syn::parse_str("Trait::method(obj, arg)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
+    }
+
+    #[test]
+    fn test_detect_ufcs_trait_call_rejects_plain_function_call() {
+        let expr: syn::Expr = syn::parse_str("helper(&x)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
     }
 }
