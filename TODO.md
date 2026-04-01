@@ -235,3 +235,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Gaps 1-8 all fixed, `either` re-transpiled: 5 files, 0 errors
         - [x] *done* Remaining TODOs are crate-specific macros (need cargo expand) and complex expr patterns
         - [x] *done* Compile test: core Either type compiles and runs with both g++ 14 and clang++ 19 (-std=c++20). Full crate compilation blocked by missing rusty:: headers and Proxy library at compile time.
+    - [ ] Phase 16: Make transpiled tests compilable and runnable (see docs/rusty-cpp-transpiler.md §10.9)
+      - [ ] Category B: Auto-generate variant constructor functions (`Left(val)`, `Right(val)`) for enums with data
+      - [ ] Category C: Use struct wrapper (not using alias) for enums that have impl blocks, so methods can be added
+      - [ ] Category D: Skip `using` declarations for Rust-only trait paths (std::convert, std::ops, std::fmt, etc.)
+      - [ ] Category F: Clean up `&mut` in reference expressions — emit just `&` in C++
+      - [ ] Category E: Support match-as-expression (emit as IIFE or ternary chain)
+      - [ ] Category A: Wire `cargo expand` into `--crate` mode for macro-heavy crates
+      - [ ] End-to-end: either's test_basic compiles and runs with same output as cargo test

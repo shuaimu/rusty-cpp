@@ -1644,6 +1644,108 @@ $ clang++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
 - Proxy library (`pro::facade_builder`) not yet integrated as a build dependency
 - Crate-specific macros (`impl_specific_ref_and_mut!`) need `cargo expand`
 
+### 10.9 Plan: Making Transpiled Tests Compilable and Runnable
+
+To reach the goal of `cargo test` → transpile → `g++ && ./test` with the same results, the following issues must be fixed. These are categorized by root cause.
+
+#### Category A: Macro Expansion (needs `cargo expand` pre-processing)
+
+**Problem:** Crate-specific macros (`try_left!`, `try_right!`, `for_both!`, `map_either!`, `impl_specific_ref_and_mut!`, `check_t!`) emit `/* macro!(...) */` comments in the output. These macros define the bulk of Either's methods and test logic.
+
+**Fix:** Run `cargo expand` on the crate before transpilation. This resolves all macros into plain Rust code, which the transpiler can then handle.
+
+**Implementation:**
+1. Add `--expand` support to `--crate` mode: run `cargo expand` once, parse the monolithic output
+2. Since `cargo expand` produces one merged file, transpile it as a single module
+3. Alternative: run `cargo expand --lib` to get just the library code without tests, then run `cargo expand --tests` separately
+
+**Estimated effort:** ~50 LOC to wire `cargo expand` into `--crate` mode.
+
+#### Category B: Missing Variant Constructor Functions
+
+**Problem:** Transpiled code uses `Left(2)` and `Right(2)` as function calls, but these are Rust enum variant constructors — they don't exist as functions in C++. `std::variant` doesn't auto-generate constructor functions from variant struct names.
+
+**Fix:** For each enum with data, auto-generate constructor helper functions:
+
+```cpp
+// Auto-generated for enum Either<L, R> { Left(L), Right(R) }
+template<typename L, typename R>
+Either<L, R> Left(L val) { return Either_Left<L, R>{std::move(val)}; }
+
+template<typename L, typename R>
+Either<L, R> Right(R val) { return Either_Right<L, R>{std::move(val)}; }
+```
+
+**Challenge:** Template argument deduction — `Left(2)` can't deduce `R`. Options:
+1. Require explicit types: `Left<int, string>(2)` (verbose, unlike Rust)
+2. Use a deferred construction wrapper that captures the value and deduces the variant type at assignment
+3. Use CTAD (Class Template Argument Deduction) on the variant structs
+
+**Recommended approach:** Emit constructor helpers with explicit template args. The transpiler already knows the full `Either<L, R>` type at each call site from Rust's type inference — emit it.
+
+**Estimated effort:** ~40 LOC in `emit_enum` + ~20 LOC in call site type inference.
+
+#### Category C: Method Calls on Variant Types
+
+**Problem:** Transpiled code calls methods on `Either` values: `e.left()`, `e.right()`, `e.as_ref()`, `e.as_mut()`. But `std::variant` doesn't have these methods — they were defined in Rust's `impl Either<L, R>`.
+
+**Fix:** The `impl` blocks for `Either` are transpiled as methods merged into the struct. But since `Either` is a `using` alias (or struct wrapper) for `std::variant`, methods can't be directly added. Options:
+1. **Free functions:** `left(e)` instead of `e.left()` — changes call syntax
+2. **Wrapper struct with methods:** Make `Either` a class that inherits from `std::variant` and adds methods (we already do this for recursive enums)
+3. **Always use struct wrapper:** Drop the `using` alias, always use `struct Either : std::variant<...>` with inherited constructors + methods
+
+**Recommended approach:** Option 3 — always use struct wrapper for enums with `impl` blocks. This lets methods be added directly. The struct inherits `std::variant`'s functionality via `using variant::variant`.
+
+**Estimated effort:** ~30 LOC to change `emit_enum` + impl block merging for enums.
+
+#### Category D: `using` Declarations for Non-Existent C++ Namespaces
+
+**Problem:** `using std::convert::AsRef` — C++ `std` namespace doesn't have `convert::AsRef`. These are Rust-only trait paths with no C++ equivalent.
+
+**Fix:** Detect and skip `using` declarations that reference Rust-only namespaces/traits. Known Rust-only paths:
+- `std::convert::*` (AsRef, AsMut, From, Into)
+- `std::ops::*` (Deref, DerefMut, Add, Sub, etc.)
+- `std::fmt::*` (Display, Debug, Formatter)
+- `std::iter::*` (Iterator, IntoIterator, etc.)
+- `std::error::Error`
+- `std::future::Future`
+- `std::pin::Pin`
+
+These should either be skipped (they're trait imports — the transpiler handles traits via Proxy) or mapped to appropriate C++ equivalents.
+
+**Estimated effort:** ~30 LOC to add a skip-list for Rust-only trait imports.
+
+#### Category E: `match` as Expression (Value-Producing Match)
+
+**Problem:** `let iter = match x { 3 => Left(0..10), _ => Right(17..) };` — match used as a value-producing expression. Current transpiler emits `/* TODO: expr */` when match appears in expression position.
+
+**Fix:** For simple match-as-expression cases, emit as a chain of ternary operators or as an immediately-invoked lambda with switch/visit inside.
+
+**Estimated effort:** ~40 LOC in `emit_expr_to_string` for `Expr::Match`.
+
+#### Category F: `&mut` in C++ Context
+
+**Problem:** Transpiled code contains `&mut buf` and `&mut 2` — Rust-only syntax. In C++, `&mut` doesn't exist; mutable references are just `&`.
+
+**Fix:** In `emit_expr_to_string` for `Expr::Reference`, don't emit `mut` keyword — just emit `&`.
+
+**Estimated effort:** ~5 LOC — already partially handled, just need to verify.
+
+#### Priority Order
+
+| Priority | Category | Issue | Effort | Unblocks |
+|----------|----------|-------|--------|----------|
+| 1 | B | Variant constructors (`Left()`, `Right()`) | ~60 LOC | test_basic |
+| 2 | C | Methods on variant types (struct wrapper) | ~30 LOC | test_basic |
+| 3 | D | Skip Rust-only trait imports | ~30 LOC | clean compilation |
+| 4 | F | `&mut` syntax cleanup | ~5 LOC | test_basic |
+| 5 | E | Match as expression | ~40 LOC | test_iter |
+| 6 | A | Macro expansion integration | ~50 LOC | test_macros, all methods |
+
+**Total estimated: ~215 LOC** to make `either`'s basic tests compilable.
+
+After fixing categories B, C, D, and F (~125 LOC), the `test_basic` function should compile and produce the same output as `cargo test`. Categories A and E are needed for the more complex tests.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
