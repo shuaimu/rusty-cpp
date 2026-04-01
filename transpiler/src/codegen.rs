@@ -150,6 +150,20 @@ impl CodeGen {
             syn::Item::Trait(t) => self.emit_trait(t),
             syn::Item::Mod(m) => self.emit_mod(m),
             syn::Item::Use(u) => self.emit_use(u),
+            syn::Item::ExternCrate(ec) => {
+                // extern crate foo; → no-op in C++20 modules (deps handled via import)
+                self.writeln(&format!("// extern crate {}", ec.ident));
+            }
+            syn::Item::Macro(m) => {
+                // Top-level macro invocations (macro_rules! definitions, etc.)
+                if let Some(ref ident) = m.ident {
+                    // macro_rules! name { ... } → compile-time only, skip
+                    self.writeln(&format!("// macro_rules! {} {{ ... }}", ident));
+                } else {
+                    // Unnamed macro invocation at top level
+                    self.emit_macro_stmt(&m.mac);
+                }
+            }
             _ => {
                 self.writeln("// TODO: unhandled item kind");
             }
@@ -4718,5 +4732,23 @@ mod tests {
         assert!(out.contains("using std::collections::HashMap;"));
         assert!(out.contains("using std::collections::HashSet;"));
         assert!(out.contains("using std::collections::BTreeMap;"));
+    }
+
+    // ── Phase 15 Gap 4: Unhandled item kinds ────────────────────
+
+    #[test]
+    fn test_extern_crate() {
+        let out = transpile_str("extern crate serde;");
+        assert!(out.contains("// extern crate serde"));
+        assert!(!out.contains("// TODO: unhandled"));
+    }
+
+    #[test]
+    fn test_macro_rules_skipped() {
+        let out = transpile_str(
+            r#"macro_rules! my_macro { ($x:expr) => { $x + 1 }; }"#,
+        );
+        assert!(out.contains("// macro_rules! my_macro"));
+        assert!(!out.contains("// TODO: unhandled"));
     }
 }

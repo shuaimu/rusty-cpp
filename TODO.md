@@ -207,11 +207,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Handle `self` in groups: `use std::io::{self}` → `using std::io`
         - [x] *done* Add unit tests: simple group, nested group, group with self, crate rewriting
         - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 3 to mark as done
-      - [ ] Gap 4: Handle unhandled syn::Item kinds
-        - [ ] `Item::ExternCrate` → emit `// extern crate foo` comment (no-op in C++20 modules)
-        - [ ] `Item::Macro` (top-level `macro_rules!` definitions) → emit `// macro_rules! name { ... }` comment (compile-time only)
-        - [ ] Add unit tests for ExternCrate and top-level Macro items
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 4 to mark as done
+      - [x] *done* Gap 4: Handle unhandled syn::Item kinds
+        - [x] *done* `Item::ExternCrate` → emit `// extern crate foo` comment
+        - [x] *done* `Item::Macro` → macro_rules! emits comment, unnamed macros emit via emit_macro_stmt
+        - [x] *done* Add unit tests for ExternCrate and top-level Macro items
+        - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 4 to mark as done
       - [ ] Gap 5: Nested function definitions → convert to lambdas
         - [ ] In `emit_stmt`, detect `Stmt::Item(Item::Fn(...))` inside a function body
         - [ ] Emit as `const auto fn_name = [&](params) -> ret { body };` instead of nested function

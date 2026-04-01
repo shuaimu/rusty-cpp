@@ -1566,17 +1566,11 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Fix:** Replaced `emit_use_tree` (single string) with `flatten_use_tree` (returns `Vec<String>` of expanded paths). Groups are recursively expanded with the parent prefix. `self` in groups maps to the parent path. Path prefixes (crate/core/alloc/std) handled during flattening.
 
-### Gap 4: Unhandled `syn::Item` Kinds
+### Gap 4: Unhandled `syn::Item` Kinds — FIXED ✅
 
-**Problem:** Several item kinds emit `// TODO: unhandled item kind`:
-- `Item::ExternCrate` — `extern crate foo;`
-- `Item::Macro` (top-level macro invocations like `macro_rules!`)
-- `Item::Verbatim` (unparsed items)
+**Problem:** `ExternCrate` and `Macro` items emitted `// TODO: unhandled item kind`.
 
-**Fix:**
-- `Item::ExternCrate` → skip or emit `import`
-- `Item::Macro` (top-level) → expand or emit comment with macro name
-- Handle `macro_rules!` definitions — either skip (they're compile-time only) or emit a comment
+**Fix:** `Item::ExternCrate` → `// extern crate foo` comment (no-op in C++20 modules). `Item::Macro` with ident → `// macro_rules! name { ... }` comment (compile-time only). Unnamed top-level macro invocations emit via `emit_macro_stmt`.
 
 **Estimated effort:** ~20 LOC in `emit_item`.
 
@@ -1632,7 +1626,7 @@ TEST_CASE("macros") {
 | 1 | Gap 1: Generic enums | ~~Blocks most real crates~~ **FIXED** | ~50 LOC |
 | 2 | Gap 3: Group use imports | ~~Invalid C++ syntax~~ **FIXED** | ~30 LOC |
 | 3 | Gap 2: `core::` mapping | ~~Missing path~~ **FIXED** | ~5 LOC |
-| 4 | Gap 4: Unhandled item kinds | Missing code | ~20 LOC |
+| 4 | Gap 4: Unhandled item kinds | ~~Missing code~~ **FIXED** | ~20 LOC |
 | 5 | Gap 8: Nested functions | Invalid C++ | ~40 LOC |
 | 6 | Gap 6: Slice/range syntax | Missing expressions | ~30 LOC |
 | 7 | Gap 7: Array literals | Missing expressions | ~20 LOC |
