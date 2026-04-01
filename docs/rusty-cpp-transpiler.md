@@ -2062,6 +2062,32 @@ Design rationale:
 - Keep Leaf 2 focused on automation infrastructure (<1000 LOC) rather than mixing in transpiler correctness changes.
 - Make failures reproducible with log artifacts so Leaf 3 work can be data-driven.
 
+### 10.21 Phase 18 Progress: End-to-End (Leaf 3.1) — DONE
+
+Leaf 3.1 focused on syntax-level blockers that prevented early C++ module parsing/build:
+
+- Added required front-of-file includes for generated modules:
+  - `<variant>`, `<tuple>`, `<utility>`, `<type_traits>`, `<string_view>`, `<stdexcept>`, and `<rusty/rusty.hpp>`
+- In module mode, emit a global module fragment:
+  - `module;` before includes
+  - `export module <name>;` after includes
+  - This avoids named-module/header conflicts with libstdc++ declarations.
+- Fixed enum-wrapper base alias emission:
+  - struct-wrapped enums now emit `using variant = std::variant<...>;` and `using variant::variant;`
+- Fixed inline module handling in module mode:
+  - `mod foo { ... }` no longer emits invalid `import <parent>.foo;` and only emits inline namespace content.
+- Fixed `crate::` import rewriting for C++ module mode:
+  - `crate::...` now resolves as local namespace path instead of incorrectly prepending module name as a C++ namespace.
+- Fixed enum-variant re-export handling for `Either::{Left, Right}`:
+  - Treat these early `pub use` imports as Rust-only comments, because emitting `using Either::Left/Right` before enum declaration is invalid in C++ source order.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler` passes (unit + integration tests).
+- Re-ran parity harness (`tests/transpile_tests/either/run_parity_harness.sh --stop-after build`):
+  - prior file-front blockers are removed;
+  - next top blockers are semantic/name-resolution issues (`core::...`, `Pin`, `FnOnceFacade`, etc.), which are handled in subsequent leaves.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2161,3 +2187,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Hand-edited files can silently diverge from current transpiler output and hide regressions.
 - They bypass the real pipeline goal (`cargo test` baseline → transpile → C++ build/run with no manual edits).
 - An automated harness on generated artifacts gives a truthful failure signal and reproducible logs for debugging.
+
+### 11.10 Emitting Early `export using Either::Left/Right` Re-exports
+
+**Rejected approach:** Keep emitting `export using Either::Left;` / `export using Either::Right;` directly at the original `pub use` location in expanded output.
+
+**Why it was rejected:**
+- Expanded Rust often places `pub use ...Either::{Left, Right};` before the enum declaration.
+- In C++, `using` declarations require the target to be declared first; this causes immediate hard compile failures.
+- Treating those early imports as Rust-only is safer than emitting invalid C++ and allows build progress to later semantic blockers.

@@ -130,14 +130,28 @@ impl CodeGen {
         self.writeln("// Do not edit manually.");
         self.newline();
 
-        if let Some(ref mod_name) = self.module_name {
-            self.writeln(&format!("export module {};", mod_name));
+        if self.module_name.is_some() {
+            // Use a global module fragment so standard/rusty headers stay in the global module.
+            // This avoids named-module ODR conflicts with libstdc++ declarations.
+            self.writeln("module;");
             self.newline();
         }
 
         self.writeln("#include <cstdint>");
         self.writeln("#include <cstddef>");
+        self.writeln("#include <variant>");
+        self.writeln("#include <tuple>");
+        self.writeln("#include <utility>");
+        self.writeln("#include <type_traits>");
+        self.writeln("#include <string_view>");
+        self.writeln("#include <stdexcept>");
+        self.writeln("#include <rusty/rusty.hpp>");
         self.newline();
+
+        if let Some(ref mod_name) = self.module_name {
+            self.writeln(&format!("export module {};", mod_name));
+            self.newline();
+        }
 
         for item in &file.items {
             // Skip impl blocks — they've been merged into structs
@@ -549,13 +563,14 @@ impl CodeGen {
             // Use struct wrapper if recursive OR has impl blocks (so methods can be added)
             let has_impls = self.impl_blocks.contains_key(&name.to_string());
             if is_recursive || has_impls {
+                let variant_type = format!("std::variant<{}>", variant_list.join(", "));
                 if has_generics { self.writeln(&template_prefix); }
                 self.writeln(&format!(
-                    "struct {} : std::variant<{}> {{",
-                    name,
-                    variant_list.join(", ")
+                    "struct {} : {} {{",
+                    name, variant_type
                 ));
                 self.indent += 1;
+                self.writeln(&format!("using variant = {};", variant_type));
                 self.writeln("using variant::variant;");
 
                 // Merge impl block methods into the enum struct
@@ -847,14 +862,19 @@ impl CodeGen {
 
         let mod_name = &m.ident;
         let is_pub = matches!(m.vis, syn::Visibility::Public(_));
+        let has_inline_content = m.content.is_some();
 
         if let Some(ref parent_module) = self.module_name.clone() {
-            // In module mode: mod foo; → import parent.foo;
-            let full_name = format!("{}.{}", parent_module, mod_name);
-            if is_pub {
-                self.writeln(&format!("export import {};", full_name));
-            } else {
-                self.writeln(&format!("import {};", full_name));
+            // In module mode:
+            // - `mod foo;`   → import parent.foo;
+            // - `mod foo {}` → inline namespace emission only (no import line)
+            if !has_inline_content {
+                let full_name = format!("{}.{}", parent_module, mod_name);
+                if is_pub {
+                    self.writeln(&format!("export import {};", full_name));
+                } else {
+                    self.writeln(&format!("import {};", full_name));
+                }
             }
         } else {
             // Without module mode, just emit a comment
@@ -920,11 +940,10 @@ impl CodeGen {
                 // Map path prefixes (crate::, self::, core::, etc.)
                 let mapped = match ident.as_str() {
                     "crate" => {
-                        if let Some(ref mod_name) = self.module_name {
-                            mod_name.clone()
-                        } else {
-                            return self.flatten_use_tree(&p.tree, prefix);
-                        }
+                        // `crate::` paths refer to the current Rust module tree.
+                        // In C++ module output, module names are not C++ namespaces,
+                        // so keep these as local namespace paths (same as `self::`).
+                        return self.flatten_use_tree(&p.tree, prefix);
                     }
                     "self" => return self.flatten_use_tree(&p.tree, prefix),
                     "super" => {
@@ -3307,6 +3326,9 @@ enum UseImportAction {
 fn classify_use_import(path: &str) -> UseImportAction {
     let normalized = normalize_use_import_path(path);
 
+    if is_either_variant_reexport(normalized) {
+        return UseImportAction::RustOnly;
+    }
     if let Some(action) = rewrite_std_io_import(normalized) {
         return action;
     }
@@ -3318,6 +3340,20 @@ fn classify_use_import(path: &str) -> UseImportAction {
 
 fn normalize_use_import_path(path: &str) -> &str {
     path.strip_prefix("namespace ").unwrap_or(path)
+}
+
+/// `pub use ...::Either::{Left, Right};` often appears before the enum declaration in the
+/// source order. Emitting a C++ `using` for these names at that point is invalid because
+/// `Either` is not yet declared, so treat these as Rust-only imports for now.
+fn is_either_variant_reexport(path: &str) -> bool {
+    let parts: Vec<&str> = path.split("::").collect();
+    if parts.len() < 2 {
+        return false;
+    }
+
+    let enum_name = parts[parts.len() - 2];
+    let variant_name = parts[parts.len() - 1];
+    enum_name == "Either" && matches!(variant_name, "Left" | "Right")
 }
 
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
@@ -4567,6 +4603,24 @@ mod tests {
     }
 
     #[test]
+    fn test_module_mode_emits_global_fragment_before_includes() {
+        let out = transpile_str_module("fn f() {}", "my_crate");
+        let module_idx = out.find("\nmodule;\n").unwrap();
+        let include_idx = out.find("#include <cstdint>").unwrap();
+        let export_idx = out.find("export module my_crate;").unwrap();
+        assert!(module_idx < include_idx);
+        assert!(include_idx < export_idx);
+    }
+
+    #[test]
+    fn test_emits_required_cpp_and_rusty_includes() {
+        let out = transpile_str("fn f() {}");
+        assert!(out.contains("#include <variant>"));
+        assert!(out.contains("#include <utility>"));
+        assert!(out.contains("#include <rusty/rusty.hpp>"));
+    }
+
+    #[test]
     fn test_pub_fn_exported() {
         let out = transpile_str_module("pub fn hello() {}", "my_crate");
         assert!(out.contains("export void hello()"));
@@ -4606,8 +4660,17 @@ mod tests {
     #[test]
     fn test_pub_use_export() {
         let out = transpile_str_module("pub use crate::types::MyType;", "my_crate");
-        // crate:: is rewritten to the module name
-        assert!(out.contains("export using my_crate::types::MyType;"));
+        // crate:: resolves within the same module tree (module name is not a namespace)
+        assert!(out.contains("export using types::MyType;"));
+    }
+
+    #[test]
+    fn test_pub_use_either_variants_rewritten_to_ctor_functions() {
+        let out = transpile_str_module("pub use crate::Either::{Left, Right};", "either");
+        assert!(out.contains("// Rust-only: using Either::Left;"));
+        assert!(out.contains("// Rust-only: using Either::Right;"));
+        assert!(!out.contains("export using Either::Left;"));
+        assert!(!out.contains("export using Either::Right;"));
     }
 
     #[test]
@@ -4623,6 +4686,14 @@ mod tests {
         let out = transpile_str(
             "mod inner { pub fn foo() {} }",
         );
+        assert!(out.contains("namespace inner {"));
+        assert!(out.contains("void foo()"));
+    }
+
+    #[test]
+    fn test_inline_mod_in_module_mode_does_not_emit_import() {
+        let out = transpile_str_module("mod inner { pub fn foo() {} }", "my_crate");
+        assert!(!out.contains("import my_crate.inner;"));
         assert!(out.contains("namespace inner {"));
         assert!(out.contains("void foo()"));
     }
@@ -5093,6 +5164,7 @@ mod tests {
     fn test_recursive_enum_struct_wrapper() {
         let out = transpile_str("enum List { Cons(i32, Box<List>), Nil }");
         assert!(out.contains("struct List : std::variant<"));
+        assert!(out.contains("using variant = std::variant<"));
         assert!(out.contains("using variant::variant;"));
     }
 
@@ -5178,8 +5250,8 @@ mod tests {
     #[test]
     fn test_use_crate_rewritten() {
         let out = transpile_str_module("use crate::utils::helper;", "my_crate");
-        assert!(out.contains("using my_crate::utils::helper;"));
-        // Should not contain bare "crate::" (only as part of "my_crate::")
+        assert!(out.contains("using utils::helper;"));
+        // Should not contain bare "crate::"
         assert!(!out.contains("using crate::"));
     }
 
@@ -5335,8 +5407,8 @@ mod tests {
     #[test]
     fn test_use_group_crate_rewritten() {
         let out = transpile_str_module("use crate::types::{Foo, Bar};", "my_app");
-        assert!(out.contains("using my_app::types::Foo;"));
-        assert!(out.contains("using my_app::types::Bar;"));
+        assert!(out.contains("using types::Foo;"));
+        assert!(out.contains("using types::Bar;"));
     }
 
     #[test]
@@ -5570,6 +5642,7 @@ mod tests {
         );
         // Should use struct wrapper (not using alias) since it has impl
         assert!(out.contains("struct Opt : std::variant<"));
+        assert!(out.contains("using variant = std::variant<"));
         assert!(out.contains("using variant::variant;"));
         assert!(out.contains("bool is_some() const"));
     }

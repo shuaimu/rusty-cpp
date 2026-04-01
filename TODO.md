@@ -278,5 +278,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 1: Skip Rust prelude imports from expanded output (`std::prelude::rust_2018`) so transpiled C++ does not emit invalid `using namespace std::prelude::...`
         - [x] *done* Leaf 2: Add an automated parity harness command/script for `either` (`cargo test` baseline + transpile + C++ build/run) with no manual editing steps
         - [ ] Leaf 3: Fix top compile blockers surfaced by harness in generated expanded output (prioritize syntactic invalid C++ emissions before semantic parity)
+          - [x] *done* Leaf 3.1: Fix foundational syntax blockers at file/module front (required includes, valid enum-wrapper base alias, no invalid inline-module `import`, and valid enum-variant re-export lowering)
+          - [ ] Leaf 3.2: Keep inline-module type methods inside type scope (avoid free `clone() const`-style emissions)
+          - [ ] Leaf 3.3: Guard/skip unresolved trait-facade/proxy emissions in expanded output when backing symbols are unavailable
+          - [ ] Leaf 3.4: Re-run harness and capture the next reduced blocker set for semantic-parity work
         - [ ] Leaf 4: Normalize remaining behavior mismatches so C++ test output matches Rust `cargo test` output
         - [ ] Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
