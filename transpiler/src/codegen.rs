@@ -128,6 +128,10 @@ impl CodeGen {
             self.newline();
         }
 
+        // Reserve an insertion point immediately after module declaration (or includes in non-module mode).
+        // We only insert the helper if code generation actually emits `std::visit(overloaded { ... })`.
+        let helper_insert_pos = self.output.len();
+
         for item in &file.items {
             // Skip impl blocks — they've been merged into structs
             if matches!(item, syn::Item::Impl(_)) {
@@ -135,6 +139,10 @@ impl CodeGen {
             }
             self.emit_item(item);
             self.newline();
+        }
+
+        if self.output.contains("std::visit(overloaded {") {
+            self.output.insert_str(helper_insert_pos, visit_overloaded_helper_text());
         }
     }
 
@@ -3486,6 +3494,14 @@ fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
     Some(format!("{}Facade", last))
 }
 
+fn visit_overloaded_helper_text() -> &'static str {
+    "template<class... Ts>\n\
+struct overloaded : Ts... { using Ts::operator()...; };\n\
+template<class... Ts>\n\
+overloaded(Ts...) -> overloaded<Ts...>;\n\
+\n"
+}
+
 /// Build a scoped impl key from a self-type path and current inline-module path.
 /// For local impls like `impl Foo` inside `mod a`, this returns `a::Foo`.
 /// For explicit paths (`foo::Bar`), keep the path as-is.
@@ -4882,6 +4898,41 @@ mod tests {
         assert!(out.contains("#include <variant>"));
         assert!(out.contains("#include <utility>"));
         assert!(out.contains("#include <rusty/rusty.hpp>"));
+    }
+
+    #[test]
+    fn test_visit_overloaded_helper_emitted_once() {
+        let out = transpile_str(
+            r#"
+            enum E { A, B }
+            fn f(e: E) { match e { E::A => {}, E::B => {} } }
+        "#,
+        );
+        assert!(out.contains("struct overloaded : Ts... { using Ts::operator()...; };"));
+        assert!(out.contains("overloaded(Ts...) -> overloaded<Ts...>;"));
+        assert_eq!(
+            out.matches("struct overloaded : Ts... { using Ts::operator()...; };")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_visit_overloaded_helper_precedes_visit_use_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            pub enum E { A, B }
+            pub fn f(e: E) { match e { E::A => {}, E::B => {} } }
+        "#,
+            "my_crate",
+        );
+        let export_idx = out.find("export module my_crate;").unwrap();
+        let helper_idx = out
+            .find("struct overloaded : Ts... { using Ts::operator()...; };")
+            .unwrap();
+        let visit_idx = out.find("std::visit(overloaded {").unwrap();
+        assert!(export_idx < helper_idx);
+        assert!(helper_idx < visit_idx);
     }
 
     #[test]

@@ -2173,6 +2173,32 @@ Outcome:
   - Marked Leaf 3.4 done.
   - Broke Leaf 4 into focused leaves (4.1–4.7), each scoped to one blocker cluster and intended to stay below ~1000 LOC.
 
+### 10.25 Phase 18 Progress: End-to-End (Leaf 4.1) — DONE
+
+Leaf 4.1 restored the missing visitor helper used by generated match lowering (`std::visit(overloaded { ... })`).
+
+Changes:
+
+- Added a reusable helper text emitter:
+  - `visit_overloaded_helper_text()`
+  - Emits:
+    - `template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };`
+    - `template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;`
+- Wired `emit_file` to insert this helper at the top prologue insertion point only when generated output actually contains `std::visit(overloaded { ... })`.
+
+Regression tests added:
+
+- `test_visit_overloaded_helper_emitted_once`
+- `test_visit_overloaded_helper_precedes_visit_use_in_module_mode`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler visit_overloaded_helper` passes.
+- Re-ran parity harness build stage:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf41.FUALMd --stop-after build`
+  - previous blocker `‘overloaded’ was not declared in this scope` is removed from the reduced error set;
+  - next blockers are now deeper semantic/name-lowering issues (`core::*`, `Pin`, associated/dependent types, nested export syntax, impl-merge conflicts), matching remaining Leaf 4.x items.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2308,3 +2334,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Many diagnostics are cascades from a few missing primitives (`overloaded`, path lowering, dependent-type syntax), so line-by-line fixes are high effort and low signal.
 - It causes noisy, unstable partial patches and makes regression tracking hard.
 - A cluster-first approach yields small, testable leaves (4.1–4.7) and keeps changes scoped, measurable, and reviewable.
+
+### 11.14 Keeping `std::visit(overloaded { ... })` Lowering Without Emitting the Helper Type
+
+**Rejected approach:** Continue emitting `std::visit(overloaded { ... })` call sites while omitting the `overloaded` helper declaration from generated output.
+
+**Why it was rejected:**
+- It causes immediate hard compile failures (`‘overloaded’ was not declared in this scope`) across many generated match/visitor call sites.
+- The resulting diagnostics are mostly cascade noise that blocks meaningful semantic-parity debugging.
+- Emitting the standard helper once in file prologue is a minimal, stable fix with low regression risk.
