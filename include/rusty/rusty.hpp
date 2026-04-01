@@ -32,6 +32,9 @@
 #include "rusty/btreemap.hpp"
 #include "rusty/btreeset.hpp"
 
+// I/O (std::io equivalent)
+#include "rusty/io.hpp"
+
 // Move semantics (Rust-like reference handling)
 #include "rusty/move.hpp"
 

@@ -61,6 +61,14 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // MaybeUninit
         "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
 
+        // I/O types
+        "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
+        "io::Error" | "std::io::Error" => Some(("rusty::io::Error", false)),
+        "io::SeekFrom" | "std::io::SeekFrom" => Some(("rusty::io::SeekFrom", false)),
+        "io::Stdin" | "std::io::Stdin" => Some(("rusty::io::Stdin", false)),
+        "io::Stdout" | "std::io::Stdout" => Some(("rusty::io::Stdout", false)),
+        "io::Stderr" | "std::io::Stderr" => Some(("rusty::io::Stderr", false)),
+
         // str (bare type, not &str — &str handled at Type::Reference level)
         "str" => Some(("std::string_view", false)),
 
@@ -82,6 +90,11 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         // thread::spawn
         "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
+        // I/O functions
+        "io::stdin" | "std::io::stdin" => Some("rusty::io::stdin_"),
+        "io::stdout" | "std::io::stdout" => Some("rusty::io::stdout_"),
+        "io::stderr" | "std::io::stderr" => Some("rusty::io::stderr_"),
+        "io::Cursor::new" | "std::io::Cursor::new" => Some("rusty::io::Cursor::new_"),
         _ => None,
     }
 }
