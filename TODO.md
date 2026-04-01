@@ -242,3 +242,18 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Category F: `&mut` already handled correctly in parsed code (only appears in macro tokens)
       - [x] *done* Category E: Match-as-expression → IIFE with switch or std::visit
       - [x] *done* Category A: `cargo expand` wired into `--crate --expand` mode
+    - [ ] Phase 17: Full test parity — cargo test → transpile → g++ → same results (see docs/rusty-cpp-transpiler.md §10.10)
+      - [ ] Fix 1: Run `cargo expand` on either and transpile the expanded output
+        - [ ] Run `--crate --expand` on either, check for new transpilation errors
+        - [ ] Fix any gaps surfaced by expanded code (turbofish, UFCS, qualified paths)
+        - [ ] Verify expanded transpiled output has all Either methods (left, right, is_left, etc.)
+      - [ ] Fix 2: Template argument deduction for variant constructors
+        - [ ] Track expected type from `let` binding type annotations
+        - [ ] Propagate expected type to emit_expr_to_string for variant constructor calls
+        - [ ] Emit explicit template args: `Left(2)` → `Left<int32_t, int32_t>(2)` when type known
+        - [ ] Add unit tests for typed let, assignment, function arg contexts
+      - [ ] Fix 3: Handle expanded macro code patterns
+        - [ ] Handle `<Type as Trait>::method()` (UFCS) → emit as `Type::method()` 
+        - [ ] Handle `#[automatically_derived]` and `#[doc(hidden)]` attributes → skip silently
+        - [ ] Test with other macro-heavy crates (bitflags, serde derives)
+      - [ ] End-to-end: write C++ tests for all 7 of either's #[test] functions and verify same output as cargo test

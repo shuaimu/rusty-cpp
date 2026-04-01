@@ -1746,6 +1746,82 @@ These should either be skipped (they're trait imports — the transpiler handles
 
 After fixing categories B, C, D, and F (~125 LOC), the `test_basic` function should compile and produce the same output as `cargo test`. Categories A and E are needed for the more complex tests.
 
+### 10.10 Remaining Generic Fixes for Full Test Parity
+
+After Phase 16, the core Either type compiles and 6 C++ tests pass. To achieve full `cargo test` → transpile → `g++ && ./test` parity, three remaining issues need generic fixes.
+
+#### Fix 1: Run `cargo expand` on Either and Transpile the Result
+
+**Problem:** 5 of 7 Rust tests depend on macro-defined methods (`try_left!`, `for_both!`, `impl_specific_ref_and_mut!`, etc.). These macros define the bulk of Either's API — `left()`, `right()`, `as_ref()`, `is_left()`, and more. Without expansion, the transpiler can only emit `// macro_rules!` comments.
+
+**Fix:** Run `rusty-cpp-transpiler --crate Cargo.toml --expand` on the either crate. `cargo expand` resolves all macros into plain Rust code (concrete `impl` blocks with full method bodies), which the transpiler can then handle with its existing impl-block-merging and method-emission infrastructure.
+
+**What this unblocks:** All 5 remaining tests (`macros`, `iter`, `seek`, `read_write`, `error`) depend on macro-expanded method implementations.
+
+**Risk:** `cargo expand` output may contain Rust features our transpiler doesn't handle yet (e.g., complex lifetime annotations, turbofish syntax `::<>`, `where` clauses with associated types). These would surface as new transpilation gaps to fix.
+
+**Estimated effort:** ~20 LOC to test and debug; the `--crate --expand` pipeline is already wired up.
+
+#### Fix 2: Template Argument Deduction for Variant Constructors
+
+**Problem:** `Left(2)` can't deduce the missing type parameter `R`. In Rust, the compiler infers the full `Either<i32, i32>` type from context. In C++, template argument deduction fails because `R` doesn't appear in the function signature of `Left<L, R>(L val)`.
+
+**Current output (won't compile):**
+```cpp
+auto e = Left(2);  // Error: can't deduce R
+```
+
+**Expected output:**
+```cpp
+auto e = Left<int32_t, int32_t>(2);  // Explicit template args
+```
+
+**Fix:** When the transpiler emits a call to an enum variant constructor and the target type is known from context, emit explicit template arguments. Context sources:
+1. Type annotation on `let`: `let e: Either<i32, i32> = Left(2)` → emit `Left<int32_t, int32_t>(2)`
+2. Function parameter type: `fn f(e: Either<i32, i32>)` called with `f(Left(2))` → emit `Left<int32_t, int32_t>(2)`
+3. Assignment to typed variable: `e = Right(3)` where `e` is known to be `Either<i32, i32>`
+
+This requires a lightweight type inference pass — tracking the expected type at each expression position and propagating it to variant constructor calls. The transpiler already has the infrastructure (`get_local_type`, `map_type`) — just needs to thread the expected type through `emit_expr_to_string`.
+
+**Alternative (simpler):** Use a deferred construction pattern — emit a helper that returns a builder:
+```cpp
+template<typename L, typename R>
+auto Left(L val) { return Either_Left<L, R>{std::move(val)}; }
+// When full type unknown, let C++ deduce from assignment context
+```
+This works when assigning to a typed variable but fails for `auto`.
+
+**Estimated effort:** ~80 LOC for the type inference approach, ~20 LOC for the simpler alternative.
+
+#### Fix 3: Expanded Macro Code Quality
+
+**Problem:** `cargo expand` produces valid but verbose Rust code. Common patterns in expanded output that may need transpiler handling:
+- Turbofish syntax: `Iterator::next::<T>(&mut self)` — explicit type params on method calls
+- Fully qualified paths: `<Either<L, R> as std::ops::Deref>::deref(&self)` — UFCS
+- Compiler-generated trait impls: `impl Clone for Either<L, R> where L: Clone, R: Clone`
+- `#[automatically_derived]` attributes
+- Expanded `derive` macros with explicit field-by-field implementations
+
+**Fix:** Most of these are already handled:
+- Turbofish → the transpiler handles generic args on function calls
+- Qualified paths → `emit_path_to_string` handles `::` paths
+- Where clauses → `emit_template_prefix` handles where constraints
+- Attributes → unknown attributes are silently skipped
+
+May need small fixes for:
+- `<Type as Trait>::method()` syntax → emit as `Type::method()` or via Proxy
+- `#[doc(hidden)]` items → skip or emit anyway
+
+**Estimated effort:** ~30 LOC for edge cases surfaced during testing.
+
+#### Action Plan
+
+1. **Run `cargo expand` on either** — test the `--crate --expand` pipeline, see what the expanded transpiled output looks like
+2. **Fix any new transpilation gaps** surfaced by the expanded code
+3. **Add template arg deduction** for variant constructors in typed contexts
+4. **Write full C++ test suite** that mirrors all 7 of either's `#[test]` functions
+5. **Compare outputs** — verify the C++ version produces the same results as `cargo test`
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
