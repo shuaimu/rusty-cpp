@@ -2088,6 +2088,27 @@ Verification:
   - prior file-front blockers are removed;
   - next top blockers are semantic/name-resolution issues (`core::...`, `Pin`, `FnOnceFacade`, etc.), which are handled in subsequent leaves.
 
+### 10.22 Phase 18 Progress: End-to-End (Leaf 3.2) — DONE
+
+Leaf 3.2 fixed inline-module method scoping so impl methods are emitted inside their type definitions, not as invalid free functions:
+
+- Added recursive pass-1 impl collection across inline module items, not only top-level file items.
+- Added scoped impl keys (`module::Type`) for nested modules and matching scoped lookup during struct/enum emission.
+- Added relative-path impl key normalization for `self::`, `super::`, and `crate::` in impl self-type paths.
+- Tracked current module nesting path during emission so nested type lookup is deterministic.
+- In inline module emission, skipped direct output of `Item::Impl` (impls are now merged into type bodies instead of fallback free-function emission).
+
+Regression tests added:
+
+- `test_inline_mod_impl_methods_merged_into_struct`
+- `test_inline_mod_enum_impl_methods_merged_into_wrapper`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler` passes.
+- `either` parity harness build-stage run no longer emits fallback `// Methods for ...` blocks for inline-module types; `IterEither::clone() const` is now emitted inside `struct IterEither`.
+- Remaining blockers are later semantic issues (`core::...`, `FnOnceFacade`, `Pin`, associated-type typing), which align with later leaves.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2196,3 +2217,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Expanded Rust often places `pub use ...Either::{Left, Right};` before the enum declaration.
 - In C++, `using` declarations require the target to be declared first; this causes immediate hard compile failures.
 - Treating those early imports as Rust-only is safer than emitting invalid C++ and allows build progress to later semantic blockers.
+
+### 11.11 Emitting Unmerged Nested `impl` Methods as Free Functions
+
+**Rejected approach:** For inline-module types, keep fallback emission from `impl` blocks as free functions (for example `clone() const` outside class scope).
+
+**Why it was rejected:**
+- Receiver-qualified methods (`const`, instance dispatch) are syntactically invalid as free functions.
+- It breaks source-order/type ownership expectations and produces hard compile errors before semantic parity can be evaluated.
+- The robust model is two-pass merging with namespace-aware impl resolution so methods stay inside their corresponding struct/enum body.
