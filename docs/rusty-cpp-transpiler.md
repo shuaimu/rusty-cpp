@@ -1905,6 +1905,30 @@ Design rationale:
 - Keep this step strictly about pattern recognition, deferring semantic rewrite to later leaf tasks to keep changes auditable and low risk.
 - This follows §11 guidance by avoiding premature broad transformations before pattern coverage is validated.
 
+### 10.15 Phase 18 Progress: Blocker 2 (Leaf 2) — DONE
+
+Implemented UFCS trait-call rewrite in call emission:
+
+- `Trait::method(&receiver, args...)` now emits `receiver.method(args...)`.
+- `Trait::method(&self, args...)` now emits `method(args...)` to match existing `self` method-call codegen style.
+- Rewriting is applied only when the UFCS detector matches; regular calls keep existing behavior.
+
+Safety guard added:
+
+- Detection now requires an UpperCamelCase trait segment (the segment before method name), which avoids rewriting ordinary namespaced free functions like `io::read(...)`.
+
+Tests added:
+
+- Rewrite with mutable receiver: `io::Read::read(&mut cursor, &mut buf)` emits `cursor.read(&buf)`.
+- Rewrite with `self` receiver: `Trait::tick(&self, 1)` emits `tick(1)`.
+- Negative detection guard: namespaced free function `io::read(&x, y)` is not treated as UFCS trait method.
+
+Design rationale:
+
+- This leaf is intentionally scoped to structural rewrite only (receiver-form conversion).
+- Argument-level semantic normalization (e.g., converting `&mut buf` to `buf` for known APIs) remains in the next leaf task.
+- This follows §11 by preferring a narrow, auditable transformation over broad, risky rewrites.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -1950,3 +1974,12 @@ See §2.5 for the full rationale.
 - Proxy is non-invasive (like Rust traits), has value semantics, and supports SBO
 
 We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
+
+### 11.4 Blind UFCS Rewriting by Namespace Shape
+
+**Rejected approach:** Rewrite any `a::b::func(&x, ...)` call to `x.func(...)` without trait-shape validation.
+
+**Why it was rejected:**
+- This can silently rewrite valid namespaced free functions into incorrect method calls.
+- It introduces hard-to-diagnose regressions because many Rust paths use namespaces that are not trait dispatch.
+- A conservative trait-shape guard (including trait-segment naming convention) keeps rewrite scope predictable and testable.

@@ -265,7 +265,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] Blocker 2: UFCS trait method calls → direct method calls
         - [x] *done* Detect `Trait::method(receiver, args)` pattern (free function call where first arg is `&self`/`&mut self`)
-        - [ ] Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods
+        - [x] *done* Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods
         - [ ] Handle common patterns: `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
         - [ ] Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
         - [ ] Update docs/rusty-cpp-transpiler.md with design notes

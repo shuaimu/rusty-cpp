@@ -2136,13 +2136,32 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
-        // Phase 18 Blocker 2 (leaf 1): detect UFCS trait-method call pattern.
-        // Rewriting is handled by subsequent tasks.
-        let _ufcs_trait_call = self.detect_ufcs_trait_method_call(call);
-
         if let Some(ty) = expected_ty {
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
                 return emitted;
+            }
+        }
+
+        // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
+        // `Trait::method(&receiver, args...)` to `receiver.method(args...)`.
+        if let Some(ufcs) = self.detect_ufcs_trait_method_call(call) {
+            if let Some(syn::Expr::Reference(receiver_ref)) = call.args.first() {
+                let receiver = self.emit_expr_to_string(&receiver_ref.expr);
+                let args: Vec<String> = call
+                    .args
+                    .iter()
+                    .skip(1)
+                    .map(|a| self.emit_expr_maybe_move(a))
+                    .collect();
+                let is_self = matches!(
+                    receiver_ref.expr.as_ref(),
+                    syn::Expr::Path(p)
+                        if p.path.segments.len() == 1 && p.path.segments[0].ident == "self"
+                );
+                if is_self {
+                    return format!("{}({})", ufcs.method_name, args.join(", "));
+                }
+                return format!("{}.{}({})", receiver, ufcs.method_name, args.join(", "));
             }
         }
 
@@ -2180,6 +2199,13 @@ impl CodeGen {
         };
 
         if func_path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+
+        // Heuristic guard: trait segment is typically UpperCamelCase.
+        // This avoids rewriting regular namespaced free functions.
+        let trait_segment = func_path.segments.iter().nth_back(1)?.ident.to_string();
+        if !trait_segment.starts_with(|c: char| c.is_uppercase()) {
             return None;
         }
 
@@ -5564,5 +5590,40 @@ mod tests {
         };
         let cg = CodeGen::new();
         assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
+    }
+
+    #[test]
+    fn test_detect_ufcs_trait_call_rejects_namespaced_free_function() {
+        let expr: syn::Expr = syn::parse_str("io::read(&x, y)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
+    }
+
+    #[test]
+    fn test_emit_ufcs_trait_call_as_method_call() {
+        let expr: syn::Expr = syn::parse_str("io::Read::read(&mut cursor, &mut buf)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "cursor.read(&buf)");
+    }
+
+    #[test]
+    fn test_emit_ufcs_trait_call_with_self_receiver() {
+        let expr: syn::Expr = syn::parse_str("Trait::tick(&self, 1)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "tick(1)");
     }
 }
