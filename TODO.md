@@ -255,4 +255,23 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Handle `<T as Trait>::Assoc` (UFCS) → `T::Assoc` via QSelf handling in map_type
         - [x] *done* `#[automatically_derived]` and `#[doc(hidden)]` already silently skipped by syn
         - [x] *done* Unit test for UFCS associated type projection
-      - [x] *done* End-to-end: all 7 of either's #[test] functions pass in C++ with same results as cargo test
+      - [x] *done* End-to-end: all 7 of either's #[test] functions pass in C++ with same results as cargo test (hand-written)
+    - [ ] Phase 18: Fully automatic test generation — transpiled tests compile without manual edits
+      - [ ] Blocker 1: Type context propagation for variant constructors
+        - [ ] In `emit_local`, when `let` has a type annotation (e.g., `let e: Either<i32, i32> = Left(2)`), pass the type to the initializer expression emitter
+        - [ ] In `emit_expr_to_string` for `Expr::Call`, when calling a variant constructor and expected type is known, emit explicit template args
+        - [ ] Handle assignment context: `e = Right(2)` where `e` is typed — infer template args from target variable type
+        - [ ] Add unit tests: typed let with variant constructor, untyped let (should still work via auto), assignment to typed var
+        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+      - [ ] Blocker 2: UFCS trait method calls → direct method calls
+        - [ ] Detect `Trait::method(receiver, args)` pattern (free function call where first arg is `&self`/`&mut self`)
+        - [ ] Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods
+        - [ ] Handle common patterns: `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
+        - [ ] Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
+        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+      - [ ] Blocker 3: Rust iterator protocol and std::io using declarations
+        - [ ] Skip `using std::io` (not a valid C++ namespace) — add to Rust-only imports list or map to `using namespace rusty::io`
+        - [ ] Handle `.collect()` on ranges — emit as range-to-vector conversion or skip
+        - [ ] Add unit tests: using std::io skipped, range().collect() handled
+        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+      - [ ] End-to-end: transpile either tests, compile with g++, run, and get same output as cargo test — zero manual edits
