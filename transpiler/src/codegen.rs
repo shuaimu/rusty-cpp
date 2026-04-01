@@ -534,8 +534,9 @@ impl CodeGen {
                 })
                 .collect();
 
-            if is_recursive {
-                // For recursive enums, use a struct wrapper (using alias can't be forward-declared)
+            // Use struct wrapper if recursive OR has impl blocks (so methods can be added)
+            let has_impls = self.impl_blocks.contains_key(&name.to_string());
+            if is_recursive || has_impls {
                 if has_generics { self.writeln(&template_prefix); }
                 self.writeln(&format!(
                     "struct {} : std::variant<{}> {{",
@@ -544,6 +545,17 @@ impl CodeGen {
                 ));
                 self.indent += 1;
                 self.writeln("using variant::variant;");
+
+                // Merge impl block methods into the enum struct
+                if let Some(methods) = self.impl_blocks.remove(&name.to_string()) {
+                    self.newline();
+                    self.current_struct = Some(name.to_string());
+                    for impl_item in &methods {
+                        self.emit_impl_item(impl_item);
+                    }
+                    self.current_struct = None;
+                }
+
                 self.indent -= 1;
                 self.writeln("};");
             } else {
@@ -553,6 +565,65 @@ impl CodeGen {
                     name,
                     variant_list.join(", ")
                 ));
+            }
+
+            // Emit constructor helper functions for each variant
+            for variant in &e.variants {
+                let vname = &variant.ident;
+                let variant_struct = if has_generics {
+                    format!("{}_{}{}", name, vname, template_args)
+                } else {
+                    format!("{}_{}", name, vname)
+                };
+                let enum_type = if has_generics {
+                    format!("{}{}", name, template_args)
+                } else {
+                    name.to_string()
+                };
+
+                match &variant.fields {
+                    syn::Fields::Unnamed(fields) => {
+                        // Left(val) → Either<L,R> Left(L val) { return Either_Left<L,R>{std::move(val)}; }
+                        let params: Vec<String> = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                            let ty = self.map_type(&f.ty);
+                            format!("{} _{}", ty, i)
+                        }).collect();
+                        let args: Vec<String> = (0..fields.unnamed.len()).map(|i| format!("std::move(_{})", i)).collect();
+                        if has_generics { self.writeln(&template_prefix); }
+                        self.writeln(&format!(
+                            "{} {}({}) {{ return {}{{{}}};  }}",
+                            enum_type, vname, params.join(", "),
+                            variant_struct,
+                            args.join(", ")
+                        ));
+                    }
+                    syn::Fields::Named(fields) => {
+                        let params: Vec<String> = fields.named.iter().map(|f| {
+                            let fname = f.ident.as_ref().unwrap();
+                            let ftype = self.map_type(&f.ty);
+                            format!("{} {}", ftype, fname)
+                        }).collect();
+                        let args: Vec<String> = fields.named.iter().map(|f| {
+                            let fname = f.ident.as_ref().unwrap();
+                            format!(".{} = std::move({})", fname, fname)
+                        }).collect();
+                        if has_generics { self.writeln(&template_prefix); }
+                        self.writeln(&format!(
+                            "{} {}({}) {{ return {}{{{}}};  }}",
+                            enum_type, vname, params.join(", "),
+                            variant_struct,
+                            args.join(", ")
+                        ));
+                    }
+                    syn::Fields::Unit => {
+                        // None → Either None() { return Either_None{}; }
+                        if has_generics { self.writeln(&template_prefix); }
+                        self.writeln(&format!(
+                            "{} {}() {{ return {}{{}};  }}",
+                            enum_type, vname, variant_struct
+                        ));
+                    }
+                }
             }
         } else {
             // C-like enum → enum class
@@ -818,7 +889,11 @@ impl CodeGen {
 
         let export_prefix = if is_pub && self.module_name.is_some() { "export " } else { "" };
         for path in &paths {
-            self.writeln(&format!("{}using {};", export_prefix, path));
+            if is_rust_only_import(path) {
+                self.writeln(&format!("// Rust-only: using {};", path));
+            } else {
+                self.writeln(&format!("{}using {};", export_prefix, path));
+            }
         }
     }
 
@@ -1515,6 +1590,58 @@ impl CodeGen {
         result
     }
 
+    /// Emit a switch-style match as an expression (returns string for IIFE body).
+    fn emit_match_expr_switch(&self, arms: &[syn::Arm]) -> String {
+        let mut parts = Vec::new();
+        for arm in arms {
+            let body = self.emit_expr_to_string(&arm.body);
+            match &arm.pat {
+                syn::Pat::Wild(_) => parts.push(format!("return {};", body)),
+                syn::Pat::Lit(lit) => {
+                    let val = self.emit_lit(&lit.lit);
+                    parts.push(format!("if (_m == {}) return {};", val, body));
+                }
+                _ => parts.push(format!("return {};", body)),
+            }
+        }
+        parts.join(" ")
+    }
+
+    /// Emit a variant match as expression body (returns string for visit lambdas).
+    fn emit_match_expr_visit(&self, arms: &[syn::Arm]) -> String {
+        let mut parts = Vec::new();
+        for arm in arms {
+            let body = self.emit_expr_to_string(&arm.body);
+            match &arm.pat {
+                syn::Pat::TupleStruct(ts) => {
+                    let path = self.emit_path_to_string(&ts.path);
+                    let cpp_type = path.replace("::", "_");
+                    let bindings = self.extract_tuple_struct_bindings(&ts.elems);
+                    let binding_stmts: Vec<String> = bindings.iter().enumerate()
+                        .filter(|(_, n)| *n != "_")
+                        .map(|(i, n)| format!("auto& {} = _v._{};", n, i))
+                        .collect();
+                    parts.push(format!(
+                        "[](const {}& _v) {{ {} return {}; }}",
+                        cpp_type, binding_stmts.join(" "), body
+                    ));
+                }
+                syn::Pat::Path(pp) => {
+                    let path = self.emit_path_to_string(&pp.path);
+                    let cpp_type = path.replace("::", "_");
+                    parts.push(format!("[](const {}&) {{ return {}; }}", cpp_type, body));
+                }
+                syn::Pat::Wild(_) => {
+                    parts.push(format!("[](const auto&) {{ return {}; }}", body));
+                }
+                _ => {
+                    parts.push(format!("[](const auto&) {{ return {}; }}", body));
+                }
+            }
+        }
+        parts.join(", ")
+    }
+
     fn emit_arm_body(&mut self, body: &syn::Expr) {
         // If the body is a block, emit its statements
         if let syn::Expr::Block(block) = body {
@@ -2081,6 +2208,21 @@ impl CodeGen {
                 format!("std::make_tuple({})", elems.join(", "))
             }
             syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
+            syn::Expr::Match(match_expr) => {
+                // Match as expression → immediately-invoked lambda
+                let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+                if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+                    // Simple switch-like match → ternary chain or IIFE with switch
+                    format!("[&]() {{ auto _m = {}; {} }}()",
+                        scrutinee,
+                        self.emit_match_expr_switch(&match_expr.arms))
+                } else {
+                    // Variant match → IIFE with std::visit
+                    format!("[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
+                        scrutinee,
+                        self.emit_match_expr_visit(&match_expr.arms))
+                }
+            }
             syn::Expr::Try(try_expr) => {
                 // Rust `expr?` → C++ `RUSTY_TRY(expr)`
                 // Uses GCC/Clang statement expressions to unwrap or early-return
@@ -2844,6 +2986,34 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "PartialOrd" => Some("operator<=>"),
         _ => None,
     }
+}
+
+/// Check if a using path refers to a Rust-only trait/module with no C++ equivalent.
+/// These are silently skipped (commented out) since they have no meaning in C++.
+fn is_rust_only_import(path: &str) -> bool {
+    // Rust std trait modules that don't exist in C++
+    let rust_only_prefixes = [
+        "std::convert::",   // AsRef, AsMut, From, Into
+        "std::ops::",       // Deref, DerefMut, Add, Sub, Index, etc.
+        "std::fmt",         // Display, Debug, Formatter, etc.
+        "std::iter",        // Iterator, IntoIterator, etc.
+        "std::error",       // Error trait
+        "std::future",      // Future trait
+        "std::pin",         // Pin type (no C++ equivalent)
+        "std::marker",      // Send, Sync, Copy, Sized, etc.
+        "std::clone",       // Clone trait
+        "std::cmp",         // PartialEq, Ord, etc.
+        "std::hash",        // Hash trait
+        "std::default",     // Default trait
+        "std::borrow",      // Borrow, BorrowMut
+    ];
+
+    for prefix in &rust_only_prefixes {
+        if path.starts_with(prefix) || path == *prefix {
+            return true;
+        }
+    }
+    false
 }
 
 fn escape_cpp_keyword(name: &str) -> String {
@@ -4908,5 +5078,67 @@ mod tests {
         );
         // Self in struct context → struct name
         assert!(out.contains("static Foo new_()"));
+    }
+
+    // ── Phase 16: Compilable test fixes ─────────────────────────
+
+    #[test]
+    fn test_rust_only_imports_skipped() {
+        let out = transpile_str("use std::convert::AsRef;\nuse std::ops::Deref;\nuse std::fmt::Display;");
+        assert!(out.contains("// Rust-only: using std::convert::AsRef;"));
+        assert!(out.contains("// Rust-only: using std::ops::Deref;"));
+        assert!(out.contains("// Rust-only: using std::fmt::Display;"));
+    }
+
+    #[test]
+    fn test_non_rust_only_imports_kept() {
+        let out = transpile_str("use std::io::Read;");
+        // std::io is real C++ — should NOT be marked Rust-only
+        assert!(out.contains("using std::io::Read;"));
+        assert!(!out.contains("Rust-only"));
+    }
+
+    #[test]
+    fn test_variant_constructor_generated() {
+        let out = transpile_str("enum Maybe<T> { Just(T), Nothing }");
+        // Constructor functions should be emitted
+        assert!(out.contains("Maybe<T> Just(T _0)"));
+        assert!(out.contains("Maybe<T> Nothing()"));
+    }
+
+    #[test]
+    fn test_variant_constructor_two_params() {
+        let out = transpile_str("enum Either<L, R> { Left(L), Right(R) }");
+        assert!(out.contains("Either<L, R> Left(L _0)"));
+        assert!(out.contains("Either<L, R> Right(R _0)"));
+    }
+
+    #[test]
+    fn test_variant_constructor_non_generic() {
+        let out = transpile_str("enum Token { Num(i32), Str(String) }");
+        assert!(out.contains("Token Num(int32_t _0)"));
+        assert!(out.contains("Token Str(rusty::String _0)"));
+    }
+
+    #[test]
+    fn test_enum_with_impl_gets_struct_wrapper() {
+        let out = transpile_str(
+            r#"
+            enum Opt<T> { Some(T), None }
+            impl<T> Opt<T> { fn is_some(&self) -> bool { true } }
+        "#,
+        );
+        // Should use struct wrapper (not using alias) since it has impl
+        assert!(out.contains("struct Opt : std::variant<"));
+        assert!(out.contains("using variant::variant;"));
+        assert!(out.contains("bool is_some() const"));
+    }
+
+    #[test]
+    fn test_match_as_expression() {
+        let out = transpile_str("fn f(x: i32) { let val = match x { 1 => 10, _ => 0 }; }");
+        assert!(out.contains("[&]()"));
+        assert!(out.contains("if (_m == 1) return 10;"));
+        assert!(out.contains("return 0;"));
     }
 }

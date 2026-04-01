@@ -1648,7 +1648,7 @@ $ clang++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
 
 To reach the goal of `cargo test` → transpile → `g++ && ./test` with the same results, the following issues must be fixed. These are categorized by root cause.
 
-#### Category A: Macro Expansion (needs `cargo expand` pre-processing)
+#### Category A: Macro Expansion — IMPLEMENTED ✅
 
 **Problem:** Crate-specific macros (`try_left!`, `try_right!`, `for_both!`, `map_either!`, `impl_specific_ref_and_mut!`, `check_t!`) emit `/* macro!(...) */` comments in the output. These macros define the bulk of Either's methods and test logic.
 
@@ -1661,7 +1661,7 @@ To reach the goal of `cargo test` → transpile → `g++ && ./test` with the sam
 
 **Estimated effort:** ~50 LOC to wire `cargo expand` into `--crate` mode.
 
-#### Category B: Missing Variant Constructor Functions
+#### Category B: Missing Variant Constructor Functions — IMPLEMENTED ✅
 
 **Problem:** Transpiled code uses `Left(2)` and `Right(2)` as function calls, but these are Rust enum variant constructors — they don't exist as functions in C++. `std::variant` doesn't auto-generate constructor functions from variant struct names.
 
@@ -1685,7 +1685,7 @@ Either<L, R> Right(R val) { return Either_Right<L, R>{std::move(val)}; }
 
 **Estimated effort:** ~40 LOC in `emit_enum` + ~20 LOC in call site type inference.
 
-#### Category C: Method Calls on Variant Types
+#### Category C: Method Calls on Variant Types — IMPLEMENTED ✅
 
 **Problem:** Transpiled code calls methods on `Either` values: `e.left()`, `e.right()`, `e.as_ref()`, `e.as_mut()`. But `std::variant` doesn't have these methods — they were defined in Rust's `impl Either<L, R>`.
 
@@ -1698,7 +1698,7 @@ Either<L, R> Right(R val) { return Either_Right<L, R>{std::move(val)}; }
 
 **Estimated effort:** ~30 LOC to change `emit_enum` + impl block merging for enums.
 
-#### Category D: `using` Declarations for Non-Existent C++ Namespaces
+#### Category D: `using` Declarations for Non-Existent C++ Namespaces — IMPLEMENTED ✅
 
 **Problem:** `using std::convert::AsRef` — C++ `std` namespace doesn't have `convert::AsRef`. These are Rust-only trait paths with no C++ equivalent.
 
@@ -1715,7 +1715,7 @@ These should either be skipped (they're trait imports — the transpiler handles
 
 **Estimated effort:** ~30 LOC to add a skip-list for Rust-only trait imports.
 
-#### Category E: `match` as Expression (Value-Producing Match)
+#### Category E: `match` as Expression — IMPLEMENTED ✅
 
 **Problem:** `let iter = match x { 3 => Left(0..10), _ => Right(17..) };` — match used as a value-producing expression. Current transpiler emits `/* TODO: expr */` when match appears in expression position.
 
@@ -1723,7 +1723,7 @@ These should either be skipped (they're trait imports — the transpiler handles
 
 **Estimated effort:** ~40 LOC in `emit_expr_to_string` for `Expr::Match`.
 
-#### Category F: `&mut` in C++ Context
+#### Category F: `&mut` in C++ Context — RESOLVED ✅ (already handled)
 
 **Problem:** Transpiled code contains `&mut buf` and `&mut 2` — Rust-only syntax. In C++, `&mut` doesn't exist; mutable references are just `&`.
 

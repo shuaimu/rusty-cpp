@@ -54,6 +54,7 @@ fn transpile_crate(
     cargo_toml_path: &Path,
     output_dir: &Path,
     type_map: &types::UserTypeMap,
+    expand: bool,
     verify: bool,
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
@@ -87,7 +88,7 @@ fn transpile_crate(
                 let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
                 if dep_cargo_toml.exists() {
                     let dep_out_dir = output_dir.join(&dep.name);
-                    match transpile_crate(&dep_cargo_toml, &dep_out_dir, type_map, verify) {
+                    match transpile_crate(&dep_cargo_toml, &dep_out_dir, type_map, expand, verify) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
                         }
@@ -104,6 +105,35 @@ fn transpile_crate(
             }
         }
         println!();
+    }
+
+    // If --expand, use cargo expand for the whole crate (macro expansion)
+    if expand {
+        println!("Running cargo expand on '{}'...", crate_name);
+        match run_cargo_expand(cargo_toml_path) {
+            Ok(expanded_source) => {
+                let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
+                match transpile::transpile_with_type_map(&expanded_source, Some(crate_name), type_map) {
+                    Ok(cpp_output) => {
+                        std::fs::write(&cppm_path, &cpp_output)
+                            .map_err(|e| format!("Failed to write: {}", e))?;
+                        println!("  Expanded and transpiled → {}", cppm_path.display());
+                    }
+                    Err(e) => return Err(format!("Transpilation of expanded source failed: {}", e)),
+                }
+
+                // Generate CMakeLists.txt
+                let cmake_content = cmake::generate_cmake(&cargo, &sources);
+                let cmake_path = output_dir.join("CMakeLists.txt");
+                std::fs::write(&cmake_path, &cmake_content)
+                    .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;
+                println!("Generated {}", cmake_path.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Warning: cargo expand failed ({}), falling back to per-file mode", e);
+            }
+        }
     }
 
     println!("Transpiling crate '{}' ({} source files)", crate_name, sources.len());
@@ -281,7 +311,7 @@ fn main() {
 
     // Handle --crate: transpile entire crate
     if let Some(ref cargo_toml_path) = cli.crate_ {
-        match transpile_crate(cargo_toml_path, &cli.output_dir, &type_map, cli.verify) {
+        match transpile_crate(cargo_toml_path, &cli.output_dir, &type_map, cli.expand, cli.verify) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
