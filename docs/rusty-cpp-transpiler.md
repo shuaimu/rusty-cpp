@@ -2028,6 +2028,40 @@ Design rationale:
 - This keeps the fix narrow and deterministic: only prelude imports are filtered.
 - It avoids broad suppression of namespace-glob imports, which could hide valid C++ namespace imports.
 
+### 10.20 Phase 18 Progress: End-to-End (Leaf 2) — DONE
+
+Added an automated parity harness script for `either` with no manual C++ editing:
+
+- Script path: `tests/transpile_tests/either/run_parity_harness.sh`
+- Pipeline stages:
+  1. Rust baseline: `cargo test --manifest-path tests/transpile_tests/either/Cargo.toml`
+  2. Transpile: `cargo run -p rusty-cpp-transpiler -- --crate ... --expand --output-dir ...`
+  3. C++ build: `g++ -std=c++23 -fmodules-ts ... -c either.cppm`
+  4. C++ run: compile + execute a generated `import either;` smoke main
+
+Harness behavior:
+
+- Uses strict failure semantics (`set -euo pipefail`) so the first failing stage is surfaced immediately.
+- Writes per-stage logs (`rust_cargo_test.log`, `transpile.log`, `cpp_build.log`, `cpp_run.log`) under a work directory.
+- Supports `--dry-run` (for fast CI checks), `--work-dir`, `--keep-work-dir`, and `--stop-after`.
+
+Test coverage added:
+
+- Integration tests in `transpiler/tests/either_parity_harness.rs` verify:
+  - dry-run lists all 4 stages and expected commands,
+  - dry-run `--stop-after transpile` halts before C++ build,
+  - invalid flags are rejected.
+
+Observed from a real harness execution:
+
+- Stage 1 (Rust baseline) passes all 7 `either` unit tests and 47 doctests.
+- Stage 3 (C++ build) fails on generated output, producing actionable blockers for Leaf 3.
+
+Design rationale:
+
+- Keep Leaf 2 focused on automation infrastructure (<1000 LOC) rather than mixing in transpiler correctness changes.
+- Make failures reproducible with log artifacts so Leaf 3 work can be data-driven.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2118,3 +2152,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Some namespace imports map to valid C++ and are required for generated code readability/compatibility.
 - The actual blocker is specific (`std::prelude::rust_2018` from expanded Rust), not all glob imports.
 - A path-targeted filter avoids accidental regressions and keeps import behavior explicit.
+
+### 11.9 Using Hand-Edited C++ Parity Files as the End-to-End Signal
+
+**Rejected approach:** Use manually curated files (for example, `compile_test_full.cpp`) as the primary parity gate instead of building directly from freshly transpiled output.
+
+**Why it was rejected:**
+- Hand-edited files can silently diverge from current transpiler output and hide regressions.
+- They bypass the real pipeline goal (`cargo test` baseline → transpile → C++ build/run with no manual edits).
+- An automated harness on generated artifacts gives a truthful failure signal and reproducible logs for debugging.
