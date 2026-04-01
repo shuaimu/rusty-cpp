@@ -1852,6 +1852,20 @@ Tests added:
 - Typed let + `Right(...)` emits explicit template args.
 - Untyped let remains unchanged (`auto` + no explicit template args).
 
+### 10.12 Phase 18 Progress: Blocker 1 (Leaf 2) — DONE
+
+Integrated expected-type handling into the `Expr::Call` emission path itself:
+
+- `emit_expr_to_string` now delegates call emission through a shared call-emitter helper.
+- `emit_expr_to_string_with_expected` reuses the same helper and passes expected type context.
+- When expected type is present and call is a variant constructor, transpiler emits explicit template args.
+- `Some/Ok/Err` mappings remain unchanged and still lower to `std::make_optional` / `rusty::Result::ok` / `rusty::Result::err`.
+
+Design rationale:
+
+- Keep one call-emission path to avoid behavior drift between normal expression emission and expected-type-aware emission.
+- Keep inference local and syntax-directed (no global type-inference pass yet), consistent with rejected over-complex approaches in §11.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

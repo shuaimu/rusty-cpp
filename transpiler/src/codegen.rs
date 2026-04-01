@@ -2068,27 +2068,57 @@ impl CodeGen {
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let syn::Expr::Call(call) = expr {
+            return self.emit_call_expr_to_string(call, expected_ty);
+        }
+        self.emit_expr_to_string(expr)
+    }
+
+    /// Emit a call expression, optionally using expected type context from parent.
+    fn emit_call_expr_to_string(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
         if let Some(ty) = expected_ty {
-            if let Some(emitted) = self.try_emit_variant_constructor_with_expected(expr, ty) {
+            if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
                 return emitted;
             }
         }
-        self.emit_expr_to_string(expr)
+
+        let func = self.emit_expr_to_string(&call.func);
+
+        // Map Rust Option::Some(x) → std::optional{x}
+        if func == "Some" && call.args.len() == 1 {
+            let arg = self.emit_expr_to_string(&call.args[0]);
+            return format!("std::make_optional({})", arg);
+        }
+        // Map Ok(x) and Err(x) for Result
+        if func == "Ok" && call.args.len() == 1 {
+            let arg = self.emit_expr_to_string(&call.args[0]);
+            return format!("rusty::Result::ok({})", arg);
+        }
+        if func == "Err" && call.args.len() == 1 {
+            let arg = self.emit_expr_to_string(&call.args[0]);
+            return format!("rusty::Result::err({})", arg);
+        }
+
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+        format!("{}({})", func, args.join(", "))
     }
 
     /// If this is a variant-constructor call like `Left(2)` and the expected type
     /// is known (e.g., `Either<i32, i32>`), emit explicit template args:
     /// `Left<int32_t, int32_t>(2)`.
-    fn try_emit_variant_constructor_with_expected(
+    fn try_emit_variant_constructor_call_with_expected(
         &self,
-        expr: &syn::Expr,
+        call: &syn::ExprCall,
         expected_ty: &syn::Type,
     ) -> Option<String> {
-        let call = match expr {
-            syn::Expr::Call(call) => call,
-            _ => return None,
-        };
-
         let func_path = match call.func.as_ref() {
             syn::Expr::Path(path) => &path.path,
             _ => return None,
@@ -2126,12 +2156,7 @@ impl CodeGen {
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
 
-        Some(format!(
-            "{}<{}>({})",
-            ctor_name,
-            expected_args.join(", "),
-            args.join(", ")
-        ))
+        Some(format!("{}<{}>({})", ctor_name, expected_args.join(", "), args.join(", ")))
     }
 
     /// Extract mapped template arguments from an expected type path.
@@ -2186,31 +2211,7 @@ impl CodeGen {
                 let inner = self.emit_expr_to_string(&r.expr);
                 format!("&{}", inner)
             }
-            syn::Expr::Call(call) => {
-                let func = self.emit_expr_to_string(&call.func);
-
-                // Map Rust Option::Some(x) → std::optional{x}
-                if func == "Some" && call.args.len() == 1 {
-                    let arg = self.emit_expr_to_string(&call.args[0]);
-                    return format!("std::make_optional({})", arg);
-                }
-                // Map Ok(x) and Err(x) for Result
-                if func == "Ok" && call.args.len() == 1 {
-                    let arg = self.emit_expr_to_string(&call.args[0]);
-                    return format!("rusty::Result::ok({})", arg);
-                }
-                if func == "Err" && call.args.len() == 1 {
-                    let arg = self.emit_expr_to_string(&call.args[0]);
-                    return format!("rusty::Result::err({})", arg);
-                }
-
-                let args: Vec<String> = call
-                    .args
-                    .iter()
-                    .map(|a| self.emit_expr_maybe_move(a))
-                    .collect();
-                format!("{}({})", func, args.join(", "))
-            }
+            syn::Expr::Call(call) => self.emit_call_expr_to_string(call, None),
             syn::Expr::MethodCall(mc) => {
                 let method = &mc.method;
                 let args: Vec<String> = mc
@@ -5362,5 +5363,12 @@ mod tests {
         );
         assert!(out.contains("const auto e = Left(2);"));
         assert!(!out.contains("const auto e = Left<int32_t, int32_t>(2);"));
+    }
+
+    #[test]
+    fn test_typed_let_option_some_still_uses_make_optional() {
+        let out = transpile_str("fn f() { let o: Option<i32> = Some(2); }");
+        assert!(out.contains("const rusty::Option<int32_t> o = std::make_optional(2);"));
+        assert!(!out.contains("Some<int32_t>"));
     }
 }
