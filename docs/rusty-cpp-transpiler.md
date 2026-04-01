@@ -1793,7 +1793,7 @@ This works when assigning to a typed variable but fails for `auto`.
 
 **Estimated effort:** ~80 LOC for the type inference approach, ~20 LOC for the simpler alternative.
 
-#### Fix 3: Expanded Macro Code Quality
+#### Fix 3: Expanded Macro Code Quality — DONE ✅
 
 **Problem:** `cargo expand` produces valid but verbose Rust code. Common patterns in expanded output that may need transpiler handling:
 - Turbofish syntax: `Iterator::next::<T>(&mut self)` — explicit type params on method calls

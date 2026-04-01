@@ -2345,6 +2345,20 @@ impl CodeGen {
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
+                // Handle qualified self types: <T as Trait>::Assoc → T::Assoc
+                if let Some(qself) = &tp.qself {
+                    let self_type = self.map_type(&qself.ty);
+                    // Get the path segments after the `as Trait` part
+                    let assoc_segments: Vec<String> = tp.path.segments.iter()
+                        .skip(qself.position)
+                        .map(|s| s.ident.to_string())
+                        .collect();
+                    if !assoc_segments.is_empty() {
+                        return format!("{}::{}", self_type, assoc_segments.join("::"));
+                    }
+                    return self_type;
+                }
+
                 let path_str = self.emit_path_to_string(&tp.path);
 
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or std::move_only_function for Fn traits
@@ -5135,5 +5149,15 @@ mod tests {
         assert!(out.contains("[&]()"));
         assert!(out.contains("if (_m == 1) return 10;"));
         assert!(out.contains("return 0;"));
+    }
+
+    // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────
+
+    #[test]
+    fn test_ufcs_associated_type() {
+        // <T as Iterator>::Item → T::Item
+        let out = transpile_str("fn f<T>(x: <T as Iterator>::Item) {}");
+        assert!(out.contains("T::Item"));
+        assert!(!out.contains("<T as"));
     }
 }

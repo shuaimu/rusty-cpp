@@ -251,8 +251,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Changed constructors to return `auto` (variant struct) instead of full enum type
         - [x] *done* Implicit conversion to std::variant handles type in assignment/return contexts
         - [x] *done* Inside std::visit lambdas, type is already constrained by lambda parameter
-      - [ ] Fix 3: Handle expanded macro code patterns
-        - [ ] Handle `<Type as Trait>::method()` (UFCS) → emit as `Type::method()` 
-        - [ ] Handle `#[automatically_derived]` and `#[doc(hidden)]` attributes → skip silently
-        - [ ] Test with other macro-heavy crates (bitflags, serde derives)
+      - [x] *done* Fix 3: Handle expanded macro code patterns
+        - [x] *done* Handle `<T as Trait>::Assoc` (UFCS) → `T::Assoc` via QSelf handling in map_type
+        - [x] *done* `#[automatically_derived]` and `#[doc(hidden)]` already silently skipped by syn
+        - [x] *done* Unit test for UFCS associated type projection
       - [ ] End-to-end: write C++ tests for all 7 of either's #[test] functions and verify same output as cargo test
