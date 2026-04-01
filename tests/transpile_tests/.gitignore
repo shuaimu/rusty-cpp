@@ -10,6 +10,10 @@
 */cpp_out/
 *.cppm
 
+# Compiled binaries
+compile_test*
+!compile_test*.cpp
+
 # But track these:
 !run_tests.sh
 !README.md

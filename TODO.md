@@ -190,7 +190,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Recursively transpile local path dependencies before main crate
       - [x] *done* Generate CMakeLists.txt with `add_subdirectory()` and `target_link_libraries()` for each dependency
       - [x] *done* E2E test: multi-crate workspace transpilation
-    - [ ] Phase 15: Real-world crate transpilation fixes (see docs/rusty-cpp-transpiler.md §10.7)
+    - [x] *done* Phase 15: Real-world crate transpilation fixes (see docs/rusty-cpp-transpiler.md §10.7)
       - [x] *done* Gap 1: Generic enums/structs — propagate type parameters to variant structs and variant alias
         - [x] *done* In `emit_enum`, detect generics on `syn::ItemEnum` and emit `template<typename L, typename R>` on each variant struct
         - [x] *done* Emit variant alias with template args: `using Either = std::variant<Either_Left<L,R>, Either_Right<L,R>>`
@@ -234,4 +234,4 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Re-test `either` crate after all gaps fixed
         - [x] *done* Gaps 1-8 all fixed, `either` re-transpiled: 5 files, 0 errors
         - [x] *done* Remaining TODOs are crate-specific macros (need cargo expand) and complex expr patterns
-        - [ ] Attempt to compile transpiled output with `g++ -std=c++20` (future work)
+        - [x] *done* Compile test: core Either type compiles and runs with both g++ 14 and clang++ 19 (-std=c++20). Full crate compilation blocked by missing rusty:: headers and Proxy library at compile time.

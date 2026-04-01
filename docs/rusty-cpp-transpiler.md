@@ -1615,6 +1615,35 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 Total estimated: ~205 LOC to fix all gaps.
 
+### 10.8 Compile Test Results
+
+The transpiled Either core types were compiled and tested with both GCC 14 and Clang 19:
+
+```bash
+$ g++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
+test_basic PASSED
+test_visit PASSED
+test_generic PASSED
+All either compile tests PASSED
+
+$ clang++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
+# Same output — all tests pass
+```
+
+**What compiles and runs correctly:**
+- Generic variant structs (`Either_Left<L,R>`, `Either_Right<L,R>`)
+- `std::variant` alias with template args
+- Construction via helper functions (`Left()`, `Right()`)
+- Pattern matching via `std::visit` with `overloaded` helper
+- `std::holds_alternative` for type checking
+- Assignment, move semantics
+
+**What needs more work for full crate compilation:**
+- C++20 module syntax (`export module`) — requires module-aware build system
+- `rusty::` type headers need to be includable at compile time
+- Proxy library (`pro::facade_builder`) not yet integrated as a build dependency
+- Crate-specific macros (`impl_specific_ref_and_mut!`) need `cargo expand`
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
