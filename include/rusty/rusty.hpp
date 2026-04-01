@@ -47,6 +47,7 @@
 #include "rusty/condvar.hpp"
 #include "rusty/barrier.hpp"
 #include "rusty/once.hpp"
+#include "rusty/async.hpp"
 
 // Convenience aliases in rusty namespace
 // @safe

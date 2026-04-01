@@ -50,6 +50,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Error handling
         "Option" | "std::option::Option" => Some(("rusty::Option", true)),
         "Result" | "std::result::Result" => Some(("rusty::Result", true)),
+        "core::option::Option" => Some(("rusty::Option", true)),
+        "core::result::Result" => Some(("rusty::Result", true)),
 
         // Concurrency
         "Mutex" | "std::sync::Mutex" => Some(("rusty::Mutex", true)),
@@ -57,6 +59,18 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
         "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
+        "core::task::Poll" => Some(("rusty::Poll", true)),
+        "core::task::Context" => Some(("rusty::Context", false)),
+
+        // Runtime compatibility fallbacks for expanded Rust paths.
+        "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
+        "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
+        "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
+        "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
+        "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
+        "std::path::Path" => Some(("rusty::path::Path", false)),
+        "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
+        "std::ffi::CStr" => Some(("rusty::ffi::CStr", false)),
 
         // MaybeUninit
         "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
@@ -95,6 +109,27 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "io::stdout" | "std::io::stdout" => Some("rusty::io::stdout_"),
         "io::stderr" | "std::io::stderr" => Some("rusty::io::stderr_"),
         "io::Cursor::new" | "std::io::Cursor::new" => Some("rusty::io::Cursor::new_"),
+
+        // Expanded-Rust runtime compatibility shims.
+        "core::intrinsics::discriminant_value" => Some("rusty::intrinsics::discriminant_value"),
+        "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
+        "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
+        "core::hash::Hash::hash" => Some("rusty::hash::hash"),
+        "core::fmt::Formatter::debug_tuple_field1_finish" => {
+            Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
+        }
+        "core::fmt::Formatter::debug_struct_field1_finish" => {
+            Some("rusty::fmt::Formatter::debug_struct_field1_finish")
+        }
+        "Pin::new_unchecked" | "std::pin::Pin::new_unchecked" | "core::pin::Pin::new_unchecked" => {
+            Some("rusty::pin::new_unchecked")
+        }
+        "Pin::get_ref" | "std::pin::Pin::get_ref" | "core::pin::Pin::get_ref" => {
+            Some("rusty::pin::get_ref")
+        }
+        "Pin::get_unchecked_mut"
+        | "std::pin::Pin::get_unchecked_mut"
+        | "core::pin::Pin::get_unchecked_mut" => Some("rusty::pin::get_unchecked_mut"),
         _ => None,
     }
 }
@@ -194,6 +229,38 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf42_runtime_type_fallback_mappings() {
+        assert_eq!(
+            map_std_type("core::option::Option"),
+            Some(("rusty::Option", true))
+        );
+        assert_eq!(
+            map_std_type("core::task::Poll"),
+            Some(("rusty::Poll", true))
+        );
+        assert_eq!(
+            map_std_type("core::fmt::Formatter"),
+            Some(("rusty::fmt::Formatter", false))
+        );
+        assert_eq!(
+            map_std_type("fmt::Arguments"),
+            Some(("rusty::fmt::Arguments", false))
+        );
+        assert_eq!(
+            map_std_type("Pin"),
+            Some(("rusty::pin::Pin", true))
+        );
+        assert_eq!(
+            map_std_type("std::path::Path"),
+            Some(("rusty::path::Path", false))
+        );
+        assert_eq!(
+            map_std_type("std::ffi::CStr"),
+            Some(("rusty::ffi::CStr", false))
+        );
+    }
+
+    #[test]
     fn test_std_types_full_path() {
         assert_eq!(
             map_std_type("std::vec::Vec"),
@@ -256,6 +323,30 @@ mod tests {
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
         assert_eq!(map_function_path("thread::spawn"), Some("rusty::thread::spawn"));
         assert_eq!(map_function_path("Unknown::method"), None);
+    }
+
+    #[test]
+    fn test_leaf42_runtime_function_path_mappings() {
+        assert_eq!(
+            map_function_path("core::intrinsics::discriminant_value"),
+            Some("rusty::intrinsics::discriminant_value")
+        );
+        assert_eq!(
+            map_function_path("core::panicking::panic_fmt"),
+            Some("rusty::panicking::panic_fmt")
+        );
+        assert_eq!(
+            map_function_path("core::hash::Hash::hash"),
+            Some("rusty::hash::hash")
+        );
+        assert_eq!(
+            map_function_path("Pin::new_unchecked"),
+            Some("rusty::pin::new_unchecked")
+        );
+        assert_eq!(
+            map_function_path("Pin::get_unchecked_mut"),
+            Some("rusty::pin::get_unchecked_mut")
+        );
     }
 
     #[test]

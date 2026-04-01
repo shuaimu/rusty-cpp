@@ -118,7 +118,9 @@ impl CodeGen {
         self.writeln("#include <tuple>");
         self.writeln("#include <utility>");
         self.writeln("#include <type_traits>");
+        self.writeln("#include <string>");
         self.writeln("#include <string_view>");
+        self.writeln("#include <cstdlib>");
         self.writeln("#include <stdexcept>");
         self.writeln("#include <rusty/rusty.hpp>");
         self.newline();
@@ -141,8 +143,15 @@ impl CodeGen {
             self.newline();
         }
 
+        let mut helper_text = String::new();
         if self.output.contains("std::visit(overloaded {") {
-            self.output.insert_str(helper_insert_pos, visit_overloaded_helper_text());
+            helper_text.push_str(visit_overloaded_helper_text());
+        }
+        if needs_runtime_path_fallback_helpers(&self.output) {
+            helper_text.push_str(runtime_path_fallback_helpers_text());
+        }
+        if !helper_text.is_empty() {
+            self.output.insert_str(helper_insert_pos, &helper_text);
         }
     }
 
@@ -2709,6 +2718,14 @@ impl CodeGen {
             return "std::nullopt".to_string();
         }
 
+        // Map Rust Ordering enum variants to fallback ordering enum variants.
+        match joined.as_str() {
+            "core::cmp::Ordering::Less" => return "rusty::cmp::Ordering::Less".to_string(),
+            "core::cmp::Ordering::Equal" => return "rusty::cmp::Ordering::Equal".to_string(),
+            "core::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
+            _ => {}
+        }
+
         // Try user-provided type mappings first (highest priority)
         if let Some(cpp_type) = self.user_type_map.lookup(&joined) {
             return cpp_type.to_string();
@@ -3499,6 +3516,93 @@ fn visit_overloaded_helper_text() -> &'static str {
 struct overloaded : Ts... { using Ts::operator()...; };\n\
 template<class... Ts>\n\
 overloaded(Ts...) -> overloaded<Ts...>;\n\
+\n"
+}
+
+fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
+    let markers = [
+        "rusty::intrinsics::",
+        "rusty::panicking::",
+        "rusty::hash::hash",
+        "rusty::fmt::",
+        "rusty::pin::",
+        "rusty::path::Path",
+        "rusty::ffi::",
+        "rusty::cmp::Ordering",
+    ];
+    markers.iter().any(|m| output.contains(m))
+}
+
+fn runtime_path_fallback_helpers_text() -> &'static str {
+    "namespace rusty {\n\
+namespace cmp {\n\
+enum class Ordering { Less, Equal, Greater };\n\
+}\n\
+namespace fmt {\n\
+using Result = bool;\n\
+struct Arguments {};\n\
+struct Formatter {\n\
+    template<typename... Args>\n\
+    static Result debug_tuple_field1_finish(Args&&...) { return true; }\n\
+    template<typename... Args>\n\
+    static Result debug_struct_field1_finish(Args&&...) { return true; }\n\
+};\n\
+}\n\
+namespace path {\n\
+using Path = std::string;\n\
+}\n\
+namespace ffi {\n\
+using OsStr = std::string;\n\
+using CStr = std::string;\n\
+}\n\
+namespace pin {\n\
+template<typename T>\n\
+using Pin = T;\n\
+template<typename T>\n\
+constexpr decltype(auto) new_unchecked(T&& value) {\n\
+    return std::forward<T>(value);\n\
+}\n\
+template<typename T>\n\
+constexpr const T* get_ref(const T& value) {\n\
+    return &value;\n\
+}\n\
+template<typename T>\n\
+constexpr T* get_unchecked_mut(T& value) {\n\
+    return &value;\n\
+}\n\
+}\n\
+namespace hash {\n\
+template<typename T, typename State>\n\
+void hash(const T&, State&) {}\n\
+}\n\
+namespace panicking {\n\
+template<typename... Args>\n\
+[[noreturn]] inline void panic_fmt(Args&&...) { std::abort(); }\n\
+}\n\
+namespace intrinsics {\n\
+struct Discriminant {\n\
+    std::size_t value;\n\
+    bool operator==(const Discriminant&) const = default;\n\
+    rusty::cmp::Ordering cmp(const Discriminant& other) const {\n\
+        if (value < other.value) return rusty::cmp::Ordering::Less;\n\
+        if (value > other.value) return rusty::cmp::Ordering::Greater;\n\
+        return rusty::cmp::Ordering::Equal;\n\
+    }\n\
+    Option<rusty::cmp::Ordering> partial_cmp(const Discriminant& other) const {\n\
+        return Option<rusty::cmp::Ordering>(cmp(other));\n\
+    }\n\
+    template<typename State>\n\
+    void hash(State& state) const {\n\
+        rusty::hash::hash(value, state);\n\
+    }\n\
+};\n\
+template<typename V>\n\
+Discriminant discriminant_value(const V& value) {\n\
+    return Discriminant{static_cast<std::size_t>(value.index())};\n\
+}\n\
+[[noreturn]] inline void unreachable() { std::abort(); }\n\
+}\n\
+}\n\
 \n"
 }
 
@@ -4933,6 +5037,92 @@ mod tests {
         let visit_idx = out.find("std::visit(overloaded {").unwrap();
         assert!(export_idx < helper_idx);
         assert!(helper_idx < visit_idx);
+    }
+
+    #[test]
+    fn test_leaf42_runtime_type_paths_lowered() {
+        let out = transpile_str(
+            r#"
+            fn f(
+                x: core::option::Option<core::cmp::Ordering>,
+                p: Pin<i32>,
+                poll: core::task::Poll<i32>,
+                cx: core::task::Context,
+                args: fmt::Arguments,
+                path: std::path::Path,
+                os: std::ffi::OsStr,
+                c: std::ffi::CStr
+            ) {}
+        "#,
+        );
+        assert!(out.contains("rusty::Option<rusty::cmp::Ordering> x"));
+        assert!(out.contains("rusty::pin::Pin<int32_t> p"));
+        assert!(out.contains("rusty::Poll<int32_t> poll"));
+        assert!(out.contains("rusty::Context cx"));
+        assert!(out.contains("rusty::fmt::Arguments args"));
+        assert!(out.contains("rusty::path::Path path"));
+        assert!(out.contains("rusty::ffi::OsStr os"));
+        assert!(out.contains("rusty::ffi::CStr c"));
+        assert!(!out.contains("core::option::Option"));
+        assert!(!out.contains("core::task::Poll"));
+        assert!(!out.contains("std::path::Path"));
+        assert!(!out.contains("std::ffi::CStr"));
+    }
+
+    #[test]
+    fn test_leaf42_runtime_function_paths_lowered() {
+        let out = transpile_str(
+            r#"
+            fn f(x: i32, y: i32) {
+                core::intrinsics::discriminant_value(x);
+                core::intrinsics::unreachable();
+                core::panicking::panic_fmt();
+                core::hash::Hash::hash(x, y);
+                core::fmt::Formatter::debug_tuple_field1_finish();
+                Pin::new_unchecked(x);
+                Pin::get_ref(x);
+                Pin::get_unchecked_mut(y);
+                let _ = core::cmp::Ordering::Equal;
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::intrinsics::discriminant_value"));
+        assert!(out.contains("rusty::intrinsics::unreachable"));
+        assert!(out.contains("rusty::panicking::panic_fmt"));
+        assert!(out.contains("rusty::hash::hash"));
+        assert!(out.contains("rusty::fmt::Formatter::debug_tuple_field1_finish"));
+        assert!(out.contains("rusty::pin::new_unchecked"));
+        assert!(out.contains("rusty::pin::get_ref"));
+        assert!(out.contains("rusty::pin::get_unchecked_mut"));
+        assert!(out.contains("rusty::cmp::Ordering::Equal"));
+        assert!(!out.contains("core::intrinsics::"));
+        assert!(!out.contains("core::panicking::"));
+        assert!(!out.contains("core::hash::Hash::hash"));
+    }
+
+    #[test]
+    fn test_runtime_fallback_helpers_emitted_when_needed() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                core::intrinsics::unreachable();
+                core::panicking::panic_fmt();
+                Pin::new_unchecked(1);
+            }
+        "#,
+        );
+        assert!(out.contains("namespace intrinsics {"));
+        assert!(out.contains("namespace panicking {"));
+        assert!(out.contains("namespace pin {"));
+        assert!(out.contains("enum class Ordering { Less, Equal, Greater };"));
+    }
+
+    #[test]
+    fn test_runtime_fallback_helpers_not_emitted_when_unused() {
+        let out = transpile_str("fn f() { let x = 1; }");
+        assert!(!out.contains("namespace intrinsics {"));
+        assert!(!out.contains("namespace panicking {"));
+        assert!(!out.contains("namespace pin {"));
     }
 
     #[test]

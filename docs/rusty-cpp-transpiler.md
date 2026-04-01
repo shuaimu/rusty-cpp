@@ -2199,6 +2199,48 @@ Verification:
   - previous blocker `‘overloaded’ was not declared in this scope` is removed from the reduced error set;
   - next blockers are now deeper semantic/name-lowering issues (`core::*`, `Pin`, associated/dependent types, nested export syntax, impl-merge conflicts), matching remaining Leaf 4.x items.
 
+### 10.26 Phase 18 Progress: End-to-End (Leaf 4.2) — DONE
+
+Leaf 4.2 lowered Rust path-only runtime/type names from expanded output to valid C++/rusty-cpp mappings with guarded fallback helpers.
+
+Changes:
+
+- Extended type/path mapping tables:
+  - `core::option::Option` → `rusty::Option`
+  - `core::task::Poll` / `core::task::Context` → `rusty::Poll` / `rusty::Context`
+  - `core::cmp::Ordering` → `rusty::cmp::Ordering`
+  - `core::fmt::{Result,Formatter,Arguments}` and `fmt::{Result,Formatter,Arguments}` → `rusty::fmt::*`
+  - `Pin`/`std::pin::Pin`/`core::pin::Pin` → `rusty::pin::Pin`
+  - `std::path::Path` → `rusty::path::Path`
+  - `std::ffi::{OsStr,CStr}` → `rusty::ffi::{OsStr,CStr}`
+- Added runtime function-path lowering:
+  - `core::intrinsics::{discriminant_value,unreachable}` → `rusty::intrinsics::*`
+  - `core::panicking::panic_fmt` → `rusty::panicking::panic_fmt`
+  - `core::hash::Hash::hash` → `rusty::hash::hash`
+  - `core::fmt::Formatter::{debug_tuple_field1_finish,debug_struct_field1_finish}` → `rusty::fmt::Formatter::*`
+  - `Pin::{new_unchecked,get_ref,get_unchecked_mut}` → `rusty::pin::*`
+- Added guarded prologue helper emission in `emit_file`:
+  - emits fallback namespaces (`rusty::cmp/fmt/pin/path/ffi/hash/panicking/intrinsics`) only when generated output uses these lowered runtime paths.
+- Added `#include "rusty/async.hpp"` to `include/rusty/rusty.hpp` so `rusty::Poll`/`rusty::Context` are available through the standard umbrella include.
+
+Regression tests added:
+
+- `types::tests::test_leaf42_runtime_type_fallback_mappings`
+- `types::tests::test_leaf42_runtime_function_path_mappings`
+- `codegen::tests::test_leaf42_runtime_type_paths_lowered`
+- `codegen::tests::test_leaf42_runtime_function_paths_lowered`
+- `codegen::tests::test_runtime_fallback_helpers_emitted_when_needed`
+- `codegen::tests::test_runtime_fallback_helpers_not_emitted_when_unused`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+- Re-ran parity harness build stage:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf42-post.gxu4m7 --stop-after build`
+  - prior unresolved-name blockers for `core::*`, `Pin`, `std::path::*`, `std::ffi::*` are removed from the top error cluster;
+  - next blockers now align with later leaves (`Leaf 4.3+`: dependent/associated types, export/re-export lowering, impl duplicate methods, placeholder lowering).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2343,3 +2385,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It causes immediate hard compile failures (`‘overloaded’ was not declared in this scope`) across many generated match/visitor call sites.
 - The resulting diagnostics are mostly cascade noise that blocks meaningful semantic-parity debugging.
 - Emitting the standard helper once in file prologue is a minimal, stable fix with low regression risk.
+
+### 11.15 Blind Global `core::`→`std::` Rewriting for Runtime Paths
+
+**Rejected approach:** Rewrite all `core::*` paths to `std::*` uniformly in expression/type lowering.
+
+**Why it was rejected:**
+- Many expanded runtime paths have no C++ `std::*` equivalent (`core::intrinsics`, `core::panicking`, Rust `fmt` APIs), so global rewriting still emits invalid or unresolved symbols.
+- It mixes valid type mappings with invalid runtime call mappings and hides which names need guarded fallbacks.
+- Targeted lowering to explicit `rusty::*` fallbacks plus conditional helper emission is safer, testable, and keeps failure scope localized for later semantic leaves.
