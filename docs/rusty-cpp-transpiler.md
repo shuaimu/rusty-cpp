@@ -1554,13 +1554,11 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Estimated effort:** ~50 LOC in `codegen.rs::emit_enum`.
 
-### Gap 2: `core::` Path Not Mapped
+### Gap 2: `core::` Path Not Mapped — FIXED ✅
 
-**Problem:** `use core::convert::AsRef` emits `using core::convert::AsRef` but `core::` is not a valid C++ namespace. In Rust, `core` is the no-std version of `std`.
+**Problem:** `use core::convert::AsRef` emitted `using core::convert::AsRef` but `core::` is not a valid C++ namespace.
 
-**Fix:** Map `core::` to the same handling as `std::` in `emit_use_tree`. Both should pass through as `std::` or be recognized as internal Rust paths that don't need mapping.
-
-**Estimated effort:** ~5 LOC in `emit_use_tree`.
+**Fix:** `emit_use_tree` now maps `core::` and `alloc::` identically to `std::` (they're Rust's no-std equivalents). Single match arm: `"std" | "core" | "alloc" => format!("std::{}", rest)`. Also excluded from external crate detection.
 
 ### Gap 3: Group Use Imports Emit Invalid C++
 
@@ -1647,7 +1645,7 @@ TEST_CASE("macros") {
 |----------|-----|--------|--------|
 | 1 | Gap 1: Generic enums | ~~Blocks most real crates~~ **FIXED** | ~50 LOC |
 | 2 | Gap 3: Group use imports | Invalid C++ syntax | ~30 LOC |
-| 3 | Gap 2: `core::` mapping | Missing path | ~5 LOC |
+| 3 | Gap 2: `core::` mapping | ~~Missing path~~ **FIXED** | ~5 LOC |
 | 4 | Gap 4: Unhandled item kinds | Missing code | ~20 LOC |
 | 5 | Gap 8: Nested functions | Invalid C++ | ~40 LOC |
 | 6 | Gap 6: Slice/range syntax | Missing expressions | ~30 LOC |

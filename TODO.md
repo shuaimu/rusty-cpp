@@ -197,10 +197,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* For recursive generic enums, forward-declare with template params: `template<typename T> struct List;`
         - [x] *done* Add unit tests: generic enum with 1 param, 2 params, nested generic types in fields
         - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 1 to mark as done with design notes
-      - [ ] Gap 2: Map `core::` and `alloc::` paths same as `std::` in emit_use_tree
-        - [ ] In `emit_use_tree`, add `"core"` and `"alloc"` cases that map to `std::`
-        - [ ] Add unit test: `use core::convert::AsRef` → `using std::convert::AsRef`
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 2 to mark as done
+      - [x] *done* Gap 2: Map `core::` and `alloc::` paths same as `std::` in emit_use_tree
+        - [x] *done* In `emit_use_tree`, add `"core"` and `"alloc"` cases that map to `std::`
+        - [x] *done* Add unit test: `use core::convert::AsRef` → `using std::convert::AsRef`
+        - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 2 to mark as done
       - [ ] Gap 3: Expand group use imports `use foo::{A, B}` into separate `using` declarations
         - [ ] In `emit_use`, detect when use tree is `Path { tree: Group }` and expand into multiple `using` lines
         - [ ] Handle nested groups: `use std::io::{self, Read, Write}` → 3 separate using declarations

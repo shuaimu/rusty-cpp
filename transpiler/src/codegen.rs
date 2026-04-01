@@ -835,9 +835,9 @@ impl CodeGen {
                             format!("{}", rest)
                         }
                     }
-                    // Map std library paths
-                    "std" => {
-                        // Check for known std submodules
+                    // Map std/core/alloc library paths — core and alloc are Rust's
+                    // no-std equivalents of std, map them identically
+                    "std" | "core" | "alloc" => {
                         format!("std::{}", rest)
                     }
                     _ => format!("{}::{}", prefix, rest),
@@ -4631,5 +4631,27 @@ mod tests {
         assert!(!out.contains("template"));
         assert!(out.contains("struct Color_Red {"));
         assert!(out.contains("using Color = std::variant<Color_Red, Color_Green, Color_Blue>"));
+    }
+
+    // ── Phase 15 Gap 2: core::/alloc:: path mapping ─────────────
+
+    #[test]
+    fn test_use_core_maps_to_std() {
+        let out = transpile_str("use core::convert::AsRef;");
+        assert!(out.contains("using std::convert::AsRef;"));
+        assert!(!out.contains("core::"));
+    }
+
+    #[test]
+    fn test_use_alloc_maps_to_std() {
+        let out = transpile_str("use alloc::vec::Vec;");
+        assert!(out.contains("using std::vec::Vec;"));
+        assert!(!out.contains("alloc::"));
+    }
+
+    #[test]
+    fn test_use_core_no_external_crate_comment() {
+        let out = transpile_str("use core::fmt::Display;");
+        assert!(!out.contains("// TODO: external crate"));
     }
 }
