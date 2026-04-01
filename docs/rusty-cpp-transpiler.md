@@ -2109,6 +2109,36 @@ Verification:
 - `either` parity harness build-stage run no longer emits fallback `// Methods for ...` blocks for inline-module types; `IterEither::clone() const` is now emitted inside `struct IterEither`.
 - Remaining blockers are later semantic issues (`core::...`, `FnOnceFacade`, `Pin`, associated-type typing), which align with later leaves.
 
+### 10.23 Phase 18 Progress: End-to-End (Leaf 3.3) — DONE
+
+Leaf 3.3 focused on unresolved trait-facade/proxy emissions in expanded crate/module output.
+
+Changes:
+
+- Guarded trait-bound facade constraints:
+  - `emit_template_prefix` now skips facade-based `requires (...)` constraints for module-mode output and for trait paths known to lack emitted facades (external `std/core/alloc` traits and common imported traits like `Fn*`, `Into`, `Error`, `Hasher`).
+- Guarded dyn/impl trait proxy mappings:
+  - In module mode, `dyn Trait`/`impl Trait`/`Box<dyn Trait>` mappings now degrade to pointer-safe placeholders (`void*` / `const void*`) rather than emitting unresolved `pro::proxy*<...Facade>` types.
+  - Outside module mode, existing Proxy mapping behavior for local trait cases is preserved.
+- Guarded trait facade emission in module mode:
+  - `ItemTrait` facade output (`PRO_DEF_MEM_DISPATCH`, `pro::facade_builder`, default proxy-view helpers) is skipped with a Rust-only comment in module mode to avoid unresolved `pro::*` symbols when Proxy backing is unavailable.
+
+Regression tests added:
+
+- `test_external_trait_bound_requires_skipped`
+- `test_fnonce_trait_bound_requires_skipped`
+- `test_unresolved_dyn_trait_param_falls_back_to_void_ptr`
+- `test_unresolved_box_dyn_trait_param_falls_back_to_void_ptr`
+- `test_trait_facade_emission_skipped_in_module_mode`
+- `test_trait_bound_constraints_skipped_in_module_mode`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler` passes.
+- Re-ran parity harness build stage for `either`:
+  - previous `FnOnceFacade` / `IntoFacade` / `pro::proxy` unresolved emissions are removed from the generated module;
+  - next blockers are now non-facade semantic/type issues (`core::*`, `Pin`, associated-type typing, duplicate method signatures), matching subsequent leaves.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2226,3 +2256,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Receiver-qualified methods (`const`, instance dispatch) are syntactically invalid as free functions.
 - It breaks source-order/type ownership expectations and produces hard compile errors before semantic parity can be evaluated.
 - The robust model is two-pass merging with namespace-aware impl resolution so methods stay inside their corresponding struct/enum body.
+
+### 11.12 Emitting Proxy Facade Symbols Unconditionally in Module-Expanded Output
+
+**Rejected approach:** Always emit facade/proxy symbols (`*Facade`, `pro::proxy*`, facade-based `requires`) for expanded crate modules without checking whether Proxy backing is available.
+
+**Why it was rejected:**
+- Expanded outputs frequently import external traits without corresponding generated facades, producing immediate unresolved-symbol errors (`FnOnceFacade`, `IntoFacade`, etc.).
+- Some build environments for parity runs do not provide Proxy backing in the transpiled module context, so unconditional `pro::*` emission is brittle.
+- Guarding/skipping these emissions in module mode preserves forward progress to deeper semantic blockers instead of failing early on missing facade infrastructure.

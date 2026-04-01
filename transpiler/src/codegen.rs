@@ -768,6 +768,16 @@ impl CodeGen {
     fn emit_trait(&mut self, t: &syn::ItemTrait) {
         let trait_name = &t.ident;
 
+        // Expanded crate output in module mode commonly lacks Proxy runtime wiring.
+        // Guard by skipping trait-facade emission there to avoid unresolved `pro::*` symbols.
+        if self.module_name.is_some() {
+            self.writeln(&format!(
+                "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
+                trait_name
+            ));
+            return;
+        }
+
         // Check for known marker traits — emit as concepts
         let trait_name_str = trait_name.to_string();
         if matches!(trait_name_str.as_str(), "Send" | "Sync" | "Copy" | "Clone" | "Sized" | "Unpin") {
@@ -2759,15 +2769,29 @@ impl CodeGen {
                                         return fn_type;
                                     }
                                 }
+                                if self.module_name.is_some() {
+                                    return "void*".to_string();
+                                }
                                 // Collect all trait names for multi-bound
-                                let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
-                                    if let syn::TypeParamBound::Trait(tb) = b {
-                                        Some(tb.path.segments.last()?.ident.to_string())
-                                    } else {
-                                        None
-                                    }
-                                }).collect();
+                                let trait_paths: Vec<&syn::Path> = to
+                                    .bounds
+                                    .iter()
+                                    .filter_map(|b| match b {
+                                        syn::TypeParamBound::Trait(tb) => Some(&tb.path),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                let trait_names: Vec<String> = trait_paths
+                                    .iter()
+                                    .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))
+                                    .collect();
                                 if !trait_names.is_empty() {
+                                    if trait_paths
+                                        .iter()
+                                        .any(|p| facade_name_for_trait_path(p).is_none())
+                                    {
+                                        return "void*".to_string();
+                                    }
                                     let facade = if trait_names.len() == 1 {
                                         format!("{}Facade", trait_names[0])
                                     } else {
@@ -2838,15 +2862,35 @@ impl CodeGen {
                             return format!("const {}&", fn_type);
                         }
                     }
-                    // Collect all trait names for multi-bound
-                    let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
-                        if let syn::TypeParamBound::Trait(tb) = b {
-                            Some(tb.path.segments.last()?.ident.to_string())
-                        } else {
-                            None
+                    if self.module_name.is_some() {
+                        if r.mutability.is_some() {
+                            return "void*".to_string();
                         }
-                    }).collect();
+                        return "const void*".to_string();
+                    }
+                    // Collect all trait names for multi-bound
+                    let trait_paths: Vec<&syn::Path> = to
+                        .bounds
+                        .iter()
+                        .filter_map(|b| match b {
+                            syn::TypeParamBound::Trait(tb) => Some(&tb.path),
+                            _ => None,
+                        })
+                        .collect();
+                    let trait_names: Vec<String> = trait_paths
+                        .iter()
+                        .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))
+                        .collect();
                     if !trait_names.is_empty() {
+                        if trait_paths
+                            .iter()
+                            .any(|p| facade_name_for_trait_path(p).is_none())
+                        {
+                            if r.mutability.is_some() {
+                                return "void*".to_string();
+                            }
+                            return "const void*".to_string();
+                        }
                         let facade_name = if trait_names.len() == 1 {
                             format!("{}Facade", trait_names[0])
                         } else {
@@ -2898,17 +2942,37 @@ impl CodeGen {
                         }
                     }
                 }
+                if self.module_name.is_some() {
+                    return "void*".to_string();
+                }
                 // Collect all trait names
-                let trait_names: Vec<String> = to.bounds.iter().filter_map(|b| {
-                    if let syn::TypeParamBound::Trait(tb) = b {
-                        Some(tb.path.segments.last()?.ident.to_string())
-                    } else {
-                        None
-                    }
-                }).collect();
+                let trait_paths: Vec<&syn::Path> = to
+                    .bounds
+                    .iter()
+                    .filter_map(|b| match b {
+                        syn::TypeParamBound::Trait(tb) => Some(&tb.path),
+                        _ => None,
+                    })
+                    .collect();
+                let trait_names: Vec<String> = trait_paths
+                    .iter()
+                    .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))
+                    .collect();
                 if trait_names.len() == 1 {
+                    if trait_paths
+                        .iter()
+                        .any(|p| facade_name_for_trait_path(p).is_none())
+                    {
+                        return "void*".to_string();
+                    }
                     format!("pro::proxy_view<{}Facade>", trait_names[0])
                 } else if trait_names.len() > 1 {
+                    if trait_paths
+                        .iter()
+                        .any(|p| facade_name_for_trait_path(p).is_none())
+                    {
+                        return "void*".to_string();
+                    }
                     // Multiple bounds: combine facade names
                     let combined = trait_names.join("And");
                     format!("pro::proxy_view<{}Facade>", combined)
@@ -2925,17 +2989,37 @@ impl CodeGen {
                         }
                     }
                 }
+                if self.module_name.is_some() {
+                    return "void*".to_string();
+                }
                 // Collect all trait names
-                let trait_names: Vec<String> = it.bounds.iter().filter_map(|b| {
-                    if let syn::TypeParamBound::Trait(tb) = b {
-                        Some(tb.path.segments.last()?.ident.to_string())
-                    } else {
-                        None
-                    }
-                }).collect();
+                let trait_paths: Vec<&syn::Path> = it
+                    .bounds
+                    .iter()
+                    .filter_map(|b| match b {
+                        syn::TypeParamBound::Trait(tb) => Some(&tb.path),
+                        _ => None,
+                    })
+                    .collect();
+                let trait_names: Vec<String> = trait_paths
+                    .iter()
+                    .filter_map(|p| p.segments.last().map(|s| s.ident.to_string()))
+                    .collect();
                 if trait_names.len() == 1 {
+                    if trait_paths
+                        .iter()
+                        .any(|p| facade_name_for_trait_path(p).is_none())
+                    {
+                        return "void*".to_string();
+                    }
                     format!("pro::proxy<{}Facade>", trait_names[0])
                 } else if trait_names.len() > 1 {
+                    if trait_paths
+                        .iter()
+                        .any(|p| facade_name_for_trait_path(p).is_none())
+                    {
+                        return "void*".to_string();
+                    }
                     let combined = trait_names.join("And");
                     format!("pro::proxy<{}Facade>", combined)
                 } else {
@@ -3287,18 +3371,20 @@ impl CodeGen {
 
         // Emit requires clause for trait bounds
         let mut constraints: Vec<String> = Vec::new();
+        let skip_facade_constraints = self.module_name.is_some();
 
         for tp in &type_params {
             for bound in &tp.bounds {
                 if let syn::TypeParamBound::Trait(tb) = bound {
-                    let trait_name = tb
-                        .path
-                        .segments
-                        .iter()
-                        .map(|s| s.ident.to_string())
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    constraints.push(format!("{}Facade::is_satisfied_by<{}>()", trait_name, tp.ident));
+                    if skip_facade_constraints {
+                        continue;
+                    }
+                    if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
+                        constraints.push(format!(
+                            "{}::is_satisfied_by<{}>()",
+                            facade_name, tp.ident
+                        ));
+                    }
                 }
             }
         }
@@ -3310,14 +3396,15 @@ impl CodeGen {
                     let ty_name = self.map_type(&pt.bounded_ty);
                     for bound in &pt.bounds {
                         if let syn::TypeParamBound::Trait(tb) = bound {
-                            let trait_name = tb
-                                .path
-                                .segments
-                                .iter()
-                                .map(|s| s.ident.to_string())
-                                .collect::<Vec<_>>()
-                                .join("::");
-                            constraints.push(format!("{}Facade::is_satisfied_by<{}>()", trait_name, ty_name));
+                            if skip_facade_constraints {
+                                continue;
+                            }
+                            if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
+                                constraints.push(format!(
+                                    "{}::is_satisfied_by<{}>()",
+                                    facade_name, ty_name
+                                ));
+                            }
                         }
                     }
                 }
@@ -3382,6 +3469,21 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "PartialOrd" => Some("operator<=>"),
         _ => None,
     }
+}
+
+fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
+    let first = path.segments.first()?.ident.to_string();
+    let last = path.segments.last()?.ident.to_string();
+
+    // Expanded crates frequently reference external traits that do not have generated
+    // Proxy facade types in the transpiled module. Skip those facade references.
+    let skip = matches!(first.as_str(), "std" | "core" | "alloc")
+        || matches!(last.as_str(), "Fn" | "FnMut" | "FnOnce" | "Into" | "Error" | "Hasher");
+    if skip {
+        return None;
+    }
+
+    Some(format!("{}Facade", last))
 }
 
 /// Build a scoped impl key from a self-type path and current inline-module path.
@@ -4518,6 +4620,20 @@ mod tests {
     }
 
     #[test]
+    fn test_unresolved_dyn_trait_param_falls_back_to_void_ptr() {
+        let out = transpile_str("fn f(x: &dyn std::error::Error) {}");
+        assert!(out.contains("void f(const void* x)"));
+        assert!(!out.contains("pro::proxy_view<ErrorFacade>"));
+    }
+
+    #[test]
+    fn test_unresolved_box_dyn_trait_param_falls_back_to_void_ptr() {
+        let out = transpile_str("fn f(x: Box<dyn std::error::Error>) {}");
+        assert!(out.contains("void f(void* x)"));
+        assert!(!out.contains("pro::proxy<ErrorFacade>"));
+    }
+
+    #[test]
     fn test_impl_trait_return() {
         let out = transpile_str(
             "trait Foo { fn bar(&self); } fn f() -> impl Foo { todo!() }",
@@ -4565,6 +4681,13 @@ mod tests {
         );
         // Default method should be emitted as a free function
         assert!(out.contains("rusty::String greet(pro::proxy_view<GreetFacade> _self)"));
+    }
+
+    #[test]
+    fn test_trait_facade_emission_skipped_in_module_mode() {
+        let out = transpile_str_module("trait Foo { fn bar(&self); }", "my_crate");
+        assert!(out.contains("// Rust-only trait Foo (Proxy facade emission skipped in module mode)"));
+        assert!(!out.contains("struct FooFacade : pro::facade_builder"));
     }
 
     // ── Phase 5: Generics / templates tests ─────────────────────
@@ -4627,6 +4750,25 @@ mod tests {
         assert!(out.contains("template<typename T>"));
         assert!(out.contains("requires"));
         assert!(out.contains("Clone"));
+    }
+
+    #[test]
+    fn test_trait_bound_constraints_skipped_in_module_mode() {
+        let out = transpile_str_module("fn f<F: FnOnce(i32) -> i32>(x: F) {}", "my_crate");
+        assert!(!out.contains("FnOnceFacade::is_satisfied_by"));
+        assert!(!out.contains("requires"));
+    }
+
+    #[test]
+    fn test_external_trait_bound_requires_skipped() {
+        let out = transpile_str("fn f<T: core::hash::Hasher>(x: T) {}");
+        assert!(!out.contains("HasherFacade::is_satisfied_by"));
+    }
+
+    #[test]
+    fn test_fnonce_trait_bound_requires_skipped() {
+        let out = transpile_str("fn f<F: FnOnce(i32) -> i32>(x: F) {}");
+        assert!(!out.contains("FnOnceFacade::is_satisfied_by"));
     }
 
     #[test]
