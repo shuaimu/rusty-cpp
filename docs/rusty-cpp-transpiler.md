@@ -2139,6 +2139,40 @@ Verification:
   - previous `FnOnceFacade` / `IntoFacade` / `pro::proxy` unresolved emissions are removed from the generated module;
   - next blockers are now non-facade semantic/type issues (`core::*`, `Pin`, associated-type typing, duplicate method signatures), matching subsequent leaves.
 
+### 10.24 Phase 18 Progress: End-to-End (Leaf 3.4) — DONE
+
+Leaf 3.4 re-ran the automated parity harness and captured the next reduced blocker set for semantic-parity work.
+
+Harness run:
+
+- Command: `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf34.Knv40k --stop-after build`
+- Result:
+  - Stage 1 (`cargo test` baseline) passed (`7` unit tests + `47` doc tests in `either`).
+  - Stage 2 (expanded transpile) succeeded and generated `either.cppm`.
+  - Stage 3 (C++ module build) failed with a new post-Leaf-3.3 error profile.
+
+Reduced blocker clusters (deduped by root cause):
+
+1. Missing visitor helper infrastructure:
+   - Large repeated cluster: `‘overloaded’ was not declared in this scope` at many `std::visit(overloaded { ... })` call sites.
+2. Rust path/type names not lowered for expanded output:
+   - `core::*` and `fmt::*` unresolved (`core::cmp`, `core::fmt`, `core::task`).
+   - `Pin`, `std::path::*`, `std::ffi::*` unresolved in generated signatures.
+3. Dependent/associated type emission issues:
+   - Invalid forms like `Either<L::IntoIter, ...>`, `Either<const L&::IntoIter, ...>`, `Self::Output` without valid C++ dependent-type lowering.
+4. Nested module export/re-export syntax issues:
+   - Invalid emissions like `export struct` inside `namespace ...` blocks and unqualified `using` re-exports (`using Either;`, `using Left;`).
+5. Impl merge/signature duplication:
+   - Duplicate method declarations in the same type (`cloned`, `copied`, plus conflicting `as_ref` / `as_mut` signatures).
+6. Placeholder/invalid expression lowering still present:
+   - `/* TODO: expr */`, undefined temporary names in match-derived code, and non-void functions with no return.
+
+Outcome:
+
+- Updated `TODO.md`:
+  - Marked Leaf 3.4 done.
+  - Broke Leaf 4 into focused leaves (4.1–4.7), each scoped to one blocker cluster and intended to stay below ~1000 LOC.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2265,3 +2299,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Expanded outputs frequently import external traits without corresponding generated facades, producing immediate unresolved-symbol errors (`FnOnceFacade`, `IntoFacade`, etc.).
 - Some build environments for parity runs do not provide Proxy backing in the transpiled module context, so unconditional `pro::*` emission is brittle.
 - Guarding/skipping these emissions in module mode preserves forward progress to deeper semantic blockers instead of failing early on missing facade infrastructure.
+
+### 11.13 Fixing Cascading Harness Errors Without First Collapsing to Root-Cause Clusters
+
+**Rejected approach:** Tackle the raw compiler-error stream one line at a time (hundreds of messages) instead of first reducing to a small set of repeated root-cause families.
+
+**Why it was rejected:**
+- Many diagnostics are cascades from a few missing primitives (`overloaded`, path lowering, dependent-type syntax), so line-by-line fixes are high effort and low signal.
+- It causes noisy, unstable partial patches and makes regression tracking hard.
+- A cluster-first approach yields small, testable leaves (4.1–4.7) and keeps changes scoped, measurable, and reviewable.
