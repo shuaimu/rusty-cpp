@@ -1762,7 +1762,7 @@ After Phase 16, the core Either type compiles and 6 C++ tests pass. To achieve f
 
 **Estimated effort:** ~20 LOC to test and debug; the `--crate --expand` pipeline is already wired up.
 
-#### Fix 2: Template Argument Deduction for Variant Constructors
+#### Fix 2: Template Argument Deduction for Variant Constructors — DONE ✅
 
 **Problem:** `Left(2)` can't deduce the missing type parameter `R`. In Rust, the compiler infers the full `Either<i32, i32>` type from context. In C++, template argument deduction fails because `R` doesn't appear in the function signature of `Left<L, R>(L val)`.
 

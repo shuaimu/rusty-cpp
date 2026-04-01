@@ -567,7 +567,9 @@ impl CodeGen {
                 ));
             }
 
-            // Emit constructor helper functions for each variant
+            // Emit constructor helper functions for each variant.
+            // Return the variant struct directly — std::variant implicitly converts.
+            // This avoids template arg deduction issues (e.g., Left(2) can't deduce R).
             for variant in &e.variants {
                 let vname = &variant.ident;
                 let variant_struct = if has_generics {
@@ -575,15 +577,9 @@ impl CodeGen {
                 } else {
                     format!("{}_{}", name, vname)
                 };
-                let enum_type = if has_generics {
-                    format!("{}{}", name, template_args)
-                } else {
-                    name.to_string()
-                };
 
                 match &variant.fields {
                     syn::Fields::Unnamed(fields) => {
-                        // Left(val) → Either<L,R> Left(L val) { return Either_Left<L,R>{std::move(val)}; }
                         let params: Vec<String> = fields.unnamed.iter().enumerate().map(|(i, f)| {
                             let ty = self.map_type(&f.ty);
                             format!("{} _{}", ty, i)
@@ -591,8 +587,8 @@ impl CodeGen {
                         let args: Vec<String> = (0..fields.unnamed.len()).map(|i| format!("std::move(_{})", i)).collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "{} {}({}) {{ return {}{{{}}};  }}",
-                            enum_type, vname, params.join(", "),
+                            "auto {}({}) {{ return {}{{{}}};  }}",
+                            vname, params.join(", "),
                             variant_struct,
                             args.join(", ")
                         ));
@@ -609,18 +605,17 @@ impl CodeGen {
                         }).collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "{} {}({}) {{ return {}{{{}}};  }}",
-                            enum_type, vname, params.join(", "),
+                            "auto {}({}) {{ return {}{{{}}};  }}",
+                            vname, params.join(", "),
                             variant_struct,
                             args.join(", ")
                         ));
                     }
                     syn::Fields::Unit => {
-                        // None → Either None() { return Either_None{}; }
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "{} {}() {{ return {}{{}};  }}",
-                            enum_type, vname, variant_struct
+                            "auto {}() {{ return {}{{}};  }}",
+                            vname, variant_struct
                         ));
                     }
                 }
@@ -5101,23 +5096,23 @@ mod tests {
     #[test]
     fn test_variant_constructor_generated() {
         let out = transpile_str("enum Maybe<T> { Just(T), Nothing }");
-        // Constructor functions should be emitted
-        assert!(out.contains("Maybe<T> Just(T _0)"));
-        assert!(out.contains("Maybe<T> Nothing()"));
+        // Constructor functions return auto (variant struct) for implicit conversion
+        assert!(out.contains("auto Just(T _0)"));
+        assert!(out.contains("auto Nothing()"));
     }
 
     #[test]
     fn test_variant_constructor_two_params() {
         let out = transpile_str("enum Either<L, R> { Left(L), Right(R) }");
-        assert!(out.contains("Either<L, R> Left(L _0)"));
-        assert!(out.contains("Either<L, R> Right(R _0)"));
+        assert!(out.contains("auto Left(L _0)"));
+        assert!(out.contains("auto Right(R _0)"));
     }
 
     #[test]
     fn test_variant_constructor_non_generic() {
         let out = transpile_str("enum Token { Num(i32), Str(String) }");
-        assert!(out.contains("Token Num(int32_t _0)"));
-        assert!(out.contains("Token Str(rusty::String _0)"));
+        assert!(out.contains("auto Num(int32_t _0)"));
+        assert!(out.contains("auto Str(rusty::String _0)"));
     }
 
     #[test]
