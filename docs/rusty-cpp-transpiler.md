@@ -1586,23 +1586,17 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Estimated effort:** ~10 LOC.
 
-### Gap 6: Slice/Range Syntax Not Fully Handled
+### Gap 6: Slice/Range Syntax Not Fully Handled — FIXED ✅
 
-**Problem:** Rust slice syntax `&mockdata[..]`, `&buf[..len]` and range syntax `0..10` in non-for contexts don't fully transpile.
+**Problem:** Open ranges (`..`, `start..`, `..end`) emitted empty arguments.
 
-**Current output:** `mockdata[rusty::range(, )]` (empty args), `/* TODO: expr */`
+**Fix:** All 6 range variants now emit distinct helpers: `rusty::range(a,b)`, `rusty::range_inclusive(a,b)`, `rusty::range_from(a)`, `rusty::range_to(b)`, `rusty::range_to_inclusive(b)`, `rusty::range_full()`.
 
-**Fix:** Handle `Expr::Range` with missing start/end (open ranges), and `Expr::Index` with range arguments. Map `..` to appropriate C++ span/range operations.
+### Gap 7: Array/Vec Literal Initialization — FIXED ✅
 
-**Estimated effort:** ~30 LOC in `emit_expr_to_string`.
+**Problem:** `[0u8; 256]` (repeat init) and `b"hello"` (byte strings) emitted `/* TODO: expr */`.
 
-### Gap 7: Array/Vec Literal Initialization
-
-**Problem:** `[0x00; 256]` (repeat initializer) and `b"\xff"` (byte string literals) aren't handled.
-
-**Fix:** `[val; N]` → `std::array<T, N>` filled with val. Byte string literals → `uint8_t[]` or `std::span<const uint8_t>`.
-
-**Estimated effort:** ~20 LOC.
+**Fix:** `Expr::Repeat` → `rusty::array_repeat(val, N)`. `Lit::ByteStr` → `std::array<uint8_t, N>{{ hex bytes }}`.
 
 ### Gap 8: Nested Function Definitions — FIXED ✅
 
@@ -1619,8 +1613,8 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 | 3 | Gap 2: `core::` mapping | ~~Missing path~~ **FIXED** | ~5 LOC |
 | 4 | Gap 4: Unhandled item kinds | ~~Missing code~~ **FIXED** | ~20 LOC |
 | 5 | Gap 8: Nested functions | ~~Invalid C++~~ **FIXED** | ~40 LOC |
-| 6 | Gap 6: Slice/range syntax | Missing expressions | ~30 LOC |
-| 7 | Gap 7: Array literals | Missing expressions | ~20 LOC |
+| 6 | Gap 6: Slice/range syntax | ~~Missing expressions~~ **FIXED** | ~30 LOC |
+| 7 | Gap 7: Array literals | ~~Missing expressions~~ **FIXED** | ~20 LOC |
 | 8 | Gap 5: Self in traits | Cosmetic | ~10 LOC |
 
 Total estimated: ~205 LOC to fix all gaps.

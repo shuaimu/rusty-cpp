@@ -2007,10 +2007,18 @@ impl CodeGen {
             }
             syn::Expr::Continue(_) => "continue".to_string(),
             syn::Expr::Range(range) => {
-                // Rust range `a..b` → we need a range helper; for now emit for use in for-loops
-                let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e)).unwrap_or_default();
-                let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e)).unwrap_or_default();
-                format!("rusty::range({}, {})", start, end)
+                let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
+                let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));
+                let is_inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+
+                match (start, end, is_inclusive) {
+                    (Some(s), Some(e), false) => format!("rusty::range({}, {})", s, e),
+                    (Some(s), Some(e), true) => format!("rusty::range_inclusive({}, {})", s, e),
+                    (Some(s), None, _) => format!("rusty::range_from({})", s),
+                    (None, Some(e), false) => format!("rusty::range_to({})", e),
+                    (None, Some(e), true) => format!("rusty::range_to_inclusive({})", e),
+                    (None, None, _) => "rusty::range_full()".to_string(),
+                }
             }
             syn::Expr::Closure(closure) => {
                 self.emit_closure_to_string(closure)
@@ -2083,6 +2091,12 @@ impl CodeGen {
                     format!("RUSTY_TRY({})", inner)
                 }
             }
+            syn::Expr::Repeat(rep) => {
+                // [val; N] → std::array filled with val
+                let val = self.emit_expr_to_string(&rep.expr);
+                let len = self.emit_expr_to_string(&rep.len);
+                format!("rusty::array_repeat({}, {})", val, len)
+            }
             _ => format!("/* TODO: expr */"),
         }
     }
@@ -2095,6 +2109,10 @@ impl CodeGen {
             syn::Lit::Str(s) => format!("\"{}\"", s.value()),
             syn::Lit::Char(c) => format!("U'{}'", c.value()),
             syn::Lit::Byte(b) => format!("static_cast<uint8_t>({})", b.value()),
+            syn::Lit::ByteStr(bs) => {
+                let bytes: Vec<String> = bs.value().iter().map(|b| format!("0x{:02x}", b)).collect();
+                format!("std::array<uint8_t, {}>{{{{ {} }}}}", bytes.len(), bytes.join(", "))
+            }
             _ => "/* TODO: literal */".to_string(),
         }
     }
@@ -4812,5 +4830,59 @@ mod tests {
         let out = transpile_str("fn top_level() {}");
         assert!(out.contains("void top_level()"));
         assert!(!out.contains("const auto top_level"));
+    }
+
+    // ── Phase 15 Gap 6: Range syntax variants ───────────────────
+
+    #[test]
+    fn test_range_closed() {
+        let out = transpile_str("fn f() { for i in 0..10 { i; } }");
+        assert!(out.contains("rusty::range(0, 10)"));
+    }
+
+    #[test]
+    fn test_range_inclusive() {
+        let out = transpile_str("fn f() { for i in 0..=10 { i; } }");
+        assert!(out.contains("rusty::range_inclusive(0, 10)"));
+    }
+
+    #[test]
+    fn test_range_from() {
+        let out = transpile_str("fn f() { let r = 5..; }");
+        assert!(out.contains("rusty::range_from(5)"));
+    }
+
+    #[test]
+    fn test_range_to() {
+        let out = transpile_str("fn f() { let r = ..10; }");
+        assert!(out.contains("rusty::range_to(10)"));
+    }
+
+    #[test]
+    fn test_range_full() {
+        let out = transpile_str("fn f() { let r = ..; }");
+        assert!(out.contains("rusty::range_full()"));
+    }
+
+    #[test]
+    fn test_range_to_inclusive() {
+        let out = transpile_str("fn f() { let r = ..=10; }");
+        assert!(out.contains("rusty::range_to_inclusive(10)"));
+    }
+
+    // ── Phase 15 Gap 7: Array repeat + byte string ──────────────
+
+    #[test]
+    fn test_array_repeat() {
+        let out = transpile_str("fn f() { let a = [0u8; 256]; }");
+        assert!(out.contains("rusty::array_repeat("));
+        assert!(out.contains("256"));
+    }
+
+    #[test]
+    fn test_byte_string_literal() {
+        let out = transpile_str(r#"fn f() { let b = b"hello"; }"#);
+        assert!(out.contains("std::array<uint8_t,"));
+        assert!(out.contains("0x68")); // 'h'
     }
 }

@@ -218,18 +218,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Preserve original name so call sites work unchanged
         - [x] *done* Add unit tests: nested fn with params/return, void, multiple, top-level unchanged
         - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 5 to mark as done
-      - [ ] Gap 6: Slice/range syntax — open ranges and index-with-range
-        - [ ] Handle `Expr::Range` with missing start (e.g., `..len`) → `rusty::range(0, len)`
-        - [ ] Handle `Expr::Range` with missing end (e.g., `start..`) → `rusty::range_from(start)`
-        - [ ] Handle `Expr::Range` with both missing (e.g., `..`) → `rusty::range_full()`
-        - [ ] Handle inclusive ranges `..=` (RangeInclusive)
-        - [ ] Add unit tests for each range variant
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 6 to mark as done
-      - [ ] Gap 7: Array repeat initializer and byte string literals
-        - [ ] Handle `Expr::Repeat` (`[0u8; 256]`) → `std::array<uint8_t, 256>` filled with value
-        - [ ] Handle `Lit::ByteStr` (`b"hello"`) → `std::array<uint8_t, N>` or `uint8_t[]` literal
-        - [ ] Add unit tests for repeat array and byte string
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 7 to mark as done
+      - [x] *done* Gap 6: Slice/range syntax — all range variants handled
+        - [x] *done* `a..b` → `rusty::range(a, b)`, `a..=b` → `rusty::range_inclusive(a, b)`
+        - [x] *done* `a..` → `rusty::range_from(a)`, `..b` → `rusty::range_to(b)`
+        - [x] *done* `..` → `rusty::range_full()`, `..=b` → `rusty::range_to_inclusive(b)`
+        - [x] *done* 6 unit tests for each range variant
+      - [x] *done* Gap 7: Array repeat initializer and byte string literals
+        - [x] *done* `[val; N]` → `rusty::array_repeat(val, N)`
+        - [x] *done* `b"hello"` → `std::array<uint8_t, 5>{{ 0x68, 0x65, ... }}`
+        - [x] *done* 2 unit tests for repeat array and byte string
       - [ ] Gap 8: `Self` in trait method signatures
         - [ ] In trait method emission, when return type or param type is `Self`, emit `auto` for return or the facade's proxy type for params
         - [ ] Add unit test: trait with `fn new() -> Self` and `fn consume(self)`
