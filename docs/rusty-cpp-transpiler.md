@@ -2005,6 +2005,29 @@ Design rationale:
 - Using a dedicated runtime helper keeps transpiler code small and avoids duplicating collection logic in generated call sites.
 - This follows §11 rejected-approach guidance by avoiding broad rewrites of every `.collect()` call.
 
+### 10.19 Phase 18 Progress: End-to-End (Leaf 1) — DONE
+
+Added a targeted fix for expanded-crate prelude imports that were emitting invalid C++:
+
+- Expanded `either` output included `using namespace std::prelude::rust_2018;`.
+- C++ has no `std::prelude`, so this breaks compilation immediately.
+
+Implementation:
+
+- Added import-path normalization in use classification (`namespace foo::bar` → `foo::bar` for classification only).
+- Marked `std::prelude::*` paths as Rust-only imports.
+- Result: prelude glob imports now emit as comments (`// Rust-only: using namespace ...`) rather than active `using` declarations.
+
+Tests added:
+
+- `use std::prelude::rust_2018::*;` is skipped as Rust-only.
+- `use core::prelude::rust_2018::*;` (mapped to std) is also skipped as Rust-only.
+
+Design rationale:
+
+- This keeps the fix narrow and deterministic: only prelude imports are filtered.
+- It avoids broad suppression of namespace-glob imports, which could hide valid C++ namespace imports.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2086,3 +2109,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - `collect()` in Rust depends on iterator/type context and target collection type; broad rewriting without that context is error-prone.
 - It would risk semantic regressions for non-range iterators and custom iterator adapters.
 - The current blocker only requires range `.collect()`, so a narrow receiver-shape rewrite is safer, testable, and sufficient.
+
+### 11.8 Skipping All `use ...::*` Namespace Imports
+
+**Rejected approach:** Treat every glob import (`use foo::*`) as Rust-only and comment it out wholesale.
+
+**Why it was rejected:**
+- Some namespace imports map to valid C++ and are required for generated code readability/compatibility.
+- The actual blocker is specific (`std::prelude::rust_2018` from expanded Rust), not all glob imports.
+- A path-targeted filter avoids accidental regressions and keeps import behavior explicit.

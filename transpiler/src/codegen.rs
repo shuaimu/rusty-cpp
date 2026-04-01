@@ -3305,13 +3305,19 @@ enum UseImportAction {
 }
 
 fn classify_use_import(path: &str) -> UseImportAction {
-    if let Some(action) = rewrite_std_io_import(path) {
+    let normalized = normalize_use_import_path(path);
+
+    if let Some(action) = rewrite_std_io_import(normalized) {
         return action;
     }
-    if is_rust_only_import(path) {
+    if is_rust_only_import(normalized) {
         return UseImportAction::RustOnly;
     }
     UseImportAction::Using(path.to_string())
+}
+
+fn normalize_use_import_path(path: &str) -> &str {
+    path.strip_prefix("namespace ").unwrap_or(path)
 }
 
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
@@ -3354,6 +3360,7 @@ fn is_rust_only_import(path: &str) -> bool {
         "std::hash",        // Hash trait
         "std::default",     // Default trait
         "std::borrow",      // Borrow, BorrowMut
+        "std::prelude::",   // Rust prelude modules (e.g., rust_2018)
     ];
 
     for prefix in &rust_only_prefixes {
@@ -5208,6 +5215,20 @@ mod tests {
     fn test_use_std_no_external_comment() {
         let out = transpile_str("use std::io::Read;");
         assert!(!out.contains("// TODO: external crate"));
+    }
+
+    #[test]
+    fn test_use_std_prelude_glob_skipped_as_rust_only() {
+        let out = transpile_str("use std::prelude::rust_2018::*;");
+        assert!(out.contains("// Rust-only: using namespace std::prelude::rust_2018;"));
+        assert!(!out.contains("\nusing namespace std::prelude::rust_2018;"));
+    }
+
+    #[test]
+    fn test_use_core_prelude_glob_skipped_as_rust_only() {
+        let out = transpile_str("use core::prelude::rust_2018::*;");
+        assert!(out.contains("// Rust-only: using namespace std::prelude::rust_2018;"));
+        assert!(!out.contains("\nusing namespace std::prelude::rust_2018;"));
     }
 
     #[test]

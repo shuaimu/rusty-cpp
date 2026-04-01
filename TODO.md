@@ -275,3 +275,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Add unit tests: using std::io skipped, range().collect() handled
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] End-to-end: transpile either tests, compile with g++, run, and get same output as cargo test — zero manual edits
+        - [x] *done* Leaf 1: Skip Rust prelude imports from expanded output (`std::prelude::rust_2018`) so transpiled C++ does not emit invalid `using namespace std::prelude::...`
+        - [ ] Leaf 2: Add an automated parity harness command/script for `either` (`cargo test` baseline + transpile + C++ build/run) with no manual editing steps
+        - [ ] Leaf 3: Fix top compile blockers surfaced by harness in generated expanded output (prioritize syntactic invalid C++ emissions before semantic parity)
+        - [ ] Leaf 4: Normalize remaining behavior mismatches so C++ test output matches Rust `cargo test` output
+        - [ ] Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
