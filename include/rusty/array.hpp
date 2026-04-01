@@ -5,6 +5,10 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+#include <rusty/vec.hpp>
 
 namespace rusty {
 
@@ -13,6 +17,18 @@ namespace rusty {
 template<typename T>
 std::vector<T> array_repeat(T value, size_t count) {
     return std::vector<T>(count, value);
+}
+
+/// Collect any iterable range into rusty::Vec<T>.
+/// Used by transpiled Rust range `.collect()` calls.
+template<typename Range>
+auto collect_range(Range&& range_like) {
+    using Elem = std::decay_t<decltype(*std::begin(range_like))>;
+    Vec<Elem> out = Vec<Elem>::new_();
+    for (auto&& item : range_like) {
+        out.push(std::forward<decltype(item)>(item));
+    }
+    return out;
 }
 
 /// Iterable range [start, end) — equivalent to Rust's `start..end`.

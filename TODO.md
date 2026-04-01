@@ -271,7 +271,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] Blocker 3: Rust iterator protocol and std::io using declarations
         - [x] *done* Skip `using std::io` (not a valid C++ namespace) — map `use std::io` to `namespace io = rusty::io`, remap concrete `std::io::*` imports to `rusty::io::*`, and skip Rust-only io trait imports
-        - [ ] Handle `.collect()` on ranges — emit as range-to-vector conversion or skip
-        - [ ] Add unit tests: using std::io skipped, range().collect() handled
-        - [ ] Update docs/rusty-cpp-transpiler.md with design notes
+        - [x] *done* Handle `.collect()` on ranges — detect zero-arg `.collect()` on range receivers and emit `rusty::collect_range(...)`
+        - [x] *done* Add unit tests: using std::io skipped, range().collect() handled
+        - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
       - [ ] End-to-end: transpile either tests, compile with g++, run, and get same output as cargo test — zero manual edits

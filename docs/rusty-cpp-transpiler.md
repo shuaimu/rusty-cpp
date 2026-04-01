@@ -1979,6 +1979,32 @@ Design rationale:
 - Remap only runtime-relevant io symbols to `rusty::io`, and skip trait-only imports that have no concrete C++ `std::io` counterpart.
 - This avoids broad namespace rewrites while still removing invalid `using std::io...` output.
 
+### 10.18 Phase 18 Progress: Blocker 3 (Leaf 2/3/4) — DONE
+
+Implemented range `.collect()` handling and completed the related test/doc leaves:
+
+- Detect method calls shaped as `(<range-expr>).collect()` with zero arguments.
+- Keep rewrite narrow to range receivers only (`Expr::Range`, including parenthesized ranges).
+- Emit `rusty::collect_range(<range-expr>)` as the C++ form.
+
+Added `rusty::collect_range` runtime helper in `include/rusty/array.hpp`:
+
+- Generic iterable-to-`rusty::Vec` conversion.
+- Element type deduced via iterator dereference (`std::decay_t<decltype(*std::begin(...))>`).
+- Preserves existing range helpers and avoids changing non-range method-call behavior.
+
+Tests added:
+
+- `(0..10).collect()` emits `rusty::collect_range(rusty::range(0, 10))`.
+- `(1..=3).collect()` emits `rusty::collect_range(rusty::range_inclusive(1, 3))`.
+- Non-range `.collect()` remains unchanged (no over-rewrite).
+
+Design rationale:
+
+- This is intentionally scoped to the TODO requirement (`collect` on ranges), not a full iterator-protocol lowering.
+- Using a dedicated runtime helper keeps transpiler code small and avoids duplicating collection logic in generated call sites.
+- This follows §11 rejected-approach guidance by avoiding broad rewrites of every `.collect()` call.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2051,3 +2077,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - C++ standard library has no `std::io` namespace, so these declarations are invalid and break compilation.
 - It conflates Rust trait imports with runtime io types; only some names map to `rusty::io` runtime support.
 - A scoped rewrite (`std::io` module alias + concrete io remap + trait-import skip) is more accurate and avoids over-broad namespace manipulation.
+
+### 11.7 Rewriting Every `.collect()` Call Uniformly
+
+**Rejected approach:** Transform all `x.collect()` calls into one generic C++ collection form regardless of receiver kind.
+
+**Why it was rejected:**
+- `collect()` in Rust depends on iterator/type context and target collection type; broad rewriting without that context is error-prone.
+- It would risk semantic regressions for non-range iterators and custom iterator adapters.
+- The current blocker only requires range `.collect()`, so a narrow receiver-shape rewrite is safer, testable, and sufficient.

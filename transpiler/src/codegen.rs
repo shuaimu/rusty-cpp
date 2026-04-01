@@ -2344,6 +2344,11 @@ impl CodeGen {
             }
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, None),
             syn::Expr::MethodCall(mc) => {
+                if mc.method == "collect" && mc.args.is_empty() && Self::is_range_expression(&mc.receiver)
+                {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("rusty::collect_range({})", receiver);
+                }
                 let method = &mc.method;
                 let args: Vec<String> = mc
                     .args
@@ -2517,6 +2522,14 @@ impl CodeGen {
                 format!("rusty::array_repeat({}, {})", val, len)
             }
             _ => format!("/* TODO: expr */"),
+        }
+    }
+
+    fn is_range_expression(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Range(_) => true,
+            syn::Expr::Paren(p) => Self::is_range_expression(&p.expr),
+            _ => false,
         }
     }
 
@@ -5399,6 +5412,27 @@ mod tests {
     fn test_range_to_inclusive() {
         let out = transpile_str("fn f() { let r = ..=10; }");
         assert!(out.contains("rusty::range_to_inclusive(10)"));
+    }
+
+    #[test]
+    fn test_collect_on_range_expression() {
+        let out = transpile_str("fn f() { let v = (0..10).collect(); }");
+        assert!(out.contains("rusty::collect_range("));
+        assert!(out.contains("rusty::range(0, 10)"));
+    }
+
+    #[test]
+    fn test_collect_on_inclusive_range_expression() {
+        let out = transpile_str("fn f() { let v = (1..=3).collect(); }");
+        assert!(out.contains("rusty::collect_range("));
+        assert!(out.contains("rusty::range_inclusive(1, 3)"));
+    }
+
+    #[test]
+    fn test_collect_on_non_range_expression_unchanged() {
+        let out = transpile_str("fn f() { it.collect(); }");
+        assert!(out.contains("it.collect()"));
+        assert!(!out.contains("rusty::collect_range(it)"));
     }
 
     // ── Phase 15 Gap 7: Array repeat + byte string ──────────────
