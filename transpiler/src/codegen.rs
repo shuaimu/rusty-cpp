@@ -2045,7 +2045,8 @@ impl CodeGen {
                     let ty = self.map_type(&pat_type.ty);
                     let qualifier = if is_mut { "" } else { "const " };
                     if let Some(init) = &local.init {
-                        let expr_str = self.emit_expr_to_string(&init.expr);
+                        let expr_str =
+                            self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
                         self.writeln(&format!("{}{} {} = {};", qualifier, ty, name, expr_str));
                     } else {
                         self.writeln(&format!("{}{} {};", qualifier, ty, name));
@@ -2057,6 +2058,108 @@ impl CodeGen {
             _ => {
                 self.writeln("// TODO: complex pattern binding");
             }
+        }
+    }
+
+    /// Emit an expression with optional expected type context from its parent.
+    /// Currently used for typed `let` initializers to guide enum variant constructor calls.
+    fn emit_expr_to_string_with_expected(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        if let Some(ty) = expected_ty {
+            if let Some(emitted) = self.try_emit_variant_constructor_with_expected(expr, ty) {
+                return emitted;
+            }
+        }
+        self.emit_expr_to_string(expr)
+    }
+
+    /// If this is a variant-constructor call like `Left(2)` and the expected type
+    /// is known (e.g., `Either<i32, i32>`), emit explicit template args:
+    /// `Left<int32_t, int32_t>(2)`.
+    fn try_emit_variant_constructor_with_expected(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: &syn::Type,
+    ) -> Option<String> {
+        let call = match expr {
+            syn::Expr::Call(call) => call,
+            _ => return None,
+        };
+
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+
+        // Constructor helpers are emitted as unqualified free functions (`Left`, `Right`).
+        if func_path.segments.len() != 1 {
+            return None;
+        }
+
+        let ctor_name = func_path.segments[0].ident.to_string();
+
+        // Keep existing special mappings intact.
+        if matches!(ctor_name.as_str(), "Some" | "Ok" | "Err") {
+            return None;
+        }
+
+        // Heuristic: enum variants are CamelCase and typically start uppercase.
+        if !ctor_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            return None;
+        }
+
+        let expected_args = self.expected_type_template_args(expected_ty)?;
+        if expected_args.is_empty() {
+            return None;
+        }
+
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+
+        Some(format!(
+            "{}<{}>({})",
+            ctor_name,
+            expected_args.join(", "),
+            args.join(", ")
+        ))
+    }
+
+    /// Extract mapped template arguments from an expected type path.
+    /// `Either<i32, i32>` -> `["int32_t", "int32_t"]`
+    fn expected_type_template_args(&self, expected_ty: &syn::Type) -> Option<Vec<String>> {
+        let tp = match expected_ty {
+            syn::Type::Path(tp) => tp,
+            _ => return None,
+        };
+
+        let last = tp.path.segments.last()?;
+        let args = match &last.arguments {
+            syn::PathArguments::AngleBracketed(args) => &args.args,
+            _ => return None,
+        };
+
+        let type_args: Vec<String> = args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                _ => None,
+            })
+            .collect();
+
+        if type_args.is_empty() {
+            None
+        } else {
+            Some(type_args)
         }
     }
 
@@ -5223,5 +5326,41 @@ mod tests {
         let out = transpile_str("fn f<T>(x: <T as Iterator>::Item) {}");
         assert!(out.contains("T::Item"));
         assert!(!out.contains("<T as"));
+    }
+
+    // ── Phase 18 Blocker 1: typed-let context propagation ──────
+
+    #[test]
+    fn test_typed_let_variant_constructor_left_gets_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() { let e: Either<i32, i32> = Left(2); }
+        "#,
+        );
+        assert!(out.contains("const Either<int32_t, int32_t> e = Left<int32_t, int32_t>(2);"));
+    }
+
+    #[test]
+    fn test_typed_let_variant_constructor_right_gets_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() { let e: Either<i32, i32> = Right(3); }
+        "#,
+        );
+        assert!(out.contains("const Either<int32_t, int32_t> e = Right<int32_t, int32_t>(3);"));
+    }
+
+    #[test]
+    fn test_untyped_let_variant_constructor_unchanged() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() { let e = Left(2); }
+        "#,
+        );
+        assert!(out.contains("const auto e = Left(2);"));
+        assert!(!out.contains("const auto e = Left<int32_t, int32_t>(2);"));
     }
 }

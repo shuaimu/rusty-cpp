@@ -258,7 +258,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* End-to-end: all 7 of either's #[test] functions pass in C++ with same results as cargo test (hand-written)
     - [ ] Phase 18: Fully automatic test generation — transpiled tests compile without manual edits
       - [ ] Blocker 1: Type context propagation for variant constructors
-        - [ ] In `emit_local`, when `let` has a type annotation (e.g., `let e: Either<i32, i32> = Left(2)`), pass the type to the initializer expression emitter
+        - [x] *done* In `emit_local`, when `let` has a type annotation (e.g., `let e: Either<i32, i32> = Left(2)`), pass the type to the initializer expression emitter
         - [ ] In `emit_expr_to_string` for `Expr::Call`, when calling a variant constructor and expected type is known, emit explicit template args
         - [ ] Handle assignment context: `e = Right(2)` where `e` is typed — infer template args from target variable type
         - [ ] Add unit tests: typed let with variant constructor, untyped let (should still work via auto), assignment to typed var

@@ -1833,6 +1833,25 @@ All 5 steps completed:
 
 **rusty::array_repeat:** Added `include/rusty/array.hpp` with `array_repeat(val, count)` (returns `std::vector<T>`) and range types (`range`, `range_inclusive`, `range_from`, `range_to`, `range_full`).
 
+### 10.11 Phase 18 Progress: Blocker 1 (Leaf 1) — DONE
+
+Implemented typed-let type-context propagation in `emit_local`:
+
+- `let e: Either<i32, i32> = Left(2)` now routes initializer emission through `emit_expr_to_string_with_expected(..., Some(type))`.
+- Added a narrow expected-type hook for constructor-like calls so typed-let initializers can emit explicit template args (`Left<int32_t, int32_t>(2)`).
+- Scope is intentionally local to typed-let initialization; broader call-site propagation remains tracked by the next Phase 18 leaf tasks.
+
+Design rationale:
+
+- This keeps transpilation deterministic and syntax-directed, without adding a global inference pass yet.
+- It aligns with §11 rejected approaches by improving generated C++ directly (no FFI fallback, no runtime indirection).
+
+Tests added:
+
+- Typed let + `Left(...)` emits explicit template args.
+- Typed let + `Right(...)` emits explicit template args.
+- Untyped let remains unchanged (`auto` + no explicit template args).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
