@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use quote::ToTokens;
 use syn;
 
@@ -24,6 +24,9 @@ pub struct CodeGen {
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     current_struct: Option<String>,
+    /// Stack of in-scope generic type parameter names.
+    /// Used for dependent-type emission (`typename T::Assoc`).
+    type_param_scopes: Vec<HashSet<String>>,
     /// Set of variable names that are reassigned in the current block.
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
@@ -50,6 +53,7 @@ impl CodeGen {
             impl_blocks: HashMap::new(),
             operator_renames: HashMap::new(),
             current_struct: None,
+            type_param_scopes: Vec::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             module_name: None,
@@ -215,6 +219,15 @@ impl CodeGen {
 
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     for impl_item in &impl_block.items {
+                        if op_name.is_some() {
+                            if let syn::ImplItem::Type(assoc) = impl_item {
+                                // Operator traits use `type Output = ...`, but merged C++ methods
+                                // don't require this alias and duplicate aliases cause conflicts.
+                                if assoc.ident == "Output" {
+                                    continue;
+                                }
+                            }
+                        }
                         if let (Some(op), syn::ImplItem::Fn(method)) = (&op_name, impl_item) {
                             let method_name = method.sig.ident.to_string();
                             self.operator_renames
@@ -341,9 +354,10 @@ impl CodeGen {
         }
 
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
+        let is_async = f.sig.asyncness.is_some();
+        self.push_type_param_scope(&f.sig.generics);
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
-        let is_async = f.sig.asyncness.is_some();
 
         // Wrap return type in Task<> for async functions
         let return_type = if is_async {
@@ -362,6 +376,7 @@ impl CodeGen {
             self.emit_block(&f.block);
             self.indent -= 1;
             self.writeln("}");
+            self.pop_type_param_scope();
             return;
         }
 
@@ -392,6 +407,7 @@ impl CodeGen {
 
         self.indent -= 1;
         self.writeln("}");
+        self.pop_type_param_scope();
     }
 
     fn emit_foreign_mod(&mut self, fm: &syn::ItemForeignMod) {
@@ -423,6 +439,7 @@ impl CodeGen {
         self.emit_doc_comments(&s.attrs);
 
         self.emit_template_prefix(&s.generics);
+        self.push_type_param_scope(&s.generics);
         let export_prefix = if self.is_exported(&s.vis) { "export " } else { "" };
         self.writeln(&format!("{}struct {} {{", export_prefix, name));
         self.indent += 1;
@@ -517,6 +534,7 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("};");
         }
+        self.pop_type_param_scope();
     }
 
     /// Extract derive trait names from attributes.
@@ -542,6 +560,7 @@ impl CodeGen {
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
+        self.push_type_param_scope(&e.generics);
 
         // Collect type parameters (skip lifetimes)
         let type_params: Vec<String> = e.generics.params.iter().filter_map(|p| {
@@ -720,6 +739,7 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("};");
         }
+        self.pop_type_param_scope();
     }
 
     /// Check if a variant's fields reference a given type name (for recursion detection).
@@ -1135,19 +1155,6 @@ impl CodeGen {
             }
             syn::ImplItem::Type(t) => {
                 let name = &t.ident;
-                // Skip `type Output = ...` from operator trait impls
-                if name == "Output" {
-                    if let Some(ref struct_name) = self.current_struct {
-                        let scoped_name = self.scoped_type_key(struct_name);
-                        if self
-                            .operator_renames
-                            .keys()
-                            .any(|(s, _)| s == struct_name || s == &scoped_name)
-                        {
-                            return;
-                        }
-                    }
-                }
                 let ty = self.map_type(&t.ty);
                 self.writeln(&format!("using {} = {};", name, ty));
             }
@@ -1159,6 +1166,7 @@ impl CodeGen {
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
+        self.push_type_param_scope(&method.sig.generics);
 
         // Check if this method is an operator trait impl (renamed)
         let name = if let Some(ref struct_name) = self.current_struct {
@@ -1237,6 +1245,7 @@ impl CodeGen {
         self.emit_block(&method.block);
         self.indent -= 1;
         self.writeln("}");
+        self.pop_type_param_scope();
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
@@ -2766,19 +2775,26 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 // Handle qualified self types: <T as Trait>::Assoc → T::Assoc
                 if let Some(qself) = &tp.qself {
-                    let self_type = self.map_type(&qself.ty);
+                    let self_type = self.normalize_qself_base_for_assoc(&self.map_type(&qself.ty));
                     // Get the path segments after the `as Trait` part
                     let assoc_segments: Vec<String> = tp.path.segments.iter()
                         .skip(qself.position)
                         .map(|s| s.ident.to_string())
                         .collect();
                     if !assoc_segments.is_empty() {
-                        return format!("{}::{}", self_type, assoc_segments.join("::"));
+                        return self.maybe_prefix_typename_for_dependent_path(format!(
+                            "{}::{}",
+                            self_type,
+                            assoc_segments.join("::")
+                        ));
                     }
                     return self_type;
                 }
 
-                let path_str = self.emit_path_to_string(&tp.path);
+                let mut path_str = self.emit_path_to_string(&tp.path);
+                if self.current_struct.is_some() && path_str.starts_with("Self::") {
+                    path_str = path_str.trim_start_matches("Self::").to_string();
+                }
 
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or std::move_only_function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
@@ -2846,7 +2862,7 @@ impl CodeGen {
 
                         if !type_args.is_empty() {
                             // Re-map the base without the args we already processed
-                            let base = {
+                            let mut base = {
                                 let segs: Vec<String> = tp
                                     .path
                                     .segments
@@ -2864,11 +2880,21 @@ impl CodeGen {
                                     joined
                                 }
                             };
-                            return format!("{}<{}>", base, type_args.join(", "));
+                            if self.current_struct.is_some() && base.starts_with("Self::") {
+                                base = base.trim_start_matches("Self::").to_string();
+                            }
+                            return self.maybe_prefix_typename_for_dependent_path(format!(
+                                "{}<{}>",
+                                base,
+                                type_args.join(", ")
+                            ));
                         }
                     }
                 }
 
+                if path_str.contains("::") {
+                    return self.maybe_prefix_typename_for_dependent_path(path_str);
+                }
                 path_str
             }
             syn::Type::Reference(r) => {
@@ -3121,6 +3147,7 @@ impl CodeGen {
                 // Multi-statement body
                 let mut inner = CodeGen::new_();
                 inner.current_struct = self.current_struct.clone();
+                inner.type_param_scopes = self.type_param_scopes.clone();
                 inner.module_stack = self.module_stack.clone();
                 inner.indent = 0;
                 inner.emit_block(&block.block);
@@ -3228,6 +3255,7 @@ impl CodeGen {
             impl_blocks: HashMap::new(),
             operator_renames: HashMap::new(),
             current_struct: None,
+            type_param_scopes: Vec::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             module_name: None,
@@ -3365,6 +3393,50 @@ impl CodeGen {
             syn::Expr::Block(block) => self.block_single_expr(&block.block),
             _ => Some(self.emit_expr_to_string(expr)),
         }
+    }
+
+    fn push_type_param_scope(&mut self, generics: &syn::Generics) {
+        let mut scope = HashSet::new();
+        for param in &generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                scope.insert(tp.ident.to_string());
+            }
+        }
+        self.type_param_scopes.push(scope);
+    }
+
+    fn pop_type_param_scope(&mut self) {
+        self.type_param_scopes.pop();
+    }
+
+    fn is_type_param_in_scope(&self, name: &str) -> bool {
+        self.type_param_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn normalize_qself_base_for_assoc(&self, self_type: &str) -> String {
+        let mut base = self_type.trim().to_string();
+        while let Some(stripped) = base.strip_prefix("const ") {
+            base = stripped.trim().to_string();
+        }
+        while base.ends_with('&') || base.ends_with('*') {
+            base.pop();
+            base = base.trim_end().to_string();
+        }
+        base
+    }
+
+    fn maybe_prefix_typename_for_dependent_path(&self, path: String) -> String {
+        if path.starts_with("typename ") {
+            return path;
+        }
+        let first = path.split("::").next().unwrap_or_default().trim();
+        if first == "Self" || self.is_type_param_in_scope(first) {
+            return format!("typename {}", path);
+        }
+        path
     }
 
     /// Emit a `template<typename T, typename U, ...>` prefix if the generics
@@ -5123,6 +5195,52 @@ mod tests {
         assert!(!out.contains("namespace intrinsics {"));
         assert!(!out.contains("namespace panicking {"));
         assert!(!out.contains("namespace pin {"));
+    }
+
+    #[test]
+    fn test_leaf43_dependent_assoc_type_prefixed_with_typename() {
+        let out = transpile_str("fn f<L, R>(x: Either<L::IntoIter, R::IntoIter>) {}");
+        assert!(out.contains("Either<typename L::IntoIter, typename R::IntoIter> x"));
+    }
+
+    #[test]
+    fn test_leaf43_qself_ref_assoc_type_normalized() {
+        let out = transpile_str(
+            "fn f<L>(x: <&L as IntoIterator>::IntoIter, y: <&mut L as IntoIterator>::IntoIter) {}",
+        );
+        assert!(out.contains("typename L::IntoIter x"));
+        assert!(out.contains("typename L::IntoIter y"));
+        assert!(!out.contains("const L&::IntoIter"));
+        assert!(!out.contains("L&::IntoIter"));
+    }
+
+    #[test]
+    fn test_leaf43_self_assoc_type_stripped_in_struct_scope() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo {
+                type Output = i32;
+                fn poll(&self) -> Self::Output { 0 }
+            }
+        "#,
+        );
+        assert!(out.contains("using Output = int32_t;"));
+        assert!(out.contains("Output poll() const"));
+        assert!(!out.contains("Self::Output"));
+    }
+
+    #[test]
+    fn test_leaf43_assoc_alias_uses_typename() {
+        let out = transpile_str(
+            r#"
+            struct Foo<L> { inner: L }
+            impl<L> Foo<L> {
+                type Iter = L::IntoIter;
+            }
+        "#,
+        );
+        assert!(out.contains("using Iter = typename L::IntoIter;"));
     }
 
     #[test]

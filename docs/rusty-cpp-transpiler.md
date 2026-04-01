@@ -2241,6 +2241,38 @@ Verification:
   - prior unresolved-name blockers for `core::*`, `Pin`, `std::path::*`, `std::ffi::*` are removed from the top error cluster;
   - next blockers now align with later leaves (`Leaf 4.3+`: dependent/associated types, export/re-export lowering, impl duplicate methods, placeholder lowering).
 
+### 10.27 Phase 18 Progress: End-to-End (Leaf 4.3) — DONE
+
+Leaf 4.3 fixed dependent/associated-type emission forms so generated signatures and aliases use C++-legal dependent names.
+
+Changes:
+
+- Added generic type-parameter scope tracking in `CodeGen` so dependent names can be detected precisely (instead of guessing from path shape).
+- Updated `map_type` for associated/dependent paths:
+  - `L::IntoIter` / `R::IntoIter` now emit as `typename L::IntoIter` / `typename R::IntoIter` when `L`/`R` are in scope generic type parameters.
+  - Qualified-self associated projections normalize reference-qualified self types:
+    - `<&L as IntoIterator>::IntoIter` and `<&mut L as IntoIterator>::IntoIter`
+    - now emit `typename L::IntoIter` (no invalid `const L&::IntoIter` / `L&::IntoIter` forms).
+  - `Self::Output` in struct/enum method scope is lowered to `Output` (member alias form) instead of unresolved `Self::Output`.
+- Kept operator-trait `type Output` suppression behavior (existing tests) while preserving non-operator associated type aliases:
+  - moved suppression to impl-collection time for operator-trait impl blocks only.
+
+Regression tests added:
+
+- `test_leaf43_dependent_assoc_type_prefixed_with_typename`
+- `test_leaf43_qself_ref_assoc_type_normalized`
+- `test_leaf43_self_assoc_type_stripped_in_struct_scope`
+- `test_leaf43_assoc_alias_uses_typename`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+- Re-ran parity harness build stage:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf43-post2.ZVXTdR --stop-after build`
+  - prior dependent-type syntax diagnostics are removed (no `use 'typename L::IntoIter'` errors; no `const L&::IntoIter` forms; `Self::Output` rewritten);
+  - next blockers remain aligned with later leaves (`Leaf 4.4+`: nested export/re-export lowering, impl merge conflicts/duplicates, placeholder match lowering, unresolved specialized generic names).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2394,3 +2426,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Many expanded runtime paths have no C++ `std::*` equivalent (`core::intrinsics`, `core::panicking`, Rust `fmt` APIs), so global rewriting still emits invalid or unresolved symbols.
 - It mixes valid type mappings with invalid runtime call mappings and hides which names need guarded fallbacks.
 - Targeted lowering to explicit `rusty::*` fallbacks plus conditional helper emission is safer, testable, and keeps failure scope localized for later semantic leaves.
+
+### 11.16 Unconditional `typename` Prefixing for All `a::b` Type Paths
+
+**Rejected approach:** Prefix every multi-segment type path with `typename` (`typename std::vector<int>`, `typename rusty::Result<...>`, etc.) to “fix” dependent-type errors quickly.
+
+**Why it was rejected:**
+- `typename` is only valid for dependent names; applying it to ordinary namespace/type paths is invalid and introduces new compile errors.
+- It obscures actual dependency context and makes emitted code harder to reason about.
+- Scope-aware detection (generic-type-parameter tracking + qself normalization) provides correct `typename` insertion only where required and avoids widespread regressions.
