@@ -212,12 +212,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* `Item::Macro` → macro_rules! emits comment, unnamed macros emit via emit_macro_stmt
         - [x] *done* Add unit tests for ExternCrate and top-level Macro items
         - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 4 to mark as done
-      - [ ] Gap 5: Nested function definitions → convert to lambdas
-        - [ ] In `emit_stmt`, detect `Stmt::Item(Item::Fn(...))` inside a function body
-        - [ ] Emit as `const auto fn_name = [&](params) -> ret { body };` instead of nested function
-        - [ ] Preserve original name so call sites work unchanged
-        - [ ] Add unit tests: nested fn called, nested fn with params/return type, nested fn with captures
-        - [ ] Update docs/rusty-cpp-transpiler.md §10.7 Gap 5 to mark as done
+      - [x] *done* Gap 5: Nested function definitions → convert to lambdas
+        - [x] *done* In `emit_stmt`, detect `Stmt::Item(Item::Fn(...))` and call `emit_nested_function`
+        - [x] *done* Emit as `const auto fn_name = [&](params) -> ret { body };`
+        - [x] *done* Preserve original name so call sites work unchanged
+        - [x] *done* Add unit tests: nested fn with params/return, void, multiple, top-level unchanged
+        - [x] *done* Update docs/rusty-cpp-transpiler.md §10.7 Gap 5 to mark as done
       - [ ] Gap 6: Slice/range syntax — open ranges and index-with-range
         - [ ] Handle `Expr::Range` with missing start (e.g., `..len`) → `rusty::range(0, len)`
         - [ ] Handle `Expr::Range` with missing end (e.g., `start..`) → `rusty::range_from(start)`

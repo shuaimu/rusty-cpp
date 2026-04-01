@@ -213,6 +213,29 @@ impl CodeGen {
         })
     }
 
+    /// Emit a nested function definition as a C++ lambda.
+    /// `fn foo(x: i32) -> i32 { x + 1 }` → `const auto foo = [&](int32_t x) -> int32_t { return x + 1; };`
+    fn emit_nested_function(&mut self, f: &syn::ItemFn) {
+        let name = escape_cpp_keyword(&f.sig.ident.to_string());
+        let return_type = self.map_return_type(&f.sig.output);
+        let params = self.map_fn_params(&f.sig.inputs);
+
+        let ret_annotation = if return_type == "void" {
+            String::new()
+        } else {
+            format!(" -> {}", return_type)
+        };
+
+        self.writeln(&format!(
+            "const auto {} = [&]({}){} {{",
+            name, params, ret_annotation
+        ));
+        self.indent += 1;
+        self.emit_block(&f.block);
+        self.indent -= 1;
+        self.writeln("};");
+    }
+
     fn emit_function(&mut self, f: &syn::ItemFn) {
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
@@ -1050,7 +1073,14 @@ impl CodeGen {
                     self.writeln(&format!("{};", expr_str));
                 }
             }
-            syn::Stmt::Item(item) => self.emit_item(item),
+            syn::Stmt::Item(item) => {
+                // Nested function definitions → emit as lambda (C++ doesn't allow nested fns)
+                if let syn::Item::Fn(f) = item {
+                    self.emit_nested_function(f);
+                } else {
+                    self.emit_item(item);
+                }
+            }
             syn::Stmt::Macro(stmt_macro) => {
                 self.emit_macro_stmt(&stmt_macro.mac);
             }
@@ -4750,5 +4780,37 @@ mod tests {
         );
         assert!(out.contains("// macro_rules! my_macro"));
         assert!(!out.contains("// TODO: unhandled"));
+    }
+
+    // ── Phase 15 Gap 5: Nested functions → lambdas ──────────────
+
+    #[test]
+    fn test_nested_fn_to_lambda() {
+        let out = transpile_str("fn outer() { fn inner(x: i32) -> i32 { x + 1 } inner(1); }");
+        assert!(out.contains("const auto inner = [&](int32_t x) -> int32_t {"));
+        assert!(out.contains("return x + 1;"));
+        assert!(out.contains("inner(1);"));
+    }
+
+    #[test]
+    fn test_nested_fn_void() {
+        let out = transpile_str("fn outer() { fn helper() { do_it(); } helper(); }");
+        assert!(out.contains("const auto helper = [&]() {"));
+        assert!(!out.contains("-> void"));
+    }
+
+    #[test]
+    fn test_nested_fn_multiple() {
+        let out = transpile_str("fn outer() { fn a() {} fn b() {} a(); b(); }");
+        assert!(out.contains("const auto a = [&]()"));
+        assert!(out.contains("const auto b = [&]()"));
+    }
+
+    #[test]
+    fn test_nested_fn_not_at_toplevel() {
+        // Top-level functions should NOT be lambdas
+        let out = transpile_str("fn top_level() {}");
+        assert!(out.contains("void top_level()"));
+        assert!(!out.contains("const auto top_level"));
     }
 }

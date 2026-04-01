@@ -1604,20 +1604,11 @@ using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
 
 **Estimated effort:** ~20 LOC.
 
-### Gap 8: Nested Function Definitions
+### Gap 8: Nested Function Definitions — FIXED ✅
 
-**Problem:** Rust allows defining functions inside other functions. The transpiler emits them as nested C++ functions, which is invalid (C++ doesn't allow nested function definitions).
+**Problem:** Rust allows `fn` inside `fn`; C++ doesn't allow nested function definitions.
 
-**Current output (wrong):**
-```cpp
-TEST_CASE("macros") {
-    Either<uint32_t, uint32_t> a() { ... }  // nested fn — invalid C++
-}
-```
-
-**Fix:** Either hoist nested functions to module scope (with a unique name), or convert them to lambdas.
-
-**Estimated effort:** ~40 LOC.
+**Fix:** `emit_stmt` detects `Stmt::Item(Item::Fn(...))` and calls `emit_nested_function` which emits a lambda: `const auto name = [&](params) -> ret { body };`. Call sites work unchanged since the lambda is assigned to the same name.
 
 ### Priority Order for Fixes
 
@@ -1627,7 +1618,7 @@ TEST_CASE("macros") {
 | 2 | Gap 3: Group use imports | ~~Invalid C++ syntax~~ **FIXED** | ~30 LOC |
 | 3 | Gap 2: `core::` mapping | ~~Missing path~~ **FIXED** | ~5 LOC |
 | 4 | Gap 4: Unhandled item kinds | ~~Missing code~~ **FIXED** | ~20 LOC |
-| 5 | Gap 8: Nested functions | Invalid C++ | ~40 LOC |
+| 5 | Gap 8: Nested functions | ~~Invalid C++~~ **FIXED** | ~40 LOC |
 | 6 | Gap 6: Slice/range syntax | Missing expressions | ~30 LOC |
 | 7 | Gap 7: Array literals | Missing expressions | ~20 LOC |
 | 8 | Gap 5: Self in traits | Cosmetic | ~10 LOC |
