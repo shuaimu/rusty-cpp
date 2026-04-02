@@ -10,6 +10,18 @@
 #include <vector>
 #include <chrono>
 #include <iostream>
+#include <string>
+
+struct TestMessage {
+    std::string text;
+};
+
+namespace rusty {
+template<>
+struct is_explicitly_send<TestMessage> : std::true_type {};
+template<>
+struct is_send<TestMessage> : std::true_type {};
+}  // namespace rusty
 
 // Test 1: Basic send and receive
 void test_basic_send_receive() {
@@ -267,18 +279,18 @@ void test_stress() {
 void test_string_messages() {
     std::cout << "Test 10: String messages... ";
 
-    auto [sender, receiver] = rusty::sync::mpsc::channel<const char*>();
+    auto [sender, receiver] = rusty::sync::mpsc::channel<TestMessage>();
 
-    sender.send("Hello");
-    sender.send("from");
-    sender.send("channel");
+    sender.send(TestMessage{"Hello"});
+    sender.send(TestMessage{"from"});
+    sender.send(TestMessage{"channel"});
 
     const char* expected[] = {"Hello", "from", "channel"};
     for (int i = 0; i < 3; i++) {
         auto result = receiver.recv();
         assert(result.is_ok());
-        // Note: comparing string literals by pointer is OK here
-        // In real code, use strcmp
+        auto msg = result.unwrap();
+        assert(msg.text == expected[i]);
     }
 
     std::cout << "PASS\n";

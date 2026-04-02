@@ -87,13 +87,14 @@ void test_option_assignment() {
     {
         auto some1 = Some(42);
         auto some2 = Some(100);
-        
-        some2 = some1;  // Assignment
+
+        // Option is move-only; use explicit clone when copy semantics are needed.
+        auto some1_clone = some1.clone();
+        some2 = std::move(some1_clone);
         assert(some2.is_some());
         assert(some2.unwrap() == 42);
-        
-        Option<int> none(None);
-        some2 = none;  // Assign None
+
+        some2 = Option<int>(None);  // Assign None
         assert(some2.is_none());
     }
     printf("PASS\n");

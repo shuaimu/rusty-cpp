@@ -3561,6 +3561,65 @@ Design rationale:
   - no broad/global constructor rewrite,
   - no blanket control-flow/lambda return coercion across unrelated expressions.
 
+### 10.11.28 Leaf 4.28: Iterator method-shape unblock for expanded tests
+
+Problem:
+
+- After Leaf 4.27, expanded runnable tests reached the next deterministic blocker in `iter()`:
+  - `iter.next()` / `iter.count()` on `Either<rusty::range<int32_t>, rusty::range_from<int32_t>>`.
+- Two concrete gaps were present:
+  - `Iterator` impl methods for `Either` were not reliably merged when defined in inline module scope and imported via `use super::Either`.
+  - `rusty::range` / `rusty::range_from` did not expose Rust-iterator-style `.next()` / `.count()` methods used by generated `Either::next()` / `Either::count()` bodies.
+
+Execution plan:
+
+1. Keep impl-merge and mutable-visitor fixes scoped to the `Either` iterator path (`next`/`count`) without broad pattern/lambda rewrites.
+2. Add minimal runtime iterator-shape helpers to `rusty` range types needed by instantiated expanded tests.
+3. Add focused transpiler and C++ runtime regressions, then re-probe expanded-tests compile to capture the next blocker family.
+
+Implementation:
+
+- In transpiler codegen:
+  - Collected top-level declared item names before impl collection and used that during impl target qualification so nested `impl Iterator for Either<...>` merges into top-level `Either` instead of `iterator::Either`.
+  - Made `std::visit` lambda parameter constness pattern-aware for `ref mut` arm bindings, so generated `next()` visitors can call mutating `inner.next()`.
+- In runtime helpers (`include/rusty/array.hpp`):
+  - Added `range<T>::next()` returning `std::optional<T>` and `range<T>::count()` for remaining-length count.
+  - Added `range_from<T>::next()` and `range_from<T>::count()` (`size_t` max for unbounded range shape).
+
+Regression tests added:
+
+- Transpiler:
+  - `codegen::tests::test_leaf428_inline_module_impl_for_imported_top_level_type_merges_into_top_level_type`
+  - `codegen::tests::test_leaf428_iterator_trait_impl_on_imported_top_level_either_emits_next_and_count`
+  - `codegen::tests::test_leaf428_ref_mut_pattern_binding_emits_mutable_reference`
+- Runtime C++:
+  - `tests/rusty_array_test.cpp` (`test_range_next_and_count`, `test_range_from_next_and_count_shape`)
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf428 -- --nocapture`
+- `cmake -S . -B build-tests`
+- `cmake --build build-tests --target rusty_array_test.out`
+- `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+- Expanded-tests compile re-probe:
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf428.cppm -o /tmp/either-expanded-tests-leaf428.o`
+
+Re-probe result:
+
+- Previous iterator blocker family is removed:
+  - no `Either<range, range_from>::next()` errors for missing `.next()`/`.count()`.
+- Next deterministic blockers now start in seek/read_write io lowering:
+  - unresolved `Cursor` template argument/context shape,
+  - `range_full`-based vector indexing/slice lowering,
+  - `buf.len()` and related read/write assertion tuple lowering.
+
+Design rationale:
+
+- Kept changes tightly scoped to the first deterministic iterator blocker family.
+- Explicitly avoided wrong approaches from §11:
+  - no broad suppression of generated iterator methods,
+  - no global rewrite of member calls or range/slice expressions unrelated to the failing instantiated path.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

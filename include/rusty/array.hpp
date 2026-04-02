@@ -8,6 +8,8 @@
 #include <iterator>
 #include <type_traits>
 #include <utility>
+#include <optional>
+#include <limits>
 #include <rusty/vec.hpp>
 
 namespace rusty {
@@ -47,6 +49,27 @@ public:
     iterator begin() const { return {start_}; }
     iterator end() const { return {end_}; }
 
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    std::optional<T> next() {
+        if (start_ == end_) {
+            return std::nullopt;
+        }
+        T current = start_;
+        ++start_;
+        return current;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    size_t count() const {
+        T current = start_;
+        size_t n = 0;
+        while (current != end_) {
+            ++current;
+            ++n;
+        }
+        return n;
+    }
+
 private:
     T start_, end_;
 };
@@ -77,6 +100,19 @@ private:
 template<typename T>
 struct range_from {
     T start;
+
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    std::optional<T> next() {
+        T current = start;
+        ++start;
+        return current;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    /// `start..` is unbounded, so this mirrors an effectively-infinite count.
+    size_t count() const {
+        return std::numeric_limits<size_t>::max();
+    }
 };
 
 /// Range to end — equivalent to Rust's `..end`.

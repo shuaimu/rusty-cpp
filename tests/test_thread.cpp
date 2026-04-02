@@ -45,7 +45,7 @@ void test_spawn_void() {
 
     auto handle = thread::spawn(
         [](Arc<Mutex<bool>> flag) {
-            auto guard = flag->lock();
+            auto guard = flag->lock().unwrap();
             *guard = true;
         },
         flag
@@ -53,7 +53,7 @@ void test_spawn_void() {
 
     handle.join();
 
-    auto guard = flag->lock();
+    auto guard = flag->lock().unwrap();
     assert(*guard == true);
 
     std::cout << "PASSED\n";
@@ -68,7 +68,7 @@ void test_detach_on_drop() {
         auto handle = thread::spawn(
             [](Arc<Mutex<bool>> flag) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                auto guard = flag->lock();
+                auto guard = flag->lock().unwrap();
                 *guard = true;
             },
             flag
@@ -79,7 +79,7 @@ void test_detach_on_drop() {
     // Thread should still be running (detached)
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    auto guard = flag->lock();
+    auto guard = flag->lock().unwrap();
     assert(*guard == true);  // Thread completed
 
     std::cout << "PASSED\n";
@@ -93,7 +93,7 @@ void test_explicit_detach() {
     auto handle = thread::spawn(
         [](Arc<Mutex<bool>> flag) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            auto guard = flag->lock();
+            auto guard = flag->lock().unwrap();
             *guard = true;
         },
         flag
@@ -104,7 +104,7 @@ void test_explicit_detach() {
     // Wait for thread to finish
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    auto guard = flag->lock();
+    auto guard = flag->lock().unwrap();
     assert(*guard == true);
 
     std::cout << "PASSED\n";
@@ -164,7 +164,7 @@ void test_multiple_threads() {
     for (int i = 0; i < 5; ++i) {
         auto handle = thread::spawn(
             [](Arc<Mutex<int>> counter, int value) {
-                auto guard = counter->lock();
+                auto guard = counter->lock().unwrap();
                 *guard += value;
             },
             counter,
@@ -177,7 +177,7 @@ void test_multiple_threads() {
         h.join();
     }
 
-    auto result = counter->lock();
+    auto result = counter->lock().unwrap();
     assert(*result == 0 + 1 + 2 + 3 + 4);  // 10
 
     std::cout << "PASSED\n";
@@ -211,13 +211,13 @@ void test_scoped_with_arc_mutex() {
     thread::scope([&data](auto& s) {
         for (int i = 0; i < 10; ++i) {
             s.spawn([&data, i]() {  // Captures &Arc<Mutex<...>>
-                auto guard = data->lock();
+                auto guard = data->lock().unwrap();
                 guard->push(i);
             });
         }
     });
 
-    auto guard = data->lock();
+    auto guard = data->lock().unwrap();
     assert(guard->size() == 10);
 
     std::cout << "PASSED\n";
