@@ -4367,6 +4367,70 @@ Design rationale:
 - Kept the fixes local to the observed blocker family and existing constrained-emission architecture.
 - Avoided broad global rewrites; each change is now covered by focused regressions and a compile re-probe.
 
+### 10.11.40 Leaf 4.34: Remove constrained associated-type `Option<...>` value-position emissions
+
+Problem:
+
+- After Leaf 4.33, the first deterministic blockers were value-position associated projections in
+  expanded output, notably:
+  - `rusty::Option<IterEither::Item>(...)`
+  - related `Option<Self::Item>` constructor shaping in constrained modes.
+- These came from expression-lowering paths (not signatures) that still forced explicit
+  `rusty::Option<Inner>(...)` ctors even when associated aliases were intentionally softened/skipped.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one targeted guard in `option_ctor_inner_cpp_type`,
+  - two focused regressions,
+  - one expanded compile re-probe.
+
+Execution plan:
+
+1. Keep explicit Option ctor shaping for references/type-params where needed.
+2. In constrained modes, skip explicit Option ctor typing when the Option inner type is a dependent/current-struct associated projection.
+3. Add focused expanded-mode regressions (`None` and `Some(...)`).
+4. Re-probe expanded tests and capture the next blocker family.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Updated `option_ctor_inner_cpp_type(...)`:
+    - detect associated-projection inner types via
+      `type_contains_dependent_assoc(...) || type_references_current_struct_assoc(...)`.
+    - if `should_soften_dependent_assoc_mode()` and inner is associated-projection, return `None`
+      (no explicit `rusty::Option<Assoc>(...)` ctor typing in expression position).
+    - retain existing explicit ctor behavior for reference/type-parameter Option inners.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf434_expanded_mode_option_none_avoids_assoc_ctor_type_in_value_position`
+- `codegen::tests::test_leaf434_expanded_mode_option_some_avoids_assoc_ctor_type_in_value_position`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf434 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf434-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf434-post.rs -o /tmp/either-expanded-tests-leaf434-post.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf434-post.cppm -o /tmp/either-expanded-tests-leaf434-post.o`
+
+Re-probe result:
+
+- Previous deterministic `Option<...::Item>` blocker family is removed
+  (no `rusty::Option<IterEither::Item>(...)` emissions remain).
+- Next deterministic blockers now start at expanded error-path runtime/lowering in `error()`:
+  `std::str::from_utf8`, `"x".parse()`, and resulting nested `Result<..., Either<...>>` typing fallout.
+- Existing `as_ref`/`as_mut` ref-parity issues remain downstream after that family.
+
+Design rationale:
+
+- This keeps constrained-mode associated-type softening consistent across declarations and
+  expression value-shaping.
+- The fix is intentionally narrow: it avoids known invalid associated-projection value typing
+  without changing non-constrained Option constructor behavior.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4909,3 +4973,17 @@ wrappers/casts/stubs to silence instantiation errors.
   target leaf intent.
 - Declarations and definitions must use the same signature shape (explicit variant return type in
   both places) so lookup ordering is fixed without introducing overload ambiguity.
+
+### 11.50 Forcing Explicit `Option<AssociatedType>` Constructor Typing in Constrained Modes
+
+**Rejected approach:** Keep emitting explicit value-position constructors like
+`rusty::Option<Self::Item>(...)` / `rusty::Option<IterEither::Item>(...)` in constrained
+module/expanded-libtest output.
+
+**Why it was rejected:**
+
+- Constrained modes intentionally soften/skip associated-type declarations; forcing them back into
+  expression value-position reintroduces hard template/type parsing failures.
+- It breaks compile progress before downstream parity issues can be evaluated.
+- A mode-aware skip for associated-projection inner types preserves needed Option ctor shaping for
+  references/type-params while avoiding invalid associated-type value emissions.

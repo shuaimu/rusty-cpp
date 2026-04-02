@@ -4910,9 +4910,18 @@ impl CodeGen {
             _ => None,
         })?;
 
+        let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
+            || self.type_references_current_struct_assoc(inner_ty);
+        // In constrained modes (module/expanded libtest), associated projections
+        // like `Self::Item` are intentionally softened/skipped at declaration time.
+        // Avoid reintroducing them through explicit Option ctor typing in value position.
+        if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
+            return None;
+        }
+
         let needs_explicit_ctor = matches!(inner_ty, syn::Type::Reference(_))
             || self.type_mentions_in_scope_type_param(inner_ty)
-            || self.type_contains_dependent_assoc(inner_ty);
+            || is_dependent_assoc_inner;
         if !needs_explicit_ctor {
             return None;
         }
@@ -11727,6 +11736,42 @@ mod tests {
         assert!(out.contains("auto next("));
         assert!(!out.contains("rusty::Option<Either::Item> next("));
         assert!(!out.contains("using Item = typename L::Item;"));
+    }
+
+    #[test]
+    fn test_leaf434_expanded_mode_option_none_avoids_assoc_ctor_type_in_value_position() {
+        let out = transpile_str(
+            r#"
+            #[rustc_test_marker = "basic"]
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            trait IteratorLike { type Item; fn next(self) -> Option<Self::Item>; }
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for Either<L, R> {
+                type Item = L::Item;
+                fn next(self) -> Option<Self::Item> { None }
+            }
+        "#,
+        );
+        assert!(out.contains("return std::nullopt;"));
+        assert!(!out.contains("rusty::Option<Either::Item>(rusty::None)"));
+    }
+
+    #[test]
+    fn test_leaf434_expanded_mode_option_some_avoids_assoc_ctor_type_in_value_position() {
+        let out = transpile_str(
+            r#"
+            #[rustc_test_marker = "basic"]
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            trait IteratorLike { type Item; fn next(self) -> Option<Self::Item>; }
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for Either<L, R> {
+                type Item = L::Item;
+                fn next(self) -> Option<Self::Item> { Some(todo!()) }
+            }
+        "#,
+        );
+        assert!(out.contains("return std::make_optional("));
+        assert!(!out.contains("rusty::Option<Either::Item>("));
     }
 
     #[test]
