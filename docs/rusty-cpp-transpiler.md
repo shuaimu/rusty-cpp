@@ -2954,6 +2954,61 @@ Design rationale:
 - Checked §11 wrong-approach guidance; avoided broad symbol suppression or blanket
   unknown-macro skipping beyond targeted prior leaves.
 
+### 10.46 Phase 18 Progress: End-to-End (Leaf 4.18) — DONE
+
+Leaf 4.18 ran an expanded-tests execution/link probe past module compile and captured
+the first runtime/behavior blocker set.
+
+Scope analysis:
+
+- This leaf is small (<1000 LOC): probe execution plus TODO/docs updates only; no new
+  transpiler lowering was needed in this step.
+
+Execution plan:
+
+1. Re-generate expanded `either` tests (`cargo expand --lib --tests`).
+2. Transpile to module output and compile (`g++ -c`).
+3. Link and run an `import either;` smoke executable.
+4. Compare expanded Rust test-body presence vs transpiled C++ test-body presence.
+
+Probe commands:
+
+- `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf418.rs`
+- `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf418.rs -o /tmp/either-expanded-tests-leaf418.cppm --module-name either`
+- `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=200 -c /tmp/either-expanded-tests-leaf418.cppm -o /tmp/either-expanded-tests-leaf418.o`
+- `g++ -std=c++23 -fmodules-ts -I include /tmp/either-expanded-tests-leaf418-main.cpp /tmp/either-expanded-tests-leaf418.o -o /tmp/either-expanded-tests-leaf418-smoke`
+- `/tmp/either-expanded-tests-leaf418-smoke`
+
+Results:
+
+- Compile succeeded (`exit 0`).
+- Link succeeded (`exit 0`).
+- Smoke run succeeded (`exit 0`).
+
+First runtime/behavior blocker set captured:
+
+- Expanded Rust input still contains 7 test bodies (`basic`, `macros`, `deref`, `iter`,
+  `seek`, `read_write`, `error`) and libtest metadata.
+- Transpiled expanded-tests module currently emits none of those runnable test bodies.
+- Current link/run success is therefore a smoke-only green signal, not test-behavior
+  parity.
+
+Next leaf direction:
+
+- Preserve/emit expanded `#[test]` bodies as runnable C++ test cases and then capture
+  the first real compile/link/runtime blocker from that runnable-test path.
+
+Verification:
+
+- Full regression suite passed: `cargo test --workspace`.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first): validate first that link/run works, then isolate
+  the true parity gap (missing runnable test bodies).
+- Followed §11.31 (below): do not treat import-only smoke run success as behavioral
+  parity.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3244,3 +3299,13 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It leaves deterministic non-compilable output in frequently used `Either` return-path methods (`read`/`write`/`seek`/`deref`/`fmt` families).
 - It discards useful semantic structure that can be lowered safely from `for_both!` shape (`receiver, pattern => body`).
 - The correct approach is targeted lowering for known macro structure, with conservative fallback only when pattern parsing is unsupported.
+
+### 11.31 Treating Import-Only Smoke Success as Expanded-Test Parity
+
+**Rejected approach:** Consider expanded-tests parity achieved once transpiled module compile/link and an `import module; int main(){}` smoke run succeed.
+
+**Why it was rejected:**
+
+- It can produce a false-green parity signal when expanded Rust test bodies are still absent from emitted C++.
+- It validates only module/link viability, not test behavior equivalence.
+- The correct approach is to explicitly verify runnable test-body emission (or equivalent callable test-entry coverage) before claiming runtime parity progress.

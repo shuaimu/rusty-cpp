@@ -310,7 +310,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Leaf 4.17.2: Add expected-type context recovery for untyped variant constructors in expanded test bodies (`Left(...)` / `Right(...)` / `Ok(...)` / `Err(...)` in assertion tuples and local bindings)
             - [x] *done* Leaf 4.17.3: Replace unresolved `for_both!`-comment fallbacks in returned-expression methods (read/write/seek/deref/fmt paths) with compilable lowerings or conservative Rust-only skips
             - [x] *done* Leaf 4.17.4: Re-run expanded-tests compile probe and capture next reduced blocker set for subsequent leaf work
-          - [ ] Leaf 4.18: Run expanded-tests execution/link parity probe (beyond module compile) and capture the first runtime/behavior blocker set
+          - [x] *done* Leaf 4.18: Run expanded-tests execution/link parity probe (beyond module compile) and capture the first runtime/behavior blocker set
+          - [ ] Leaf 4.19: Preserve expanded `#[test]` functions as runnable transpiled test bodies (currently omitted), then capture the first compile/link blocker from that runnable-test path
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
