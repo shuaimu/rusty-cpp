@@ -3144,6 +3144,102 @@ Design rationale:
 - Followed §11.29 and §11.33: avoided broad global constructor/reference rewrites;
   kept fixes scoped to tuple-binding statement matches and reassigned constructor locals.
 
+### 10.49 Phase 18 Progress: End-to-End (Leaf 4.21) — DONE
+
+Leaf 4.21 addressed the first post-4.20 compile blocker family where expanded runnable
+tests instantiated `Either<int,int>` and eagerly checked unsupported associated-type
+members (`typename L::IntoIter`, `type Output = L::Output`, etc.).
+
+Scope analysis:
+
+- This leaf is small (<1000 LOC): focused `codegen.rs` updates plus regression tests.
+
+Implementation:
+
+- In module mode, return types that contain dependent associated-type projections
+  (`L::Assoc`, `Self::Assoc`, including qself-normalized forms) are softened to `auto`.
+- In module mode, dependent associated type aliases in merged impl output are skipped
+  to avoid eager invalid instantiation.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf421 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- Expanded-tests compile probe confirmed `Either<int,int>` associated-type instantiation
+  errors were removed.
+
+### 10.50 Phase 18 Progress: End-to-End (Leaf 4.22) — DONE
+
+Leaf 4.22 fixed the first post-4.21 assertion/runtime lowering blocker family in runnable
+expanded tests:
+
+- unresolved `core::panicking::assert_failed` / `core::panicking::AssertKind`;
+- unresolved `core::option::Option::None`;
+- assertion equality shape comparing `rusty::Option<T>` with `std::nullopt` /
+  `std::make_optional(...)`.
+
+Scope analysis:
+
+- This leaf is small (<1000 LOC): targeted runtime-path lowering, helper shim extension,
+  `rusty::Option` interoperability glue, and focused regressions.
+
+Execution plan:
+
+1. Lower `core::panicking` assert symbols and `core::option::Option::None` to C++/rusty
+   forms already used by runtime fallback helpers.
+2. Extend runtime fallback helper text with minimal assertion symbols so generated module
+   output compiles without Rust runtime definitions.
+3. Fix `Option` equality shape mismatch without broad assertion-body rewriting.
+4. Re-run transpiler tests, workspace tests, and expanded-tests compile probe.
+
+Implementation:
+
+- Added function-path mapping:
+  - `core::panicking::assert_failed` -> `rusty::panicking::assert_failed`.
+- Added expression-path lowering:
+  - `core::panicking::AssertKind::*` -> `rusty::panicking::AssertKind::*`;
+  - `core::option::Option::None` / `std::option::Option::None` -> `std::nullopt`;
+  - `core::option::Option::Some` / `std::option::Option::Some` -> `Some`.
+- Extended runtime fallback helper block:
+  - `rusty::panicking::AssertKind { Eq, Ne }`;
+  - `rusty::panicking::assert_failed(Args&&...)` abort shim.
+- Extended `include/rusty/option.hpp` interoperability:
+  - constructors/assignment from `std::nullopt_t` and `std::optional<T>`;
+  - equality/inequality with `std::nullopt_t` and `std::optional<T>`.
+
+Regression tests added/updated:
+
+- `types::tests::test_leaf42_runtime_function_path_mappings` (assert_failed mapping).
+- `codegen::tests::test_leaf42_runtime_function_paths_lowered` (assert paths + Option::None lowering).
+- `codegen::tests::test_runtime_fallback_helpers_emitted_when_needed` (AssertKind/assert_failed helper symbols).
+- `codegen::tests::test_leaf422_core_option_none_path_lowered`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf42 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+- Expanded-tests compile probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf422.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf422.rs -o /tmp/either-expanded-tests-leaf422.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf422.cppm -o /tmp/either-expanded-tests-leaf422.o`
+
+Re-probe result:
+
+- Previous Leaf 4.22 blocker family is removed (no `core::panicking::*` /
+  `core::option::Option::None` / `Option`-vs-`nullopt` equality errors).
+- Next deterministic blockers are:
+  - `std::make_optional(&2)` style rvalue-address emissions;
+  - malformed expanded `macros()` lowering (`Either_Left`/`Either_Right` missing template
+    args in visitor params, `return return`, unresolved `crate::...` / `core::convert::From`).
+
+Design rationale:
+
+- Followed §11.15: avoided blanket `core::` -> `std::` rewrites; added narrow runtime-path
+  lowering and helper coverage for this specific assertion family.
+- Followed §11.13: fixed one deterministic blocker family end-to-end, then re-probed to
+  capture the next reduced set.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3468,3 +3564,16 @@ temporary materialization or pointer-like emission everywhere.
   blanket rewriting would introduce avoidable churn/regression risk.
 - The immediate blocker was statement-level tuple match lowering with rvalue-address
   scrutinee elements, so a scoped fix there is safer and easier to verify.
+
+### 11.34 Rewriting Expanded Assertion Bodies Instead of Lowering Runtime Paths
+
+**Rejected approach:** Pattern-rewrite expanded `assert_eq!`/`assert_ne!`-generated `if (!lhs == rhs) { ... assert_failed(...) }` bodies into custom C++ assertions, bypassing `core::panicking::*` and `core::option::*` symbols entirely.
+
+**Why it was rejected:**
+
+- Expanded assertion bodies vary heavily across crates and generic contexts, so broad body
+  rewrites are brittle and risk semantic drift.
+- It hides genuine path-lowering gaps (`core::panicking::AssertKind`, `core::option::Option::None`)
+  that still need deterministic handling for other expanded code.
+- Narrow symbol-path lowering plus `rusty::Option` interop fixes the blocker family with
+  lower regression risk and keeps parity debugging focused on the next real blockers.

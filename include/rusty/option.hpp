@@ -1,6 +1,7 @@
 #ifndef RUSTY_OPTION_HPP
 #define RUSTY_OPTION_HPP
 
+#include <optional>
 #include <utility>
 #include <stdexcept>
 
@@ -43,8 +44,26 @@ public:
     Option() : has_value(false), dummy(0) {}
     
     Option(None_t) : has_value(false), dummy(0) {}
+
+    Option(std::nullopt_t) : has_value(false), dummy(0) {}
     
     Option(T val) : has_value(true), value(std::move(val)) {}
+
+    Option(const std::optional<T>& opt) : has_value(opt.has_value()) {
+        if (has_value) {
+            new (&value) T(*opt);
+        } else {
+            dummy = 0;
+        }
+    }
+
+    Option(std::optional<T>&& opt) : has_value(opt.has_value()) {
+        if (has_value) {
+            new (&value) T(std::move(*opt));
+        } else {
+            dummy = 0;
+        }
+    }
     
     // Copy constructor - deleted to enforce Rust-like move semantics
     // Use clone() for explicit copying
@@ -74,6 +93,32 @@ public:
                 new (&value) T(std::move(other.value));
                 other.has_value = false;
             }
+        }
+        return *this;
+    }
+
+    Option& operator=(const std::optional<T>& opt) {
+        if (has_value) {
+            value.~T();
+        }
+        has_value = opt.has_value();
+        if (has_value) {
+            new (&value) T(*opt);
+        } else {
+            dummy = 0;
+        }
+        return *this;
+    }
+
+    Option& operator=(std::optional<T>&& opt) {
+        if (has_value) {
+            value.~T();
+        }
+        has_value = opt.has_value();
+        if (has_value) {
+            new (&value) T(std::move(*opt));
+        } else {
+            dummy = 0;
         }
         return *this;
     }
@@ -490,6 +535,50 @@ bool operator==(const Option<T>& lhs, const Option<T>& rhs) {
 
 template<typename T>
 bool operator!=(const Option<T>& lhs, const Option<T>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename T>
+bool operator==(const Option<T>& lhs, std::nullopt_t) {
+    return lhs.is_none();
+}
+
+template<typename T>
+bool operator==(std::nullopt_t, const Option<T>& rhs) {
+    return rhs.is_none();
+}
+
+template<typename T>
+bool operator!=(const Option<T>& lhs, std::nullopt_t) {
+    return lhs.is_some();
+}
+
+template<typename T>
+bool operator!=(std::nullopt_t, const Option<T>& rhs) {
+    return rhs.is_some();
+}
+
+template<typename T>
+bool operator==(const Option<T>& lhs, const std::optional<T>& rhs) {
+    if (lhs.is_none() && !rhs.has_value()) return true;
+    if (lhs.is_some() && rhs.has_value()) {
+        return lhs.as_ref().unwrap() == *rhs;
+    }
+    return false;
+}
+
+template<typename T>
+bool operator==(const std::optional<T>& lhs, const Option<T>& rhs) {
+    return rhs == lhs;
+}
+
+template<typename T>
+bool operator!=(const Option<T>& lhs, const std::optional<T>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename T>
+bool operator!=(const std::optional<T>& lhs, const Option<T>& rhs) {
     return !(lhs == rhs);
 }
 

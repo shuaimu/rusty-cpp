@@ -114,6 +114,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::intrinsics::discriminant_value" => Some("rusty::intrinsics::discriminant_value"),
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
+        "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "core::fmt::Formatter::debug_tuple_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
@@ -334,6 +335,10 @@ mod tests {
         assert_eq!(
             map_function_path("core::panicking::panic_fmt"),
             Some("rusty::panicking::panic_fmt")
+        );
+        assert_eq!(
+            map_function_path("core::panicking::assert_failed"),
+            Some("rusty::panicking::assert_failed")
         );
         assert_eq!(
             map_function_path("core::hash::Hash::hash"),

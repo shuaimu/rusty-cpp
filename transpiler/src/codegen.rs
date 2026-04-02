@@ -1623,6 +1623,13 @@ impl CodeGen {
                 self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
             }
             syn::ImplItem::Type(t) => {
+                if self.module_name.is_some() && self.type_contains_dependent_assoc(&t.ty) {
+                    self.writeln(&format!(
+                        "// Rust-only dependent associated type alias skipped in module mode: {}",
+                        t.ident
+                    ));
+                    return;
+                }
                 let name = &t.ident;
                 let ty = self.map_type(&t.ty);
                 self.writeln(&format!("using {} = {};", name, ty));
@@ -1661,7 +1668,16 @@ impl CodeGen {
             escape_cpp_keyword(&method_ident)
         };
 
-        let return_type = self.map_return_type(&method.sig.output);
+        let mut return_type = self.map_return_type(&method.sig.output);
+        // In module-mode expanded output, merged trait impls can surface
+        // unconstrained associated-type returns (e.g. `L::IntoIter`, `Self::Output`)
+        // that hard-fail when instantiating concrete `Either<int,int>`.
+        // Falling back to `auto` keeps these methods lazily checked at use sites.
+        if self.module_name.is_some()
+            && self.return_type_contains_dependent_assoc(&method.sig.output)
+        {
+            return_type = "auto".to_string();
+        }
 
         // Analyze receiver to determine method kind
         let (qualifier, is_static) = match method.sig.inputs.first() {
@@ -4955,6 +4971,12 @@ impl CodeGen {
         if segments.len() == 1 && segments[0] == "None" {
             return "std::nullopt".to_string();
         }
+        if joined == "core::option::Option::None" || joined == "std::option::Option::None" {
+            return "std::nullopt".to_string();
+        }
+        if joined == "core::option::Option::Some" || joined == "std::option::Option::Some" {
+            return "Some".to_string();
+        }
 
         // Expanded either crate commonly references `IterEither` through imports.
         // Use a stable fully-qualified path so type/call sites resolve before re-exports.
@@ -4967,6 +4989,10 @@ impl CodeGen {
                 *last = escape_cpp_keyword(last);
             }
             return format!("iterator::{}", escaped.join("::"));
+        }
+
+        if let Some(kind) = joined.strip_prefix("core::panicking::AssertKind::") {
+            return format!("rusty::panicking::AssertKind::{}", kind);
         }
 
         // Map Rust Ordering enum variants to fallback ordering enum variants.
@@ -5805,6 +5831,111 @@ impl CodeGen {
         }
     }
 
+    fn return_type_contains_dependent_assoc(&self, output: &syn::ReturnType) -> bool {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return false;
+        };
+        self.type_contains_dependent_assoc(ty)
+    }
+
+    fn type_contains_dependent_assoc(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() >= 2 {
+                    let first = tp.path.segments.first().map(|s| s.ident.to_string());
+                    if first
+                        .as_ref()
+                        .is_some_and(|name| name == "Self" || self.is_type_param_in_scope(name))
+                    {
+                        return true;
+                    }
+                }
+
+                if let Some(qself) = &tp.qself {
+                    if self.type_mentions_in_scope_type_param(&qself.ty) {
+                        return true;
+                    }
+                    if self.type_contains_dependent_assoc(&qself.ty) {
+                        return true;
+                    }
+                }
+
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| {
+                            if let syn::GenericArgument::Type(inner_ty) = arg {
+                                self.type_contains_dependent_assoc(inner_ty)
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_contains_dependent_assoc(&r.elem),
+            syn::Type::Ptr(p) => self.type_contains_dependent_assoc(&p.elem),
+            syn::Type::Slice(s) => self.type_contains_dependent_assoc(&s.elem),
+            syn::Type::Array(a) => self.type_contains_dependent_assoc(&a.elem),
+            syn::Type::Paren(p) => self.type_contains_dependent_assoc(&p.elem),
+            syn::Type::Group(g) => self.type_contains_dependent_assoc(&g.elem),
+            syn::Type::Tuple(tup) => tup.elems.iter().any(|elem| self.type_contains_dependent_assoc(elem)),
+            _ => false,
+        }
+    }
+
+    fn type_mentions_in_scope_type_param(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| {
+                            let name = seg.ident.to_string();
+                            name == "Self" || self.is_type_param_in_scope(&name)
+                        })
+                {
+                    return true;
+                }
+
+                if let Some(qself) = &tp.qself {
+                    if self.type_mentions_in_scope_type_param(&qself.ty) {
+                        return true;
+                    }
+                }
+
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| {
+                            if let syn::GenericArgument::Type(inner_ty) = arg {
+                                self.type_mentions_in_scope_type_param(inner_ty)
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_mentions_in_scope_type_param(&r.elem),
+            syn::Type::Ptr(p) => self.type_mentions_in_scope_type_param(&p.elem),
+            syn::Type::Slice(s) => self.type_mentions_in_scope_type_param(&s.elem),
+            syn::Type::Array(a) => self.type_mentions_in_scope_type_param(&a.elem),
+            syn::Type::Paren(p) => self.type_mentions_in_scope_type_param(&p.elem),
+            syn::Type::Group(g) => self.type_mentions_in_scope_type_param(&g.elem),
+            syn::Type::Tuple(tup) => tup
+                .elems
+                .iter()
+                .any(|elem| self.type_mentions_in_scope_type_param(elem)),
+            _ => false,
+        }
+    }
+
     fn map_return_type(&self, output: &syn::ReturnType) -> String {
         match output {
             syn::ReturnType::Default => "void".to_string(),
@@ -6032,6 +6163,9 @@ template<typename T, typename State>\n\
 void hash(const T&, State&) {}\n\
 }\n\
 namespace panicking {\n\
+enum class AssertKind { Eq, Ne };\n\
+template<typename... Args>\n\
+[[noreturn]] inline void assert_failed(Args&&...) { std::abort(); }\n\
 template<typename... Args>\n\
 [[noreturn]] inline void panic_fmt(Args&&...) { std::abort(); }\n\
 }\n\
@@ -7722,6 +7856,8 @@ mod tests {
                 core::intrinsics::discriminant_value(x);
                 core::intrinsics::unreachable();
                 core::panicking::panic_fmt();
+                let kind = core::panicking::AssertKind::Eq;
+                core::panicking::assert_failed(kind, &x, &y, core::option::Option::None);
                 core::hash::Hash::hash(x, y);
                 core::fmt::Formatter::debug_tuple_field1_finish();
                 Pin::new_unchecked(x);
@@ -7734,14 +7870,18 @@ mod tests {
         assert!(out.contains("rusty::intrinsics::discriminant_value"));
         assert!(out.contains("rusty::intrinsics::unreachable"));
         assert!(out.contains("rusty::panicking::panic_fmt"));
+        assert!(out.contains("rusty::panicking::AssertKind::Eq"));
+        assert!(out.contains("rusty::panicking::assert_failed"));
         assert!(out.contains("rusty::hash::hash"));
         assert!(out.contains("rusty::fmt::Formatter::debug_tuple_field1_finish"));
         assert!(out.contains("rusty::pin::new_unchecked"));
         assert!(out.contains("rusty::pin::get_ref"));
         assert!(out.contains("rusty::pin::get_unchecked_mut"));
         assert!(out.contains("rusty::cmp::Ordering::Equal"));
+        assert!(out.contains("std::nullopt"));
         assert!(!out.contains("core::intrinsics::"));
         assert!(!out.contains("core::panicking::"));
+        assert!(!out.contains("core::option::Option::None"));
         assert!(!out.contains("core::hash::Hash::hash"));
     }
 
@@ -7752,6 +7892,8 @@ mod tests {
             fn f() {
                 core::intrinsics::unreachable();
                 core::panicking::panic_fmt();
+                let kind = core::panicking::AssertKind::Eq;
+                core::panicking::assert_failed(kind, &1, &2, core::option::Option::None);
                 Pin::new_unchecked(1);
             }
         "#,
@@ -7760,6 +7902,8 @@ mod tests {
         assert!(out.contains("namespace panicking {"));
         assert!(out.contains("namespace pin {"));
         assert!(out.contains("enum class Ordering { Less, Equal, Greater };"));
+        assert!(out.contains("enum class AssertKind { Eq, Ne };"));
+        assert!(out.contains("assert_failed(Args&&...)"));
     }
 
     #[test]
@@ -7768,6 +7912,13 @@ mod tests {
         assert!(!out.contains("namespace intrinsics {"));
         assert!(!out.contains("namespace panicking {"));
         assert!(!out.contains("namespace pin {"));
+    }
+
+    #[test]
+    fn test_leaf422_core_option_none_path_lowered() {
+        let out = transpile_str("fn f() { let x = core::option::Option::None; }");
+        assert!(out.contains("std::nullopt"));
+        assert!(!out.contains("core::option::Option::None"));
     }
 
     #[test]
@@ -9622,6 +9773,35 @@ mod tests {
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("const auto& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("const auto& right_val = std::get<1>(_m_tuple);"));
+    }
+
+    #[test]
+    fn test_leaf421_module_mode_dependent_assoc_signatures_are_softened() {
+        let out = transpile_str_module(
+            r#"
+            trait FutureLike { type Output; fn poll(self) -> Self::Output; }
+            trait DerefLike { type Target; fn deref(self) -> Self::Target; }
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn iter(self) -> Either<L::IntoIter, R::IntoIter> { todo!() }
+            }
+            impl<L: FutureLike, R: FutureLike<Output = L::Output>> FutureLike for Either<L, R> {
+                type Output = L::Output;
+                fn poll(self) -> Self::Output { todo!() }
+            }
+            impl<L: DerefLike, R: DerefLike<Target = L::Target>> DerefLike for Either<L, R> {
+                type Target = L::Target;
+                fn deref(self) -> Self::Target { todo!() }
+            }
+        "#,
+            "either",
+        );
+        assert!(out.contains("auto iter("));
+        assert!(!out.contains("Either<typename L::IntoIter, typename R::IntoIter> iter("));
+        assert!(out.contains("auto poll("));
+        assert!(out.contains("auto deref("));
+        assert!(!out.contains("using Output = typename L::Output;"));
+        assert!(!out.contains("using Target = typename L::Target;"));
     }
 
     #[test]
