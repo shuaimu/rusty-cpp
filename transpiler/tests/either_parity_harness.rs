@@ -73,6 +73,35 @@ fn test_either_parity_harness_dry_run_stop_after_transpile() {
 }
 
 #[test]
+fn test_either_parity_harness_dry_run_stop_after_build() {
+    let script = harness_script();
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--dry-run")
+        .arg("--stop-after")
+        .arg("build")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run parity harness");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stage 1/4: Rust baseline"));
+    assert!(stdout.contains("Stage 2/4: Transpile expanded either crate"));
+    assert!(stdout.contains("Stage 3/4: Build transpiled C++ module"));
+    assert!(stdout.contains("Stopped after stage: build"));
+    assert!(!stdout.contains("Stage 4/4: Link and run C++ smoke executable"));
+}
+
+#[test]
 fn test_either_parity_harness_rejects_unknown_flag() {
     let script = harness_script();
     let output = Command::new("bash")

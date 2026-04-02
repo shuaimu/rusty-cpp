@@ -2378,6 +2378,48 @@ Verification:
   - `no return statement in function returning non-void` / `control reaches end` diagnostics are removed from harness log;
   - next blockers are now later semantic/type-lowering issues (`Leaf 4.7` capture-and-reduce phase), not placeholder/fallthrough match lowering.
 
+### 10.31 Phase 18 Progress: End-to-End (Leaf 4.7) — DONE
+
+Leaf 4.7 re-ran the parity harness and captured the next reduced blocker set after Leaf 4.1–4.6.
+
+Capture run:
+
+- `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf47.1775093084 --stop-after build`
+
+Validation of prior leaf outcomes:
+
+- `/* TODO: expr */` is absent from the generated `either.cppm` and build log.
+- `no return statement in function returning non-void` / `control reaches end` diagnostics are absent from the build log.
+- duplicate-overload diagnostics from Leaf 4.5 remain absent.
+
+Reduced blocker families observed (normalized build log):
+
+- Generic variant pattern type emission still missing template arguments in visitor lambdas:
+  - repeated `missing template argument list after ‘Either_Left’/‘Either_Right’ ...` diagnostics.
+- Cascade unresolved lambda bindings due earlier pattern-type failures:
+  - repeated `'_v'/'_v0'/'_v1' was not declared in this scope`.
+- Generic dependent constructor call/name lookup issues in match arms:
+  - repeated `there are no arguments to 'Left'/'Right' that depend on a template parameter`.
+- Remaining unresolved type/path families in expanded output:
+  - `IterEither`/`IterEither_Left`/`IterEither_Right`, `E`, `T`, `rusty_cmp_Ordering_Equal`, `core`.
+- Remaining module-linkage export issue:
+  - `export using iterator::IterEither` does not have external linkage.
+- Remaining try-operator macro emission issue in generated iterator paths:
+  - `RUSTY_TRY` declaration/availability diagnostics in templated contexts.
+- Residual malformed switch/case placement diagnostics in some generated blocks:
+  - `case label not within a switch statement`.
+
+Test coverage for this leaf:
+
+- Added harness regression test:
+  - `test_either_parity_harness_dry_run_stop_after_build`
+  - verifies the exact parity-capture stage path (`--stop-after build`) is script-stable.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2567,3 +2609,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It emits statement-only `std::visit(...)`/`switch` bodies with no enclosing `return`, producing non-void fallthrough diagnostics.
 - It obscures expression semantics from Rust, where tail `match` is a value producer.
 - A return-context-aware approach (tail `match` lowered through expression IIFE only in value-return scopes) preserves intended Rust semantics while avoiding regressions in void-return statement matches.
+
+### 11.20 Fixing Cascade `_v` / `_v0` / `_v1` Errors Before Resolving Upstream Pattern-Type Failures
+
+**Rejected approach:** Treat repeated `_v`/`_v0`/`_v1` "not declared" diagnostics as the primary blocker and patch local lambda bodies first.
+
+**Why it was rejected:**
+- In the current parity snapshot these are mostly cascade errors from earlier lambda signature/type failures (for example missing template arguments on variant types).
+- Local patches at the binding-use sites hide root causes and create brittle, non-general fixes.
+- The correct next step is root-cause-first on upstream pattern type/templated variant emission and dependent-name resolution, then re-evaluate remaining binding diagnostics.
