@@ -3438,6 +3438,70 @@ Design rationale:
   constructor-shape rewrites, minimizing regression risk and preserving existing type-context
   behavior elsewhere.
 
+### 10.54 Phase 18 Progress: End-to-End (Leaf 4.26) — DONE
+
+Leaf 4.26 fixed the first post-4.25 malformed deref/reborrow blocker family in expanded runnable
+tests:
+
+- generated `Either::operator*`/`deref` paths emitted invalid deref shapes (`*(*this)`,
+  non-pointer deref chains, and `&*` reborrow forms that became pointer-shaped in C++).
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): scoped changes in expression lowering plus small helper
+  additions and focused regressions.
+
+Execution plan:
+
+1. Reproduce first expanded compile failure and confirm the deref root-cause cluster.
+2. Apply a narrow codegen fix for Deref/DerefMut expression lowering (no broad global rewrite).
+3. Add focused regressions for `*self`/`&**inner`/`&*value`.
+4. Re-run compile probe and capture the next deterministic blocker family.
+
+Implementation:
+
+- Added reference-aware unary deref lowering:
+  - `*self` now respects receiver reference context (avoids recursive `*(*this)` in Deref paths).
+  - `ref`/`ref mut` pattern bindings are tracked in scoped match-arm context and used by deref
+    emission.
+- Added scoped Deref-method fallback helpers in generated module runtime helpers:
+  - `rusty::deref_ref(...)`
+  - `rusty::deref_mut(...)`
+- Added reborrow collapse for `&*...` only when context indicates safe non-pointer/reference
+  semantics (typed local/path-driven), avoiding blanket global address-of stripping.
+- Updated expression-match IIFE scrutinee binding from `auto _m = ...` to `auto&& _m = ...` to
+  avoid incidental copy construction failures on non-copy payloads encountered in the deref path.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf426_deref_trait_match_uses_reference_aware_deref_lowering`
+- `codegen::tests::test_leaf426_reborrow_of_deref_typed_non_pointer_drops_address_of`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf426 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf425 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf4172 -- --nocapture`
+- Expanded-tests compile probe:
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf426-pre.rs -o /tmp/either-expanded-tests-leaf426-post.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf426-post.cppm -o /tmp/either-expanded-tests-leaf426-post.o`
+
+Re-probe result:
+
+- Previous first blocker family is removed:
+  - no first-failing `Either::operator*` diagnostics for recursive `*(*this)` or invalid
+    non-pointer deref chain emission.
+- Next deterministic blockers now start in iterator/io families:
+  - `iter()` branch return-type unification and downstream iterator method-shape errors,
+  - then seek/read_write io lowering families.
+
+Design rationale:
+
+- Kept fixes scoped to Deref/DerefMut lowering and typed reborrow contexts instead of introducing
+  a blanket global `&*`/`*` rewrite.
+- Checked §11 wrong-approach guidance and explicitly avoided broad symbol suppression or global
+  pointer/reference text rewrites.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3815,3 +3879,19 @@ return `ExpectedEnum(Left/Right(...))` globally across expression contexts.
 - It introduces broad output churn and can obscure future blocker attribution.
 - The observed mismatch was localized to tuple-binding statement assertions, so a scoped fix at
   that lowering site is safer and easier to validate.
+
+### 11.38 Blanket Global Rewriting of Reborrow/Deref Forms (`&*expr`, `*self`, `**inner`)
+
+**Rejected approach:** Apply a global text/AST rewrite that strips or rewrites all `&*expr` and
+multi-deref forms everywhere, regardless of receiver/type context.
+
+**Why it was rejected:**
+
+- Reborrow and deref shapes appear in many unrelated paths (assertion runtime calls, pointer-like
+  helpers, trait/operator impls); global rewriting risks silent semantic drift.
+- It can mask real type-flow issues by forcing syntactic compilation rather than preserving
+  context-aware lowering.
+- The safer approach is scoped lowering:
+  - receiver-aware handling for `*self`,
+  - pattern/type-context-aware handling for `&*...`,
+  - and localized fallback helpers for Deref/DerefMut-heavy expanded paths.

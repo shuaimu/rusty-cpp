@@ -63,6 +63,17 @@ pub struct CodeGen {
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
+    /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
+    /// Used to lower deref of `self` correctly (`*self` should not become `*(*this)` recursion).
+    self_receiver_ref_scopes: Vec<bool>,
+    /// Pattern bindings introduced as `ref`/`ref mut` in the current emission scope.
+    /// Used for reference-aware unary deref lowering in match/visit arms.
+    pattern_ref_bindings: Vec<HashSet<String>>,
+    /// Scope stack marking emission inside a mapped Deref trait method (`operator*`).
+    /// Used for scoped deref fallback lowering in expanded outputs.
+    deref_method_scopes: Vec<bool>,
+    /// Scope stack marking emission inside a DerefMut trait method (`deref_mut`).
+    deref_mut_method_scopes: Vec<bool>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
     /// Current inline module nesting path while emitting items.
@@ -118,6 +129,10 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            self_receiver_ref_scopes: Vec::new(),
+            pattern_ref_bindings: Vec::new(),
+            deref_method_scopes: Vec::new(),
+            deref_mut_method_scopes: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -185,6 +200,10 @@ impl CodeGen {
         self.data_enum_types.clear();
         self.struct_field_types.clear();
         self.param_bindings.clear();
+        self.self_receiver_ref_scopes.clear();
+        self.pattern_ref_bindings.clear();
+        self.deref_method_scopes.clear();
+        self.deref_mut_method_scopes.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -1667,6 +1686,8 @@ impl CodeGen {
         } else {
             escape_cpp_keyword(&method_ident)
         };
+        let is_deref_method = method_ident == "deref" && name == "operator*";
+        let is_deref_mut_method = method_ident == "deref_mut";
 
         let mut return_type = self.map_return_type(&method.sig.output);
         // In module-mode expanded output, merged trait impls can surface
@@ -1743,7 +1764,13 @@ impl CodeGen {
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
+        self.push_self_receiver_ref_scope(&method.sig.inputs);
+        self.push_deref_method_scope(is_deref_method);
+        self.push_deref_mut_method_scope(is_deref_mut_method);
         self.emit_block(&method.block);
+        self.pop_deref_mut_method_scope();
+        self.pop_deref_method_scope();
+        self.pop_self_receiver_ref_scope();
         self.pop_param_bindings();
         self.pop_return_type_hint();
         self.pop_return_value_scope();
@@ -2183,6 +2210,7 @@ impl CodeGen {
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}& _v) {{", cpp_type));
+                self.push_pattern_ref_binding_scope(&arm.pat);
 
                 if !binding_stmts.is_empty() || arm.guard.is_some() {
                     self.output.push('\n');
@@ -2203,9 +2231,11 @@ impl CodeGen {
                     }
                     self.indent -= 1;
                     self.writeln("},");
+                    self.pop_pattern_ref_binding_scope();
                 } else {
                     let body_str = self.emit_expr_to_string(&arm.body);
                     self.output.push_str(&format!(" {}; }},\n", body_str));
+                    self.pop_pattern_ref_binding_scope();
                 }
             }
             syn::Pat::Struct(ps) => {
@@ -2214,6 +2244,7 @@ impl CodeGen {
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}& _v) {{\n", cpp_type));
+                self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
 
                 // Emit field bindings
@@ -2243,6 +2274,7 @@ impl CodeGen {
 
                 self.indent -= 1;
                 self.writeln("},");
+                self.pop_pattern_ref_binding_scope();
             }
             syn::Pat::Path(pp) => {
                 // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
@@ -2250,29 +2282,35 @@ impl CodeGen {
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}&) {{\n", cpp_type));
+                self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
+                self.pop_pattern_ref_binding_scope();
             }
             syn::Pat::Wild(_) => {
                 // Wildcard: `_ =>` → [](const auto&) { ... }
                 self.write_indent();
                 self.output.push_str("[&](const auto&) {\n");
+                self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
+                self.pop_pattern_ref_binding_scope();
             }
             syn::Pat::Ident(pi) => {
                 // Catch-all binding: `x =>` → [](const auto& x) { ... }
                 let name = &pi.ident;
                 self.write_indent();
                 self.output.push_str(&format!("[&](const auto& {}) {{\n", name));
+                self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
+                self.pop_pattern_ref_binding_scope();
             }
             _ => {
                 self.writeln("// TODO: unhandled match pattern");
@@ -2495,7 +2533,7 @@ impl CodeGen {
         let (lambda_param, binding_stmt, visit_arg) =
             self.for_both_lambda_components(&binding_pat)?;
         Some(format!(
-            "[&]() {{ auto _m = {}; return std::visit(overloaded {{ [&]({}) -> decltype(auto) {{ {}return {}; }} }}, {}); }}()",
+            "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ [&]({}) -> decltype(auto) {{ {}return {}; }} }}, {}); }}()",
             receiver_cpp, lambda_param, binding_stmt, body_cpp, visit_arg
         ))
     }
@@ -2787,7 +2825,7 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
-        let mut out = format!("[&]() {{ auto _m = {}; ", scrutinee);
+        let mut out = format!("[&]() {{ auto&& _m = {}; ", scrutinee);
 
         let mut saw_runtime_pattern = false;
         for (idx, arm) in match_expr.arms.iter().enumerate() {
@@ -4305,6 +4343,163 @@ impl CodeGen {
         self.param_bindings.pop();
     }
 
+    fn push_self_receiver_ref_scope(
+        &mut self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) {
+        let is_ref = matches!(
+            inputs.first(),
+            Some(syn::FnArg::Receiver(recv)) if recv.reference.is_some()
+        );
+        self.self_receiver_ref_scopes.push(is_ref);
+    }
+
+    fn pop_self_receiver_ref_scope(&mut self) {
+        self.self_receiver_ref_scopes.pop();
+    }
+
+    fn current_self_receiver_is_reference(&self) -> bool {
+        self.self_receiver_ref_scopes
+            .last()
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn push_deref_method_scope(&mut self, enabled: bool) {
+        self.deref_method_scopes.push(enabled);
+    }
+
+    fn pop_deref_method_scope(&mut self) {
+        self.deref_method_scopes.pop();
+    }
+
+    fn in_deref_method_scope(&self) -> bool {
+        self.deref_method_scopes.last().copied().unwrap_or(false)
+    }
+
+    fn push_deref_mut_method_scope(&mut self, enabled: bool) {
+        self.deref_mut_method_scopes.push(enabled);
+    }
+
+    fn pop_deref_mut_method_scope(&mut self) {
+        self.deref_mut_method_scopes.pop();
+    }
+
+    fn in_deref_mut_method_scope(&self) -> bool {
+        self.deref_mut_method_scopes
+            .last()
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn collect_pattern_ref_binding_names(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.by_ref.is_some() {
+                    out.insert(pi.ident.to_string());
+                }
+                if let Some((_, subpat)) = &pi.subpat {
+                    self.collect_pattern_ref_binding_names(subpat, out);
+                }
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                for elem in &tuple_pat.elems {
+                    self.collect_pattern_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::TupleStruct(ts) => {
+                for elem in &ts.elems {
+                    self.collect_pattern_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::Struct(ps) => {
+                for field in &ps.fields {
+                    self.collect_pattern_ref_binding_names(&field.pat, out);
+                }
+            }
+            syn::Pat::Reference(r) => self.collect_pattern_ref_binding_names(&r.pat, out),
+            syn::Pat::Type(pt) => self.collect_pattern_ref_binding_names(&pt.pat, out),
+            syn::Pat::Paren(p) => self.collect_pattern_ref_binding_names(&p.pat, out),
+            syn::Pat::Slice(slice) => {
+                for elem in &slice.elems {
+                    self.collect_pattern_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::Or(or_pat) => {
+                for case in &or_pat.cases {
+                    self.collect_pattern_ref_binding_names(case, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_pattern_ref_binding_scope(&mut self, pat: &syn::Pat) {
+        let mut refs = HashSet::new();
+        self.collect_pattern_ref_binding_names(pat, &mut refs);
+        self.pattern_ref_bindings.push(refs);
+    }
+
+    fn pop_pattern_ref_binding_scope(&mut self) {
+        self.pattern_ref_bindings.pop();
+    }
+
+    fn is_pattern_ref_binding_in_scope(&self, name: &str) -> bool {
+        self.pattern_ref_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn is_expr_reference_like(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                if name == "self" {
+                    return self.current_self_receiver_is_reference();
+                }
+                if self.is_pattern_ref_binding_in_scope(&name) {
+                    return true;
+                }
+                self.lookup_local_binding_type(&name)
+                    .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
+            }
+            syn::Expr::Paren(p) => self.is_expr_reference_like(&p.expr),
+            syn::Expr::Group(g) => self.is_expr_reference_like(&g.expr),
+            syn::Expr::Reference(_) => true,
+            _ => false,
+        }
+    }
+
+    fn should_collapse_reborrow_of_deref_operand(&self, operand: &syn::Expr) -> bool {
+        if self.is_expr_reference_like(operand) {
+            return true;
+        }
+        match operand {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                if let Some(ty) = self.lookup_local_binding_type(&name) {
+                    !matches!(ty, syn::Type::Ptr(_))
+                } else {
+                    false
+                }
+            }
+            syn::Expr::Paren(p) => self.should_collapse_reborrow_of_deref_operand(&p.expr),
+            syn::Expr::Group(g) => self.should_collapse_reborrow_of_deref_operand(&g.expr),
+            _ => false,
+        }
+    }
+
+    fn peel_paren_group_expr<'a>(&self, mut expr: &'a syn::Expr) -> &'a syn::Expr {
+        loop {
+            match expr {
+                syn::Expr::Paren(p) => expr = &p.expr,
+                syn::Expr::Group(g) => expr = &g.expr,
+                _ => return expr,
+            }
+        }
+    }
+
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
     fn emit_expr_to_string_with_expected(
@@ -4316,6 +4511,17 @@ impl CodeGen {
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
             syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, expected_ty),
             syn::Expr::Reference(r) => {
+                let ref_inner = self.peel_paren_group_expr(&r.expr);
+                if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
+                    return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
+                }
+                if let syn::Expr::Unary(un) = ref_inner {
+                    if matches!(un.op, syn::UnOp::Deref(_))
+                        && self.should_collapse_reborrow_of_deref_operand(&un.expr)
+                    {
+                        return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
+                    }
+                }
                 let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                 format!("&{}", inner)
             }
@@ -4817,16 +5023,46 @@ impl CodeGen {
                 let right = self.emit_expr_to_string(&bin.right);
                 format!("{} {} {}", left, op, right)
             }
-            syn::Expr::Unary(un) => {
-                let operand = self.emit_expr_to_string(&un.expr);
-                match un.op {
-                    syn::UnOp::Neg(_) => format!("-{}", operand),
-                    syn::UnOp::Not(_) => format!("!{}", operand),
-                    syn::UnOp::Deref(_) => format!("*{}", operand),
-                    _ => format!("/* unknown unary */ {}", operand),
+            syn::Expr::Unary(un) => match un.op {
+                syn::UnOp::Neg(_) => {
+                    let operand = self.emit_expr_to_string(&un.expr);
+                    format!("-{}", operand)
                 }
-            }
+                syn::UnOp::Not(_) => {
+                    let operand = self.emit_expr_to_string(&un.expr);
+                    format!("!{}", operand)
+                }
+                syn::UnOp::Deref(_) => {
+                    if self.is_expr_reference_like(&un.expr) {
+                        self.emit_expr_to_string(&un.expr)
+                    } else {
+                        let operand = self.emit_expr_to_string(&un.expr);
+                        if self.in_deref_method_scope() {
+                            format!("rusty::deref_ref({})", operand)
+                        } else if self.in_deref_mut_method_scope() {
+                            format!("rusty::deref_mut({})", operand)
+                        } else {
+                            format!("*{}", operand)
+                        }
+                    }
+                }
+                _ => {
+                    let operand = self.emit_expr_to_string(&un.expr);
+                    format!("/* unknown unary */ {}", operand)
+                }
+            },
             syn::Expr::Reference(r) => {
+                let ref_inner = self.peel_paren_group_expr(&r.expr);
+                if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
+                    return self.emit_expr_to_string(ref_inner);
+                }
+                if let syn::Expr::Unary(un) = ref_inner {
+                    if matches!(un.op, syn::UnOp::Deref(_))
+                        && self.should_collapse_reborrow_of_deref_operand(&un.expr)
+                    {
+                        return self.emit_expr_to_string(ref_inner);
+                    }
+                }
                 let inner = self.emit_expr_to_string(&r.expr);
                 format!("&{}", inner)
             }
@@ -5033,7 +5269,7 @@ impl CodeGen {
             let scrutinee = self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
             // Simple switch-like match → ternary chain or IIFE with switch
             format!(
-                "[&]() {{ auto _m = {}; {} }}()",
+                "[&]() {{ auto&& _m = {}; {} }}()",
                 scrutinee,
                 self.emit_match_expr_switch(&match_expr.arms, expected_ty)
             )
@@ -5062,7 +5298,7 @@ impl CodeGen {
             let scrutinee = self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
             // Variant match → IIFE with std::visit
             format!(
-                "[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
+                "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
                 scrutinee,
                 self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
             )
@@ -5203,7 +5439,7 @@ impl CodeGen {
         };
 
         Some(format!(
-            "({{ auto _m = {}; {} _match_value; if (_m.{}()) {{ auto _mv = _m.{}(); {}_match_value = {}; }} else {{ auto _mv = _m.{}(); {}{}; }} _match_value; }})",
+            "({{ auto&& _m = {}; {} _match_value; if (_m.{}()) {{ auto _mv = _m.{}(); {}_match_value = {}; }} else {{ auto _mv = _m.{}(); {}{}; }} _match_value; }})",
             scrutinee,
             value_ty,
             success_check,
@@ -5917,6 +6153,10 @@ impl CodeGen {
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            self_receiver_ref_scopes: Vec::new(),
+            pattern_ref_bindings: Vec::new(),
+            deref_method_scopes: Vec::new(),
+            deref_mut_method_scopes: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -6517,6 +6757,8 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::path::Path",
         "rusty::ffi::",
         "rusty::cmp::Ordering",
+        "rusty::deref_ref(",
+        "rusty::deref_mut(",
         "core::cmp::",
     ];
     markers.iter().any(|m| output.contains(m))
@@ -6563,6 +6805,24 @@ constexpr T* get_unchecked_mut(T& value) {\n\
 namespace hash {\n\
 template<typename T, typename State>\n\
 void hash(const T&, State&) {}\n\
+}\n\
+template<typename T>\n\
+auto deref_ref(const T& value) {\n\
+    if constexpr (requires { value.as_str(); }) {\n\
+        return value.as_str();\n\
+    } else if constexpr (requires { *value; }) {\n\
+        return *value;\n\
+    } else {\n\
+        return value;\n\
+    }\n\
+}\n\
+template<typename T>\n\
+decltype(auto) deref_mut(T& value) {\n\
+    if constexpr (requires { *value; }) {\n\
+        return *value;\n\
+    } else {\n\
+        return (value);\n\
+    }\n\
 }\n\
 namespace panicking {\n\
 enum class AssertKind { Eq, Ne };\n\
@@ -9789,7 +10049,7 @@ mod tests {
     #[test]
     fn test_leaf46_tail_match_expr_returns_from_function() {
         let out = transpile_str("fn f(x: i32) -> i32 { match x { 1 => 10, _ => 0 } }");
-        assert!(out.contains("return [&]() { auto _m = x;"));
+        assert!(out.contains("return [&]() { auto&& _m = x;"));
         assert!(out.contains("if (_m == 1) return 10;"));
         assert!(out.contains("return 0;"));
         assert!(!out.contains("switch (x) {"));
@@ -10296,6 +10556,47 @@ mod tests {
         assert!(!out.contains(
             "auto _m1_tmp = Left<rusty::String, std::string_view>(rusty::String::from(\"foo\"));"
         ));
+    }
+
+    #[test]
+    fn test_leaf426_deref_trait_match_uses_reference_aware_deref_lowering() {
+        let out = transpile_str_module(
+            r#"
+            use std::ops::Deref;
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L: Deref, R: Deref<Target = L::Target>> Deref for Either<L, R> {
+                type Target = L::Target;
+                fn deref(&self) -> &Self::Target {
+                    match *self {
+                        Either::Left(ref inner) => &**inner,
+                        Either::Right(ref inner) => &**inner,
+                    }
+                }
+            }
+        "#,
+            "either",
+        );
+        assert!(out.contains("auto operator*() const {"));
+        assert!(out.contains("auto&& _m = (*this);"));
+        assert!(!out.contains("auto _m = *(*this);"));
+        assert!(out.contains("return rusty::deref_ref("));
+        assert!(!out.contains("&**inner"));
+    }
+
+    #[test]
+    fn test_leaf426_reborrow_of_deref_typed_non_pointer_drops_address_of() {
+        let out = transpile_str(
+            r#"
+            use std::ops::Deref;
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f(value: Either<String, &'static str>) {
+                let is_str = |_: &str| {};
+                is_str(&*value);
+            }
+        "#,
+        );
+        assert!(out.contains("is_str(*value);"));
+        assert!(!out.contains("is_str(&*value);"));
     }
 
     #[test]

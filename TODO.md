@@ -342,6 +342,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Kept scope narrow to tuple-binding match path only (no global constructor-shape rewrite), preserving existing typed-let/assignment constructor behavior
             - [x] *done* Added focused regressions for Leaf 4.25 (tuple-binding match with callable-return `Either<rusty::String, std::string_view>` and `Left(String::from(...))`)
             - [x] *done* Re-probe: previous `Either`-vs-variant assertion equality mismatch signature is removed; next deterministic first blocker is malformed deref emission in expanded `deref` path (`Either::operator*` returning invalid `*` on non-pointer payloads), followed by iterator/io families
+          - [x] *done* Leaf 4.26: Fix malformed deref/reborrow lowering in expanded `Deref` paths (`*self`, `&**inner`, `&*value`) so generated `Either::operator*` is compilable, then re-probe compile/link
+            - [x] *done* Added reference-aware unary deref lowering in codegen (`*self` on reference receivers, scoped `ref` pattern bindings) plus scoped `rusty::deref_ref`/`rusty::deref_mut` fallback helpers for Deref/DerefMut trait methods
+            - [x] *done* Collapsed reborrow-shaped `&*...` emission only when local type context indicates non-pointer/reference semantics (fixes expanded `is_str(&*value)` without broad global reference rewrites)
+            - [x] *done* Added focused regressions for Deref lowering/reborrow collapse and kept scope narrow to this blocker family
+            - [x] *done* Re-probe: previous first blocker family in expanded `Either::operator*` (`*(*this)` recursion and invalid non-pointer deref diagnostics) is gone; next deterministic blockers start at iterator/io families (`iter` branch return-type unification, then seek/read_write paths)
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
