@@ -1,5 +1,6 @@
 // Tests for rusty range helpers used by transpiled iterator lowering
 #include "../include/rusty/array.hpp"
+#include "../include/rusty/io.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -125,6 +126,18 @@ void test_span_equality_helper_shape() {
     printf("PASS\n");
 }
 
+void test_cursor_new_helper_shape() {
+    printf("test_cursor_new_helper_shape: ");
+    auto cursor = rusty::io::cursor_new(std::vector<uint8_t>{7, 8, 9});
+    uint8_t out[2] = {0, 0};
+    auto read_res = cursor.read(std::span<uint8_t>(out, 2));
+    assert(read_res.is_ok());
+    assert(read_res.unwrap() == 2);
+    assert(out[0] == 7);
+    assert(out[1] == 8);
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty range helpers ===\n");
 
@@ -133,6 +146,7 @@ int main() {
     test_slice_helpers_basic_shapes();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
+    test_cursor_new_helper_shape();
 
     printf("\nAll rusty range tests passed!\n");
     return 0;

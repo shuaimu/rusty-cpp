@@ -24,6 +24,8 @@
 #include <iostream>
 #include <sstream>
 #include <span>
+#include <type_traits>
+#include <utility>
 
 namespace rusty {
 namespace io {
@@ -262,6 +264,12 @@ private:
     T inner_;
     size_t pos_;
 };
+
+template<typename T>
+auto cursor_new(T&& inner) {
+    using Inner = std::decay_t<T>;
+    return Cursor<Inner>::new_(std::forward<T>(inner));
+}
 
 // ── Stdin / Stdout / Stderr ────────────────────────────
 

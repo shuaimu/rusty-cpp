@@ -4763,6 +4763,14 @@ impl CodeGen {
 
         let func = self.emit_expr_to_string(&call.func);
 
+        // Keep Cursor constructor lowering as a normal function call shape with
+        // template argument deduction, so generated `decltype((...))` contexts
+        // do not require an explicit `Cursor<T>::new_` specialization at call sites.
+        if func == "rusty::io::Cursor::new_" && call.args.len() == 1 {
+            let arg = self.emit_cursor_new_arg_expr(&call.args[0]);
+            return format!("rusty::io::cursor_new({})", arg);
+        }
+
         // Map Rust Option::Some(x) → std::optional{x}
         if func == "Some" && call.args.len() == 1 {
             if let Some(ref_arg) = self.emit_some_ref_constructor_arg(&call.args[0]) {
@@ -4813,6 +4821,18 @@ impl CodeGen {
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
         format!("{}({})", func, args.join(", "))
+    }
+
+    fn emit_cursor_new_arg_expr(&self, arg: &syn::Expr) -> String {
+        let peeled = self.peel_paren_group_expr(arg);
+        if let syn::Expr::Array(arr) = peeled {
+            // Expanded io tests use `Cursor::new([])`. Keep this path concrete
+            // instead of falling back to `unreachable()`.
+            if arr.elems.is_empty() {
+                return "rusty::array_repeat(static_cast<uint8_t>(0), 0)".to_string();
+            }
+        }
+        self.emit_expr_maybe_move(arg)
     }
 
     fn emit_some_ref_constructor_arg(&self, arg: &syn::Expr) -> Option<String> {
@@ -11176,7 +11196,22 @@ mod tests {
         };
         let cg = CodeGen::new();
         let out = cg.emit_call_expr_to_string(&call, None);
-        assert!(out.starts_with("rusty::io::Cursor::new_("));
+        assert!(out.starts_with("rusty::io::cursor_new("));
         assert!(!out.contains(".new("));
+    }
+
+    #[test]
+    fn test_leaf4295_cursor_new_empty_array_lowers_to_concrete_empty_buffer() {
+        let expr: syn::Expr = syn::parse_str("io::Cursor::new([])").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(
+            out,
+            "rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0))"
+        );
     }
 }

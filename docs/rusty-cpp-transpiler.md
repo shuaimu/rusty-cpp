@@ -3897,6 +3897,77 @@ Design rationale:
 - Kept the fix local to tuple-binding assertion lowering and slice-shape interop.
 - Avoided broad global reference rewriting in line with §11.33.
 
+### 10.11.33 Leaf 4.29.5: Cursor constructor type-context lowering in io paths
+
+Problem:
+
+- After Leaf 4.29.4, the first deterministic expanded io blocker was constructor type-context
+  emission around `io::Cursor::new(...)` in `seek()`:
+  - generated forms relied on `rusty::io::Cursor::new_(...)` in `decltype((...))` contexts, which
+    referenced the class template without explicit specialization.
+  - `io::Cursor::new([])` arguments also fell through to `rusty::intrinsics::unreachable()` because
+    empty array literals were unsupported in this call shape.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC):
+  - one scoped constructor-path lowering adjustment in `transpiler/src/codegen.rs`,
+  - one runtime helper in `include/rusty/io.hpp`,
+  - focused transpiler/runtime regressions.
+
+Execution plan:
+
+1. Keep UFCS guard behavior from Leaf 4.29.1 intact (`Cursor::new` must remain a normal function path).
+2. Lower mapped `Cursor::new_` calls to a deducible helper call shape (`rusty::io::cursor_new(...)`)
+   so `decltype((...))` does not require explicit `Cursor<T>::new_` qualification.
+3. For `Cursor::new([])` in expanded io tests, emit a concrete empty byte buffer argument rather than
+   `unreachable()`.
+4. Re-run focused tests and expanded compile probe to verify Cursor-template-context diagnostics are removed.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added a scoped constructor-path rewrite in call emission:
+    - `rusty::io::Cursor::new_(arg)` -> `rusty::io::cursor_new(arg)`.
+  - Added `emit_cursor_new_arg_expr(...)`:
+    - special-cases empty array-literal argument (`[]`) to
+      `rusty::array_repeat(static_cast<uint8_t>(0), 0)` for concrete io buffer shape.
+- In `include/rusty/io.hpp`:
+  - Added deducing helper:
+    - `template<typename T> auto cursor_new(T&& inner)` returning `Cursor<std::decay_t<T>>`.
+
+Regression tests added:
+
+- Transpiler:
+  - `codegen::tests::test_leaf429_emit_constructor_like_new_path_keeps_function_call_shape`
+    (updated expectation to `rusty::io::cursor_new(...)`).
+  - `codegen::tests::test_leaf4295_cursor_new_empty_array_lowers_to_concrete_empty_buffer`.
+- Runtime C++ (`ctest` path):
+  - `tests/rusty_array_test.cpp::test_cursor_new_helper_shape`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf429 -- --nocapture`
+- `cmake --build build-tests --target rusty_array_test.out`
+- `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4295.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4295.rs -o /tmp/either-expanded-tests-leaf4295.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf4295.cppm -o /tmp/either-expanded-tests-leaf4295.o`
+
+Re-probe result:
+
+- Previous Cursor constructor template-context blocker is removed (no unspecialized
+  `rusty::io::Cursor::new_(...)` diagnostics in `seek()`).
+- Next deterministic blocker family is now clear:
+  - `if`/ternary arm unification for `Left(...)` vs `Right(...)` constructor expressions in io
+    read/write paths (`?:` arm type mismatch), followed by later unrelated families.
+
+Design rationale:
+
+- Kept the fix narrow to constructor path lowering and explicit empty-array argument recovery.
+- Avoided broad rewrites of conditional-expression codegen or global array-literal lowering.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4344,3 +4415,17 @@ generated C++.
   fix there provides better attribution and lower regression risk.
 - Localized tuple-match handling plus focused regression tests keeps parity debugging incremental and
   auditable.
+
+### 11.43 Requiring Explicit `Cursor<T>::new_` Template Qualification at All Call Sites
+
+**Rejected approach:** Keep emitting constructor paths as `rusty::io::Cursor::new_(...)` and patch
+each failing call site by force-injecting explicit template qualifications in ad-hoc contexts.
+
+**Why it was rejected:**
+
+- Expanded outputs place constructor calls inside `decltype((...))` and constructor-hint contexts
+  where ad-hoc explicit qualification logic is brittle and repeats type-flow work.
+- It does not address empty-array constructor arguments (`Cursor::new([])`) that were already
+  lowering to `unreachable()`.
+- A single deducible helper (`rusty::io::cursor_new(...)`) plus local empty-array recovery keeps
+  constructor lowering stable and auditable.
