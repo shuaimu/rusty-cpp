@@ -4860,7 +4860,8 @@ fn escape_cpp_keyword(name: &str) -> String {
         | "inline" | "explicit" | "export" | "typedef" | "typename" | "decltype"
         | "constexpr" | "nullptr" | "alignof" | "alignas" | "thread_local"
         | "static_assert" | "noexcept" | "consteval" | "constinit" | "co_await"
-        | "co_return" | "co_yield" | "requires" | "concept" | "import" | "module" => {
+        | "co_return" | "co_yield" | "requires" | "concept" | "import" | "module"
+        | "default" => {
             format!("{}_", name)
         }
         _ => name.to_string(),
@@ -5445,6 +5446,28 @@ mod tests {
     fn test_keyword_in_call() {
         let out = transpile_str("fn f() { let w = Widget::new(); }");
         assert!(out.contains("Widget::new_()"));
+    }
+
+    #[test]
+    fn test_default_keyword_escaped_in_impl_and_call() {
+        let out = transpile_str(
+            r#"
+            struct D {}
+            impl D {
+                fn default() -> Self { D {} }
+            }
+            fn f() { let _d = D::default(); }
+        "#,
+        );
+        assert!(out.contains("static D default_()"));
+        assert!(out.contains("D::default_()"));
+        assert!(!out.contains("D::default()"));
+    }
+
+    #[test]
+    fn test_default_keyword_escaped_in_generic_path_call() {
+        let out = transpile_str("fn f<T>() -> T { T::default() }");
+        assert!(out.contains("T::default_()"));
     }
 
     #[test]

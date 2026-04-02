@@ -2627,6 +2627,41 @@ Design rationale:
 - Followed the rejected broad fallback strategy in §11.23 by avoiding global macro substitution.
 - Fixed the semantic mismatch at the emitter by choosing the correct try macro based on return context.
 
+### 10.38 Phase 18 Progress: End-to-End (Leaf 4.13) — DONE
+
+Leaf 4.13 fixed the residual malformed `switch`/`case` parser diagnostics in expanded either output.
+
+Root cause:
+
+- The failing diagnostics (`case label not within a switch statement`) were triggered by emitted calls like `L::default()` / `R::default()`.
+- In C++, `default` is a reserved token, so unescaped `::default` is parsed as a `switch` label token sequence in invalid context.
+
+Changes:
+
+- Extended C++ keyword escaping to include `default` in `escape_cpp_keyword(...)`.
+- This updates path/call lowering from `Type::default()` to `Type::default_()` in generated output.
+- Kept the fix narrow; no broad rewrites to match/switch lowering were required.
+
+Regression tests added:
+
+- `test_default_keyword_escaped_in_impl_and_call`
+- `test_default_keyword_escaped_in_generic_path_call`
+
+Verification:
+
+- Focused tests pass:
+  - `cargo test -p rusty-cpp-transpiler default_keyword_escaped -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_keyword_in_call -- --nocapture`
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf413 --stop-after build`
+  - prior `case label not within a switch statement` diagnostics are no longer present in `cpp_build.log`;
+  - remaining build failures are from later blocker families.
+
+Design rationale:
+
+- Followed rejected approach in §11.24 by avoiding a broad switch-lowering rewrite.
+- Applied the minimal parser-safe fix at keyword escaping boundaries.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2853,3 +2888,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - `RUSTY_TRY` is Result-oriented (`is_err()`/Err early-return), while `Option` paths require `is_none()`/None propagation semantics.
 - In generated iterator template methods, this creates deterministic compile/runtime semantic mismatch risk and obscures the actual residual blockers.
 - Correct lowering is context-sensitive macro selection (`RUSTY_TRY_OPT` / `RUSTY_CO_TRY_OPT` for `Option` returns), plus explicit `try.hpp` availability.
+
+### 11.24 Rewriting Match/Switch Lowering to Fix `case label not within a switch` Diagnostics
+
+**Rejected approach:** Overhaul `match` expression lowering and generated `switch`/`visit` block structure to address residual `case label not within a switch statement` diagnostics.
+
+**Why it was rejected:**
+- The observed diagnostics were caused by unescaped `::default()` call emission, not malformed `switch` structure.
+- A broad switch-lowering rewrite would increase risk of regressions in already-stable match lowering paths.
+- The correct fix is narrow keyword escaping (`default` -> `default_`) at path/call emission boundaries.
