@@ -2656,7 +2656,10 @@ impl CodeGen {
     fn emit_match_expr_switch(&self, arms: &[syn::Arm], expected_ty: Option<&syn::Type>) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+            let body = {
+                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                self.maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)
+            };
             match &arm.pat {
                 syn::Pat::Wild(_) => parts.push(format!("return {};", body)),
                 syn::Pat::Lit(lit) => {
@@ -3861,6 +3864,7 @@ impl CodeGen {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
             }
+            syn::Expr::Range(range) => self.infer_range_expr_type(range),
             syn::Expr::Tuple(tuple) => {
                 let mut elems = Vec::new();
                 for elem in &tuple.elems {
@@ -3882,6 +3886,43 @@ impl CodeGen {
                 self.infer_local_binding_type_from_initializer(expr)
             }
             _ => None,
+        }
+    }
+
+    fn infer_range_expr_type(&self, range: &syn::ExprRange) -> Option<syn::Type> {
+        let elem_ty = range
+            .start
+            .as_deref()
+            .and_then(|e| self.infer_simple_expr_type(e))
+            .or_else(|| {
+                range
+                    .end
+                    .as_deref()
+                    .and_then(|e| self.infer_simple_expr_type(e))
+            });
+
+        match (range.start.as_ref(), range.end.as_ref(), &range.limits) {
+            (Some(_), Some(_), syn::RangeLimits::HalfOpen(_)) => {
+                let t = elem_ty?;
+                Some(parse_quote!(rusty::range<#t>))
+            }
+            (Some(_), Some(_), syn::RangeLimits::Closed(_)) => {
+                let t = elem_ty?;
+                Some(parse_quote!(rusty::range_inclusive<#t>))
+            }
+            (Some(_), None, _) => {
+                let t = elem_ty?;
+                Some(parse_quote!(rusty::range_from<#t>))
+            }
+            (None, Some(_), syn::RangeLimits::HalfOpen(_)) => {
+                let t = elem_ty?;
+                Some(parse_quote!(rusty::range_to<#t>))
+            }
+            (None, Some(_), syn::RangeLimits::Closed(_)) => {
+                let t = elem_ty?;
+                Some(parse_quote!(rusty::range_to_inclusive<#t>))
+            }
+            (None, None, _) => Some(parse_quote!(rusty::range_full)),
         }
     }
 
@@ -10641,8 +10682,29 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Left<int32_t, int32_t>(1);"));
-        assert!(out.contains("return Right<int32_t, int32_t>(2);"));
+        assert!(out.contains("return Either<int32_t, int32_t>(Left<int32_t, int32_t>(1));"));
+        assert!(out.contains("return Either<int32_t, int32_t>(Right<int32_t, int32_t>(2));"));
+    }
+
+    #[test]
+    fn test_leaf427_untyped_match_local_with_mixed_constructor_payloads_wraps_expected_enum() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f(x: i32) {
+                let iter = match x {
+                    3 => Left(0..10),
+                    _ => Right(17..),
+                };
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "if (_m == 3) return Either<rusty::range<int32_t>, rusty::range_from<int32_t>>(Left<rusty::range<int32_t>, rusty::range_from<int32_t>>(rusty::range(0, 10)));"
+        ));
+        assert!(out.contains(
+            "return Either<rusty::range<int32_t>, rusty::range_from<int32_t>>(Right<rusty::range<int32_t>, rusty::range_from<int32_t>>(rusty::range_from(17)));"
+        ));
     }
 
     // ── Phase 18 Blocker 2: UFCS trait method call detection ────

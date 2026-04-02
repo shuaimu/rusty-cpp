@@ -3502,6 +3502,65 @@ Design rationale:
 - Checked §11 wrong-approach guidance and explicitly avoided broad symbol suppression or global
   pointer/reference text rewrites.
 
+### 10.11.27 Leaf 4.27: Iterator `match` return unification in untyped locals
+
+Problem:
+
+- In expanded runnable tests, `iter()` initialized an untyped local from a switch-style match:
+  - `let iter = match x { 3 => Left(0..10), _ => Right(17..), };`
+- Lowered C++ used an expression IIFE with branch returns of distinct variant structs:
+  - `return Left<...>(...);` vs `return Right<...>(...);`
+- This produced the first deterministic blocker:
+  - `inconsistent types 'Either_Left<...>' and 'Either_Right<...>' deduced for lambda return type`
+
+Implementation:
+
+- In match-expression switch lowering (`emit_match_expr_switch`), constructor-arm bodies are now
+  wrapped with the expected enum type when that expected type is known:
+  - `return Either<...>(Left<...>(...));`
+  - `return Either<...>(Right<...>(...));`
+- Added range-expression type inference in constructor expected-type recovery:
+  - `a..b` -> `rusty::range<T>`
+  - `a..=b` -> `rusty::range_inclusive<T>`
+  - `a..` -> `rusty::range_from<T>`
+  - `..b` -> `rusty::range_to<T>`
+  - `..=b` -> `rusty::range_to_inclusive<T>`
+  - `..` -> `rusty::range_full`
+- This allows constructor-pair recovery for range payloads to produce concrete expected
+  `Either<...>` context instead of `decltype(...)` hint fallback.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf427_untyped_match_local_with_mixed_constructor_payloads_wraps_expected_enum`
+- Updated:
+  - `codegen::tests::test_leaf4172_untyped_match_local_recovers_constructor_pair`
+    (now expects wrapped `Either<...>(Left/Right<...>(...))` return shape)
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf427 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf4172 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf42 -- --nocapture`
+- Expanded-tests compile probe:
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf427-seq.rs -o /tmp/either-expanded-tests-leaf427-post.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=30 -c /tmp/either-expanded-tests-leaf427-post.cppm -o /tmp/either-expanded-tests-leaf427-post.o`
+
+Re-probe result:
+
+- Previous deterministic blocker is removed:
+  - no `Either_Left` vs `Either_Right` lambda return-type mismatch in `iter()`.
+- Next deterministic blockers are now:
+  - iterator method-shape gap (`iter.next()` / `iter.count()` missing on
+    `Either<rusty::range<...>, rusty::range_from<...>>`),
+  - then existing seek/read_write io families.
+
+Design rationale:
+
+- Kept scope narrow to expression `match` return unification and type recovery for range payloads.
+- Explicitly avoided wrong approaches from §11:
+  - no broad/global constructor rewrite,
+  - no blanket control-flow/lambda return coercion across unrelated expressions.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
