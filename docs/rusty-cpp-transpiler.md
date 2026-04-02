@@ -5150,6 +5150,64 @@ Design rationale:
   - no demoting wrapper execution to an optional side path that can silently drift from default parity checks (§11.54),
   - no broad catch-all test suppression around failing wrappers (would hide real mismatches) (§11.31).
 
+### 10.11.52 Leaf 4.46: Fix expanded `seek` runtime abort caused by repeat-array element type drift
+
+Problem:
+
+- After Leaf 4.45, expanded wrapper execution reached runtime and aborted in `seek`.
+- Probe/backtrace showed assertion type mismatch in generated test paths:
+  - expected byte-slice shape (`std::span<unsigned char>`),
+  - but generated local repeat array was deduced as `int` element type from `[0; N]`,
+  - leading to `std::span<int>` in later assertion comparisons.
+- Root cause in transpiler:
+  - untyped repeat initializer `let mut mockdata = [0; N];` stayed at integer seed deduction,
+  - later indexed cast assignment (`mockdata[i] = i as u8;`) did not feed back into element typing.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - localized `codegen` inference path for untyped repeat arrays,
+  - focused transpiler regression tests,
+  - no runtime-library API changes.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - added block-local repeat-element hint state:
+    - `repeat_elem_type_hints: HashMap<String, syn::Type>`
+  - added pre-scan pass per emitted block:
+    - collects untyped repeat-array candidates (`let x = [0; N]`),
+    - detects indexed assignments with cast RHS (`x[i] = ... as u8`),
+    - records first element-type hint for that binding.
+  - in `emit_local`, when emitting an untyped repeat initializer with a hint, emit:
+    - `rusty::array_repeat(static_cast<Hint>(seed), len)`
+  - kept existing default behavior unchanged when no indexed cast hint exists.
+
+Regression tests:
+
+- Added focused transpiler regressions:
+  - `test_leaf446_repeat_array_infers_u8_from_index_cast_assignment`
+  - `test_leaf446_repeat_array_without_index_cast_keeps_default_literal_seed`
+
+Verification:
+
+- Focused transpiler tests:
+  - `cargo test -p rusty-cpp-transpiler test_leaf446 -- --nocapture`
+- Expanded parity harness runtime re-probe:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf446`
+- Result:
+  - wrappers now complete without abort:
+    - `basic`, `macros`, `deref`, `iter`, `seek`, `read_write`, `error`.
+
+Design rationale:
+
+- Fixed the problem at AST/codegen inference level, not by test-specific output patching.
+- Kept inference narrow and evidence-based (indexed cast assignments in same block), so unrelated
+  repeat arrays retain existing behavior.
+- Avoided wrong approaches from §11:
+  - no generated-C++ post-processing for one failing wrapper (§11.55),
+  - no global forced byte casts for all repeat arrays (would break legitimate integer arrays) (§11.44).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -5761,3 +5819,16 @@ an optional flag/path.
 - Optional probe paths are easy to skip in routine loops and CI, causing parity drift.
 - The Phase 18 objective is automatic parity, so default behavior should surface real runtime
   mismatches instead of requiring a special opt-in command.
+
+### 11.55 Patching Generated Expanded C++ to Force Byte Repeat Arrays in `seek`
+
+**Rejected approach:** Add a post-transpile text patch that rewrites generated
+`rusty::array_repeat(0, N)` to byte-typed forms only in expanded `seek` wrapper output.
+
+**Why it was rejected:**
+
+- It is brittle and non-general: relies on generated text shape and local variable names.
+- It hides the real inference gap in transpiler codegen, so similar failures can reappear in other
+  wrappers/crates.
+- It risks semantic regressions by changing repeat-array element types in contexts where integer
+  arrays are valid and intended.

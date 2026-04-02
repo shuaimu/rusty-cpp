@@ -62,6 +62,10 @@ pub struct CodeGen {
     /// by-value method calls (for example `res.unwrap_err()`).
     /// Such bindings must not be emitted as `const auto`.
     consuming_method_receiver_vars: std::collections::HashSet<String>,
+    /// Per-block inferred element type hints for untyped `[val; N]` locals.
+    /// Derived from indexed assignments in the same block (for example
+    /// `mockdata[i] = i as u8;`) to avoid invalid C++ auto-deduction drift.
+    repeat_elem_type_hints: HashMap<String, syn::Type>,
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
@@ -141,6 +145,7 @@ impl CodeGen {
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
+            repeat_elem_type_hints: HashMap::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -218,6 +223,7 @@ impl CodeGen {
         self.struct_field_types.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
+        self.repeat_elem_type_hints.clear();
         self.param_bindings.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
@@ -1951,8 +1957,10 @@ impl CodeGen {
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         let consuming = collect_consuming_method_receiver_vars(&block.stmts);
+        let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
+        let prev_repeat_hints = std::mem::replace(&mut self.repeat_elem_type_hints, repeat_hints);
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
 
@@ -1968,6 +1976,7 @@ impl CodeGen {
         self.local_cpp_bindings.pop();
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
+        self.repeat_elem_type_hints = prev_repeat_hints;
     }
 
     fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -3979,7 +3988,21 @@ impl CodeGen {
                         if pushed_hints {
                             self.constructor_template_hints.push(recovered_hints);
                         }
-                        let expr_str = if let Some(ty) = inferred_binding_ty.as_ref() {
+                        let expr_str = if get_local_type(local).is_none() {
+                            if let syn::Expr::Repeat(repeat) = init.expr.as_ref() {
+                                if let Some(elem_hint) = self.repeat_elem_type_hints.get(&name_str) {
+                                    self.emit_repeat_expr_with_element_hint(repeat, elem_hint)
+                                } else if let Some(ty) = inferred_binding_ty.as_ref() {
+                                    self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                } else {
+                                    self.emit_expr_maybe_move(&init.expr)
+                                }
+                            } else if let Some(ty) = inferred_binding_ty.as_ref() {
+                                self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                            } else {
+                                self.emit_expr_maybe_move(&init.expr)
+                            }
+                        } else if let Some(ty) = inferred_binding_ty.as_ref() {
                             self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
                         } else {
                             self.emit_expr_maybe_move(&init.expr)
@@ -4035,6 +4058,17 @@ impl CodeGen {
                 self.writeln("// TODO: complex pattern binding");
             }
         }
+    }
+
+    fn emit_repeat_expr_with_element_hint(
+        &self,
+        repeat: &syn::ExprRepeat,
+        elem_hint: &syn::Type,
+    ) -> String {
+        let val = self.emit_expr_to_string(&repeat.expr);
+        let len = self.emit_expr_to_string(&repeat.len);
+        let elem_ty = self.map_type(elem_hint);
+        format!("rusty::array_repeat(static_cast<{}>({}), {})", elem_ty, val, len)
     }
 
     /// Register local bindings in the current scope for expected-type lookup.
@@ -7287,6 +7321,7 @@ impl CodeGen {
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
+            repeat_elem_type_hints: HashMap::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -8428,6 +8463,233 @@ fn collect_consuming_method_receiver_vars(
         collect_consuming_method_receivers_in_stmt(stmt, &mut result);
     }
     result
+}
+
+/// Infer element types for untyped repeat-array locals (`let x = [0; N];`) by
+/// scanning indexed assignments in the same block (`x[i] = ... as u8`).
+fn collect_repeat_element_type_hints(stmts: &[syn::Stmt]) -> HashMap<String, syn::Type> {
+    let mut candidates = std::collections::HashSet::new();
+    for stmt in stmts {
+        let syn::Stmt::Local(local) = stmt else {
+            continue;
+        };
+        if get_local_type(local).is_some() {
+            continue;
+        }
+        let syn::Pat::Ident(pat_ident) = &local.pat else {
+            continue;
+        };
+        let Some(init) = &local.init else {
+            continue;
+        };
+        if !is_untyped_repeat_with_integer_seed(&init.expr) {
+            continue;
+        }
+        candidates.insert(pat_ident.ident.to_string());
+    }
+
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut hints = HashMap::new();
+    for stmt in stmts {
+        collect_repeat_assignment_hints_in_stmt(stmt, &candidates, &mut hints);
+    }
+    hints
+}
+
+fn is_untyped_repeat_with_integer_seed(expr: &syn::Expr) -> bool {
+    let syn::Expr::Repeat(repeat) = peel_paren_group_expr(expr) else {
+        return false;
+    };
+    matches!(peel_paren_group_expr(&repeat.expr), syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(_), .. }))
+}
+
+fn collect_repeat_assignment_hints_in_stmt(
+    stmt: &syn::Stmt,
+    candidates: &std::collections::HashSet<String>,
+    hints: &mut HashMap<String, syn::Type>,
+) {
+    match stmt {
+        syn::Stmt::Local(local) => {
+            if let Some(init) = &local.init {
+                collect_repeat_assignment_hints_in_expr(&init.expr, candidates, hints);
+            }
+        }
+        syn::Stmt::Expr(expr, _) => collect_repeat_assignment_hints_in_expr(expr, candidates, hints),
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+    }
+}
+
+fn collect_repeat_assignment_hints_in_expr(
+    expr: &syn::Expr,
+    candidates: &std::collections::HashSet<String>,
+    hints: &mut HashMap<String, syn::Type>,
+) {
+    match expr {
+        syn::Expr::Assign(assign) => {
+            if let Some(base_name) = extract_index_base_ident(&assign.left) {
+                if candidates.contains(&base_name) && !hints.contains_key(&base_name) {
+                    if let Some(rhs_ty) = infer_repeat_assignment_rhs_type(&assign.right) {
+                        hints.insert(base_name, rhs_ty);
+                    }
+                }
+            }
+            collect_repeat_assignment_hints_in_expr(&assign.left, candidates, hints);
+            collect_repeat_assignment_hints_in_expr(&assign.right, candidates, hints);
+        }
+        syn::Expr::Block(block) => {
+            for stmt in &block.block.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+        }
+        syn::Expr::If(if_expr) => {
+            collect_repeat_assignment_hints_in_expr(&if_expr.cond, candidates, hints);
+            for stmt in &if_expr.then_branch.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+            if let Some((_, else_expr)) = &if_expr.else_branch {
+                collect_repeat_assignment_hints_in_expr(else_expr, candidates, hints);
+            }
+        }
+        syn::Expr::While(while_expr) => {
+            collect_repeat_assignment_hints_in_expr(&while_expr.cond, candidates, hints);
+            for stmt in &while_expr.body.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+        }
+        syn::Expr::Loop(loop_expr) => {
+            for stmt in &loop_expr.body.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+        }
+        syn::Expr::ForLoop(for_expr) => {
+            collect_repeat_assignment_hints_in_expr(&for_expr.expr, candidates, hints);
+            for stmt in &for_expr.body.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+        }
+        syn::Expr::Unsafe(unsafe_expr) => {
+            for stmt in &unsafe_expr.block.stmts {
+                collect_repeat_assignment_hints_in_stmt(stmt, candidates, hints);
+            }
+        }
+        syn::Expr::Call(call) => {
+            collect_repeat_assignment_hints_in_expr(&call.func, candidates, hints);
+            for arg in &call.args {
+                collect_repeat_assignment_hints_in_expr(arg, candidates, hints);
+            }
+        }
+        syn::Expr::MethodCall(method_call) => {
+            collect_repeat_assignment_hints_in_expr(&method_call.receiver, candidates, hints);
+            for arg in &method_call.args {
+                collect_repeat_assignment_hints_in_expr(arg, candidates, hints);
+            }
+        }
+        syn::Expr::Binary(binary) => {
+            collect_repeat_assignment_hints_in_expr(&binary.left, candidates, hints);
+            collect_repeat_assignment_hints_in_expr(&binary.right, candidates, hints);
+        }
+        syn::Expr::Unary(unary) => {
+            collect_repeat_assignment_hints_in_expr(&unary.expr, candidates, hints);
+        }
+        syn::Expr::Index(index) => {
+            collect_repeat_assignment_hints_in_expr(&index.expr, candidates, hints);
+            collect_repeat_assignment_hints_in_expr(&index.index, candidates, hints);
+        }
+        syn::Expr::Reference(reference) => {
+            collect_repeat_assignment_hints_in_expr(&reference.expr, candidates, hints);
+        }
+        syn::Expr::Paren(paren) => {
+            collect_repeat_assignment_hints_in_expr(&paren.expr, candidates, hints);
+        }
+        syn::Expr::Group(group) => {
+            collect_repeat_assignment_hints_in_expr(&group.expr, candidates, hints);
+        }
+        syn::Expr::Match(match_expr) => {
+            collect_repeat_assignment_hints_in_expr(&match_expr.expr, candidates, hints);
+            for arm in &match_expr.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    collect_repeat_assignment_hints_in_expr(guard, candidates, hints);
+                }
+                collect_repeat_assignment_hints_in_expr(&arm.body, candidates, hints);
+            }
+        }
+        syn::Expr::Array(array) => {
+            for elem in &array.elems {
+                collect_repeat_assignment_hints_in_expr(elem, candidates, hints);
+            }
+        }
+        syn::Expr::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_repeat_assignment_hints_in_expr(elem, candidates, hints);
+            }
+        }
+        syn::Expr::Struct(struct_expr) => {
+            for field in &struct_expr.fields {
+                collect_repeat_assignment_hints_in_expr(&field.expr, candidates, hints);
+            }
+            if let Some(rest) = &struct_expr.rest {
+                collect_repeat_assignment_hints_in_expr(rest, candidates, hints);
+            }
+        }
+        syn::Expr::Await(await_expr) => {
+            collect_repeat_assignment_hints_in_expr(&await_expr.base, candidates, hints);
+        }
+        syn::Expr::Try(try_expr) => {
+            collect_repeat_assignment_hints_in_expr(&try_expr.expr, candidates, hints);
+        }
+        syn::Expr::Break(brk) => {
+            if let Some(value) = &brk.expr {
+                collect_repeat_assignment_hints_in_expr(value, candidates, hints);
+            }
+        }
+        syn::Expr::Return(ret) => {
+            if let Some(value) = &ret.expr {
+                collect_repeat_assignment_hints_in_expr(value, candidates, hints);
+            }
+        }
+        syn::Expr::Closure(closure) => {
+            collect_repeat_assignment_hints_in_expr(&closure.body, candidates, hints);
+        }
+        syn::Expr::Let(let_expr) => {
+            collect_repeat_assignment_hints_in_expr(&let_expr.expr, candidates, hints);
+        }
+        _ => {}
+    }
+}
+
+fn extract_index_base_ident(expr: &syn::Expr) -> Option<String> {
+    let mut current = peel_paren_group_expr(expr);
+    while let syn::Expr::Index(index) = current {
+        current = peel_paren_group_expr(&index.expr);
+    }
+    if let syn::Expr::Path(path) = current {
+        if path.path.segments.len() == 1 {
+            return Some(path.path.segments[0].ident.to_string());
+        }
+    }
+    None
+}
+
+fn infer_repeat_assignment_rhs_type(expr: &syn::Expr) -> Option<syn::Type> {
+    let current = peel_paren_group_expr(expr);
+    if let syn::Expr::Cast(cast_expr) = current {
+        return Some((*cast_expr.ty).clone());
+    }
+    None
+}
+
+fn peel_paren_group_expr<'a>(expr: &'a syn::Expr) -> &'a syn::Expr {
+    let mut current = expr;
+    loop {
+        match current {
+            syn::Expr::Paren(paren) => current = &paren.expr,
+            syn::Expr::Group(group) => current = &group.expr,
+            _ => return current,
+        }
+    }
 }
 
 fn collect_consuming_method_receivers_in_stmt(
@@ -11793,6 +12055,34 @@ mod tests {
         let out = transpile_str("fn f() { let a = [0u8; 256]; }");
         assert!(out.contains("rusty::array_repeat("));
         assert!(out.contains("256"));
+    }
+
+    #[test]
+    fn test_leaf446_repeat_array_infers_u8_from_index_cast_assignment() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut mockdata = [0; 16];
+                for i in 0..16 {
+                    mockdata[i] = i as u8;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto mockdata = rusty::array_repeat(static_cast<uint8_t>(0), 16);"));
+    }
+
+    #[test]
+    fn test_leaf446_repeat_array_without_index_cast_keeps_default_literal_seed() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let a = [0; 4];
+                let _x = a[0];
+            }
+            "#,
+        );
+        assert!(out.contains("const auto a = rusty::array_repeat(0, 4);"));
     }
 
     #[test]

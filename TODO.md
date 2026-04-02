@@ -256,33 +256,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* `#[automatically_derived]` and `#[doc(hidden)]` already silently skipped by syn
         - [x] *done* Unit test for UFCS associated type projection
       - [x] *done* End-to-end: all 7 of either's #[test] functions pass in C++ with same results as cargo test (hand-written)
-    - [ ] Phase 18: Fully automatic test generation — transpiled tests compile without manual edits
-      - [ ] Blocker 1: Type context propagation for variant constructors
+    - [x] *done* Phase 18: Fully automatic test generation — transpiled tests compile without manual edits
+      - [x] *done* Blocker 1: Type context propagation for variant constructors
         - [x] *done* In `emit_local`, when `let` has a type annotation (e.g., `let e: Either<i32, i32> = Left(2)`), pass the type to the initializer expression emitter
         - [x] *done* In `emit_expr_to_string` for `Expr::Call`, when calling a variant constructor and expected type is known, emit explicit template args
         - [x] *done* Handle assignment context: `e = Right(2)` where `e` is typed — infer template args from target variable type
         - [x] *done* Add unit tests: typed let with variant constructor, untyped let (should still work via auto), assignment to typed var
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
-      - [ ] Blocker 2: UFCS trait method calls → direct method calls
+      - [x] *done* Blocker 2: UFCS trait method calls → direct method calls
         - [x] *done* Detect `Trait::method(receiver, args)` pattern (free function call where first arg is `&self`/`&mut self`)
         - [x] *done* Emit as `receiver.method(args)` instead — C++ uses dot-call syntax for methods
         - [x] *done* Handle common patterns: `io::Read::read(&mut cursor, &mut buf)` → `cursor.read(buf)`
         - [x] *done* Add unit tests: UFCS Read::read, Write::write, Iterator::next, custom trait method
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
-      - [ ] Blocker 3: Rust iterator protocol and std::io using declarations
+      - [x] *done* Blocker 3: Rust iterator protocol and std::io using declarations
         - [x] *done* Skip `using std::io` (not a valid C++ namespace) — map `use std::io` to `namespace io = rusty::io`, remap concrete `std::io::*` imports to `rusty::io::*`, and skip Rust-only io trait imports
         - [x] *done* Handle `.collect()` on ranges — detect zero-arg `.collect()` on range receivers and emit `rusty::collect_range(...)`
         - [x] *done* Add unit tests: using std::io skipped, range().collect() handled
         - [x] *done* Update docs/rusty-cpp-transpiler.md with design notes
-      - [ ] End-to-end: transpile either tests, compile with g++, run, and get same output as cargo test — zero manual edits
+      - [x] *done* End-to-end: transpile either tests, compile with g++, run, and get same output as cargo test — zero manual edits
         - [x] *done* Leaf 1: Skip Rust prelude imports from expanded output (`std::prelude::rust_2018`) so transpiled C++ does not emit invalid `using namespace std::prelude::...`
         - [x] *done* Leaf 2: Add an automated parity harness command/script for `either` (`cargo test` baseline + transpile + C++ build/run) with no manual editing steps
-        - [ ] Leaf 3: Fix top compile blockers surfaced by harness in generated expanded output (prioritize syntactic invalid C++ emissions before semantic parity)
+        - [x] *done* Leaf 3: Fix top compile blockers surfaced by harness in generated expanded output (prioritize syntactic invalid C++ emissions before semantic parity)
           - [x] *done* Leaf 3.1: Fix foundational syntax blockers at file/module front (required includes, valid enum-wrapper base alias, no invalid inline-module `import`, and valid enum-variant re-export lowering)
           - [x] *done* Leaf 3.2: Keep inline-module type methods inside type scope (avoid free `clone() const`-style emissions)
           - [x] *done* Leaf 3.3: Guard/skip unresolved trait-facade/proxy emissions in expanded output when backing symbols are unavailable
           - [x] *done* Leaf 3.4: Re-run harness and capture the next reduced blocker set for semantic-parity work
-        - [ ] Leaf 4: Normalize remaining behavior mismatches so C++ test output matches Rust `cargo test` output
+        - [x] *done* Leaf 4: Normalize remaining behavior mismatches so C++ test output matches Rust `cargo test` output
           - [x] *done* Leaf 4.1: Restore/emit missing `overloaded` visitor helper for generated `std::visit(overloaded { ... })` call sites in expanded module output
           - [x] *done* Leaf 4.2: Lower Rust path-only runtime/type names in expanded output (`core::*`, `fmt::*`, `Pin`, `std::path::*`, `std::ffi::*`) to valid C++/rusty-cpp mappings or guarded fallbacks
           - [x] *done* Leaf 4.3: Fix dependent/associated-type emission in signatures and aliases (`typename L::IntoIter`, reference-qualified associated types, `Self::Output`) to valid C++ forms
@@ -448,7 +448,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Linked stage-4 runner against both module objects (`either.o` + `either_expanded_tests.o`) and kept deterministic rerun cleanup for new runner artifacts
             - [x] *done* Added unbuffered per-wrapper run markers (`[RUN]/[OK]`) in stage-4 output to make first failing wrapper deterministic in logs
             - [x] *done* Re-probe: `basic/macros/deref/iter` wrappers run, first deterministic runtime abort now occurs in `seek` wrapper; compile/transpile stages remain green
-          - [ ] Leaf 4.46: Fix first post-4.45 expanded runtime blocker family in `seek` wrapper path (transpiled test execution abort), then re-probe full wrapper run
+          - [x] *done* Leaf 4.46: Fix first post-4.45 expanded runtime blocker family in `seek` wrapper path (transpiled test execution abort), then re-probe full wrapper run
+            - [x] *done* Added block-local pre-scan inference for untyped repeat arrays (`let mut x = [0; N]`) from indexed cast assignments (`x[i] = ... as u8`), and emit hinted repeat seed casts (`rusty::array_repeat(static_cast<uint8_t>(0), N)`)
+            - [x] *done* Added focused transpiler regressions for inferred-byte repeat path and unchanged default repeat behavior when no indexed cast hint exists
+            - [x] *done* Re-probe: full parity harness wrapper run now passes `seek` and completes all wrappers (`basic/macros/deref/iter/seek/read_write/error`) without runtime abort
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
