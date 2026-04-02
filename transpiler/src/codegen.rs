@@ -252,6 +252,7 @@ impl CodeGen {
         self.writeln("#include <type_traits>");
         self.writeln("#include <string>");
         self.writeln("#include <string_view>");
+        self.writeln("#include <charconv>");
         self.writeln("#include <cstdlib>");
         self.writeln("#include <stdexcept>");
         self.writeln("#include <rusty/rusty.hpp>");
@@ -4248,9 +4249,10 @@ impl CodeGen {
         let Some(expr) = self.extract_value_expr(expr) else {
             return hints;
         };
+        let if_let_unwrap_method = self.expr_if_let_unwrap_method(expr);
 
         if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
-            let arg_cpp = self.emit_expr_maybe_move(ctor_arg);
+            let arg_cpp = self.emit_constructor_hint_arg_cpp(ctor_arg, if_let_unwrap_method);
             let ty_cpp = format!("decltype(({}))", arg_cpp);
             match ctor_name.as_str() {
                 "Left" | "Right" => {
@@ -4278,6 +4280,7 @@ impl CodeGen {
                     left_arg,
                     &right_name,
                     right_arg,
+                    if_let_unwrap_method,
                 );
             }
         }
@@ -4293,6 +4296,7 @@ impl CodeGen {
                         left_arg,
                         &right_name,
                         right_arg,
+                        if_let_unwrap_method,
                     );
                 }
             }
@@ -4300,7 +4304,7 @@ impl CodeGen {
 
         if hints.is_empty() {
             let mut ctor_args: HashMap<String, String> = HashMap::new();
-            self.collect_constructor_arg_cpp_strings(expr, &mut ctor_args);
+            self.collect_constructor_arg_cpp_strings(expr, &mut ctor_args, if_let_unwrap_method);
 
             let mut inferred_either_ty: Option<String> = None;
             if let (Some(left_cpp), Some(right_cpp)) =
@@ -4337,6 +4341,7 @@ impl CodeGen {
         &self,
         expr: &syn::Expr,
         out: &mut HashMap<String, String>,
+        if_let_unwrap_method: Option<&'static str>,
     ) {
         let Some(expr) = self.extract_value_expr(expr) else {
             return;
@@ -4344,33 +4349,131 @@ impl CodeGen {
 
         if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
             out.entry(ctor_name)
-                .or_insert_with(|| self.emit_expr_maybe_move(ctor_arg));
+                .or_insert_with(|| self.emit_constructor_hint_arg_cpp(ctor_arg, if_let_unwrap_method));
         }
 
         match expr {
             syn::Expr::If(if_expr) => {
                 if let Some(then_expr) = self.extract_single_expr_from_block(&if_expr.then_branch) {
-                    self.collect_constructor_arg_cpp_strings(then_expr, out);
+                    self.collect_constructor_arg_cpp_strings(then_expr, out, if_let_unwrap_method);
                 }
                 if let Some((_, else_expr)) = &if_expr.else_branch {
-                    self.collect_constructor_arg_cpp_strings(else_expr, out);
+                    self.collect_constructor_arg_cpp_strings(else_expr, out, if_let_unwrap_method);
                 }
             }
             syn::Expr::Match(match_expr) => {
                 for arm in &match_expr.arms {
-                    self.collect_constructor_arg_cpp_strings(&arm.body, out);
+                    self.collect_constructor_arg_cpp_strings(&arm.body, out, if_let_unwrap_method);
                 }
             }
-            syn::Expr::Reference(r) => self.collect_constructor_arg_cpp_strings(&r.expr, out),
-            syn::Expr::Paren(p) => self.collect_constructor_arg_cpp_strings(&p.expr, out),
-            syn::Expr::Group(g) => self.collect_constructor_arg_cpp_strings(&g.expr, out),
+            syn::Expr::Reference(r) => {
+                self.collect_constructor_arg_cpp_strings(&r.expr, out, if_let_unwrap_method)
+            }
+            syn::Expr::Paren(p) => {
+                self.collect_constructor_arg_cpp_strings(&p.expr, out, if_let_unwrap_method)
+            }
+            syn::Expr::Group(g) => {
+                self.collect_constructor_arg_cpp_strings(&g.expr, out, if_let_unwrap_method)
+            }
             syn::Expr::Call(call) => {
                 for arg in &call.args {
-                    self.collect_constructor_arg_cpp_strings(arg, out);
+                    self.collect_constructor_arg_cpp_strings(arg, out, if_let_unwrap_method);
                 }
             }
             _ => {}
         }
+    }
+
+    fn expr_if_let_unwrap_method(&self, expr: &syn::Expr) -> Option<&'static str> {
+        match expr {
+            syn::Expr::If(if_expr) => {
+                if matches!(if_expr.cond.as_ref(), syn::Expr::Let(_)) {
+                    if let syn::Expr::Let(let_expr) = if_expr.cond.as_ref() {
+                        if let Some((_, _, unwrap_method)) = self.if_let_expr_condition_parts(let_expr)
+                        {
+                            if unwrap_method.is_some() {
+                                return unwrap_method;
+                            }
+                        }
+                    }
+                }
+                for stmt in &if_expr.then_branch.stmts {
+                    match stmt {
+                        syn::Stmt::Expr(e, _) => {
+                            if let Some(method) = self.expr_if_let_unwrap_method(e) {
+                                return Some(method);
+                            }
+                        }
+                        syn::Stmt::Local(local) => {
+                            if let Some(init) = &local.init {
+                                if let Some(method) = self.expr_if_let_unwrap_method(&init.expr) {
+                                    return Some(method);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    return self.expr_if_let_unwrap_method(else_expr);
+                }
+                None
+            }
+            syn::Expr::Block(block_expr) => {
+                for stmt in &block_expr.block.stmts {
+                    match stmt {
+                        syn::Stmt::Expr(e, _) => {
+                            if let Some(method) = self.expr_if_let_unwrap_method(e) {
+                                return Some(method);
+                            }
+                        }
+                        syn::Stmt::Local(local) => {
+                            if let Some(init) = &local.init {
+                                if let Some(method) = self.expr_if_let_unwrap_method(&init.expr) {
+                                    return Some(method);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            syn::Expr::Match(match_expr) => match_expr
+                .arms
+                .iter()
+                .find_map(|arm| self.expr_if_let_unwrap_method(&arm.body)),
+            syn::Expr::Paren(p) => self.expr_if_let_unwrap_method(&p.expr),
+            syn::Expr::Group(g) => self.expr_if_let_unwrap_method(&g.expr),
+            syn::Expr::Call(call) => {
+                self.expr_if_let_unwrap_method(&call.func).or_else(|| {
+                    call.args
+                        .iter()
+                        .find_map(|arg| self.expr_if_let_unwrap_method(arg))
+                })
+            }
+            syn::Expr::Reference(r) => self.expr_if_let_unwrap_method(&r.expr),
+            _ => None,
+        }
+    }
+
+    fn emit_constructor_hint_arg_cpp(
+        &self,
+        arg: &syn::Expr,
+        if_let_unwrap_method: Option<&'static str>,
+    ) -> String {
+        let arg = self.extract_value_expr(arg).unwrap_or(arg);
+        if let Some(unwrap_method) = if_let_unwrap_method {
+            if let syn::Expr::Path(path) = arg {
+                if path.path.segments.len() == 1 {
+                    let ident = path.path.segments[0].ident.to_string();
+                    if ident != "self" && self.lookup_local_binding_type(&ident).is_none() {
+                        return format!("_iflet.{}()", unwrap_method);
+                    }
+                }
+            }
+        }
+        self.emit_expr_maybe_move(arg)
     }
 
     fn extract_constructor_pair_from_if<'a>(
@@ -4423,9 +4526,10 @@ impl CodeGen {
         lhs_arg: &syn::Expr,
         rhs_name: &str,
         rhs_arg: &syn::Expr,
+        if_let_unwrap_method: Option<&'static str>,
     ) {
-        let lhs_cpp = self.emit_expr_maybe_move(lhs_arg);
-        let rhs_cpp = self.emit_expr_maybe_move(rhs_arg);
+        let lhs_cpp = self.emit_constructor_hint_arg_cpp(lhs_arg, if_let_unwrap_method);
+        let rhs_cpp = self.emit_constructor_hint_arg_cpp(rhs_arg, if_let_unwrap_method);
         let lhs_ty = format!("decltype(({}))", lhs_cpp);
         let rhs_ty = format!("decltype(({}))", rhs_cpp);
 
@@ -5130,6 +5234,20 @@ impl CodeGen {
         joined == "core::convert::From::from" || joined == "std::convert::From::from"
     }
 
+    fn method_call_single_turbofish_type<'a>(
+        &self,
+        mc: &'a syn::ExprMethodCall,
+    ) -> Option<&'a syn::Type> {
+        let turbofish = mc.turbofish.as_ref()?;
+        if turbofish.args.len() != 1 {
+            return None;
+        }
+        match turbofish.args.first()? {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
     fn emit_from_conversion_to_target(&self, arg: &syn::Expr, target_cpp_ty: &str) -> String {
         let inner = match arg {
             syn::Expr::Call(call)
@@ -5498,6 +5616,16 @@ impl CodeGen {
                 if mc.method == "len" && mc.args.is_empty() {
                     let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!("rusty::len({})", receiver);
+                }
+                if mc.method == "parse" && mc.args.is_empty() {
+                    if let Some(parsed_ty) = self.method_call_single_turbofish_type(mc) {
+                        let receiver = self.emit_expr_to_string(&mc.receiver);
+                        return format!(
+                            "rusty::str_runtime::parse<{}>({})",
+                            self.map_type(parsed_ty),
+                            receiver
+                        );
+                    }
                 }
                 if mc.method == "collect" && mc.args.is_empty() && Self::is_range_expression(&mc.receiver)
                 {
@@ -7576,6 +7704,8 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::path::Path",
         "rusty::ffi::",
         "rusty::cmp::Ordering",
+        "rusty::str_runtime::from_utf8",
+        "rusty::str_runtime::parse<",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
         "core::cmp::",
@@ -7624,6 +7754,86 @@ constexpr T* get_unchecked_mut(T& value) {\n\
 namespace hash {\n\
 template<typename T, typename State>\n\
 void hash(const T&, State&) {}\n\
+}\n\
+namespace str_runtime {\n\
+inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {\n\
+    std::size_t i = 0;\n\
+    while (i < len) {\n\
+        const auto byte = data[i];\n\
+        if (byte <= 0x7F) {\n\
+            ++i;\n\
+            continue;\n\
+        }\n\
+        if ((byte >> 5) == 0x6) {\n\
+            if (i + 1 >= len) return false;\n\
+            const auto b1 = data[i + 1];\n\
+            if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;\n\
+            i += 2;\n\
+            continue;\n\
+        }\n\
+        if ((byte >> 4) == 0xE) {\n\
+            if (i + 2 >= len) return false;\n\
+            const auto b1 = data[i + 1];\n\
+            const auto b2 = data[i + 2];\n\
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;\n\
+            if (byte == 0xE0 && b1 < 0xA0) return false;\n\
+            if (byte == 0xED && b1 >= 0xA0) return false;\n\
+            i += 3;\n\
+            continue;\n\
+        }\n\
+        if ((byte >> 3) == 0x1E) {\n\
+            if (i + 3 >= len) return false;\n\
+            const auto b1 = data[i + 1];\n\
+            const auto b2 = data[i + 2];\n\
+            const auto b3 = data[i + 3];\n\
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;\n\
+            if (byte == 0xF0 && b1 < 0x90) return false;\n\
+            if (byte == 0xF4 && b1 >= 0x90) return false;\n\
+            if (byte > 0xF4) return false;\n\
+            i += 4;\n\
+            continue;\n\
+        }\n\
+        return false;\n\
+    }\n\
+    return true;\n\
+}\n\
+template<typename Bytes>\n\
+rusty::Result<std::string_view, rusty::String> from_utf8(const Bytes& bytes) {\n\
+    if constexpr (requires { bytes.data(); bytes.size(); }) {\n\
+        const auto* raw = bytes.data();\n\
+        const std::size_t len = static_cast<std::size_t>(bytes.size());\n\
+        const auto* data = reinterpret_cast<const unsigned char*>(raw);\n\
+        if (!is_valid_utf8(data, len)) {\n\
+            return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from(\"invalid utf-8\"));\n\
+        }\n\
+        return rusty::Result<std::string_view, rusty::String>::Ok(\n\
+            std::string_view(reinterpret_cast<const char*>(raw), len)\n\
+        );\n\
+    }\n\
+    return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from(\"unsupported from_utf8 input\"));\n\
+}\n\
+template<typename T, typename Input>\n\
+rusty::Result<T, rusty::String> parse(const Input& input) {\n\
+    std::string_view text;\n\
+    if constexpr (std::is_convertible_v<Input, std::string_view>) {\n\
+        text = std::string_view(input);\n\
+    } else if constexpr (requires { input.as_str(); }) {\n\
+        text = std::string_view(input.as_str());\n\
+    } else {\n\
+        return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse input\"));\n\
+    }\n\
+    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {\n\
+        T value{};\n\
+        const auto* begin = text.data();\n\
+        const auto* end = begin + text.size();\n\
+        const auto [ptr, ec] = std::from_chars(begin, end, value);\n\
+        if (ec == std::errc() && ptr == end) {\n\
+            return rusty::Result<T, rusty::String>::Ok(value);\n\
+        }\n\
+        return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"invalid digit found in string\"));\n\
+    }\n\
+    return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse target\"));\n\
+}\n\
 }\n\
 template<typename T>\n\
 auto deref_ref(const T& value) {\n\
@@ -11811,9 +12021,33 @@ mod tests {
         "#,
         );
         assert!(!out.contains("rusty::intrinsics::unreachable() ?"));
-        assert!(out.contains("auto&& _iflet = std::str::from_utf8("));
+        assert!(out.contains("auto&& _iflet = rusty::str_runtime::from_utf8("));
+        assert!(out.contains("rusty::str_runtime::parse<int32_t>(\"x\")"));
+        assert!(!out.contains("std::str::from_utf8("));
+        assert!(!out.contains("\"x\".parse()"));
         assert!(out.contains("_iflet.is_err() ?"));
         assert!(out.contains("auto error = _iflet.unwrap_err();"));
+    }
+
+    #[test]
+    fn test_leaf435_constructor_hint_recovery_uses_iflet_unwrap_type_placeholder() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let invalid_utf8 = b"\xff";
+                let _res = if let Err(error) = std::str::from_utf8(invalid_utf8) {
+                    Err(Left(error))
+                } else if let Err(error) = "x".parse::<i32>() {
+                    Err(Right(error))
+                } else {
+                    Ok(())
+                };
+            }
+        "#,
+        );
+        assert!(!out.contains("decltype((std::move(error)))"));
+        assert!(out.contains("decltype((_iflet.unwrap_err()))"));
     }
 
     #[test]

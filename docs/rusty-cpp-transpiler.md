@@ -4431,6 +4431,91 @@ Design rationale:
 - The fix is intentionally narrow: it avoids known invalid associated-projection value typing
   without changing non-constrained Option constructor behavior.
 
+### 10.11.41 Leaf 4.35: Resolve expanded `error()` runtime/lowering blockers (`from_utf8`, `parse`, nested `Result` fallback shape)
+
+Problem:
+
+- After Leaf 4.34, the first deterministic expanded-tests compile blockers were concentrated in
+  `error()`:
+  - unresolved `std::str::from_utf8(...)`,
+  - unresolved `"x".parse::<i32>()` lowering,
+  - nested constructor-hint fallout using out-of-scope `decltype((std::move(error)))` in
+    generated `Result<..., Either<...>>` expressions.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one runtime path mapping extension (`types.rs`),
+  - targeted method-call lowering + runtime helper additions (`codegen.rs`),
+  - constructor-hint recovery stabilization in the existing hint pipeline,
+  - focused transpiler regressions and a strict expanded compile re-probe.
+
+Execution plan:
+
+1. Map `std/core::str::from_utf8` paths to a generated runtime compatibility helper.
+2. Lower method-call turbofish parse (`expr.parse::<T>()`) to a compilable helper form.
+3. Add runtime helper implementations for UTF-8 validation + parsing.
+4. Stabilize nested `if let Err(error)` constructor-hint recovery so generated type hints do not
+   capture out-of-scope local bindings.
+5. Re-run focused tests and expanded compile probe.
+
+Implementation:
+
+- In `transpiler/src/types.rs`:
+  - Added function-path mapping:
+    - `std::str::from_utf8` / `core::str::from_utf8` / `str::from_utf8`
+      → `rusty::str_runtime::from_utf8`.
+- In `transpiler/src/codegen.rs`:
+  - Added method-call lowering for turbofish parse:
+    - `receiver.parse::<T>()` → `rusty::str_runtime::parse<T>(receiver)`.
+  - Extended runtime fallback helper emission:
+    - Added `rusty::str_runtime::from_utf8(...)` with UTF-8 validation.
+    - Added `rusty::str_runtime::parse<T>(...)` for integral parse targets.
+  - Stabilized constructor template hint recovery for expressions containing `if let` chains:
+    - detect unwrap method (`unwrap`/`unwrap_err`) from `if let` conditions,
+    - for unresolved constructor arg identifiers in that context, synthesize hints via
+      `_iflet.<unwrap_method>()` instead of out-of-scope local names (`error`).
+  - Added `<charconv>` include for parse helper implementation.
+
+Regression tests added/updated:
+
+- `codegen::tests::test_leaf433_if_let_expr_lowers_without_unreachable_condition`
+  - now asserts `rusty::str_runtime::from_utf8` and `rusty::str_runtime::parse<int32_t>`.
+- `codegen::tests::test_leaf435_constructor_hint_recovery_uses_iflet_unwrap_type_placeholder`
+  - verifies no `decltype((std::move(error)))` fallback type leakage.
+- `types::tests::test_leaf42_runtime_function_path_mappings`
+  - extended for `std/core::str::from_utf8` mapping.
+
+Verification:
+
+- Focused tests:
+  - `cargo test -p rusty-cpp-transpiler leaf433 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf435 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf42_runtime_function_path_mappings -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf435-post2.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf435-post2.rs -o /tmp/either-expanded-tests-leaf435-post2.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf435-post2.cppm -o /tmp/either-expanded-tests-leaf435-post2.o`
+
+Re-probe result:
+
+- Previous deterministic Leaf 4.35 signatures are removed:
+  - no `std::str::from_utf8` unresolved path,
+  - no `"x".parse()` unresolved method form,
+  - no `decltype((std::move(error)))` nested fallback leak.
+- Next first deterministic blocker is now:
+  - consuming-method constness in `error()` (`const auto res` followed by `res.unwrap_err()`),
+  - then existing downstream `as_ref`/`as_mut` and io-span method-shape families.
+
+Design rationale:
+
+- Reused existing runtime-compat helper strategy instead of hardcoding per-function textual rewrites.
+- Kept changes localized to path/method lowering and hint recovery; avoided broad constructor/type
+  inference rewrites not needed for this blocker family.
+- Explicitly avoided wrong approaches from §11:
+  - no Rust-specific one-off branch for `error()` function name,
+  - no global fallback that weakens all constructor hinting to `auto`/erasure.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

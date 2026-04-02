@@ -116,6 +116,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
+        "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
+            Some("rusty::str_runtime::from_utf8")
+        }
         "core::fmt::Formatter::debug_tuple_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
         }
@@ -343,6 +346,14 @@ mod tests {
         assert_eq!(
             map_function_path("core::hash::Hash::hash"),
             Some("rusty::hash::hash")
+        );
+        assert_eq!(
+            map_function_path("std::str::from_utf8"),
+            Some("rusty::str_runtime::from_utf8")
+        );
+        assert_eq!(
+            map_function_path("core::str::from_utf8"),
+            Some("rusty::str_runtime::from_utf8")
         );
         assert_eq!(
             map_function_path("Pin::new_unchecked"),
