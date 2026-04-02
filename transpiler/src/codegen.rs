@@ -177,6 +177,7 @@ impl CodeGen {
         self.writeln("#include <cstdlib>");
         self.writeln("#include <stdexcept>");
         self.writeln("#include <rusty/rusty.hpp>");
+        self.writeln("#include <rusty/try.hpp>");
         self.newline();
 
         if let Some(ref mod_name) = self.module_name {
@@ -3335,14 +3336,11 @@ impl CodeGen {
             }
             syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, None),
             syn::Expr::Try(try_expr) => {
-                // Rust `expr?` → C++ `RUSTY_TRY(expr)`
-                // Uses GCC/Clang statement expressions to unwrap or early-return
+                // Rust `expr?` → C++ try macro variant selected by return context.
+                // Option-returning contexts use *_TRY_OPT and others use *_TRY.
                 let inner = self.emit_expr_to_string(&try_expr.expr);
-                if self.in_async {
-                    format!("RUSTY_CO_TRY({})", inner)
-                } else {
-                    format!("RUSTY_TRY({})", inner)
-                }
+                let try_macro = self.current_try_macro();
+                format!("{}({})", try_macro, inner)
             }
             syn::Expr::Repeat(rep) => {
                 // [val; N] → std::array filled with val
@@ -4184,6 +4182,19 @@ impl CodeGen {
         self.return_type_hints.last().and_then(|hint| hint.as_ref())
     }
 
+    fn current_try_macro(&self) -> &'static str {
+        let returns_option = self
+            .current_return_type_hint()
+            .map(is_option_type_hint)
+            .unwrap_or(false);
+        match (self.in_async, returns_option) {
+            (true, true) => "RUSTY_CO_TRY_OPT",
+            (true, false) => "RUSTY_CO_TRY",
+            (false, true) => "RUSTY_TRY_OPT",
+            (false, false) => "RUSTY_TRY",
+        }
+    }
+
     /// Best-effort lowering of a Rust block used in expression position.
     /// Emits an IIFE that preserves simple local bindings and tail-expression return.
     fn block_expr_to_iife_string(&self, block: &syn::Block) -> Option<String> {
@@ -4920,6 +4931,21 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             }
         }
         _ => {}
+    }
+}
+
+fn is_option_type_hint(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(tp) => tp
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident == "Option")
+            .unwrap_or(false),
+        syn::Type::Group(group) => is_option_type_hint(&group.elem),
+        syn::Type::Paren(paren) => is_option_type_hint(&paren.elem),
+        syn::Type::Reference(reference) => is_option_type_hint(&reference.elem),
+        _ => false,
     }
 }
 
@@ -6152,6 +6178,7 @@ mod tests {
         assert!(out.contains("#include <variant>"));
         assert!(out.contains("#include <utility>"));
         assert!(out.contains("#include <rusty/rusty.hpp>"));
+        assert!(out.contains("#include <rusty/try.hpp>"));
     }
 
     #[test]
@@ -6676,6 +6703,21 @@ mod tests {
     }
 
     #[test]
+    fn test_try_on_option_uses_try_opt() {
+        let out = transpile_str(
+            "fn f(opt: Option<i32>) -> Option<i32> { let x = opt?; Some(x) }",
+        );
+        assert!(out.contains("RUSTY_TRY_OPT(opt)"));
+        assert!(!out.contains("RUSTY_TRY(opt)"));
+    }
+
+    #[test]
+    fn test_try_on_generic_option_uses_try_opt() {
+        let out = transpile_str("fn f<T>(opt: Option<T>) -> Option<T> { Some(opt?) }");
+        assert!(out.contains("RUSTY_TRY_OPT(opt)"));
+    }
+
+    #[test]
     fn test_try_on_method_call() {
         let out = transpile_str(
             "fn f() -> Result<i32, String> { let x = foo.bar()?; Ok(x) }",
@@ -6689,6 +6731,15 @@ mod tests {
             "async fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }",
         );
         assert!(out.contains("RUSTY_CO_TRY(parse())"));
+    }
+
+    #[test]
+    fn test_try_on_option_in_async_uses_co_try_opt() {
+        let out = transpile_str(
+            "async fn f(opt: Option<i32>) -> Option<i32> { let x = opt?; Some(x) }",
+        );
+        assert!(out.contains("RUSTY_CO_TRY_OPT(opt)"));
+        assert!(!out.contains("RUSTY_CO_TRY(opt)"));
     }
 
     #[test]

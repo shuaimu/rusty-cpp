@@ -2586,6 +2586,47 @@ Design rationale:
 - Followed the rejected broad export strategy in §11.17 by avoiding blanket namespace export rewrites.
 - Applied a narrow, deterministic lowering rule only for the known module-linkage re-export hotspot.
 
+### 10.37 Phase 18 Progress: End-to-End (Leaf 4.12) — DONE
+
+Leaf 4.12 fixed `?`-operator macro availability/emission in generated templated iterator paths.
+
+Changes:
+
+- Added explicit `#include <rusty/try.hpp>` to emitted module global-fragment includes so `RUSTY_TRY*` macros are always available in transpiled outputs.
+- Updated `Expr::Try` lowering to select macro family from current return-type context:
+  - `Option` return context:
+    - sync -> `RUSTY_TRY_OPT(...)`
+    - async -> `RUSTY_CO_TRY_OPT(...)`
+  - non-`Option` return context:
+    - sync -> `RUSTY_TRY(...)`
+    - async -> `RUSTY_CO_TRY(...)`
+- Added helper detection for `Option` return hints (`is_option_type_hint(...)`) and used it through `current_try_macro()`.
+
+Regression tests added:
+
+- `test_try_on_option_uses_try_opt`
+- `test_try_on_generic_option_uses_try_opt`
+- `test_try_on_option_in_async_uses_co_try_opt`
+- Updated include coverage in `test_emits_required_cpp_and_rusty_includes`
+
+Verification:
+
+- Focused unit tests pass:
+  - `cargo test -p rusty-cpp-transpiler test_try_on_option_uses_try_opt -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_try_on_generic_option_uses_try_opt -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_try_on_option_in_async_uses_co_try_opt -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_try_on_result -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_emits_required_cpp_and_rusty_includes -- --nocapture`
+- Parity harness rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf412-fix --stop-after build`
+  - generated `either.cppm` now contains `#include <rusty/try.hpp>` and `RUSTY_TRY_OPT(...)` in `iterator::IterEither<L, R>` `next/last/nth/next_back/nth_back`;
+  - prior `RUSTY_TRY` declaration/availability blocker class is no longer present; remaining failures are from later leaves.
+
+Design rationale:
+
+- Followed the rejected broad fallback strategy in §11.23 by avoiding global macro substitution.
+- Fixed the semantic mismatch at the emitter by choosing the correct try macro based on return context.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2803,3 +2844,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Compilers reject exporting aliases to module-linkage entities (`does not have external linkage`), causing immediate hard build failure.
 - It introduces a deterministic blocker before deeper parity mismatches can be addressed.
 - The safer narrow fix is to lower this specific re-export as Rust-only in module mode until explicit exported declaration support is implemented.
+
+### 11.23 Forcing `RUSTY_TRY` for `Option` Return Paths
+
+**Rejected approach:** Keep emitting `RUSTY_TRY(...)` for all `expr?` sites, including `Option`-returning contexts in templated iterator methods.
+
+**Why it was rejected:**
+- `RUSTY_TRY` is Result-oriented (`is_err()`/Err early-return), while `Option` paths require `is_none()`/None propagation semantics.
+- In generated iterator template methods, this creates deterministic compile/runtime semantic mismatch risk and obscures the actual residual blockers.
+- Correct lowering is context-sensitive macro selection (`RUSTY_TRY_OPT` / `RUSTY_CO_TRY_OPT` for `Option` returns), plus explicit `try.hpp` availability.
