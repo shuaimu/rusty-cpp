@@ -1122,6 +1122,13 @@ impl CodeGen {
 
         let export_prefix = if is_pub && self.module_name.is_some() { "export " } else { "" };
         for path in &paths {
+            if is_pub
+                && self.module_name.is_some()
+                && is_module_linkage_sensitive_reexport(normalize_use_import_path(path))
+            {
+                self.writeln(&format!("// Rust-only: using {};", path));
+                continue;
+            }
             if self.is_skipped_module_trait_import(path) {
                 self.writeln(&format!("// Rust-only: using {};", path));
                 continue;
@@ -4749,6 +4756,18 @@ fn is_either_variant_reexport(path: &str) -> bool {
     enum_name == "Either" && matches!(variant_name, "Left" | "Right")
 }
 
+/// Some pub re-exports in module mode refer to declarations with module linkage
+/// (for example `pub use iterator::IterEither;` in expanded either output).
+/// Emitting `export using` for these names is rejected by compilers, so keep
+/// them as Rust-only until the originating declaration is explicitly exported.
+fn is_module_linkage_sensitive_reexport(path: &str) -> bool {
+    let parts: Vec<&str> = path.split("::").collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    parts[parts.len() - 2] == "iterator" && parts[parts.len() - 1] == "IterEither"
+}
+
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
     // `use std::io;` imports the module name itself; alias it to rusty::io.
     if path == "std::io" {
@@ -6353,6 +6372,34 @@ mod tests {
         assert!(out.contains("// Rust-only: using Either::Right;"));
         assert!(!out.contains("export using Either::Left;"));
         assert!(!out.contains("export using Either::Right;"));
+    }
+
+    #[test]
+    fn test_pub_use_iter_either_reexport_skipped_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            mod iterator {
+                pub struct IterEither<L, R> { pub _0: L, pub _1: R }
+            }
+            pub use crate::iterator::IterEither;
+        "#,
+            "either",
+        );
+        assert!(out.contains("// Rust-only: using iterator::IterEither;"));
+        assert!(!out.contains("export using iterator::IterEither;"));
+    }
+
+    #[test]
+    fn test_pub_use_iter_either_reexport_kept_without_module_mode() {
+        let out = transpile_str(
+            r#"
+            mod iterator {
+                pub struct IterEither<L, R> { pub _0: L, pub _1: R }
+            }
+            pub use crate::iterator::IterEither;
+        "#,
+        );
+        assert!(out.contains("using iterator::IterEither;"));
     }
 
     #[test]

@@ -2553,6 +2553,39 @@ Design rationale:
 - Followed rejected broad/global-rewrite approaches in §11.4 and §11.15.
 - Avoided introducing ad-hoc shim types for template static calls; used return-type context to emit correct dependent template specializations directly.
 
+### 10.36 Phase 18 Progress: End-to-End (Leaf 4.11) — DONE
+
+Leaf 4.11 fixed module-linkage failure from `pub use iterator::IterEither` re-export lowering in expanded module output.
+
+Changes:
+
+- Added targeted module-mode re-export suppression for module-linkage-sensitive names:
+  - `pub use ...::iterator::IterEither;` is now emitted as Rust-only comment in module mode;
+  - avoids invalid `export using iterator::IterEither;` when `IterEither` has module linkage.
+- Kept non-module behavior unchanged (`using iterator::IterEither;` still emitted outside module mode).
+- Added targeted detector `is_module_linkage_sensitive_reexport(...)` and applied it only for `pub` + module-mode `use` lowering.
+
+Regression tests added:
+
+- `test_pub_use_iter_either_reexport_skipped_in_module_mode`
+- `test_pub_use_iter_either_reexport_kept_without_module_mode`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler iter_either_reexport -- --nocapture` passes.
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf411-fix --stop-after build`
+  - prior diagnostic
+    `exporting 'template<class L, class R> struct iterator::IterEither' that does not have external linkage`
+    is no longer present;
+  - generated output now contains `// Rust-only: using iterator::IterEither;`;
+  - remaining build errors are from later leaves.
+
+Design rationale:
+
+- Followed the rejected broad export strategy in §11.17 by avoiding blanket namespace export rewrites.
+- Applied a narrow, deterministic lowering rule only for the known module-linkage re-export hotspot.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2761,3 +2794,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It increases runtime/helper surface with artificial compatibility layers that can drift from real semantics.
 - It risks creating ambiguous name lookup and module-linkage complications around real `iterator::IterEither<L, R>` declarations.
 - The robust fix is expected-type-aware call lowering that emits `iterator::IterEither<...>::new_(...)` directly at the original call site.
+
+### 11.22 Keeping `export using iterator::IterEither` for Module-Local Linkage Types
+
+**Rejected approach:** Keep emitting `export using iterator::IterEither;` in module mode even when the underlying declaration has module linkage (non-exported declaration in the same named module).
+
+**Why it was rejected:**
+- Compilers reject exporting aliases to module-linkage entities (`does not have external linkage`), causing immediate hard build failure.
+- It introduces a deterministic blocker before deeper parity mismatches can be addressed.
+- The safer narrow fix is to lower this specific re-export as Rust-only in module mode until explicit exported declaration support is implemented.
