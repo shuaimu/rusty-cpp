@@ -5064,7 +5064,7 @@ Implementation:
     - `cargo expand --manifest-path ... --lib --tests > $WORK_DIR/either_expanded_tests.rs`
     - `cargo run -p rusty-cpp-transpiler -- $WORK_DIR/either_expanded_tests.rs --output $CPP_OUT_DIR/either_expanded_tests.cppm --module-name rustycpp.either_expanded_tests`
   - Stage 3 now also compiles:
-    - `g++ -std=c++20 -fmodules-ts -fmax-errors=80 -I include -I tests/cpp/include -x c++ -c either_expanded_tests.cppm -o either_expanded_tests.o`
+    - `g++ -std=c++23 -fmodules-ts -fmax-errors=80 -I include -I tests/cpp/include -x c++ -c either_expanded_tests.cppm -o either_expanded_tests.o`
   - artifact reset/cleanup updated for the new intermediate/output files.
 - Updated `transpiler/tests/either_parity_harness.rs` dry-run assertions to lock the new command
   path (`cargo expand --lib --tests`, expanded-tests module-name/output, and stricter compile flags).
@@ -5090,6 +5090,65 @@ Design rationale:
 - Avoided wrong approaches from §11:
   - no replacing the current harness with a separate second script (split ownership/drift risk) (§11.53),
   - no dropping existing crate-output compile smoke to “speed up” expanded-tests checks (§11.31).
+
+### 10.11.51 Leaf 4.45: Run transpiled expanded test wrappers in harness stage 4 and capture first runtime blocker
+
+Problem:
+
+- After Leaf 4.44, default harness coverage included expanded-tests transpile+compile, but stage 4
+  still linked/ran a smoke executable that did not execute transpiled `rusty_test_*` bodies.
+- That left runtime parity regressions invisible in the default parity command path.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - harness script stage-4 execution path update,
+  - harness dry-run integration assertion refresh,
+  - TODO/docs updates only.
+- No transpiler codegen/runtime-library behavior changes in this leaf.
+
+Implementation:
+
+- Updated `tests/transpile_tests/either/run_parity_harness.sh` stage 4:
+  - discovered exported expanded test wrappers from generated module output via:
+    - `export void rusty_test_*()`
+  - generated `either_expanded_tests_main.cpp` that imports:
+    - `either`
+    - `rustycpp.either_expanded_tests`
+  - emitted direct wrapper invocation sequence in generated `main()` (in transpiled test order).
+  - linked runner against both objects:
+    - `either.o`
+    - `either_expanded_tests.o`
+  - upgraded expanded-tests module compile dialect to `-std=c++23` to match stage-4 import TU and
+    avoid cross-dialect module import errors.
+  - added deterministic unbuffered run markers (`[RUN] <name>`, `[OK] <name>`) so first failing
+    wrapper is visible even when execution aborts.
+- Updated harness dry-run assertions in
+  `transpiler/tests/either_parity_harness.rs` for the new stage-4 runner artifact/command shape.
+
+Regression tests:
+
+- Focused harness integration:
+  - `cargo test -p rusty-cpp-transpiler --test either_parity_harness -- --nocapture`
+- Runtime parity re-probe:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf445`
+
+Verification:
+
+- Harness integration tests pass with updated stage-4 behavior assertions.
+- Default harness now executes transpiled expanded wrappers and surfaces runtime mismatches directly.
+- First deterministic post-leaf runtime blocker captured:
+  - wrappers `basic`, `macros`, `deref`, `iter` execute,
+  - first abort occurs in wrapper `seek`.
+
+Design rationale:
+
+- This keeps parity signaling honest: compile-green no longer masks failing transpiled test runtime.
+- The leaf intentionally captures the next runtime blocker family instead of papering over it with
+  smoke-only success.
+- Avoided wrong approaches from §11:
+  - no demoting wrapper execution to an optional side path that can silently drift from default parity checks (§11.54),
+  - no broad catch-all test suppression around failing wrappers (would hide real mismatches) (§11.31).
 
 ---
 
@@ -5689,3 +5748,16 @@ script/command just for expanded `--lib --tests` transpile+compile checks.
   semantics.
 - Integrating expanded-tests transpile+compile into the existing harness keeps one authoritative
   path and makes regressions visible in the normal parity workflow.
+
+### 11.54 Keeping Default Parity Run Smoke-Only While Hiding Expanded Runtime Failures Behind Optional Flags
+
+**Rejected approach:** Keep stage 4 as smoke-only by default and add expanded wrapper execution as
+an optional flag/path.
+
+**Why it was rejected:**
+
+- It creates a false-green default: compile/transpile can pass while transpiled test runtime is
+  already aborting (as seen first in `seek`).
+- Optional probe paths are easy to skip in routine loops and CI, causing parity drift.
+- The Phase 18 objective is automatic parity, so default behavior should surface real runtime
+  mismatches instead of requiring a special opt-in command.

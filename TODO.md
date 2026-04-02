@@ -440,9 +440,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Re-probe: expanded-tests compile probe and parity harness build/run now pass for this blocker family; no immediate follow-up blocker surfaced by the same probe path
           - [x] *done* Leaf 4.44: Extend parity harness to transpile+compile expanded `--lib --tests` output in the default run path, then re-probe
             - [x] *done* Updated `tests/transpile_tests/either/run_parity_harness.sh` so stage 2 now also materializes `cargo expand --lib --tests` output and transpiles it as a single-file module (`either_expanded_tests.cppm`)
-            - [x] *done* Updated harness stage 3 to compile that generated expanded-tests module (`g++ -std=c++20 -fmodules-ts -fmax-errors=80 -I include -I tests/cpp/include -c either_expanded_tests.cppm`) in addition to existing crate-output module compile
+            - [x] *done* Updated harness stage 3 to compile that generated expanded-tests module (`g++ -std=c++23 -fmodules-ts -fmax-errors=80 -I include -I tests/cpp/include -c either_expanded_tests.cppm`) in addition to existing crate-output module compile
             - [x] *done* Updated harness integration assertions in `transpiler/tests/either_parity_harness.rs` to lock the new dry-run command path and flags
             - [x] *done* Re-probe: harness integration test binary passes and full harness run succeeds with expanded-tests transpile+compile enabled
+          - [x] *done* Leaf 4.45: Run transpiled expanded `rusty_test_*` wrappers in harness stage 4 (not smoke-only), then capture the first runtime blocker family
+            - [x] *done* Replaced smoke-only stage-4 main generation with wrapper discovery from `either_expanded_tests.cppm` (`export void rusty_test_*`) and generated runner that imports `rustycpp.either_expanded_tests` and invokes each wrapper
+            - [x] *done* Linked stage-4 runner against both module objects (`either.o` + `either_expanded_tests.o`) and kept deterministic rerun cleanup for new runner artifacts
+            - [x] *done* Added unbuffered per-wrapper run markers (`[RUN]/[OK]`) in stage-4 output to make first failing wrapper deterministic in logs
+            - [x] *done* Re-probe: `basic/macros/deref/iter` wrappers run, first deterministic runtime abort now occurs in `seek` wrapper; compile/transpile stages remain green
+          - [ ] Leaf 4.46: Fix first post-4.45 expanded runtime blocker family in `seek` wrapper path (transpiled test execution abort), then re-probe full wrapper run
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

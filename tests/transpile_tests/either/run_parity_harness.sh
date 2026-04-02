@@ -13,7 +13,7 @@ Automates the Phase 18 end-to-end parity workflow for tests/transpile_tests/eith
 3) C++ build:
    - compile generated either.cppm
    - compile generated either_expanded_tests.cppm
-4) C++ run: run generated smoke executable
+4) C++ run: run generated expanded-test wrapper executable
 
 Options:
   --work-dir <path>      Directory for generated artifacts/logs (default: mktemp)
@@ -97,8 +97,8 @@ MODULE_OBJ="${WORK_DIR}/either.o"
 EXPANDED_TESTS_RS="${WORK_DIR}/either_expanded_tests.rs"
 EXPANDED_TESTS_CPPM="${CPP_OUT_DIR}/either_expanded_tests.cppm"
 EXPANDED_TESTS_OBJ="${WORK_DIR}/either_expanded_tests.o"
-SMOKE_MAIN="${WORK_DIR}/either_smoke_main.cpp"
-SMOKE_BIN="${WORK_DIR}/either_smoke"
+TEST_RUNNER_MAIN="${WORK_DIR}/either_expanded_tests_main.cpp"
+TEST_RUNNER_BIN="${WORK_DIR}/either_expanded_tests_runner"
 
 cleanup() {
   local exit_code=$?
@@ -129,7 +129,7 @@ reset_artifacts() {
   : > "${LOG_CPP_BUILD}"
   : > "${LOG_CPP_RUN}"
 
-  rm -f "${MODULE_OBJ}" "${EXPANDED_TESTS_RS}" "${EXPANDED_TESTS_OBJ}" "${SMOKE_MAIN}" "${SMOKE_BIN}"
+  rm -f "${MODULE_OBJ}" "${EXPANDED_TESTS_RS}" "${EXPANDED_TESTS_OBJ}" "${TEST_RUNNER_MAIN}" "${TEST_RUNNER_BIN}"
 }
 
 run_logged() {
@@ -217,27 +217,57 @@ echo "Stage 3/4: Build transpiled C++ module"
 run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_BUILD}" \
   g++ -std=c++23 -fmodules-ts -I "${REPO_ROOT}/include" -x c++ -c "${CPP_OUT_DIR}/either.cppm" -o "${MODULE_OBJ}"
 run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_BUILD}" \
-  g++ -std=c++20 -fmodules-ts -fmax-errors=80 -I "${REPO_ROOT}/include" -I "${REPO_ROOT}/tests/cpp/include" -x c++ -c "${EXPANDED_TESTS_CPPM}" -o "${EXPANDED_TESTS_OBJ}"
+  g++ -std=c++23 -fmodules-ts -fmax-errors=80 -I "${REPO_ROOT}/include" -I "${REPO_ROOT}/tests/cpp/include" -x c++ -c "${EXPANDED_TESTS_CPPM}" -o "${EXPANDED_TESTS_OBJ}"
 if [[ "${STOP_AFTER}" == "build" ]]; then
   echo "Stopped after stage: build"
   exit 0
 fi
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
-  cat > "${SMOKE_MAIN}" <<'EOF'
+  mapfile -t EXPANDED_TEST_WRAPPERS < <(
+    sed -n 's/^[[:space:]]*export[[:space:]]\+void[[:space:]]\+\(rusty_test_[A-Za-z0-9_]\+\)[[:space:]]*(.*/\1/p' "${EXPANDED_TESTS_CPPM}"
+  )
+  if [[ "${#EXPANDED_TEST_WRAPPERS[@]}" -eq 0 ]]; then
+    echo "error: no exported expanded test wrappers found in ${EXPANDED_TESTS_CPPM}" >&2
+    exit 1
+  fi
+
+  {
+    cat <<'EOF'
 import either;
+import rustycpp.either_expanded_tests;
+
+extern "C" long write(int, const void*, unsigned long);
+
+static void log_line(const char* msg) {
+  unsigned long len = 0;
+  while (msg[len] != '\0') {
+    ++len;
+  }
+  (void)write(2, msg, len);
+  (void)write(2, "\n", 1);
+}
 
 int main() {
+EOF
+    for fn_name in "${EXPANDED_TEST_WRAPPERS[@]}"; do
+      readable_name="${fn_name#rusty_test_}"
+      printf '  log_line("[RUN] %s");\n' "${readable_name}"
+      printf '  %s();\n' "${fn_name}"
+      printf '  log_line("[OK] %s");\n' "${readable_name}"
+    done
+    cat <<'EOF'
   return 0;
 }
 EOF
+  } > "${TEST_RUNNER_MAIN}"
 fi
 
-echo "Stage 4/4: Link and run C++ smoke executable"
+echo "Stage 4/4: Link and run transpiled expanded test wrappers"
 run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_RUN}" \
-  g++ -std=c++23 -fmodules-ts -I "${REPO_ROOT}/include" "${SMOKE_MAIN}" "${MODULE_OBJ}" -o "${SMOKE_BIN}"
+  g++ -std=c++23 -fmodules-ts -I "${REPO_ROOT}/include" "${TEST_RUNNER_MAIN}" "${MODULE_OBJ}" "${EXPANDED_TESTS_OBJ}" -o "${TEST_RUNNER_BIN}"
 run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_RUN}" \
-  "${SMOKE_BIN}"
+  "${TEST_RUNNER_BIN}"
 if [[ "${STOP_AFTER}" == "run" ]]; then
   echo "Stopped after stage: run"
 fi

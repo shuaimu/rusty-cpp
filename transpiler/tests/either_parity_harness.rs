@@ -43,7 +43,7 @@ fn test_either_parity_harness_dry_run_lists_all_stages() {
     assert!(stdout.contains("Stage 1/4: Rust baseline"));
     assert!(stdout.contains("Stage 2/4: Transpile expanded either crate"));
     assert!(stdout.contains("Stage 3/4: Build transpiled C++ module"));
-    assert!(stdout.contains("Stage 4/4: Link and run C++ smoke executable"));
+    assert!(stdout.contains("Stage 4/4: Link and run transpiled expanded test wrappers"));
     assert!(stdout.contains("cargo test --manifest-path"));
     assert!(stdout.contains("Cargo.toml"));
     assert!(stdout.contains("cargo run -p rusty-cpp-transpiler -- --crate"));
@@ -54,7 +54,8 @@ fn test_either_parity_harness_dry_run_lists_all_stages() {
     assert!(stdout.contains("either_expanded_tests.cppm"));
     assert!(stdout.contains("g++ -std=c++23 -fmodules-ts"));
     assert!(stdout.contains("-fmax-errors=80"));
-    assert!(stdout.contains("either_smoke_main.cpp"));
+    assert!(stdout.contains("either_expanded_tests_main.cpp"));
+    assert!(stdout.contains("either_expanded_tests_runner"));
 }
 
 #[test]
@@ -111,7 +112,7 @@ fn test_either_parity_harness_dry_run_stop_after_build() {
     assert!(stdout.contains("Stage 2/4: Transpile expanded either crate"));
     assert!(stdout.contains("Stage 3/4: Build transpiled C++ module"));
     assert!(stdout.contains("Stopped after stage: build"));
-    assert!(!stdout.contains("Stage 4/4: Link and run C++ smoke executable"));
+    assert!(!stdout.contains("Stage 4/4: Link and run transpiled expanded test wrappers"));
 }
 
 #[test]
