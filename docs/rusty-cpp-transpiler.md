@@ -3009,6 +3009,74 @@ Design rationale:
 - Followed §11.31 (below): do not treat import-only smoke run success as behavioral
   parity.
 
+### 10.47 Phase 18 Progress: End-to-End (Leaf 4.19) — DONE
+
+Leaf 4.19 preserves expanded libtest-backed test bodies as runnable exported wrappers
+and captures the first compile blocker set on that runnable-test path.
+
+Scope analysis:
+
+- This leaf is small (<1000 LOC): targeted transpiler changes in `codegen.rs`,
+  focused regression tests, and parity probe updates.
+
+Execution plan:
+
+1. Track expanded libtest marker metadata (`#[rustc_test_marker = "..."]`) when
+   skipping `test::TestDescAndFn` consts.
+2. Track emitted top-level function names in the same file.
+3. Emit runnable wrappers for marker-matched test functions
+   (`export void rusty_test_<name>() { <name>(); }` in module mode).
+4. Re-run expanded-tests compile probe and capture first blocker set from this
+   runnable path.
+
+Implementation:
+
+- Added marker extraction helper for `rustc_test_marker`.
+- Recorded skipped libtest marker names from metadata consts.
+- Recorded emitted top-level function names.
+- Emitted runnable wrapper exports for marker/function matches and diagnostic comments
+  for marker-only cases without matching emitted function.
+
+Regression tests added:
+
+- `test_leaf419_emits_runnable_wrappers_for_libtest_markers_in_module_mode`
+- `test_leaf419_reports_marker_without_emitted_function`
+
+Focused verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf419 -- --nocapture`
+
+Runnable-path probe:
+
+- `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf419.rs`
+- `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf419.rs -o /tmp/either-expanded-tests-leaf419.cppm --module-name either`
+- Output now contains:
+  - transpiled test bodies (`void basic()`, `void macros()`, `void deref()`, `void iter()`, `void seek()`, `void read_write()`, `void error()`)
+  - exported wrappers (`export void rusty_test_basic()`, ..., `export void rusty_test_error()`).
+- Compile probe:
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf419.cppm -o /tmp/either-expanded-tests-leaf419.o`
+  - exits non-zero with first deterministic blocker family in `basic()`:
+    - invalid address-of-rvalue tuple lowering for assertions (`&Left(...)`, `&Right(...)`);
+    - invalid tuple `std::visit` target (tuple used where variant visitation is expected);
+    - subsequent left/right typed local mismatch cascades (`e = r`, missing methods on `Either_Left`).
+
+Reduced blocker set:
+
+- Runnable wrapper emission is now in place.
+- Next blocker family is compile-time lowering correctness in expanded test assertions and
+  typed local/variant handling inside `basic()`.
+
+Verification:
+
+- Full regression suite passed: `cargo test --workspace`.
+
+Design rationale:
+
+- Followed §11.28 and §11.31: preserve narrow libtest scaffolding skips while keeping
+  executable test-body signal.
+- Followed §11.13: make test bodies runnable first, then collapse to the first
+  deterministic compile blocker family.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3309,3 +3377,13 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It can produce a false-green parity signal when expanded Rust test bodies are still absent from emitted C++.
 - It validates only module/link viability, not test behavior equivalence.
 - The correct approach is to explicitly verify runnable test-body emission (or equivalent callable test-entry coverage) before claiming runtime parity progress.
+
+### 11.32 Blanket Export of All Non-Public Functions to “Make Tests Runnable”
+
+**Rejected approach:** Export every top-level function in module mode so test runners can call everything, regardless of marker metadata or intended visibility.
+
+**Why it was rejected:**
+
+- It breaks Rust visibility semantics and over-exposes internal helper APIs.
+- It creates avoidable module API drift and increases the risk of name/linkage conflicts.
+- The safer approach is targeted wrapper emission keyed by explicit libtest marker metadata and emitted function presence.

@@ -70,6 +70,13 @@ pub struct CodeGen {
     /// Traits intentionally skipped in module mode (Proxy facade unavailable),
     /// tracked by scoped path so `pub use` can be lowered as Rust-only imports.
     skipped_module_traits: HashSet<String>,
+    /// Expanded Rust libtest marker names discovered from skipped
+    /// `test::TestDescAndFn` metadata consts.
+    /// Used to emit runnable wrappers for transpiled test-body functions.
+    expanded_test_markers: Vec<String>,
+    /// Top-level function names emitted in this file.
+    /// Used to validate marker→function wrapper emission.
+    emitted_top_level_functions: HashSet<String>,
     /// `macro_rules!` names discovered in the current file (including inline modules).
     /// `use` imports that target these names are macro-only and should not emit C++ `using`.
     macro_rules_names: HashSet<String>,
@@ -114,6 +121,8 @@ impl CodeGen {
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
+            expanded_test_markers: Vec::new(),
+            emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
@@ -164,6 +173,8 @@ impl CodeGen {
         self.impl_method_conflict_keys.clear();
         self.operator_renames.clear();
         self.skipped_module_traits.clear();
+        self.expanded_test_markers.clear();
+        self.emitted_top_level_functions.clear();
         self.macro_rules_names.clear();
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
@@ -225,6 +236,8 @@ impl CodeGen {
             self.emit_item(item);
             self.newline();
         }
+
+        self.emit_expanded_test_wrappers();
 
         let mut helper_text = String::new();
         if self.output.contains("std::visit(overloaded {") {
@@ -495,6 +508,55 @@ impl CodeGen {
         body.contains("test :: test_main_static") || body.contains("test::test_main_static")
     }
 
+    fn rustc_test_marker_name(attrs: &[syn::Attribute]) -> Option<String> {
+        for attr in attrs {
+            if !attr.path().is_ident("rustc_test_marker") {
+                continue;
+            }
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                    if let syn::Lit::Str(s) = &expr_lit.lit {
+                        return Some(s.value());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn emit_expanded_test_wrappers(&mut self) {
+        if self.expanded_test_markers.is_empty() {
+            return;
+        }
+
+        self.newline();
+        self.writeln("// Runnable wrappers for expanded Rust test bodies");
+        let mut seen = HashSet::new();
+        let markers = self.expanded_test_markers.clone();
+
+        for marker in markers {
+            if !seen.insert(marker.clone()) {
+                continue;
+            }
+            if !self.emitted_top_level_functions.contains(&marker) {
+                self.writeln(&format!(
+                    "// Rust-only libtest marker without emitted function: {}",
+                    marker
+                ));
+                continue;
+            }
+
+            let fn_name = escape_cpp_keyword(&marker);
+            let wrapper_name = format!("rusty_test_{}", fn_name);
+            let export_prefix = if self.module_name.is_some() { "export " } else { "" };
+            self.writeln(&format!("{}void {}() {{", export_prefix, wrapper_name));
+            self.indent += 1;
+            self.writeln(&format!("{}();", fn_name));
+            self.indent -= 1;
+            self.writeln("}");
+        }
+    }
+
     /// Emit a nested function definition as a C++ lambda.
     /// `fn foo(x: i32) -> i32 { x + 1 }` → `const auto foo = [&](int32_t x) -> int32_t { return x + 1; };`
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
@@ -529,6 +591,11 @@ impl CodeGen {
         if self.is_rust_libtest_main(f) {
             self.writeln("// Rust-only libtest main omitted");
             return;
+        }
+
+        if self.module_stack.is_empty() {
+            self.emitted_top_level_functions
+                .insert(f.sig.ident.to_string());
         }
 
         let is_test = Self::has_test_attr(&f.attrs);
@@ -1004,6 +1071,9 @@ impl CodeGen {
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
         if self.is_rust_libtest_metadata_type(&c.ty) {
+            let marker = Self::rustc_test_marker_name(&c.attrs)
+                .unwrap_or_else(|| c.ident.to_string());
+            self.expanded_test_markers.push(marker);
             self.writeln(&format!(
                 "// Rust-only libtest metadata const skipped: {}",
                 c.ident
@@ -5230,6 +5300,8 @@ impl CodeGen {
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
+            expanded_test_markers: Vec::new(),
+            emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
@@ -7745,6 +7817,40 @@ mod tests {
         let out = transpile_str("fn main() {}");
         assert!(!out.contains("// Rust-only libtest main omitted"));
         assert!(out.contains("void main() {"));
+    }
+
+    #[test]
+    fn test_leaf419_emits_runnable_wrappers_for_libtest_markers_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            #[rustc_test_marker = "basic"]
+            pub const basic: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            fn basic() {}
+        "#,
+            "either",
+        );
+
+        assert!(out.contains("// Rust-only libtest metadata const skipped: basic"));
+        assert!(out.contains("void basic() {"));
+        assert!(out.contains("export void rusty_test_basic() {"));
+        assert!(out.contains("basic();"));
+    }
+
+    #[test]
+    fn test_leaf419_reports_marker_without_emitted_function() {
+        let out = transpile_str_module(
+            r#"
+            #[rustc_test_marker = "missing_test_fn"]
+            pub const marker_only: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+        "#,
+            "either",
+        );
+
+        assert!(out.contains("// Rust-only libtest metadata const skipped: marker_only"));
+        assert!(out.contains(
+            "// Rust-only libtest marker without emitted function: missing_test_fn"
+        ));
+        assert!(!out.contains("rusty_test_missing_test_fn"));
     }
 
     #[test]
