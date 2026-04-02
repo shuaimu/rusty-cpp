@@ -3620,6 +3620,71 @@ Design rationale:
   - no broad suppression of generated iterator methods,
   - no global rewrite of member calls or range/slice expressions unrelated to the failing instantiated path.
 
+### 10.11.29 Leaf 4.29.1: Guard constructor-like `new` paths from UFCS rewrite
+
+Problem:
+
+- First deterministic seek/read_write io blocker family included malformed constructor lowering in
+  expanded output:
+  - `io::Cursor::new(&...)` was being interpreted as UFCS trait dispatch and rewritten to
+    `receiver.new(...)`.
+- This created invalid generated C++ in Cursor call sites and obscured the remaining root blockers.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): one scoped UFCS guard in
+  `transpiler/src/codegen.rs` plus focused regression tests.
+
+Execution plan:
+
+1. Keep UFCS behavior for real trait-method paths (`Read::read`, `Write::write`, `Iterator::next`).
+2. Add a narrow guard that excludes constructor-like `new` calls from UFCS rewrite.
+3. Add focused tests for detection and emission shape.
+4. Re-run expanded-tests compile probe to confirm the malformed `.new(...)` shape is removed and
+   capture the next deterministic blockers.
+
+Implementation:
+
+- Updated `detect_ufcs_trait_method_call(...)`:
+  - reject method names `new` / `new_` for UFCS rewrite candidacy;
+  - reject paths recognized by `types::map_function_path(...)` as constructor mappings
+    (`...::new_`), so normal function-path lowering remains active.
+- This keeps `io::Cursor::new(&...)` on the standard mapped path:
+  - `rusty::io::Cursor::new_(...)`
+  - and avoids receiver-dot-call mis-lowering.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf429_detect_ufcs_trait_call_rejects_constructor_like_new_path`
+- `codegen::tests::test_leaf429_emit_constructor_like_new_path_keeps_function_call_shape`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf429 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler ufcs -- --nocapture`
+- Expanded-tests compile re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf429.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf429.rs -o /tmp/either-expanded-tests-leaf429.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf429.cppm -o /tmp/either-expanded-tests-leaf429.o`
+
+Re-probe result:
+
+- The constructor-misrewrite signature is removed:
+  - no generated `receiver.new(...)` shape for `Cursor::new` sites.
+- Next deterministic blockers in the same family are now clear and isolated:
+  - `Cursor` template/context shape in `decltype` uses,
+  - `range_full` / `range_to` indexing lowered as `operator[]` on vectors,
+  - `buf.len()` emission on C++ containers without `.len()`,
+  - residual tuple assertion reference artifacts (`&&...`) in io tests.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first): collapsed the first malformed-constructor signature before
+  broad io-shape work.
+- Avoided wrong approaches from §11.4 and §11.5:
+  - no blanket UFCS disablement,
+  - no global reference-argument stripping outside UFCS rewrite scope.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4013,3 +4078,16 @@ multi-deref forms everywhere, regardless of receiver/type context.
   - receiver-aware handling for `*self`,
   - pattern/type-context-aware handling for `&*...`,
   - and localized fallback helpers for Deref/DerefMut-heavy expanded paths.
+
+### 11.39 Disabling UFCS Rewrite Globally to Avoid Constructor False Positives
+
+**Rejected approach:** Turn off UFCS-to-method rewrite entirely after seeing constructor-like
+`Type::new(&...)` false positives.
+
+**Why it was rejected:**
+
+- It would regress already-fixed trait-call lowering paths (`Read::read`, `Write::write`,
+  `Iterator::next`) that rely on UFCS rewrite for valid C++ method-call shape.
+- The real issue is overbroad constructor classification, not UFCS as a mechanism.
+- A narrow constructor-path guard preserves working UFCS behavior while eliminating the false
+  positive.

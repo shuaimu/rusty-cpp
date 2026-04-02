@@ -4978,12 +4978,24 @@ impl CodeGen {
         };
 
         let method_name = func_path.segments.last()?.ident.to_string();
+        // Constructor-like calls (notably `Type::new(&...)`) are ordinary static
+        // functions in Rust path space, not UFCS trait-method dispatch.
+        if matches!(method_name.as_str(), "new" | "new_") {
+            return None;
+        }
         let function_path = func_path
             .segments
             .iter()
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        // Guard known mapped constructor paths (for example `io::Cursor::new`)
+        // so they keep normal function-path lowering.
+        if let Some(mapped) = types::map_function_path(&function_path) {
+            if mapped.ends_with("::new_") {
+                return None;
+            }
+        }
 
         Some(UfcsTraitCallInfo {
             function_path,
@@ -10920,6 +10932,17 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf429_detect_ufcs_trait_call_rejects_constructor_like_new_path() {
+        let expr: syn::Expr = syn::parse_str("io::Cursor::new(&data)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        assert!(cg.detect_ufcs_trait_method_call(&call).is_none());
+    }
+
+    #[test]
     fn test_emit_ufcs_read_call_common_pattern() {
         let expr: syn::Expr = syn::parse_str("io::Read::read(&mut cursor, &mut buf)").unwrap();
         let call = match expr {
@@ -10977,5 +11000,18 @@ mod tests {
         let cg = CodeGen::new();
         let out = cg.emit_call_expr_to_string(&call, None);
         assert_eq!(out, "obj.apply(value)");
+    }
+
+    #[test]
+    fn test_leaf429_emit_constructor_like_new_path_keeps_function_call_shape() {
+        let expr: syn::Expr = syn::parse_str("io::Cursor::new(&data)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert!(out.starts_with("rusty::io::Cursor::new_("));
+        assert!(!out.contains(".new("));
     }
 }
