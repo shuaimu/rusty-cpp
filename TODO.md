@@ -393,7 +393,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Lowered method-call turbofish parse paths (`expr.parse::<T>()`) to `rusty::str_runtime::parse<T>(expr)` with integral parse fallback
             - [x] *done* Stabilized constructor-hint recovery in nested `if let Err(error)` chains so generated template hints no longer use out-of-scope `decltype((std::move(error)))` placeholders
             - [x] *done* Re-probe: previous deterministic `error()` blocker signatures (`std::str::from_utf8`, `"x".parse()`, nested `decltype((std::move(error)))` fallout) are removed; next first blockers start at consuming-method constness in `error()` (`const auto res` + `unwrap_err()`), then existing `as_ref`/`as_mut` and io-span families
-          - [ ] Leaf 4.36: Fix first post-4.35 consuming-method constness blocker in expanded `error()` (`let res` lowered as `const auto` but consumed by `unwrap_err()`), then re-probe compile/link
+          - [x] *done* Leaf 4.36: Fix first post-4.35 consuming-method constness blocker in expanded `error()` (`let res` lowered as `const auto` but consumed by `unwrap_err()`), then re-probe compile/link
+            - [x] *done* Added block-local consuming-method receiver pre-scan (`unwrap*`/`expect*`/`into_*`) and emitted non-const immutable locals only when they are consumed by by-value method calls
+            - [x] *done* Added focused regressions for local constness parity (`res.unwrap_err().to_string()` drops `const`; `res.is_err()` keeps `const`)
+            - [x] *done* Re-probe: previous `const auto res` + `res.unwrap_err()` qualifier error is removed; next deterministic blockers start at `as_ref`/`as_mut` reference-parity plus existing io/either method-shape families
+          - [ ] Leaf 4.37: Fix first post-4.36 expanded `as_ref`/`as_mut` reference-parity blocker family (`Left<L&,R&>(std::move(inner))` / `Right<L&,R&>(std::move(inner))` and `Option<R&>` const-reference mismatch), then re-probe compile/link
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

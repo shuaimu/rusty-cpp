@@ -4516,6 +4516,84 @@ Design rationale:
   - no Rust-specific one-off branch for `error()` function name,
   - no global fallback that weakens all constructor hinting to `auto`/erasure.
 
+### 10.11.42 Leaf 4.36: Remove expanded `error()` consuming-method constness blocker (`const auto res` + `unwrap_err()`)
+
+Problem:
+
+- After Leaf 4.35, the first deterministic expanded compile blocker in `error()` was:
+  - immutable binding lowered as `const auto res = ...`,
+  - later consumed via `res.unwrap_err()`,
+  - failing because `rusty::Result::unwrap_err()` is non-const/by-value.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one block-local pre-scan for consuming method receivers,
+  - local-binding qualifier update (`const auto` vs `auto`) in existing emission path,
+  - focused transpiler regressions,
+  - expanded compile re-probe.
+
+Execution plan:
+
+1. Detect immutable locals in a block that are used as receivers of consuming methods.
+2. Keep default `const auto` behavior for immutable locals that are not consumed.
+3. Add focused tests for both consuming and non-consuming receiver paths.
+4. Re-probe expanded compile and record the next deterministic blocker family.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added block-local state: `consuming_method_receiver_vars`.
+  - In `emit_block(...)`, added pre-scan:
+    - `collect_consuming_method_receiver_vars(...)`.
+  - In local emission (`emit_local` for ident and typed-ident bindings):
+    - immutable bindings now emit `auto` (not `const auto`) only when the local name appears in
+      `consuming_method_receiver_vars`.
+  - Added recursive scanner helpers:
+    - `collect_consuming_method_receivers_in_stmt(...)`
+    - `collect_consuming_method_receivers_in_expr(...)`
+    - `extract_simple_local_ident(...)`
+    - `is_consuming_method_name(...)`
+  - Consuming-method classifier includes:
+    - `unwrap`, `unwrap_err`, `expect`, `expect_err`, `unwrap_left`, `unwrap_right`,
+      `expect_left`, `expect_right`, and `into_*`.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf436_consuming_method_receiver_binding_is_not_const`
+  - verifies `let res = ...; res.unwrap_err().to_string();` lowers to non-const local.
+- `codegen::tests::test_leaf436_non_consuming_receiver_binding_stays_const`
+  - verifies `let res = ...; res.is_err();` keeps `const auto`.
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf436 -- --nocapture`
+  - sanity reruns:
+    - `cargo test -p rusty-cpp-transpiler leaf435 -- --nocapture`
+    - `cargo test -p rusty-cpp-transpiler leaf433 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf436.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf436.rs -o /tmp/either-expanded-tests-leaf436.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=60 -c /tmp/either-expanded-tests-leaf436.cppm -o /tmp/either-expanded-tests-leaf436.o`
+
+Re-probe result:
+
+- Previous first deterministic constness error is removed:
+  - generated `error()` now emits `auto res = ...` (no `const`),
+  - no `passing const ... as this argument discards qualifiers` diagnostic on `unwrap_err()`.
+- Next deterministic blockers now start in `as_ref`/`as_mut` reference-parity and related method-shape
+  families (for example `Left<L&,R&>(std::move(inner))`, `Option<R&>` const-reference mismatch),
+  plus existing downstream io/either compile families.
+
+Design rationale:
+
+- Fixed at declaration-time constness (source of mismatch) rather than patching specific call sites.
+- Preserved default immutable-local lowering (`const auto`) for non-consuming cases.
+- Avoided wrong approaches from §11:
+  - no broad global de-const rewrite of all immutable locals,
+  - no ad-hoc one-off rewrite for only `error()` by function name.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

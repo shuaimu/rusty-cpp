@@ -58,6 +58,10 @@ pub struct CodeGen {
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
     reassigned_vars: std::collections::HashSet<String>,
+    /// Immutable local names in the current block that are consumed through
+    /// by-value method calls (for example `res.unwrap_err()`).
+    /// Such bindings must not be emitted as `const auto`.
+    consuming_method_receiver_vars: std::collections::HashSet<String>,
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
@@ -136,6 +140,7 @@ impl CodeGen {
             data_enum_types: HashSet::new(),
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
+            consuming_method_receiver_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -211,6 +216,8 @@ impl CodeGen {
         self.enum_type_params.clear();
         self.data_enum_types.clear();
         self.struct_field_types.clear();
+        self.reassigned_vars.clear();
+        self.consuming_method_receiver_vars.clear();
         self.param_bindings.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
@@ -1920,7 +1927,9 @@ impl CodeGen {
     fn emit_block(&mut self, block: &syn::Block) {
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
+        let consuming = collect_consuming_method_receiver_vars(&block.stmts);
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
+        let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
 
@@ -1935,6 +1944,7 @@ impl CodeGen {
         self.local_bindings.pop();
         self.local_cpp_bindings.pop();
         self.reassigned_vars = prev;
+        self.consuming_method_receiver_vars = prev_consuming;
     }
 
     fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -3831,7 +3841,8 @@ impl CodeGen {
                     "auto".to_string()
                 };
 
-                let qualifier = if is_mut { "" } else { "const " };
+                let is_consumed = self.consuming_method_receiver_vars.contains(&name_str);
+                let qualifier = if is_mut || is_consumed { "" } else { "const " };
 
                 if let Some(init) = &local.init {
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
@@ -3914,7 +3925,10 @@ impl CodeGen {
                     let cpp_name = self.allocate_local_cpp_name(&name.to_string());
                     let is_mut = pi.mutability.is_some();
                     let ty = self.map_type(&pat_type.ty);
-                    let qualifier = if is_mut { "" } else { "const " };
+                    let is_consumed = self
+                        .consuming_method_receiver_vars
+                        .contains(&name.to_string());
+                    let qualifier = if is_mut || is_consumed { "" } else { "const " };
                     if let Some(init) = &local.init {
                         let expr_str =
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
@@ -7029,6 +7043,7 @@ impl CodeGen {
             data_enum_types: HashSet::new(),
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
+            consuming_method_receiver_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -8147,6 +8162,184 @@ fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<Str
         collect_assignments_in_stmt(stmt, &mut result);
     }
     result
+}
+
+/// Scan statements and collect immutable locals that are consumed through
+/// by-value method calls (for example `res.unwrap_err()`).
+fn collect_consuming_method_receiver_vars(
+    stmts: &[syn::Stmt],
+) -> std::collections::HashSet<String> {
+    let mut result = std::collections::HashSet::new();
+    for stmt in stmts {
+        collect_consuming_method_receivers_in_stmt(stmt, &mut result);
+    }
+    result
+}
+
+fn collect_consuming_method_receivers_in_stmt(
+    stmt: &syn::Stmt,
+    result: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        syn::Stmt::Local(local) => {
+            if let Some(init) = &local.init {
+                collect_consuming_method_receivers_in_expr(&init.expr, result);
+            }
+        }
+        syn::Stmt::Expr(expr, _) => collect_consuming_method_receivers_in_expr(expr, result),
+        _ => {}
+    }
+}
+
+fn collect_consuming_method_receivers_in_expr(
+    expr: &syn::Expr,
+    result: &mut std::collections::HashSet<String>,
+) {
+    match expr {
+        syn::Expr::MethodCall(mc) => {
+            if is_consuming_method_name(&mc.method.to_string()) {
+                if let Some(name) = extract_simple_local_ident(&mc.receiver) {
+                    result.insert(name);
+                }
+            }
+            collect_consuming_method_receivers_in_expr(&mc.receiver, result);
+            for arg in &mc.args {
+                collect_consuming_method_receivers_in_expr(arg, result);
+            }
+        }
+        syn::Expr::Call(call) => {
+            collect_consuming_method_receivers_in_expr(&call.func, result);
+            for arg in &call.args {
+                collect_consuming_method_receivers_in_expr(arg, result);
+            }
+        }
+        syn::Expr::Binary(bin) => {
+            collect_consuming_method_receivers_in_expr(&bin.left, result);
+            collect_consuming_method_receivers_in_expr(&bin.right, result);
+        }
+        syn::Expr::Unary(un) => collect_consuming_method_receivers_in_expr(&un.expr, result),
+        syn::Expr::Reference(r) => collect_consuming_method_receivers_in_expr(&r.expr, result),
+        syn::Expr::Assign(assign) => {
+            collect_consuming_method_receivers_in_expr(&assign.left, result);
+            collect_consuming_method_receivers_in_expr(&assign.right, result);
+        }
+        syn::Expr::Block(block) => {
+            for stmt in &block.block.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
+        syn::Expr::If(if_expr) => {
+            collect_consuming_method_receivers_in_expr(&if_expr.cond, result);
+            for stmt in &if_expr.then_branch.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+            if let Some((_, else_expr)) = &if_expr.else_branch {
+                collect_consuming_method_receivers_in_expr(else_expr, result);
+            }
+        }
+        syn::Expr::Match(match_expr) => {
+            collect_consuming_method_receivers_in_expr(&match_expr.expr, result);
+            for arm in &match_expr.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    collect_consuming_method_receivers_in_expr(guard, result);
+                }
+                collect_consuming_method_receivers_in_expr(&arm.body, result);
+            }
+        }
+        syn::Expr::While(w) => {
+            collect_consuming_method_receivers_in_expr(&w.cond, result);
+            for stmt in &w.body.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
+        syn::Expr::Loop(l) => {
+            for stmt in &l.body.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
+        syn::Expr::ForLoop(f) => {
+            collect_consuming_method_receivers_in_expr(&f.expr, result);
+            for stmt in &f.body.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
+        syn::Expr::Paren(p) => collect_consuming_method_receivers_in_expr(&p.expr, result),
+        syn::Expr::Group(g) => collect_consuming_method_receivers_in_expr(&g.expr, result),
+        syn::Expr::Array(arr) => {
+            for elem in &arr.elems {
+                collect_consuming_method_receivers_in_expr(elem, result);
+            }
+        }
+        syn::Expr::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_consuming_method_receivers_in_expr(elem, result);
+            }
+        }
+        syn::Expr::Struct(struct_expr) => {
+            for field in &struct_expr.fields {
+                collect_consuming_method_receivers_in_expr(&field.expr, result);
+            }
+            if let Some(rest) = &struct_expr.rest {
+                collect_consuming_method_receivers_in_expr(rest, result);
+            }
+        }
+        syn::Expr::Field(field) => collect_consuming_method_receivers_in_expr(&field.base, result),
+        syn::Expr::Index(index) => {
+            collect_consuming_method_receivers_in_expr(&index.expr, result);
+            collect_consuming_method_receivers_in_expr(&index.index, result);
+        }
+        syn::Expr::Cast(cast_expr) => collect_consuming_method_receivers_in_expr(&cast_expr.expr, result),
+        syn::Expr::Await(await_expr) => {
+            collect_consuming_method_receivers_in_expr(&await_expr.base, result)
+        }
+        syn::Expr::Try(try_expr) => collect_consuming_method_receivers_in_expr(&try_expr.expr, result),
+        syn::Expr::Break(brk) => {
+            if let Some(value) = &brk.expr {
+                collect_consuming_method_receivers_in_expr(value, result);
+            }
+        }
+        syn::Expr::Return(ret) => {
+            if let Some(value) = &ret.expr {
+                collect_consuming_method_receivers_in_expr(value, result);
+            }
+        }
+        syn::Expr::Closure(closure) => collect_consuming_method_receivers_in_expr(&closure.body, result),
+        syn::Expr::Let(let_expr) => collect_consuming_method_receivers_in_expr(&let_expr.expr, result),
+        syn::Expr::Unsafe(unsafe_expr) => {
+            for stmt in &unsafe_expr.block.stmts {
+                collect_consuming_method_receivers_in_stmt(stmt, result);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_simple_local_ident(expr: &syn::Expr) -> Option<String> {
+    let mut current = expr;
+    loop {
+        match current {
+            syn::Expr::Paren(p) => current = &p.expr,
+            syn::Expr::Group(g) => current = &g.expr,
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                return Some(path.path.segments[0].ident.to_string())
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn is_consuming_method_name(method: &str) -> bool {
+    matches!(
+        method,
+        "unwrap"
+            | "unwrap_err"
+            | "expect"
+            | "expect_err"
+            | "unwrap_left"
+            | "unwrap_right"
+            | "expect_left"
+            | "expect_right"
+    ) || method.starts_with("into_")
 }
 
 /// Recursively collect assignment targets from a statement.
@@ -12048,6 +12241,35 @@ mod tests {
         );
         assert!(!out.contains("decltype((std::move(error)))"));
         assert!(out.contains("decltype((_iflet.unwrap_err()))"));
+    }
+
+    #[test]
+    fn test_leaf436_consuming_method_receiver_binding_is_not_const() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let res = Err::<(), i32>(1);
+                res.unwrap_err().to_string();
+            }
+        "#,
+        );
+        assert!(out.contains("auto res = "));
+        assert!(!out.contains("const auto res = "));
+        assert!(out.contains("res.unwrap_err().to_string();"));
+    }
+
+    #[test]
+    fn test_leaf436_non_consuming_receiver_binding_stays_const() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let res = Err::<(), i32>(1);
+                let _is_err = res.is_err();
+            }
+        "#,
+        );
+        assert!(out.contains("const auto res = "));
+        assert!(out.contains("const auto _is_err = res.is_err();"));
     }
 
     #[test]
