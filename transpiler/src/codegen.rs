@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use quote::ToTokens;
+use syn::parse_quote;
 use syn;
 
 use crate::types;
@@ -82,6 +83,9 @@ pub struct CodeGen {
     /// Optional concrete return type in current function/method context.
     /// Used to propagate expected type into tail expression lowering.
     return_type_hints: Vec<Option<syn::Type>>,
+    /// Expression-local constructor template hints recovered from nearby context.
+    /// Used when no explicit/typed expected Rust type exists.
+    constructor_template_hints: Vec<HashMap<String, Vec<String>>>,
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
@@ -113,6 +117,7 @@ impl CodeGen {
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
             return_type_hints: Vec::new(),
+            constructor_template_hints: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -162,6 +167,7 @@ impl CodeGen {
         self.emitted_method_conflict_keys.clear();
         self.return_value_scopes.clear();
         self.return_type_hints.clear();
+        self.constructor_template_hints.clear();
         self.enum_type_params.clear();
         self.data_enum_types.clear();
         self.struct_field_types.clear();
@@ -1708,6 +1714,11 @@ impl CodeGen {
             syn::Stmt::Item(item) => {
                 // Nested function definitions → emit as lambda (C++ doesn't allow nested fns)
                 if let syn::Item::Fn(f) = item {
+                    let return_ty = match &f.sig.output {
+                        syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+                        syn::ReturnType::Default => None,
+                    };
+                    self.register_local_binding(f.sig.ident.to_string(), return_ty);
                     self.emit_nested_function(f);
                 } else {
                     self.emit_item(item);
@@ -2773,6 +2784,26 @@ impl CodeGen {
                 }
                 None
             }
+            syn::Expr::Call(call) => {
+                if let syn::Expr::Path(path) = call.func.as_ref() {
+                    if path.path.segments.len() == 1 {
+                        let func_name = path.path.segments[0].ident.to_string();
+                        if call.args.is_empty() {
+                            let ty = self.lookup_local_binding_type(&func_name)?;
+                            return self.infer_variant_type_context_from_type(&ty);
+                        }
+                        if call.args.len() == 1 && matches!(func_name.as_str(), "Left" | "Right") {
+                            let arg_ty = self.infer_simple_expr_type(&call.args[0])?;
+                            let mapped = self.map_type(&arg_ty);
+                            return Some(VariantTypeContext {
+                                enum_name: "Either".to_string(),
+                                template_args: vec![mapped.clone(), mapped],
+                            });
+                        }
+                    }
+                }
+                None
+            }
             syn::Expr::Field(field) => {
                 let member = match &field.member {
                     syn::Member::Named(ident) => ident.to_string(),
@@ -3130,6 +3161,13 @@ impl CodeGen {
             syn::Pat::Ident(pat_ident) => {
                 let name = &pat_ident.ident;
                 let is_mut = pat_ident.mutability.is_some();
+                let inferred_binding_ty = local
+                    .init
+                    .as_ref()
+                    .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr));
+                if let Some(ty) = inferred_binding_ty.clone() {
+                    self.update_local_binding_type(name.to_string(), ty);
+                }
 
                 let type_str = if let Some(ty) = get_local_type(local) {
                     self.map_type(ty)
@@ -3177,7 +3215,20 @@ impl CodeGen {
                         }
                     } else {
                         // For `let y = x` where x is a local variable → insert std::move
-                        let expr_str = self.emit_expr_maybe_move(&init.expr);
+                        let recovered_hints =
+                            self.recover_constructor_template_hints_from_expr(&init.expr);
+                        let pushed_hints = !recovered_hints.is_empty();
+                        if pushed_hints {
+                            self.constructor_template_hints.push(recovered_hints);
+                        }
+                        let expr_str = if let Some(ty) = inferred_binding_ty.as_ref() {
+                            self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                        } else {
+                            self.emit_expr_maybe_move(&init.expr)
+                        };
+                        if pushed_hints {
+                            self.constructor_template_hints.pop();
+                        }
                         self.writeln(&format!(
                             "{}{} {} = {};",
                             qualifier, type_str, name, expr_str
@@ -3252,6 +3303,476 @@ impl CodeGen {
     fn register_local_binding(&mut self, name: String, ty: Option<syn::Type>) {
         if let Some(scope) = self.local_bindings.last_mut() {
             scope.insert(name, ty);
+        }
+    }
+
+    fn update_local_binding_type(&mut self, name: String, ty: syn::Type) {
+        for scope in self.local_bindings.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = Some(ty);
+                return;
+            }
+        }
+    }
+
+    fn infer_local_binding_type_from_initializer(&self, init_expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.extract_value_expr(init_expr)?;
+        match expr {
+            syn::Expr::Closure(closure) => match &closure.output {
+                syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+                syn::ReturnType::Default => None,
+            },
+            syn::Expr::Call(call) => {
+                if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
+                    let arg_ty = self.infer_simple_expr_type(ctor_arg)?;
+                    match ctor_name.as_str() {
+                        "Left" | "Right" => {
+                            let left = arg_ty.clone();
+                            let right = arg_ty;
+                            Some(parse_quote!(Either<#left, #right>))
+                        }
+                        "Ok" | "Err" => {
+                            let ok_ty = arg_ty.clone();
+                            let err_ty = arg_ty;
+                            Some(parse_quote!(Result<#ok_ty, #err_ty>))
+                        }
+                        _ => None,
+                    }
+                } else if call.args.is_empty() {
+                    if let syn::Expr::Path(path) = call.func.as_ref() {
+                        if path.path.segments.len() == 1 {
+                            let name = path.path.segments[0].ident.to_string();
+                            return self.lookup_local_binding_type(&name);
+                        }
+                    }
+                    None
+                } else {
+                    None
+                }
+            }
+            syn::Expr::If(if_expr) => self.infer_constructor_expected_type_from_if(if_expr),
+            syn::Expr::Match(match_expr) => self.infer_constructor_expected_type_from_match(match_expr),
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                self.lookup_local_binding_type(&name)
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_constructor_expected_type_from_if(&self, if_expr: &syn::ExprIf) -> Option<syn::Type> {
+        let then_expr = self.extract_single_expr_from_block(&if_expr.then_branch)?;
+        let (_, else_expr) = if_expr.else_branch.as_ref()?;
+        let else_expr = self.extract_value_expr(else_expr)?;
+        self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
+    }
+
+    fn infer_constructor_expected_type_from_match(
+        &self,
+        match_expr: &syn::ExprMatch,
+    ) -> Option<syn::Type> {
+        let mut left_arg_ty: Option<syn::Type> = None;
+        let mut right_arg_ty: Option<syn::Type> = None;
+        let mut ok_arg_ty: Option<syn::Type> = None;
+        let mut err_arg_ty: Option<syn::Type> = None;
+
+        for arm in &match_expr.arms {
+            let body_expr = self.extract_value_expr(&arm.body)?;
+            if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(body_expr) {
+                let arg_ty = self.infer_simple_expr_type(ctor_arg)?;
+                match ctor_name.as_str() {
+                    "Left" => {
+                        left_arg_ty.get_or_insert(arg_ty);
+                    }
+                    "Right" => {
+                        right_arg_ty.get_or_insert(arg_ty);
+                    }
+                    "Ok" => {
+                        ok_arg_ty.get_or_insert(arg_ty);
+                    }
+                    "Err" => {
+                        err_arg_ty.get_or_insert(arg_ty);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let (Some(left), Some(right)) = (left_arg_ty, right_arg_ty) {
+            return Some(parse_quote!(Either<#left, #right>));
+        }
+        if let (Some(ok_ty), Some(err_ty)) = (ok_arg_ty, err_arg_ty) {
+            return Some(parse_quote!(Result<#ok_ty, #err_ty>));
+        }
+        None
+    }
+
+    fn infer_constructor_expected_type_from_pair(
+        &self,
+        lhs: &syn::Expr,
+        rhs: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let (lhs_ctor, lhs_arg) = self.extract_constructor_call_expr(lhs)?;
+        let (rhs_ctor, rhs_arg) = self.extract_constructor_call_expr(rhs)?;
+        let lhs_ty = self.infer_simple_expr_type(lhs_arg)?;
+        let rhs_ty = self.infer_simple_expr_type(rhs_arg)?;
+
+        match (lhs_ctor.as_str(), rhs_ctor.as_str()) {
+            ("Left", "Right") => Some(parse_quote!(Either<#lhs_ty, #rhs_ty>)),
+            ("Right", "Left") => Some(parse_quote!(Either<#rhs_ty, #lhs_ty>)),
+            ("Ok", "Err") => Some(parse_quote!(Result<#lhs_ty, #rhs_ty>)),
+            ("Err", "Ok") => Some(parse_quote!(Result<#rhs_ty, #lhs_ty>)),
+            _ => None,
+        }
+    }
+
+    fn infer_simple_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.extract_value_expr(expr)?;
+        match expr {
+            syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                self.lookup_local_binding_type(&name)
+            }
+            syn::Expr::Tuple(tuple) => {
+                let mut elems = Vec::new();
+                for elem in &tuple.elems {
+                    elems.push(self.infer_simple_expr_type(elem)?);
+                }
+                Some(parse_quote!((#(#elems),*)))
+            }
+            syn::Expr::Call(call) => {
+                if call.args.is_empty() {
+                    if let syn::Expr::Path(path) = call.func.as_ref() {
+                        if path.path.segments.len() == 1 {
+                            let name = path.path.segments[0].ident.to_string();
+                            if let Some(ty) = self.lookup_local_binding_type(&name) {
+                                return Some(ty);
+                            }
+                        }
+                    }
+                }
+                self.infer_local_binding_type_from_initializer(expr)
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_literal_type(&self, lit: &syn::Lit) -> Option<syn::Type> {
+        match lit {
+            syn::Lit::Int(int_lit) => {
+                let ty_name = if int_lit.suffix().is_empty() {
+                    "i32"
+                } else {
+                    int_lit.suffix()
+                };
+                syn::parse_str::<syn::Type>(ty_name).ok()
+            }
+            syn::Lit::Float(float_lit) => {
+                let ty_name = if float_lit.suffix().is_empty() {
+                    "f64"
+                } else {
+                    float_lit.suffix()
+                };
+                syn::parse_str::<syn::Type>(ty_name).ok()
+            }
+            syn::Lit::Bool(_) => syn::parse_str::<syn::Type>("bool").ok(),
+            syn::Lit::Char(_) => syn::parse_str::<syn::Type>("char").ok(),
+            syn::Lit::Str(_) => syn::parse_str::<syn::Type>("&str").ok(),
+            syn::Lit::Byte(_) => syn::parse_str::<syn::Type>("u8").ok(),
+            _ => None,
+        }
+    }
+
+    fn recover_constructor_template_hints_from_expr(
+        &self,
+        expr: &syn::Expr,
+    ) -> HashMap<String, Vec<String>> {
+        let mut hints = HashMap::new();
+        let Some(expr) = self.extract_value_expr(expr) else {
+            return hints;
+        };
+
+        if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
+            let arg_cpp = self.emit_expr_maybe_move(ctor_arg);
+            let ty_cpp = format!("decltype(({}))", arg_cpp);
+            match ctor_name.as_str() {
+                "Left" | "Right" => {
+                    let args = vec![ty_cpp.clone(), ty_cpp];
+                    hints.insert("Left".to_string(), args.clone());
+                    hints.insert("Right".to_string(), args);
+                }
+                "Ok" | "Err" => {
+                    let args = vec![ty_cpp.clone(), ty_cpp];
+                    hints.insert("Ok".to_string(), args.clone());
+                    hints.insert("Err".to_string(), args);
+                }
+                _ => {}
+            }
+            return hints;
+        }
+
+        if let syn::Expr::If(if_expr) = expr {
+            if let Some((left_name, left_arg, right_name, right_arg)) =
+                self.extract_constructor_pair_from_if(if_expr)
+            {
+                self.insert_constructor_pair_hints(
+                    &mut hints,
+                    &left_name,
+                    left_arg,
+                    &right_name,
+                    right_arg,
+                );
+            }
+        }
+
+        if hints.is_empty() {
+            if let syn::Expr::Match(match_expr) = expr {
+                if let Some((left_name, left_arg, right_name, right_arg)) =
+                    self.extract_constructor_pair_from_match(match_expr)
+                {
+                    self.insert_constructor_pair_hints(
+                        &mut hints,
+                        &left_name,
+                        left_arg,
+                        &right_name,
+                        right_arg,
+                    );
+                }
+            }
+        }
+
+        if hints.is_empty() {
+            let mut ctor_args: HashMap<String, String> = HashMap::new();
+            self.collect_constructor_arg_cpp_strings(expr, &mut ctor_args);
+
+            let mut inferred_either_ty: Option<String> = None;
+            if let (Some(left_cpp), Some(right_cpp)) =
+                (ctor_args.get("Left"), ctor_args.get("Right"))
+            {
+                let args = vec![
+                    format!("decltype(({}))", left_cpp),
+                    format!("decltype(({}))", right_cpp),
+                ];
+                hints.insert("Left".to_string(), args.clone());
+                hints.insert("Right".to_string(), args);
+                inferred_either_ty = Some(format!(
+                    "Either<decltype(({})), decltype(({}))>",
+                    left_cpp, right_cpp
+                ));
+            }
+
+            if let (Some(ok_cpp), Some(err_cpp)) = (ctor_args.get("Ok"), ctor_args.get("Err")) {
+                let err_ty = inferred_either_ty
+                    .unwrap_or_else(|| format!("decltype(({}))", err_cpp));
+                let args = vec![
+                    format!("decltype(({}))", ok_cpp),
+                    err_ty,
+                ];
+                hints.insert("Ok".to_string(), args.clone());
+                hints.insert("Err".to_string(), args);
+            }
+        }
+
+        hints
+    }
+
+    fn collect_constructor_arg_cpp_strings(
+        &self,
+        expr: &syn::Expr,
+        out: &mut HashMap<String, String>,
+    ) {
+        let Some(expr) = self.extract_value_expr(expr) else {
+            return;
+        };
+
+        if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
+            out.entry(ctor_name)
+                .or_insert_with(|| self.emit_expr_maybe_move(ctor_arg));
+        }
+
+        match expr {
+            syn::Expr::If(if_expr) => {
+                if let Some(then_expr) = self.extract_single_expr_from_block(&if_expr.then_branch) {
+                    self.collect_constructor_arg_cpp_strings(then_expr, out);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_constructor_arg_cpp_strings(else_expr, out);
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                for arm in &match_expr.arms {
+                    self.collect_constructor_arg_cpp_strings(&arm.body, out);
+                }
+            }
+            syn::Expr::Reference(r) => self.collect_constructor_arg_cpp_strings(&r.expr, out),
+            syn::Expr::Paren(p) => self.collect_constructor_arg_cpp_strings(&p.expr, out),
+            syn::Expr::Group(g) => self.collect_constructor_arg_cpp_strings(&g.expr, out),
+            syn::Expr::Call(call) => {
+                for arg in &call.args {
+                    self.collect_constructor_arg_cpp_strings(arg, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_constructor_pair_from_if<'a>(
+        &self,
+        if_expr: &'a syn::ExprIf,
+    ) -> Option<(String, &'a syn::Expr, String, &'a syn::Expr)> {
+        let then_expr = self.extract_single_expr_from_block(&if_expr.then_branch)?;
+        let (_, else_expr) = if_expr.else_branch.as_ref()?;
+        let else_expr = self.extract_value_expr(else_expr)?;
+        let (lhs_name, lhs_arg) = self.extract_constructor_call_expr(then_expr)?;
+        let (rhs_name, rhs_arg) = self.extract_constructor_call_expr(else_expr)?;
+        Some((lhs_name, lhs_arg, rhs_name, rhs_arg))
+    }
+
+    fn extract_constructor_pair_from_match<'a>(
+        &self,
+        match_expr: &'a syn::ExprMatch,
+    ) -> Option<(String, &'a syn::Expr, String, &'a syn::Expr)> {
+        let mut left: Option<(String, &'a syn::Expr)> = None;
+        let mut right: Option<(String, &'a syn::Expr)> = None;
+
+        for arm in &match_expr.arms {
+            let body_expr = self.extract_value_expr(&arm.body)?;
+            if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(body_expr) {
+                match ctor_name.as_str() {
+                    "Left" | "Ok" => {
+                        if left.is_none() {
+                            left = Some((ctor_name, ctor_arg));
+                        }
+                    }
+                    "Right" | "Err" => {
+                        if right.is_none() {
+                            right = Some((ctor_name, ctor_arg));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (left_name, left_arg) = left?;
+        let (right_name, right_arg) = right?;
+        Some((left_name, left_arg, right_name, right_arg))
+    }
+
+    fn insert_constructor_pair_hints(
+        &self,
+        hints: &mut HashMap<String, Vec<String>>,
+        lhs_name: &str,
+        lhs_arg: &syn::Expr,
+        rhs_name: &str,
+        rhs_arg: &syn::Expr,
+    ) {
+        let lhs_cpp = self.emit_expr_maybe_move(lhs_arg);
+        let rhs_cpp = self.emit_expr_maybe_move(rhs_arg);
+        let lhs_ty = format!("decltype(({}))", lhs_cpp);
+        let rhs_ty = format!("decltype(({}))", rhs_cpp);
+
+        match (lhs_name, rhs_name) {
+            ("Left", "Right") => {
+                let args = vec![lhs_ty.clone(), rhs_ty.clone()];
+                hints.insert("Left".to_string(), args.clone());
+                hints.insert("Right".to_string(), args);
+            }
+            ("Right", "Left") => {
+                let args = vec![rhs_ty.clone(), lhs_ty.clone()];
+                hints.insert("Left".to_string(), args.clone());
+                hints.insert("Right".to_string(), args);
+            }
+            ("Ok", "Err") => {
+                let args = vec![lhs_ty.clone(), rhs_ty.clone()];
+                hints.insert("Ok".to_string(), args.clone());
+                hints.insert("Err".to_string(), args);
+            }
+            ("Err", "Ok") => {
+                let args = vec![rhs_ty.clone(), lhs_ty.clone()];
+                hints.insert("Ok".to_string(), args.clone());
+                hints.insert("Err".to_string(), args);
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
+        match expr {
+            syn::Expr::Group(g) => self.extract_value_expr(&g.expr),
+            syn::Expr::Paren(p) => self.extract_value_expr(&p.expr),
+            syn::Expr::Block(block_expr) => self.extract_single_expr_from_block(&block_expr.block),
+            _ => Some(expr),
+        }
+    }
+
+    fn extract_single_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
+        if block.stmts.len() != 1 {
+            return None;
+        }
+        match &block.stmts[0] {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            _ => None,
+        }
+    }
+
+    fn extract_constructor_call_expr<'a>(
+        &self,
+        expr: &'a syn::Expr,
+    ) -> Option<(String, &'a syn::Expr)> {
+        let expr = self.extract_value_expr(expr)?;
+        let call = match expr {
+            syn::Expr::Call(call) => call,
+            _ => return None,
+        };
+        if call.args.len() != 1 {
+            return None;
+        }
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+        if func_path.segments.len() != 1 {
+            return None;
+        }
+        let ctor_name = func_path.segments[0].ident.to_string();
+        if !matches!(ctor_name.as_str(), "Left" | "Right" | "Ok" | "Err") {
+            return None;
+        }
+        Some((ctor_name, &call.args[0]))
+    }
+
+    fn infer_expected_type_from_tuple_elements(
+        &self,
+        elems: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    ) -> Option<syn::Type> {
+        elems
+            .iter()
+            .find_map(|elem| self.infer_expected_type_from_tuple_element(elem))
+    }
+
+    fn infer_expected_type_from_tuple_element(&self, elem: &syn::Expr) -> Option<syn::Type> {
+        match elem {
+            syn::Expr::Reference(r) => self.infer_expected_type_from_tuple_element(&r.expr),
+            syn::Expr::Paren(p) => self.infer_expected_type_from_tuple_element(&p.expr),
+            syn::Expr::Group(g) => self.infer_expected_type_from_tuple_element(&g.expr),
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                self.lookup_local_binding_type(&name)
+            }
+            syn::Expr::Call(call) => {
+                if call.args.is_empty() {
+                    if let syn::Expr::Path(path) = call.func.as_ref() {
+                        if path.path.segments.len() == 1 {
+                            let name = path.path.segments[0].ident.to_string();
+                            return self.lookup_local_binding_type(&name);
+                        }
+                    }
+                }
+                self.infer_local_binding_type_from_initializer(elem)
+            }
+            _ => None,
         }
     }
 
@@ -3348,6 +3869,23 @@ impl CodeGen {
         match expr {
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
             syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, expected_ty),
+            syn::Expr::Reference(r) => {
+                let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                format!("&{}", inner)
+            }
+            syn::Expr::Paren(p) => {
+                let inner = self.emit_expr_to_string_with_expected(&p.expr, expected_ty);
+                format!("({})", inner)
+            }
+            syn::Expr::Group(g) => self.emit_expr_to_string_with_expected(&g.expr, expected_ty),
+            syn::Expr::Tuple(tup) => {
+                let elems: Vec<String> = tup
+                    .elems
+                    .iter()
+                    .map(|e| self.emit_expr_to_string_with_expected(e, expected_ty))
+                    .collect();
+                format!("std::make_tuple({})", elems.join(", "))
+            }
             _ => self.emit_expr_to_string(expr),
         }
     }
@@ -3363,6 +3901,12 @@ impl CodeGen {
                 return emitted;
             }
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
+                return emitted;
+            }
+        }
+        if expected_ty.is_none() {
+            if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call)
+            {
                 return emitted;
             }
         }
@@ -3411,6 +3955,9 @@ impl CodeGen {
                     return format!("{}::Ok({})", expected_cpp, arg);
                 }
             }
+            if let Some(args) = self.lookup_constructor_template_args("Ok") {
+                return format!("rusty::Result<{}, {}>::Ok({})", args[0], args[1], arg);
+            }
             return format!("Ok({})", arg);
         }
         if func == "Err" && call.args.len() == 1 {
@@ -3421,6 +3968,9 @@ impl CodeGen {
                     return format!("{}::Err({})", expected_cpp, arg);
                 }
             }
+            if let Some(args) = self.lookup_constructor_template_args("Err") {
+                return format!("rusty::Result<{}, {}>::Err({})", args[0], args[1], arg);
+            }
             return format!("Err({})", arg);
         }
 
@@ -3430,6 +3980,112 @@ impl CodeGen {
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
         format!("{}({})", func, args.join(", "))
+    }
+
+    fn lookup_constructor_template_args(&self, ctor_name: &str) -> Option<Vec<String>> {
+        for scope in self.constructor_template_hints.iter().rev() {
+            if let Some(args) = scope.get(ctor_name) {
+                if args.len() == 2 {
+                    return Some(args.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn try_emit_variant_constructor_call_with_recovered_hints(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+        if func_path.segments.len() != 1 {
+            return None;
+        }
+        if call.args.len() != 1 {
+            return None;
+        }
+
+        let ctor_name = func_path.segments[0].ident.to_string();
+        if !matches!(ctor_name.as_str(), "Left" | "Right") {
+            return None;
+        }
+        if !matches!(func_path.segments[0].arguments, syn::PathArguments::None) {
+            return None;
+        }
+
+        let args = self.lookup_constructor_template_args(&ctor_name)?;
+        let arg = self.emit_expr_maybe_move(&call.args[0]);
+        Some(format!(
+            "{}<{}, {}>({})",
+            ctor_name, args[0], args[1], arg
+        ))
+    }
+
+    fn try_emit_variant_constructor_call_with_template_args(
+        &self,
+        call: &syn::ExprCall,
+        template_args: &[String],
+    ) -> Option<String> {
+        if template_args.len() < 2 {
+            return None;
+        }
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+        if func_path.segments.len() != 1 {
+            return None;
+        }
+        if call.args.len() != 1 {
+            return None;
+        }
+        if !matches!(func_path.segments[0].arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let ctor_name = func_path.segments[0].ident.to_string();
+        if !matches!(ctor_name.as_str(), "Left" | "Right") {
+            return None;
+        }
+        let arg = self.emit_expr_maybe_move(&call.args[0]);
+        Some(format!(
+            "{}<{}, {}>({})",
+            ctor_name, template_args[0], template_args[1], arg
+        ))
+    }
+
+    fn emit_expr_to_string_with_variant_ctx(
+        &self,
+        expr: &syn::Expr,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
+        match expr {
+            syn::Expr::Reference(r) => {
+                let inner = self.emit_expr_to_string_with_variant_ctx(&r.expr, variant_ctx);
+                format!("&{}", inner)
+            }
+            syn::Expr::Paren(p) => {
+                let inner = self.emit_expr_to_string_with_variant_ctx(&p.expr, variant_ctx);
+                format!("({})", inner)
+            }
+            syn::Expr::Group(g) => self.emit_expr_to_string_with_variant_ctx(&g.expr, variant_ctx),
+            syn::Expr::Call(call) => {
+                if let Some(ctx) = variant_ctx {
+                    if let Some(emitted) =
+                        self.try_emit_variant_constructor_call_with_template_args(
+                            call,
+                            &ctx.template_args,
+                        )
+                    {
+                        return emitted;
+                    }
+                }
+                self.emit_call_expr_to_string(call, None)
+            }
+            _ => self.emit_expr_to_string(expr),
+        }
     }
 
     /// Detect UFCS trait method calls in the form `Trait::method(&self, args...)`
@@ -3761,10 +4417,11 @@ impl CodeGen {
                 format!("{}[{}]", base, index)
             }
             syn::Expr::Tuple(tup) => {
+                let tuple_expected_ty = self.infer_expected_type_from_tuple_elements(&tup.elems);
                 let elems: Vec<String> = tup
                     .elems
                     .iter()
-                    .map(|e| self.emit_expr_to_string(e))
+                    .map(|e| self.emit_expr_to_string_with_expected(e, tuple_expected_ty.as_ref()))
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
@@ -3815,7 +4472,7 @@ impl CodeGen {
         }
         // Match as expression → immediately-invoked lambda
         if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
-            let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+            let scrutinee = self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
             // Simple switch-like match → ternary chain or IIFE with switch
             format!(
                 "[&]() {{ auto _m = {}; {} }}()",
@@ -3831,7 +4488,7 @@ impl CodeGen {
             let visit_args: Vec<String> = tuple_scrutinee
                 .elems
                 .iter()
-                .map(|e| self.emit_expr_to_string(e))
+                .map(|e| self.emit_expr_to_string_with_variant_ctx(e, tuple_variant_ctx.as_ref()))
                 .collect();
             format!(
                 "[&]() {{ return std::visit(overloaded {{ {} }}, {}); }}()",
@@ -3844,7 +4501,7 @@ impl CodeGen {
                 visit_args.join(", ")
             )
         } else {
-            let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+            let scrutinee = self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
             // Variant match → IIFE with std::visit
             format!(
                 "[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
@@ -4481,6 +5138,7 @@ impl CodeGen {
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
             return_type_hints: Vec::new(),
+            constructor_template_hints: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -8378,15 +9036,18 @@ mod tests {
     }
 
     #[test]
-    fn test_untyped_let_variant_constructor_unchanged() {
+    fn test_leaf4172_untyped_local_variant_constructor_recovers_expected_type() {
         let out = transpile_str(
             r#"
             enum Either<L, R> { Left(L), Right(R) }
-            fn f() { let e = Left(2); }
+            fn f() {
+                let e = Left(2);
+                let r = Right(2);
+            }
         "#,
         );
-        assert!(out.contains("const auto e = Left(2);"));
-        assert!(!out.contains("const auto e = Left<int32_t, int32_t>(2);"));
+        assert!(out.contains("const auto e = Left<int32_t, int32_t>(2);"));
+        assert!(out.contains("const auto r = Right<int32_t, int32_t>(2);"));
     }
 
     #[test]
@@ -8425,8 +9086,70 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("e = Right(4);"));
+        assert!(out.contains("e = Right<int32_t, int32_t>(4);"));
         assert!(out.contains("e = Right<int32_t, int32_t>(2);"));
+    }
+
+    #[test]
+    fn test_leaf4172_tuple_assertion_context_uses_local_binding_type() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let e = Left(2);
+                let t = (&e, &Right(2), &Left(3));
+            }
+        "#,
+        );
+        assert!(out.contains("&Right<int32_t, int32_t>(2)"));
+        assert!(out.contains("&Left<int32_t, int32_t>(3)"));
+    }
+
+    #[test]
+    fn test_leaf4172_tuple_context_from_local_callable_return_type() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let a = || -> Either<i32, i32> { Right(1) };
+                let t = (&a(), &Right(2));
+            }
+        "#,
+        );
+        assert!(out.contains("const auto t = std::make_tuple(&a(), &Right<int32_t, int32_t>(2));"));
+    }
+
+    #[test]
+    fn test_leaf4172_tuple_context_from_nested_fn_return_type() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                fn b() -> Either<String, &'static str> { Right("foo") }
+                let t = (&b(), &Left(String::from("foo")));
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "const auto t = std::make_tuple(&b(), &Left<rusty::String, std::string_view>(rusty::String::from(\"foo\")));"
+        ));
+    }
+
+    #[test]
+    fn test_leaf4172_untyped_match_local_recovers_constructor_pair() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f(x: i32) {
+                let iter = match x {
+                    0 => Left(1),
+                    _ => Right(2),
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("return Left<int32_t, int32_t>(1);"));
+        assert!(out.contains("return Right<int32_t, int32_t>(2);"));
     }
 
     // ── Phase 18 Blocker 2: UFCS trait method call detection ────

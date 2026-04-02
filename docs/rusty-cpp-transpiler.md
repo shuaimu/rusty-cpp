@@ -2822,6 +2822,55 @@ Design rationale:
 - Followed §11.13 (root-cause-first) by collapsing the first deterministic blocker family before tackling deeper semantic mismatches.
 - Followed §11.28 (below) by applying a narrow, shape-based skip only for known Rust libtest scaffolding rather than broad symbol stripping.
 
+### 10.43 Phase 18 Progress: End-to-End (Leaf 4.17.2) — DONE
+
+Leaf 4.17.2 adds expected-type context recovery for untyped expanded-test constructors
+(`Left(...)` / `Right(...)` / `Ok(...)` / `Err(...)`) in local bindings and assertion tuple contexts.
+
+Root causes:
+
+- Expanded test bodies contain untyped constructor calls where Rust infers enum/result context from surrounding expressions; direct C++ lowering left these as unresolved templates.
+- Context-bearing patterns in expanded tests include:
+  - untyped local initializers (`let e = Left(2)`);
+  - tuple assertions (`match (&a(), &Right(...))` and similar);
+  - nested local/nested-fn call sites where return types are known but were not fed into constructor emission.
+
+Changes:
+
+- Extended expected-type propagation:
+  - `emit_expr_to_string_with_expected` now propagates through reference/paren/group/tuple wrappers instead of only direct call/match nodes.
+  - Tuple emission now attempts expected-type recovery from sibling elements (typed locals, callable locals, constructor-inferred hints) and applies that context to all tuple elements.
+- Added local-binding type recovery:
+  - infer/update untyped local binding types from initializer shapes (closure return types, constructor calls, simple constructor-pair `if`/`match` shapes);
+  - register nested `fn` statements as in-scope callable bindings with their declared return type so later `&b()` tuple contexts can recover expected constructor type.
+- Added constructor-template hint recovery for no-annotation paths:
+  - recover paired constructor template hints from local initializer expression trees (including nested `if`/`match` forms);
+  - apply hints for `Left/Right` and `Ok/Err` emission when no explicit Rust expected type is available.
+- Improved match scrutinee emission:
+  - tuple/variant match scrutinee elements now emit with recovered variant context so untyped constructor scrutinees in expanded tests gain explicit template arguments.
+
+Regression tests added:
+
+- `test_leaf4172_untyped_local_variant_constructor_recovers_expected_type`
+- `test_leaf4172_tuple_assertion_context_uses_local_binding_type`
+- `test_leaf4172_tuple_context_from_local_callable_return_type`
+- `test_leaf4172_tuple_context_from_nested_fn_return_type`
+- `test_leaf4172_untyped_match_local_recovers_constructor_pair`
+
+Verification:
+
+- Focused transpiler tests:
+  - `cargo test -p rusty-cpp-transpiler leaf4172 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf4 -- --nocapture`
+- Expanded-tests probe (`cargo expand --lib --tests` + transpile + g++ compile):
+  - untyped constructor deduction failures (`no matching function` / `couldn’t deduce template parameter`) for `Left/Right/Ok/Err` in test-body local/tuple contexts are removed from the active blocker set;
+  - remaining failures are in different families (not constructor-deduction context for this leaf).
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first): fixed context propagation at expression/local scopes first rather than patching downstream compile cascades.
+- Followed §11.29 (below): used context-local recovery (typed local/callable/nested-fn and pair-structure hints) instead of global constructor-template forcing.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3093,3 +3142,13 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Broad stripping can remove real runtime code and hide genuine transpiler gaps, producing a false parity signal.
 - It makes behavior non-deterministic across crates because symbol-shape heuristics become too general and hard to audit.
 - The safer approach is narrow structural filtering for known Rust libtest scaffolding only (`test::TestDescAndFn` metadata and generated `test_main_static` main), with explicit regression tests.
+
+### 11.29 Global Constructor Template Forcing Without Context Recovery
+
+**Rejected approach:** Force every untyped `Left/Right/Ok/Err` call to one blanket template strategy (for example always duplicate a single argument type or globally inject synthetic template defaults), regardless of expression context.
+
+**Why it was rejected:**
+- It fails on mixed-branch contexts where left/right side types differ and need paired context (`if`/`match` local initializers).
+- It can silently pick wrong types and mask real type-flow bugs, reducing parity signal quality.
+- It does not handle callable-return and nested-function contexts used by expanded assertions.
+- The safer approach is context-local recovery (typed locals, callable/nested-fn return hints, tuple sibling context, and paired constructor-hint extraction) with targeted tests.
