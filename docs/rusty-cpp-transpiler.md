@@ -4594,6 +4594,85 @@ Design rationale:
   - no broad global de-const rewrite of all immutable locals,
   - no ad-hoc one-off rewrite for only `error()` by function name.
 
+### 10.11.43 Leaf 4.37: Remove expanded `as_ref`/`as_mut` reference-parity blockers
+
+Problem:
+
+- After Leaf 4.36, first deterministic blockers in expanded runnable tests were:
+  - reference-target constructors emitted moved arguments:
+    - `Left<L&, R&>(std::move(inner))`
+    - `Right<L&, R&>(std::move(inner))`
+  - `right()` reference payload parity mismatch:
+    - by-value match binding was emitted as `const auto& r = _v._0;`
+    - then used in `rusty::Option<R>(r)` when `R = T&`, producing const/reference mismatch.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one targeted conversion-emission guard for reference targets,
+  - one tuple-struct pattern-binding qualifier adjustment for by-value identifier bindings,
+  - focused transpiler regressions,
+  - expanded compile re-probe.
+
+Execution plan:
+
+1. Keep move semantics for non-reference target constructors unchanged.
+2. Suppress `std::move(...)` only when the constructor target type is reference-qualified.
+3. Preserve reference payload mutability in match bindings used by by-value identifier patterns.
+4. Re-probe expanded output and capture the next first deterministic blocker family.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - In `emit_from_conversion_to_target(...)`:
+    - introduced `target_is_ref` detection from mapped target C++ type.
+    - when `target_is_ref` is true, constructor argument lowering uses non-moving expression
+      emission (`emit_expr_to_string(...)`) for:
+      - direct constructor args,
+      - `core::convert::From::from(...)` inner-arg conversion path.
+    - non-reference targets keep existing move-aware behavior (`emit_expr_maybe_move(...)`).
+  - In `collect_pattern_binding_stmts(...)` for `Pat::Ident` tuple-struct arm bindings:
+    - `ref mut` stays `auto&`,
+    - `ref` stays `const auto&`,
+    - by-value ident now uses `auto&&` (instead of `const auto&`) so `R = U&` payloads are
+      preserved without const-qualification drift.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf437_as_ref_as_mut_reference_constructor_args_are_not_moved`
+  - verifies `as_ref`/`as_mut` constructor args are emitted without `std::move(inner)` for
+    reference targets.
+- `codegen::tests::test_leaf437_option_match_binding_uses_forwarding_ref_for_by_value_pat`
+  - verifies by-value tuple-struct match binding emits `auto&& r = _v._0;` (not `const auto&`)
+    in `right()` parity shape.
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf437 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler as_ref_as_mut_reference_constructor_args_are_not_moved -- --nocapture`
+- Expanded re-probe:
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf437.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf437.rs --output /tmp/either-expanded-tests-leaf437.cppm --module-name rustycpp.either_expanded_leaf437`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -c /tmp/either-expanded-tests-leaf437.cppm -o /tmp/either-expanded-tests-leaf437.o`
+
+Re-probe result:
+
+- Previous deterministic Leaf 4.37 signatures are removed:
+  - `as_ref`/`as_mut` now emit `Left/Right<...&>(inner)` (no moved reference constructor args),
+  - `right()` now emits `auto&& r = _v._0; return rusty::Option<R>(r);`.
+- Next first deterministic blocker family starts at panic-path return typing in non-void match
+  expressions (`unwrap_right()`/`expect_*` style branches where panic branch currently lowers to
+  `void`), followed by existing downstream io/either method-shape families.
+
+Design rationale:
+
+- Kept fix localized to the two emission sites that created reference-parity drift.
+- Preserved existing move behavior for value targets to avoid broad semantic regressions.
+- Avoided wrong approaches from §11:
+  - no global removal of `std::move(...)` across constructor emission,
+  - no global forced `const auto&` or forced `auto` for all pattern bindings.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -5150,3 +5229,17 @@ module/expanded-libtest output.
 - It breaks compile progress before downstream parity issues can be evaluated.
 - A mode-aware skip for associated-projection inner types preserves needed Option ctor shaping for
   references/type-params while avoiding invalid associated-type value emissions.
+
+### 11.51 Forcing `const auto&` for All By-Value Match Pattern Bindings
+
+**Rejected approach:** Keep/default all by-value match-arm identifier bindings as `const auto&`
+for simplicity and broad copy-avoidance.
+
+**Why it was rejected:**
+
+- It breaks reference payload parity for forms like `R = T&` by introducing unwanted const
+  qualification (`const T&`) before constructing reference-shaped outputs (`Option<R>`, `Either<...&>`).
+- It makes downstream type mismatch diagnostics appear far from the real source (binding qualifier
+  drift), slowing parity debugging.
+- Scoped binding-shape selection (`ref mut` -> `auto&`, `ref` -> `const auto&`, by-value ->
+  `auto&&`) preserves Rust pattern intent while keeping generated C++ reference categories stable.

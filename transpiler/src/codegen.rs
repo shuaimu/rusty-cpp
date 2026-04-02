@@ -2573,12 +2573,15 @@ impl CodeGen {
         match pat {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
-                    let binding_prefix =
-                        if pi.by_ref.is_some() && pi.mutability.is_some() {
-                            "auto&"
-                        } else {
-                            "const auto&"
-                        };
+                    let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                        "auto&"
+                    } else if pi.by_ref.is_some() {
+                        "const auto&"
+                    } else {
+                        // By-value pattern bindings should preserve reference payloads
+                        // (e.g., `R = T&`) without forcing `const`.
+                        "auto&&"
+                    };
                     out.push(format!("{} {} = {};", binding_prefix, pi.ident, source_expr));
                 }
                 true
@@ -5263,13 +5266,24 @@ impl CodeGen {
     }
 
     fn emit_from_conversion_to_target(&self, arg: &syn::Expr, target_cpp_ty: &str) -> String {
+        let target_is_ref = target_cpp_ty.contains('&');
         let inner = match arg {
             syn::Expr::Call(call)
                 if self.is_core_from_path_expr(call.func.as_ref()) && call.args.len() == 1 =>
             {
-                self.emit_expr_maybe_move(&call.args[0])
+                if target_is_ref {
+                    self.emit_expr_to_string(&call.args[0])
+                } else {
+                    self.emit_expr_maybe_move(&call.args[0])
+                }
             }
-            _ => self.emit_expr_maybe_move(arg),
+            _ => {
+                if target_is_ref {
+                    self.emit_expr_to_string(arg)
+                } else {
+                    self.emit_expr_maybe_move(arg)
+                }
+            }
         };
         if target_cpp_ty == "rusty::String" {
             if self.is_string_from_call_expr(arg) || inner.starts_with("rusty::String::from(") {
@@ -9367,7 +9381,7 @@ mod tests {
         );
         assert!(out.contains("std::visit(overloaded {"));
         assert!(out.contains("[&](const E_A& _v)"));
-        assert!(out.contains("const auto& x = _v._0;"));
+        assert!(out.contains("auto&& x = _v._0;"));
         assert!(out.contains("[&](const E_B&)"));
     }
 
@@ -11499,8 +11513,8 @@ mod tests {
         );
         assert!(out.contains("return std::visit(overloaded {"));
         assert!(out.contains("}, a, b);"));
-        assert!(out.contains("const auto& x = _v0._0;"));
-        assert!(out.contains("const auto& y = _v1._0;"));
+        assert!(out.contains("auto&& x = _v0._0;"));
+        assert!(out.contains("auto&& y = _v1._0;"));
         assert!(!out.contains("/* TODO: expr */"));
     }
 
@@ -11701,12 +11715,12 @@ mod tests {
         "#,
         );
 
-        assert!(out.contains("const auto& t = std::get<0>(_v._0);"));
-        assert!(out.contains("const auto& l = std::get<1>(_v._0);"));
-        assert!(out.contains("const auto& r = std::get<1>(_v._0);"));
-        assert!(out.contains("const auto& l = std::get<0>(_v._0);"));
-        assert!(out.contains("const auto& t = std::get<1>(_v._0);"));
-        assert!(out.contains("const auto& r = std::get<0>(_v._0);"));
+        assert!(out.contains("auto&& t = std::get<0>(_v._0);"));
+        assert!(out.contains("auto&& l = std::get<1>(_v._0);"));
+        assert!(out.contains("auto&& r = std::get<1>(_v._0);"));
+        assert!(out.contains("auto&& l = std::get<0>(_v._0);"));
+        assert!(out.contains("auto&& t = std::get<1>(_v._0);"));
+        assert!(out.contains("auto&& r = std::get<0>(_v._0);"));
     }
 
     #[test]
@@ -11960,8 +11974,8 @@ mod tests {
             "auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"
         ));
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
-        assert!(out.contains("const auto& left_val = std::get<0>(_m_tuple);"));
-        assert!(out.contains("const auto& right_val = std::get<1>(_m_tuple);"));
+        assert!(out.contains("auto&& left_val = std::get<0>(_m_tuple);"));
+        assert!(out.contains("auto&& right_val = std::get<1>(_m_tuple);"));
     }
 
     #[test]
@@ -12270,6 +12284,57 @@ mod tests {
         );
         assert!(out.contains("const auto res = "));
         assert!(out.contains("const auto _is_err = res.is_err();"));
+    }
+
+    #[test]
+    fn test_leaf437_as_ref_as_mut_reference_constructor_args_are_not_moved() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn as_ref(&self) -> Either<&L, &R> {
+                    match *self {
+                        Either::Left(ref inner) => Left(inner),
+                        Either::Right(ref inner) => Right(inner),
+                    }
+                }
+                fn as_mut(&mut self) -> Either<&mut L, &mut R> {
+                    match *self {
+                        Either::Left(ref mut inner) => Left(inner),
+                        Either::Right(ref mut inner) => Right(inner),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return Left<const L&, const R&>(inner);"));
+        assert!(out.contains("return Right<const L&, const R&>(inner);"));
+        assert!(out.contains("return Left<L&, R&>(inner);"));
+        assert!(out.contains("return Right<L&, R&>(inner);"));
+        assert!(!out.contains("Left<const L&, const R&>(std::move(inner))"));
+        assert!(!out.contains("Right<const L&, const R&>(std::move(inner))"));
+        assert!(!out.contains("Left<L&, R&>(std::move(inner))"));
+        assert!(!out.contains("Right<L&, R&>(std::move(inner))"));
+    }
+
+    #[test]
+    fn test_leaf437_option_match_binding_uses_forwarding_ref_for_by_value_pat() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn right(self) -> Option<R> {
+                    match self {
+                        Either::Left(_) => None,
+                        Either::Right(r) => Some(r),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& r = _v._0;"));
+        assert!(!out.contains("const auto& r = _v._0;"));
+        assert!(out.contains("return rusty::Option<R>(r);"));
     }
 
     #[test]
