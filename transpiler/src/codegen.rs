@@ -4309,6 +4309,13 @@ impl CodeGen {
         }
     }
 
+    fn extract_single_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
+        match expr {
+            syn::Expr::Block(block) => self.extract_single_expr_from_block(&block.block),
+            _ => self.extract_value_expr(expr),
+        }
+    }
+
     fn extract_constructor_call_expr<'a>(
         &self,
         expr: &'a syn::Expr,
@@ -4708,6 +4715,7 @@ impl CodeGen {
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
+            syn::Expr::If(if_expr) => self.emit_if_expr_to_string(if_expr, expected_ty),
             _ => self.emit_expr_to_string(expr),
         }
     }
@@ -5318,17 +5326,7 @@ impl CodeGen {
                 }
             }
             syn::Expr::If(if_expr) => {
-                // If used as an expression (e.g., `let x = if c { 1 } else { 2 };`)
-                // → C++ ternary when simple
-                if let Some((_, else_branch)) = &if_expr.else_branch {
-                    let cond = self.emit_expr_to_string(&if_expr.cond);
-                    if let (Some(then_val), Some(else_val)) =
-                        (self.block_single_expr(&if_expr.then_branch), self.expr_single_value(else_branch))
-                    {
-                        return format!("({} ? {} : {})", cond, then_val, else_val);
-                    }
-                }
-                format!("/* TODO: if-expression */")
+                self.emit_if_expr_to_string(if_expr, None)
             }
             syn::Expr::Break(brk) => {
                 match &brk.expr {
@@ -5451,6 +5449,124 @@ impl CodeGen {
                 format!("rusty::array_repeat({}, {})", val, len)
             }
             _ => self.match_expr_unreachable_fallback().to_string(),
+        }
+    }
+
+    fn emit_if_expr_to_string(
+        &self,
+        if_expr: &syn::ExprIf,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        // If used as an expression (e.g., `let x = if c { 1 } else { 2 };`)
+        // -> C++ ternary when branches are simple single-expression values.
+        let Some((_, else_branch)) = &if_expr.else_branch else {
+            return "/* TODO: if-expression */".to_string();
+        };
+        let cond = self.emit_expr_to_string(&if_expr.cond);
+        let Some(then_expr) = self.extract_single_expr_from_block(&if_expr.then_branch) else {
+            return "/* TODO: if-expression */".to_string();
+        };
+        let Some(else_expr) = self.extract_single_value_expr(else_branch) else {
+            return "/* TODO: if-expression */".to_string();
+        };
+
+        let inferred_expected_ty = if expected_ty.is_none() {
+            self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
+        } else {
+            None
+        };
+        let expected_ty_for_branches = expected_ty.or(inferred_expected_ty.as_ref());
+        let inferred_ctor_args = self.infer_variant_ctor_template_args_from_if(if_expr);
+        let inferred_expected_cpp_ty = inferred_ctor_args
+            .as_ref()
+            .map(|args| format!("Either<{}, {}>", args[0], args[1]));
+        let expected_cpp_ty = expected_ty_for_branches
+            .and_then(|ty| {
+                if self.expected_data_enum_name(ty).is_some() {
+                    Some(self.map_type(ty))
+                } else {
+                    None
+                }
+            })
+            .or(inferred_expected_cpp_ty);
+
+        let then_emitted = self.emit_if_ternary_branch_expr(
+            then_expr,
+            expected_ty_for_branches,
+            inferred_ctor_args.as_deref(),
+        );
+        let else_emitted = self.emit_if_ternary_branch_expr(
+            else_expr,
+            expected_ty_for_branches,
+            inferred_ctor_args.as_deref(),
+        );
+        let then_val = self.maybe_wrap_variant_constructor_with_expected_cpp_type(
+            then_expr,
+            then_emitted,
+            expected_cpp_ty.as_deref(),
+        );
+        let else_val = self.maybe_wrap_variant_constructor_with_expected_cpp_type(
+            else_expr,
+            else_emitted,
+            expected_cpp_ty.as_deref(),
+        );
+        format!("({} ? {} : {})", cond, then_val, else_val)
+    }
+
+    fn emit_if_ternary_branch_expr(
+        &self,
+        branch_expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+        ctor_template_args: Option<&[String]>,
+    ) -> String {
+        let value_expr = self.extract_value_expr(branch_expr).unwrap_or(branch_expr);
+        if expected_ty.is_none() {
+            if let (Some(args), syn::Expr::Call(call)) = (ctor_template_args, value_expr) {
+                if let Some(emitted) =
+                    self.try_emit_variant_constructor_call_with_template_args(call, args)
+                {
+                    return emitted;
+                }
+            }
+        }
+        self.emit_expr_to_string_with_expected(value_expr, expected_ty)
+    }
+
+    fn maybe_wrap_variant_constructor_with_expected_cpp_type(
+        &self,
+        expr: &syn::Expr,
+        emitted: String,
+        expected_cpp_ty: Option<&str>,
+    ) -> String {
+        let Some(expected_cpp_ty) = expected_cpp_ty else {
+            return emitted;
+        };
+        let Some(value_expr) = self.extract_value_expr(expr) else {
+            return emitted;
+        };
+        let syn::Expr::Call(call) = value_expr else {
+            return emitted;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return emitted;
+        };
+        if self.variant_ctor_name_from_path(&path.path).is_none() {
+            return emitted;
+        }
+        format!("{}({})", expected_cpp_ty, emitted)
+    }
+
+    fn infer_variant_ctor_template_args_from_if(&self, if_expr: &syn::ExprIf) -> Option<Vec<String>> {
+        let (lhs_name, lhs_arg, rhs_name, rhs_arg) = self.extract_constructor_pair_from_if(if_expr)?;
+        let lhs_cpp = self.emit_expr_maybe_move(lhs_arg);
+        let rhs_cpp = self.emit_expr_maybe_move(rhs_arg);
+        let lhs_ty = format!("decltype(({}))", lhs_cpp);
+        let rhs_ty = format!("decltype(({}))", rhs_cpp);
+
+        match (lhs_name.as_str(), rhs_name.as_str()) {
+            ("Left", "Right") => Some(vec![lhs_ty, rhs_ty]),
+            ("Right", "Left") => Some(vec![rhs_ty, lhs_ty]),
+            _ => None,
         }
     }
 
@@ -6536,14 +6652,6 @@ impl CodeGen {
             }
         }
         None
-    }
-
-    /// Extract the single value from an else branch expression.
-    fn expr_single_value(&self, expr: &syn::Expr) -> Option<String> {
-        match expr {
-            syn::Expr::Block(block) => self.block_single_expr(&block.block),
-            _ => Some(self.emit_expr_to_string(expr)),
-        }
     }
 
     fn push_return_value_scope(&mut self, return_type: &str) {
@@ -7677,6 +7785,40 @@ mod tests {
         // When if/else is used in a let binding with simple branches → ternary
         let out = transpile_str("fn f(c: bool) { let x = if c { 1 } else { 0 }; }");
         assert!(out.contains("(c ? 1 : 0)"));
+    }
+
+    #[test]
+    fn test_leaf4296_if_expr_constructor_pair_wraps_arms_to_common_either_type() {
+        let out = transpile_str(
+            r#"
+            fn f(use_empty: bool, mockdata: [u8; 8]) {
+                let reader = if use_empty {
+                    Left(io::Cursor::new([]))
+                } else {
+                    Right(io::Cursor::new(&mockdata[..]))
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto reader = (use_empty ? Either<"));
+        assert!(out.contains(">(Left<"));
+        assert!(out.contains(") : Either<"));
+        assert!(!out.contains("auto reader = (use_empty ? Left<"));
+    }
+
+    #[test]
+    fn test_leaf4296_typed_if_expr_constructor_pair_uses_expected_either_wrapper() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f(c: bool) {
+                let e: Either<i32, i32> = if c { Left(1) } else { Right(2) };
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "const Either<int32_t, int32_t> e = (c ? Either<int32_t, int32_t>(Left<int32_t, int32_t>(1)) : Either<int32_t, int32_t>(Right<int32_t, int32_t>(2)));"
+        ));
     }
 
     #[test]

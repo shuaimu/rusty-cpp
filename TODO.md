@@ -362,7 +362,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Leaf 4.29.3: Fix container length-call shape in expanded io tests (`buf.len()` on C++ `std::vector`/array-like lowers to valid size expression)
             - [x] *done* Leaf 4.29.4: Fix residual tuple-assertion address/reference lowering artifacts in io tests (`&&value`/mixed ref temp shape), then re-probe compile/link
             - [x] *done* Leaf 4.29.5: Fix Cursor constructor lowering/type-context shape in io tests (`io::Cursor::new(...)` inside `decltype`/constructor-hint contexts), including empty-array arg handling, then re-probe compile/link
-            - [ ] Leaf 4.29.6: Fix `if`/ternary arm unification for `Left(...)`/`Right(...)` constructor expressions in io/read_write paths (emit converged `Either<...>` arm type), then re-probe compile/link
+            - [x] *done* Leaf 4.29.6: Fix `if`/ternary arm unification for `Left(...)`/`Right(...)` constructor expressions in io/read_write paths (emit converged `Either<...>` arm type), then re-probe compile/link
+            - [ ] Leaf 4.29.7: Fix io read/write buffer-argument lowering in expanded tests (`read(&buf)` / `write(&buf)` currently emit pointer/vector-int shape instead of span<uint8_t> view), then re-probe compile/link
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

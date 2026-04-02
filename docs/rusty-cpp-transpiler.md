@@ -3968,6 +3968,71 @@ Design rationale:
 - Kept the fix narrow to constructor path lowering and explicit empty-array argument recovery.
 - Avoided broad rewrites of conditional-expression codegen or global array-literal lowering.
 
+### 10.11.34 Leaf 4.29.6: `if`/ternary Left/Right arm unification in io paths
+
+Problem:
+
+- After Leaf 4.29.5, the first deterministic expanded blocker moved to `seek()`/`read_write()`:
+  - generated ternaries had `Left<...>(...)` on one side and `Right<...>(...)` on the other,
+    so C++ deduced incompatible arm types (`Either_Left<...>` vs `Either_Right<...>`).
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one scoped `if`-expression codegen path update in `transpiler/src/codegen.rs`,
+  - focused transpiler regression tests,
+  - expanded compile re-probe.
+
+Execution plan:
+
+1. Keep existing constructor-hint machinery (used by untyped locals in expanded output).
+2. Route `if` expression lowering through a dedicated helper so branch emission can use expected or
+   inferred constructor context.
+3. For constructor-pair branches, wrap each arm to a common enum type (`Either<...>(Left/Right...)`)
+   before forming ternary expression.
+4. Re-probe expanded compile to confirm the `?:` arm mismatch family is removed.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added `emit_if_expr_to_string(...)` and used it from both:
+    - `emit_expr_to_string` (`Expr::If`), and
+    - `emit_expr_to_string_with_expected` (so typed contexts are preserved).
+  - Added branch helpers:
+    - `emit_if_ternary_branch_expr(...)` (prefers expected-type constructor specialization when available;
+      otherwise uses inferred constructor-pair template args),
+    - `maybe_wrap_variant_constructor_with_expected_cpp_type(...)` (wrap `Left/Right` branch values into
+      a common `Either<...>` C++ type),
+    - `infer_variant_ctor_template_args_from_if(...)` (decltype-based args for untyped constructor pairs),
+    - `extract_single_value_expr(...)` (single-expression extraction for else branches).
+
+Regression tests added:
+
+- `codegen::tests::test_leaf4296_if_expr_constructor_pair_wraps_arms_to_common_either_type`
+- `codegen::tests::test_leaf4296_typed_if_expr_constructor_pair_uses_expected_either_wrapper`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4296 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf429 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4296.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4296.rs -o /tmp/either-expanded-tests-leaf4296.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf4296.cppm -o /tmp/either-expanded-tests-leaf4296.o`
+
+Re-probe result:
+
+- Previous ternary mismatch signatures are removed:
+  - no `operands to ?: have different types Either_Left... and Either_Right...` in `seek()`/`read_write()`.
+- Next deterministic blocker family is now:
+  - io buffer-argument lowering in expanded tests (`read(&buf)` / `write(&buf)` pointer/int-vector shape
+    vs expected `std::span<const uint8_t>`), followed by later unrelated families.
+
+Design rationale:
+
+- Solved the mismatch at AST emission time for `if` expression branches.
+- Avoided post-hoc text rewriting or broad global constructor wrapping changes outside the ternary path.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4429,3 +4494,17 @@ each failing call site by force-injecting explicit template qualifications in ad
   lowering to `unreachable()`.
 - A single deducible helper (`rusty::io::cursor_new(...)`) plus local empty-array recovery keeps
   constructor lowering stable and auditable.
+
+### 11.44 Forcing Ternary Arm Compatibility with Ad-Hoc Casts
+
+**Rejected approach:** Keep emitting raw `Left(...) : Right(...)` ternary arms and patch compile
+errors by injecting ad-hoc casts (or generic `std::variant`/`Either` wrappers) in a post-processing
+pass.
+
+**Why it was rejected:**
+
+- It is brittle: cast insertion depends on text shape and can miss nested/typed `if` expressions.
+- It bypasses existing expected-type and constructor-hint logic, increasing divergence between typed
+  and untyped paths.
+- A scoped AST-level `if` expression lowering fix keeps branch typing deterministic and testable
+  without broad side effects.
