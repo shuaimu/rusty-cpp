@@ -1119,11 +1119,25 @@ impl CodeGen {
 
                 match &variant.fields {
                     syn::Fields::Unnamed(fields) => {
-                        let params: Vec<String> = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                            let ty = self.map_type(&f.ty);
-                            format!("{} _{}", ty, i)
-                        }).collect();
-                        let args: Vec<String> = (0..fields.unnamed.len()).map(|i| format!("std::move(_{})", i)).collect();
+                        let params: Vec<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                let ty = self.map_type(&f.ty);
+                                format!("{} _{}", ty, i)
+                            })
+                            .collect();
+                        let args: Vec<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                let ty = self.map_type(&f.ty);
+                                let param = format!("_{}", i);
+                                format!("std::forward<{}>({})", ty, param)
+                            })
+                            .collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
                             "{} {}({}) {{ return {}{{{}}};  }}",
@@ -1134,15 +1148,24 @@ impl CodeGen {
                         ));
                     }
                     syn::Fields::Named(fields) => {
-                        let params: Vec<String> = fields.named.iter().map(|f| {
-                            let fname = f.ident.as_ref().unwrap();
-                            let ftype = self.map_type(&f.ty);
-                            format!("{} {}", ftype, fname)
-                        }).collect();
-                        let args: Vec<String> = fields.named.iter().map(|f| {
-                            let fname = f.ident.as_ref().unwrap();
-                            format!(".{} = std::move({})", fname, fname)
-                        }).collect();
+                        let params: Vec<String> = fields
+                            .named
+                            .iter()
+                            .map(|f| {
+                                let fname = f.ident.as_ref().unwrap();
+                                let ftype = self.map_type(&f.ty);
+                                format!("{} {}", ftype, fname)
+                            })
+                            .collect();
+                        let args: Vec<String> = fields
+                            .named
+                            .iter()
+                            .map(|f| {
+                                let fname = f.ident.as_ref().unwrap();
+                                let ftype = self.map_type(&f.ty);
+                                format!(".{} = std::forward<{}>({})", fname, ftype, fname)
+                            })
+                            .collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
                             "{} {}({}) {{ return {}{{{}}};  }}",
@@ -3000,7 +3023,10 @@ impl CodeGen {
     ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+            let body = {
+                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                self.maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)
+            };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
@@ -3143,7 +3169,10 @@ impl CodeGen {
 
         let mut saw_runtime_pattern = false;
         for (idx, arm) in match_expr.arms.iter().enumerate() {
-            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+            let body = {
+                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                self.maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)
+            };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -3240,7 +3269,10 @@ impl CodeGen {
     ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+            let body = {
+                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                self.maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)
+            };
             match &arm.pat {
                 syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
                     let mut params = Vec::new();
@@ -11995,8 +12027,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Right<R, L>(std::move(l));"));
-        assert!(out.contains("return Left<R, L>(std::move(r));"));
+        assert!(out.contains("return Either<R, L>(Right<R, L>(std::move(l)));"));
+        assert!(out.contains("return Either<R, L>(Left<R, L>(std::move(r)));"));
     }
 
     #[test]
@@ -12014,8 +12046,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Left<L, R>(std::move(e));"));
-        assert!(out.contains("return Right<L, R>(std::move(o));"));
+        assert!(out.contains("return Either(Left<L, R>(std::move(e)));"));
+        assert!(out.contains("return Either(Right<L, R>(std::move(o)));"));
     }
 
     #[test]
@@ -12698,14 +12730,33 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Left<const L&, const R&>(inner);"));
-        assert!(out.contains("return Right<const L&, const R&>(inner);"));
-        assert!(out.contains("return Left<L&, R&>(inner);"));
-        assert!(out.contains("return Right<L&, R&>(inner);"));
+        assert!(out.contains(
+            "return Either<const L&, const R&>(Left<const L&, const R&>(inner));"
+        ));
+        assert!(out.contains(
+            "return Either<const L&, const R&>(Right<const L&, const R&>(inner));"
+        ));
+        assert!(out.contains("return Either<L&, R&>(Left<L&, R&>(inner));"));
+        assert!(out.contains("return Either<L&, R&>(Right<L&, R&>(inner));"));
         assert!(!out.contains("Left<const L&, const R&>(std::move(inner))"));
         assert!(!out.contains("Right<const L&, const R&>(std::move(inner))"));
         assert!(!out.contains("Left<L&, R&>(std::move(inner))"));
         assert!(!out.contains("Right<L&, R&>(std::move(inner))"));
+    }
+
+    #[test]
+    fn test_leaf442_variant_constructor_helpers_use_forward_for_reference_instantiations() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+        "#,
+        );
+        assert!(out.contains("Either_Left<L, R> Left(L _0)"));
+        assert!(out.contains("Either_Right<L, R> Right(R _0)"));
+        assert!(out.contains("return Either_Left<L, R>{std::forward<L>(_0)};"));
+        assert!(out.contains("return Either_Right<L, R>{std::forward<R>(_0)};"));
+        assert!(!out.contains("return Either_Left<L, R>{std::move(_0)};"));
+        assert!(!out.contains("return Either_Right<L, R>{std::move(_0)};"));
     }
 
     #[test]

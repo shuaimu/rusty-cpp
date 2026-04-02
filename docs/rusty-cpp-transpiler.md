@@ -4911,6 +4911,76 @@ Design rationale:
   - no global `visit` fallback coercion without parent-context typing (§11.4),
   - no “skip failing branches” symbol stripping to force compile success (§11.28/§11.30).
 
+### 10.11.48 Leaf 4.42: Fix expanded `as_ref`/`as_mut` visit return-shape parity and reference constructor forwarding
+
+Problem:
+
+- After Leaf 4.41, the next deterministic expanded-tests compile blockers moved to:
+  - `Either::as_ref()` / `Either::as_mut()` generated `std::visit` lambdas returning different
+    variant struct types (`Either_Left<...>` vs `Either_Right<...>`), causing visit return-type
+    mismatch assertions.
+  - Reference-instantiated constructor helper calls (`Left<L&,R&>(inner)`,
+    `Right<L&,R&>(inner)`) failing because generated helpers always used `std::move(_0)`.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - local match-expression return-shape wrapping in visit-lowering paths,
+  - local constructor helper argument forwarding update,
+  - focused transpiler regression updates/additions,
+  - expanded compile re-probe.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - in `emit_match_expr_visit`, `emit_match_expr_visit_tuple`, and `emit_runtime_match_expr`,
+    wrapped arm bodies via
+    `maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)` so
+    constructor-arm returns in expected-enum contexts become `Either<...>(Left(...))` /
+    `Either<...>(Right(...))` and `std::visit` sees one return type.
+  - in enum constructor helper generation, changed unnamed/named field argument emission from
+    unconditional `std::move(...)` to `std::forward<field_ty>(param)` so reference-instantiated
+    helpers preserve lvalue reference binding parity.
+
+Regression tests:
+
+- Updated:
+  - `codegen::tests::test_leaf437_as_ref_as_mut_reference_constructor_args_are_not_moved`
+    (now expects wrapped `Either<...>(Left/Right(...))` return shapes).
+- Added:
+  - `codegen::tests::test_leaf442_variant_constructor_helpers_use_forward_for_reference_instantiations`
+    (constructor helpers use `std::forward<...>` and no longer emit `std::move(_0)`).
+
+Verification:
+
+- Focused:
+  - `cargo test -q -p rusty-cpp-transpiler leaf437 -- --nocapture`
+  - `cargo test -q -p rusty-cpp-transpiler leaf442 -- --nocapture`
+- Expanded re-probe:
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf442.rs`
+  - `cargo run -q -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf442.rs --output /tmp/either-expanded-tests-leaf442.cppm --module-name rustycpp.either_expanded_leaf442`
+  - `g++ -std=c++20 -fmodules-ts -I include -I tests/cpp/include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf442.cppm -o /tmp/either-expanded-tests-leaf442.o`
+
+Re-probe result:
+
+- Previous deterministic `as_ref`/`as_mut` visitor return-type mismatch and reference-helper
+  binding signatures are removed.
+- Next deterministic blocker shifts to runtime `rusty::Option<const T&>::as_ref()` copy-path
+  failure in `include/rusty/option.hpp` (deleted copy constructor use).
+
+Design rationale:
+
+- Solved return-shape parity at match-expression lowering boundaries instead of adding one-off
+  hardcoded method rewrites for specific generated functions.
+- Used forwarding in constructor helpers rather than ad hoc reference-only branches to preserve
+  template-instantiation semantics across both value and reference payloads.
+- Avoided wrong approaches from §11:
+  - no hand-written post-transpile patching of generated `as_ref`/`as_mut` bodies (§11.5),
+  - no broad “force one visit return type everywhere” textual rewrite detached from expected-type
+    context (§11.4),
+  - no fake-green parity by relying only on smoke import/build while skipping real expanded-body
+    compile blockers (§11.31).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
