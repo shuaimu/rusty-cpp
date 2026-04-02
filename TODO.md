@@ -294,7 +294,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Thread variant type context from match scrutinee into visitor-arm type emission (statement and expression `match`)
             - [x] *done* Infer template args from explicit pattern path generics, typed scrutinee bindings (including function params), and in-scope enum generic params
             - [x] *done* Add regression tests for generic `self` match and typed-parameter match; re-run parity harness build stage to verify old `missing template argument list` errors disappear
-          - [ ] Leaf 4.9: Fix dependent constructor call/name lookup in generic match arms (`Left`/`Right` should be emitted as dependent calls when required)
+          - [x] *done* Leaf 4.9: Fix dependent constructor call/name lookup in generic match arms (`Left`/`Right` should be emitted as dependent calls when required)
+            - [x] *done* Propagate function/method return type hints into match-expression arm body emission (including `return` paths) so arm constructor calls receive expected type context
+            - [x] *done* Extend expected-type template-arg inference to cover bare `Self`/enum return hints in generic impl scope, emitting `Left<...>/Right<...>` dependent calls
+            - [x] *done* Add regression tests for explicit generic return and `Self` return; re-run parity harness build stage and verify previous `there are no arguments to Left/Right` diagnostics are gone
           - [ ] Leaf 4.10: Resolve remaining unresolved expanded-output names in iterator paths (`IterEither*`, `core`, `rusty_cmp_Ordering_Equal`, generic placeholders)
           - [ ] Leaf 4.11: Fix module-linkage issue for `export using iterator::IterEither` re-export lowering
           - [ ] Leaf 4.12: Fix `RUSTY_TRY` availability/emission in templated generated iterator paths

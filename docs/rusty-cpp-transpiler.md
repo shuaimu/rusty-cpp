@@ -2485,6 +2485,38 @@ Design rationale:
 - Kept the fix scoped to typed visitor-parameter emission in match lowering, instead of broad rewrites of unrelated path handling.
 - This aligns with rejected broad-rewrite approaches in §11.4 and §11.7.
 
+### 10.34 Phase 18 Progress: End-to-End (Leaf 4.9) — DONE
+
+Leaf 4.9 fixed dependent constructor call/name lookup in generic match-expression arms, so generated `Left`/`Right` calls become dependent when required by template context.
+
+Changes:
+
+- Completed expected-type propagation for match-expression arm bodies in value-return contexts:
+  - threaded return-type hints through expression match lowering and `return expr` emission;
+  - arm-body call emission now consistently receives the function/method expected return type.
+- Extended variant-constructor expected-type inference:
+  - `expected_type_template_args(...)` now handles not only explicit `Enum<A, B>` paths, but also bare `Self` / bare enum names in generic impl scope;
+  - emits dependent calls like `Left<L, R>(...)` / `Right<L, R>(...)` when only in-scope generic params are available.
+- Kept scope intentionally narrow to constructor-call typing; no broad rewrites of path lookup or module lowering logic.
+
+Regression tests added:
+
+- `test_leaf49_generic_match_arm_constructor_calls_use_return_expected_type`
+- `test_leaf49_self_return_match_constructor_calls_use_in_scope_type_params`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf49 -- --nocapture` passes.
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- Parity harness build stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf49 --stop-after build`
+  - previous diagnostics of the form `there are no arguments to Left/Right` are no longer present in `cpp_build.log`;
+  - remaining failures match later planned leaves (iterator names/linkage, `core`/ordering names, `RUSTY_TRY` in templated paths, residual malformed visit/switch sites).
+
+Design rationale:
+
+- This follows rejected broad-rewrite approaches in §11.4 and §11.7 by fixing only the dependent-call typing path instead of introducing global constructor/path rewrites.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

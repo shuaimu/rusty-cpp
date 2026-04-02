@@ -62,6 +62,9 @@ pub struct CodeGen {
     /// Stack tracking whether current function/method context returns a value.
     /// Used for tail expression lowering decisions (e.g., tail `match`).
     return_value_scopes: Vec<bool>,
+    /// Optional concrete return type in current function/method context.
+    /// Used to propagate expected type into tail expression lowering.
+    return_type_hints: Vec<Option<syn::Type>>,
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
@@ -88,6 +91,7 @@ impl CodeGen {
             skipped_module_traits: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
+            return_type_hints: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -134,6 +138,7 @@ impl CodeGen {
         self.skipped_module_traits.clear();
         self.emitted_method_conflict_keys.clear();
         self.return_value_scopes.clear();
+        self.return_type_hints.clear();
         self.enum_type_params.clear();
         self.param_bindings.clear();
 
@@ -385,7 +390,9 @@ impl CodeGen {
         ));
         self.indent += 1;
         self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&f.sig.output);
         self.emit_block(&f.block);
+        self.pop_return_type_hint();
         self.pop_return_value_scope();
         self.indent -= 1;
         self.writeln("};");
@@ -457,9 +464,11 @@ impl CodeGen {
         let prev_async = self.in_async;
         self.in_async = is_async;
         self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&f.sig.output);
         self.push_param_bindings(&f.sig.inputs);
         self.emit_block(&f.block);
         self.pop_param_bindings();
+        self.pop_return_type_hint();
         self.pop_return_value_scope();
         self.in_async = prev_async;
 
@@ -1006,7 +1015,9 @@ impl CodeGen {
                     ));
                     self.indent += 1;
                     self.push_return_value_scope(&return_type);
+                    self.push_return_type_hint(&method.sig.output);
                     self.emit_block(default_body);
+                    self.pop_return_type_hint();
                     self.pop_return_value_scope();
                     self.indent -= 1;
                     self.writeln("}");
@@ -1364,9 +1375,11 @@ impl CodeGen {
         ));
         self.indent += 1;
         self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
         self.emit_block(&method.block);
         self.pop_param_bindings();
+        self.pop_return_type_hint();
         self.pop_return_value_scope();
         self.indent -= 1;
         self.writeln("}");
@@ -1407,7 +1420,11 @@ impl CodeGen {
                 if !force_expr_path && self.try_emit_control_flow(expr) {
                     return;
                 }
-                let expr_str = self.emit_expr_to_string(expr);
+                let expr_str = if is_tail && semi.is_none() {
+                    self.emit_expr_to_string_with_expected(expr, self.current_return_type_hint())
+                } else {
+                    self.emit_expr_to_string(expr)
+                };
                 if is_tail && semi.is_none() {
                     // Tail expression without semicolon → return (or co_return in async)
                     let keyword = if self.in_async { "co_return" } else { "return" };
@@ -1882,10 +1899,10 @@ impl CodeGen {
     }
 
     /// Emit a switch-style match as an expression (returns string for IIFE body).
-    fn emit_match_expr_switch(&self, arms: &[syn::Arm]) -> String {
+    fn emit_match_expr_switch(&self, arms: &[syn::Arm], expected_ty: Option<&syn::Type>) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string(&arm.body);
+            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
             match &arm.pat {
                 syn::Pat::Wild(_) => parts.push(format!("return {};", body)),
                 syn::Pat::Lit(lit) => {
@@ -1903,10 +1920,11 @@ impl CodeGen {
         &self,
         arms: &[syn::Arm],
         variant_ctx: Option<&VariantTypeContext>,
+        expected_ty: Option<&syn::Type>,
     ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string(&arm.body);
+            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
@@ -1972,10 +1990,11 @@ impl CodeGen {
         arms: &[syn::Arm],
         arity: usize,
         variant_ctx: Option<&VariantTypeContext>,
+        expected_ty: Option<&syn::Type>,
     ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
-            let body = self.emit_expr_to_string(&arm.body);
+            let body = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
             match &arm.pat {
                 syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
                     let mut params = Vec::new();
@@ -2727,10 +2746,11 @@ impl CodeGen {
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> String {
-        if let syn::Expr::Call(call) = expr {
-            return self.emit_call_expr_to_string(call, expected_ty);
+        match expr {
+            syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
+            syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, expected_ty),
+            _ => self.emit_expr_to_string(expr),
         }
-        self.emit_expr_to_string(expr)
     }
 
     /// Emit a call expression, optionally using expected type context from parent.
@@ -2889,31 +2909,52 @@ impl CodeGen {
 
     /// Extract mapped template arguments from an expected type path.
     /// `Either<i32, i32>` -> `["int32_t", "int32_t"]`
+    /// `Self` inside `impl<L, R> Either<L, R>` -> `["L", "R"]`
     fn expected_type_template_args(&self, expected_ty: &syn::Type) -> Option<Vec<String>> {
-        let tp = match expected_ty {
-            syn::Type::Path(tp) => tp,
-            _ => return None,
-        };
-
-        let last = tp.path.segments.last()?;
-        let args = match &last.arguments {
-            syn::PathArguments::AngleBracketed(args) => &args.args,
-            _ => return None,
-        };
-
-        let type_args: Vec<String> = args
-            .iter()
-            .filter_map(|arg| match arg {
-                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
-                _ => None,
-            })
-            .collect();
-
-        if type_args.is_empty() {
-            None
-        } else {
-            Some(type_args)
+        match expected_ty {
+            syn::Type::Path(tp) => self.expected_type_template_args_from_path(tp),
+            syn::Type::Reference(r) => self.expected_type_template_args(&r.elem),
+            syn::Type::Paren(p) => self.expected_type_template_args(&p.elem),
+            syn::Type::Group(g) => self.expected_type_template_args(&g.elem),
+            _ => None,
         }
+    }
+
+    fn expected_type_template_args_from_path(
+        &self,
+        tp: &syn::TypePath,
+    ) -> Option<Vec<String>> {
+        let last = tp.path.segments.last()?;
+        if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
+            let type_args: Vec<String> = args
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                    _ => None,
+                })
+                .collect();
+
+            if !type_args.is_empty() {
+                return Some(type_args);
+            }
+        }
+
+        let enum_name = if last.ident == "Self" {
+            self.current_struct.clone()
+        } else {
+            Some(last.ident.to_string())
+        };
+
+        if let Some(enum_name) = enum_name.as_deref() {
+            if let Some(params) = self.enum_type_params.get(enum_name) {
+                if !params.is_empty() && params.iter().all(|p| self.is_type_param_in_scope(p)) {
+                    return Some(params.clone());
+                }
+            }
+        }
+
+        None
     }
 
     fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
@@ -3024,7 +3065,7 @@ impl CodeGen {
                 let keyword = if self.in_async { "co_return" } else { "return" };
                 match &ret.expr {
                     Some(e) => {
-                        let val = self.emit_expr_to_string(e);
+                        let val = self.emit_expr_to_string_with_expected(e, self.current_return_type_hint());
                         format!("{} {}", keyword, val)
                     }
                     None => keyword.to_string(),
@@ -3095,43 +3136,7 @@ impl CodeGen {
                     self.match_expr_unreachable_fallback().to_string()
                 }
             }
-            syn::Expr::Match(match_expr) => {
-                let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
-                // Match as expression → immediately-invoked lambda
-                if self.all_arms_are_literal_or_wild(&match_expr.arms) {
-                    let scrutinee = self.emit_expr_to_string(&match_expr.expr);
-                    // Simple switch-like match → ternary chain or IIFE with switch
-                    format!("[&]() {{ auto _m = {}; {} }}()",
-                        scrutinee,
-                        self.emit_match_expr_switch(&match_expr.arms))
-                } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
-                    let tuple_variant_ctx = tuple_scrutinee
-                        .elems
-                        .iter()
-                        .find_map(|e| self.infer_variant_type_context_from_expr(e));
-                    // Tuple scrutinee variant patterns: std::visit over each tuple element.
-                    let visit_args: Vec<String> = tuple_scrutinee
-                        .elems
-                        .iter()
-                        .map(|e| self.emit_expr_to_string(e))
-                        .collect();
-                    format!(
-                        "[&]() {{ return std::visit(overloaded {{ {} }}, {}); }}()",
-                        self.emit_match_expr_visit_tuple(
-                            &match_expr.arms,
-                            tuple_scrutinee.elems.len(),
-                            tuple_variant_ctx.as_ref(),
-                        ),
-                        visit_args.join(", ")
-                    )
-                } else {
-                    let scrutinee = self.emit_expr_to_string(&match_expr.expr);
-                    // Variant match → IIFE with std::visit
-                    format!("[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
-                        scrutinee,
-                        self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref()))
-                }
-            }
+            syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, None),
             syn::Expr::Try(try_expr) => {
                 // Rust `expr?` → C++ `RUSTY_TRY(expr)`
                 // Uses GCC/Clang statement expressions to unwrap or early-return
@@ -3157,6 +3162,53 @@ impl CodeGen {
             syn::Expr::Range(_) => true,
             syn::Expr::Paren(p) => Self::is_range_expression(&p.expr),
             _ => false,
+        }
+    }
+
+    fn emit_match_expr_to_string(
+        &self,
+        match_expr: &syn::ExprMatch,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        // Match as expression → immediately-invoked lambda
+        if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+            let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+            // Simple switch-like match → ternary chain or IIFE with switch
+            format!(
+                "[&]() {{ auto _m = {}; {} }}()",
+                scrutinee,
+                self.emit_match_expr_switch(&match_expr.arms, expected_ty)
+            )
+        } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
+            let tuple_variant_ctx = tuple_scrutinee
+                .elems
+                .iter()
+                .find_map(|e| self.infer_variant_type_context_from_expr(e));
+            // Tuple scrutinee variant patterns: std::visit over each tuple element.
+            let visit_args: Vec<String> = tuple_scrutinee
+                .elems
+                .iter()
+                .map(|e| self.emit_expr_to_string(e))
+                .collect();
+            format!(
+                "[&]() {{ return std::visit(overloaded {{ {} }}, {}); }}()",
+                self.emit_match_expr_visit_tuple(
+                    &match_expr.arms,
+                    tuple_scrutinee.elems.len(),
+                    tuple_variant_ctx.as_ref(),
+                    expected_ty,
+                ),
+                visit_args.join(", ")
+            )
+        } else {
+            let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+            // Variant match → IIFE with std::visit
+            format!(
+                "[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
+                scrutinee,
+                self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
+            )
         }
     }
 
@@ -3773,6 +3825,7 @@ impl CodeGen {
             skipped_module_traits: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
+            return_type_hints: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -3918,6 +3971,21 @@ impl CodeGen {
 
     fn in_value_return_scope(&self) -> bool {
         self.return_value_scopes.last().copied().unwrap_or(false)
+    }
+
+    fn push_return_type_hint(&mut self, output: &syn::ReturnType) {
+        match output {
+            syn::ReturnType::Default => self.return_type_hints.push(None),
+            syn::ReturnType::Type(_, ty) => self.return_type_hints.push(Some((**ty).clone())),
+        }
+    }
+
+    fn pop_return_type_hint(&mut self) {
+        self.return_type_hints.pop();
+    }
+
+    fn current_return_type_hint(&self) -> Option<&syn::Type> {
+        self.return_type_hints.last().and_then(|hint| hint.as_ref())
     }
 
     /// Best-effort lowering of a Rust block used in expression position.
@@ -7191,6 +7259,42 @@ mod tests {
         );
         assert!(out.contains("[&](const Either_Left<int32_t, int32_t>& _v)"));
         assert!(out.contains("[&](const Either_Right<int32_t, int32_t>& _v)"));
+    }
+
+    #[test]
+    fn test_leaf49_generic_match_arm_constructor_calls_use_return_expected_type() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn flip<L, R>(e: Either<L, R>) -> Either<R, L> {
+                match e {
+                    Either::Left(l) => Right(l),
+                    Either::Right(r) => Left(r),
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return Right<R, L>(std::move(l));"));
+        assert!(out.contains("return Left<R, L>(std::move(r));"));
+    }
+
+    #[test]
+    fn test_leaf49_self_return_match_constructor_calls_use_in_scope_type_params() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn from_result(r: Result<R, L>) -> Self {
+                    match r {
+                        Err(e) => Left(e),
+                        Ok(o) => Right(o),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return Left<L, R>(std::move(e));"));
+        assert!(out.contains("return Right<L, R>(std::move(o));"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────
