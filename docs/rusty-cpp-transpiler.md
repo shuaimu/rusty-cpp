@@ -2698,6 +2698,46 @@ Design rationale:
 - Followed rejected approach in §11.25 by avoiding raw Rust-only generic identity for emitted method de-dup.
 - Kept the fix local to method identity generation rather than broad trait/method renaming.
 
+### 10.40 Phase 18 Progress: End-to-End (Leaf 4.15) — DONE
+
+Leaf 4.15 fixed unresolved bindings in nested tuple-destructuring variant match arms from expanded either output.
+
+Root cause:
+
+- Tuple-struct variant pattern lowering only handled direct identifier fields (`Left(x)`), not nested tuple patterns (`Left((t, l))`).
+- For nested tuple patterns, no binding statements were emitted, but arm bodies still referenced `t/l/r`.
+- This produced deterministic compile failures (`'t'/'l'/'r' was not declared in this scope`) and blocked deeper parity work.
+
+Changes:
+
+- Added recursive pattern-binding statement emission for tuple-struct variant arms:
+  - `tuple_struct_binding_stmts(...)`
+  - `collect_pattern_binding_stmts(...)`
+- Supported nested tuple destructuring via `std::get<N>(...)`-based binding emission.
+- Wired this into:
+  - statement-style variant visitor arm emission (`emit_visit_arm`)
+  - expression-style variant visitor arm emission (`emit_match_expr_visit`)
+  - tuple-scrutinee visitor subpatterns (`emit_tuple_visit_subpattern`)
+
+Regression tests added:
+
+- `test_leaf415_nested_tuple_variant_pattern_emits_bindings`
+
+Verification:
+
+- Focused transpiler tests pass:
+  - `cargo test -p rusty-cpp-transpiler leaf415 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf4 -- --nocapture`
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf415 --stop-after build`
+  - prior `t/l/r` unresolved diagnostics are gone from the first error cluster;
+  - next blocker family is now `Self_Left`/`Self_Right`/`Result_Err`/`Result_Ok` and related unresolved names.
+
+Design rationale:
+
+- Followed rejected approach in §11.26 by avoiding a fallback that keeps bodies referencing unbound identifiers.
+- Used explicit recursive binding emission so generated lambdas always bind every pattern-local name they reference.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2942,3 +2982,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Emit-time identity must reflect emitted C++ signatures, not Rust-only bounds that may be intentionally skipped in output (especially in module mode).
 - This allows distinct Rust keys to collapse into the same emitted C++ method signature, causing deterministic duplicate-declaration compile failures.
 - The correct strategy is emitted-signature-based identity (method name + receiver/static shape + emitted template shape + mapped parameter types).
+
+### 11.26 Treating Nested Tuple-Destructuring Variant Patterns as Flat Field Bindings
+
+**Rejected approach:** Keep tuple-struct variant lowering limited to top-level direct field identifiers and treat nested tuple patterns (`Left((t, l))`) as if no extra bindings are required.
+
+**Why it was rejected:**
+- It leaves arm-local names (`t/l/r`) unbound while still emitting body expressions that reference them, producing immediate compile failures.
+- It masks a deterministic codegen gap and shifts failures to downstream diagnostics, reducing signal quality for parity debugging.
+- The correct approach is recursive binding emission from the pattern tree (including tuple subpatterns), so every referenced binding is explicitly declared in generated C++.

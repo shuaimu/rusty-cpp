@@ -303,6 +303,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] Leaf 4.12: Fix `RUSTY_TRY` availability/emission in templated generated iterator paths
           - [x] Leaf 4.13: Fix residual malformed `switch`/`case` placement in generated blocks
           - [x] Leaf 4.14: De-duplicate impl methods by emitted C++ template/signature shape (not raw Rust impl bounds) so expanded `fmt` impl pairs do not emit duplicate `Either::fmt(...) const`
+          - [x] Leaf 4.15: Emit nested tuple-destructuring bindings inside variant match arms (`Left((t, l))`, `Right((t, r))`) so generated visit lambdas bind all referenced names and remove `t/l/r` unresolved compile errors
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

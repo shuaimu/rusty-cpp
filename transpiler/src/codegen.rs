@@ -1763,19 +1763,21 @@ impl CodeGen {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
                 let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
-                let bindings = self.extract_tuple_struct_bindings(&ts.elems);
+                let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v") else {
+                    self.writeln("// TODO: complex tuple-struct pattern binding");
+                    self.writeln("[&](const auto&) {},");
+                    return;
+                };
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}& _v) {{", cpp_type));
 
-                if !bindings.is_empty() || arm.guard.is_some() {
+                if !binding_stmts.is_empty() || arm.guard.is_some() {
                     self.output.push('\n');
                     self.indent += 1;
                     // Emit bindings
-                    for (i, name) in bindings.iter().enumerate() {
-                        if name != "_" {
-                            self.writeln(&format!("const auto& {} = _v._{};", name, i));
-                        }
+                    for stmt in &binding_stmts {
+                        self.writeln(stmt);
                     }
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
@@ -1879,6 +1881,53 @@ impl CodeGen {
                 _ => "_".to_string(),
             })
             .collect()
+    }
+
+    fn tuple_struct_binding_stmts(
+        &self,
+        elems: &syn::punctuated::Punctuated<syn::Pat, syn::token::Comma>,
+        base_expr: &str,
+    ) -> Option<Vec<String>> {
+        let mut stmts = Vec::new();
+        for (i, elem_pat) in elems.iter().enumerate() {
+            let field_expr = format!("{}._{}", base_expr, i);
+            if !self.collect_pattern_binding_stmts(elem_pat, &field_expr, &mut stmts) {
+                return None;
+            }
+        }
+        Some(stmts)
+    }
+
+    fn collect_pattern_binding_stmts(
+        &self,
+        pat: &syn::Pat,
+        source_expr: &str,
+        out: &mut Vec<String>,
+    ) -> bool {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.ident != "_" {
+                    out.push(format!("const auto& {} = {};", pi.ident, source_expr));
+                }
+                true
+            }
+            syn::Pat::Wild(_) => true,
+            syn::Pat::Tuple(tuple_pat) => {
+                for (i, elem) in tuple_pat.elems.iter().enumerate() {
+                    let elem_expr = format!("std::get<{}>({})", i, source_expr);
+                    if !self.collect_pattern_binding_stmts(elem, &elem_expr, out) {
+                        return false;
+                    }
+                }
+                true
+            }
+            syn::Pat::Type(pt) => self.collect_pattern_binding_stmts(&pt.pat, source_expr, out),
+            syn::Pat::Reference(r) => {
+                self.collect_pattern_binding_stmts(&r.pat, source_expr, out)
+            }
+            syn::Pat::Paren(p) => self.collect_pattern_binding_stmts(&p.pat, source_expr, out),
+            _ => false,
+        }
     }
 
     /// Emit a macro invocation as a statement.
@@ -2114,11 +2163,14 @@ impl CodeGen {
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
-                    let bindings = self.extract_tuple_struct_bindings(&ts.elems);
-                    let binding_stmts: Vec<String> = bindings.iter().enumerate()
-                        .filter(|(_, n)| *n != "_")
-                        .map(|(i, n)| format!("const auto& {} = _v._{};", n, i))
-                        .collect();
+                    let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v")
+                    else {
+                        parts.push(format!(
+                            "[&](const auto&) {{ return {}; }}",
+                            self.match_expr_unreachable_fallback()
+                        ));
+                        continue;
+                    };
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
                         parts.push(format!(
@@ -2253,13 +2305,10 @@ impl CodeGen {
                 let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
                 let param_name = format!("_v{}", index);
                 params.push(format!("const {}& {}", cpp_type, param_name));
-                let bindings = self.extract_tuple_struct_bindings(&ts.elems);
-                for (field_idx, name) in bindings.iter().enumerate() {
-                    if name != "_" {
-                        binding_stmts
-                            .push(format!("const auto& {} = {}._{};", name, param_name, field_idx));
-                    }
-                }
+                let Some(stmts) = self.tuple_struct_binding_stmts(&ts.elems, &param_name) else {
+                    return false;
+                };
+                binding_stmts.extend(stmts);
                 true
             }
             syn::Pat::Path(pp) => {
@@ -7727,6 +7776,38 @@ mod tests {
         );
         assert!(out.contains("return Left<L, R>(std::move(e));"));
         assert!(out.contains("return Right<L, R>(std::move(o));"));
+    }
+
+    #[test]
+    fn test_leaf415_nested_tuple_variant_pattern_emits_bindings() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<T, L, R> Either<(T, L), (T, R)> {
+                fn factor_first(self) -> (T, Either<L, R>) {
+                    match self {
+                        Left((t, l)) => (t, Left(l)),
+                        Right((t, r)) => (t, Right(r)),
+                    }
+                }
+            }
+            impl<T, L, R> Either<(L, T), (R, T)> {
+                fn factor_second(self) -> (Either<L, R>, T) {
+                    match self {
+                        Left((l, t)) => (Left(l), t),
+                        Right((r, t)) => (Right(r), t),
+                    }
+                }
+            }
+        "#,
+        );
+
+        assert!(out.contains("const auto& t = std::get<0>(_v._0);"));
+        assert!(out.contains("const auto& l = std::get<1>(_v._0);"));
+        assert!(out.contains("const auto& r = std::get<1>(_v._0);"));
+        assert!(out.contains("const auto& l = std::get<0>(_v._0);"));
+        assert!(out.contains("const auto& t = std::get<1>(_v._0);"));
+        assert!(out.contains("const auto& r = std::get<0>(_v._0);"));
     }
 
     #[test]
