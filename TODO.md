@@ -402,7 +402,21 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Changed tuple-struct match local binding emission for by-value identifier patterns from `const auto&` to `auto&&` so reference payloads (`R = U&`) keep mutability/parity through `Option<R>(r)` construction
             - [x] *done* Added focused transpiler regressions for both fixes (`as_ref`/`as_mut` constructor parity and `right()` by-value match-binding reference preservation)
             - [x] *done* Re-probe: previous `as_ref`/`as_mut` deterministic signatures are removed in expanded output; next first deterministic blocker starts at panic-path return typing in `unwrap_right()`/`expect_*` style match arms (non-void return context receiving `void` from panic branch), followed by existing downstream io/either method-shape families
-          - [ ] Leaf 4.38: Fix first post-4.37 expanded panic-path return-typing blocker family in `unwrap_right()`/`expect_*`-style non-void match expressions (panic branch currently lowers to `void`), then re-probe compile/link
+          - [x] *done* Leaf 4.38: Fix first post-4.37 expanded panic-path return-typing blocker family in `unwrap_right()`/`expect_*`-style non-void match expressions (panic branch currently lowers to `void`), then re-probe compile/link
+            - [x] *done* Threaded expected-type context into block-expression IIFE lowering so tail block expressions in non-void contexts preserve branch return typing
+            - [x] *done* Added typed noreturn-call emission in expected-type contexts for panic-like calls (`rusty::panicking::panic*`, `rusty::intrinsics::unreachable`) via explicit typed IIFE wrappers
+            - [x] *done* Added focused transpiler regressions for `panic_fmt` and `unreachable` non-void match-arm typing parity
+            - [x] *done* Re-probe: previous `unwrap_right()`/`expect_*` panic-path `void` return mismatch signatures are removed; next first deterministic blockers start at io method-shape dispatch in expanded tests (`Either::read`/`Either::write` instantiations calling `.read/.write` on non-io `std::span` payload branches), followed by downstream `description()` method-shape and equality-visit type-family mismatches
+          - [x] *done* Leaf 4.39: Fix first post-4.38 expanded io method-shape dispatch blocker family in `Either::read`/`Either::write` (non-io branch payloads like `std::span` should not force `.read/.write` member instantiation), then re-probe compile/link
+            - [x] *done* In `codegen`, added narrow dispatch rewrite for expanded match-bound payload receiver `inner.read(...)` / `inner.write(...)` to `rusty::io::read(inner, ...)` / `rusty::io::write(inner, ...)` (kept existing by-reference buffer normalization behavior for direct method calls).
+            - [x] *done* Added runtime `rusty::io` dispatch helpers in `include/rusty/io.hpp`:
+              - member-call passthrough for real io types (`reader.read(...)`, `writer.write(...)`),
+              - integral-span fallback for `read`/`write` with dynamic-span advance semantics,
+              - explicit `Unsupported` fallback/error for unsupported or read-only write targets.
+            - [x] *done* Added focused regressions:
+              - transpiler: `leaf439` tests for `for_both!` and expanded `match`-bound `inner.read/write` dispatch emission,
+              - runtime: `tests/test_rusty_io.cpp` coverage for span read/write dispatch + read-only write rejection.
+            - [x] *done* Re-probe: previous deterministic `Either::read`/`Either::write` `.read/.write` on non-io branch signatures are removed; next deterministic blockers now start at `description()` method-shape dispatch (`inner.description()` on non-error payloads) followed by downstream equality-visit return-type mismatch families.
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

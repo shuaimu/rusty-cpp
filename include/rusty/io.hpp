@@ -330,6 +330,103 @@ inline Stdin stdin_() { return Stdin{}; }
 inline Stdout stdout_() { return Stdout{}; }
 inline Stderr stderr_() { return Stderr{}; }
 
+namespace detail {
+
+template<typename T>
+using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+
+template<typename T>
+struct is_integral_span : std::false_type {};
+
+template<typename Elem, std::size_t Extent>
+struct is_integral_span<std::span<Elem, Extent>>
+    : std::bool_constant<std::is_integral_v<std::remove_const_t<Elem>>> {};
+
+template<typename T>
+inline constexpr bool is_integral_span_v = is_integral_span<remove_cvref_t<T>>::value;
+
+template<typename Span>
+void advance_dynamic_span(Span& span, std::size_t count) {
+    using SpanT = remove_cvref_t<Span>;
+    if constexpr (SpanT::extent == std::dynamic_extent) {
+        span = span.subspan(count);
+    }
+}
+
+} // namespace detail
+
+// ── io::read/io::write dispatch helpers ───────────────
+//
+// The transpiler lowers some method-shape IO calls (notably for expanded `for_both!`
+// paths) through these helpers so mixed payload branches (e.g. stream on one side,
+// span on the other) do not require a uniform member-method surface.
+
+template<typename Reader>
+Result<size_t> read(Reader& reader, std::span<uint8_t> buf)
+requires requires(Reader& r, std::span<uint8_t> b) { r.read(b); }
+{
+    return reader.read(buf);
+}
+
+template<typename Elem, std::size_t Extent>
+Result<size_t> read(std::span<Elem, Extent>& reader, std::span<uint8_t> buf)
+requires(std::is_integral_v<std::remove_const_t<Elem>>)
+{
+    const size_t to_read = std::min(buf.size(), reader.size());
+    for (size_t i = 0; i < to_read; ++i) {
+        buf[i] = static_cast<uint8_t>(reader[i]);
+    }
+    detail::advance_dynamic_span(reader, to_read);
+    return Result<size_t>::ok(to_read);
+}
+
+template<typename Reader>
+Result<size_t> read(Reader&, std::span<uint8_t>)
+requires(
+    !requires(Reader& r, std::span<uint8_t> b) { r.read(b); } &&
+    !detail::is_integral_span_v<Reader>)
+{
+    return Result<size_t>::err(
+        Error(Error::Kind::Unsupported, "type does not implement io::read"));
+}
+
+template<typename Writer>
+Result<size_t> write(Writer& writer, std::span<const uint8_t> buf)
+requires requires(Writer& w, std::span<const uint8_t> b) { w.write(b); }
+{
+    return writer.write(buf);
+}
+
+template<typename Elem, std::size_t Extent>
+Result<size_t> write(std::span<Elem, Extent>& writer, std::span<const uint8_t> buf)
+requires(std::is_integral_v<std::remove_const_t<Elem>> && !std::is_const_v<Elem>)
+{
+    const size_t to_write = std::min(buf.size(), writer.size());
+    for (size_t i = 0; i < to_write; ++i) {
+        writer[i] = static_cast<Elem>(buf[i]);
+    }
+    detail::advance_dynamic_span(writer, to_write);
+    return Result<size_t>::ok(to_write);
+}
+
+template<typename Elem, std::size_t Extent>
+Result<size_t> write(std::span<const Elem, Extent>&, std::span<const uint8_t>)
+requires(std::is_integral_v<Elem>)
+{
+    return Result<size_t>::err(
+        Error(Error::Kind::Unsupported, "io::write target is read-only span"));
+}
+
+template<typename Writer>
+Result<size_t> write(Writer&, std::span<const uint8_t>)
+requires(
+    !requires(Writer& w, std::span<const uint8_t> b) { w.write(b); } &&
+    !detail::is_integral_span_v<Writer>)
+{
+    return Result<size_t>::err(
+        Error(Error::Kind::Unsupported, "type does not implement io::write"));
+}
+
 // ── copy ───────────────────────────────────────────────
 
 /// Copy all bytes from reader to writer.

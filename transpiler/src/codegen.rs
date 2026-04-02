@@ -2782,13 +2782,53 @@ impl CodeGen {
         let binding_pat = syn::Pat::parse_single.parse2(pattern_tokens).ok()?;
         let body_expr = syn::parse2::<syn::Expr>(body_tokens).ok()?;
         let receiver_cpp = self.emit_expr_to_string(&receiver_expr);
-        let body_cpp = self.emit_expr_to_string(&body_expr);
+        let body_cpp = self
+            .try_emit_for_both_io_method_shape_dispatch(&binding_pat, &body_expr)
+            .unwrap_or_else(|| self.emit_expr_to_string(&body_expr));
         let (lambda_param, binding_stmt, visit_arg) =
             self.for_both_lambda_components(&binding_pat)?;
         Some(format!(
             "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ [&]({}) -> decltype(auto) {{ {}return {}; }} }}, {}); }}()",
             receiver_cpp, lambda_param, binding_stmt, body_cpp, visit_arg
         ))
+    }
+
+    fn try_emit_for_both_io_method_shape_dispatch(
+        &self,
+        binding_pat: &syn::Pat,
+        body_expr: &syn::Expr,
+    ) -> Option<String> {
+        let binding_name = match binding_pat {
+            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            _ => return None,
+        };
+
+        let body_expr = self.peel_paren_group_expr(body_expr);
+        let syn::Expr::MethodCall(mc) = body_expr else {
+            return None;
+        };
+        if mc.args.len() != 1 {
+            return None;
+        }
+
+        let receiver_expr = self.peel_paren_group_expr(&mc.receiver);
+        let syn::Expr::Path(path) = receiver_expr else {
+            return None;
+        };
+        if path.path.segments.len() != 1 {
+            return None;
+        }
+        let receiver_name = path.path.segments[0].ident.to_string();
+        if receiver_name != binding_name {
+            return None;
+        }
+
+        let arg = self.emit_expr_maybe_move(mc.args.first()?);
+        match mc.method.to_string().as_str() {
+            "read" => Some(format!("rusty::io::read({}, {})", binding_name, arg)),
+            "write" => Some(format!("rusty::io::write({}, {})", binding_name, arg)),
+            _ => None,
+        }
     }
 
     /// Emit a macro invocation as an expression (returns a string).
@@ -5010,6 +5050,15 @@ impl CodeGen {
                 self.emit_expr_path_to_string(&path.path)
             }
             syn::Expr::If(if_expr) => self.emit_if_expr_to_string(if_expr, expected_ty),
+            syn::Expr::Block(block_expr) => {
+                if let Some(expr_str) =
+                    self.block_expr_to_iife_string(&block_expr.block, expected_ty)
+                {
+                    expr_str
+                } else {
+                    self.match_expr_unreachable_fallback().to_string()
+                }
+            }
             _ => self.emit_expr_to_string(expr),
         }
     }
@@ -5099,6 +5148,22 @@ impl CodeGen {
         }
 
         let func = self.emit_expr_to_string(&call.func);
+        if let Some(expected) = expected_ty {
+            if self.is_noreturn_panic_like_call_path(&func) {
+                let args: Vec<String> = call
+                    .args
+                    .iter()
+                    .map(|a| self.emit_expr_maybe_move(a))
+                    .collect();
+                let expected_cpp = self.map_type(expected);
+                return format!(
+                    "[&]() -> {} {{ {}({}); }}()",
+                    expected_cpp,
+                    func,
+                    args.join(", ")
+                );
+            }
+        }
 
         // Keep Cursor constructor lowering as a normal function call shape with
         // template argument deduction, so generated `decltype((...))` contexts
@@ -5249,6 +5314,26 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
         joined == "core::convert::From::from" || joined == "std::convert::From::from"
+    }
+
+    fn is_noreturn_panic_like_call_path(&self, path: &str) -> bool {
+        matches!(
+            path,
+            "rusty::panicking::panic"
+                | "rusty::panicking::panic_fmt"
+                | "rusty::panicking::assert_failed"
+                | "rusty::intrinsics::unreachable"
+        )
+    }
+
+    fn expr_is_noreturn_panic_like(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Call(call) => {
+                let func = self.emit_expr_to_string(&call.func);
+                self.is_noreturn_panic_like_call_path(&func)
+            }
+            _ => false,
+        }
     }
 
     fn method_call_single_turbofish_type<'a>(
@@ -5799,7 +5884,7 @@ impl CodeGen {
             }
             syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
             syn::Expr::Block(block_expr) => {
-                if let Some(expr_str) = self.block_expr_to_iife_string(&block_expr.block) {
+                if let Some(expr_str) = self.block_expr_to_iife_string(&block_expr.block, None) {
                     expr_str
                 } else {
                     self.match_expr_unreachable_fallback().to_string()
@@ -6068,17 +6153,37 @@ impl CodeGen {
         if mc.args.len() != 1 {
             return None;
         }
-        let syn::Expr::Reference(arg_ref) = mc.args.first()? else {
-            return None;
+        let receiver_name = match self.peel_paren_group_expr(&mc.receiver) {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            _ => None,
         };
-        let buffer_view = self.emit_io_read_write_buffer_view_expr(&arg_ref.expr);
         let receiver = self.emit_expr_to_string(&mc.receiver);
-        let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
-            if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
-        if is_self {
-            return Some(format!("{}({})", method, buffer_view));
+        let is_self = receiver_name.as_deref() == Some("self");
+        let arg_expr = match mc.args.first()? {
+            syn::Expr::Reference(arg_ref) => {
+                self.emit_io_read_write_buffer_view_expr(&arg_ref.expr)
+            }
+            arg => self.emit_expr_maybe_move(arg),
+        };
+
+        // Leaf 4.39: expanded `for_both`/match-lowered io methods bind payload as `inner`
+        // and can instantiate non-io branches. Route read/write through helper dispatch so
+        // non-member payload branches (e.g. spans) compile and fall back deterministically.
+        if matches!(method.as_str(), "read" | "write") && receiver_name.as_deref() == Some("inner") {
+            return Some(format!("rusty::io::{}({}, {})", method, receiver, arg_expr));
         }
-        Some(format!("{}.{}({})", receiver, method, buffer_view))
+
+        // Existing normalization for by-reference buffer calls: `read(&buf)`/`write(&buf)` ->
+        // `read(rusty::slice_full(buf))`/`write(rusty::slice_full(buf))`.
+        if !matches!(mc.args.first()?, syn::Expr::Reference(_)) {
+            return None;
+        }
+        if is_self {
+            return Some(format!("{}({})", method, arg_expr));
+        }
+        Some(format!("{}.{}({})", receiver, method, arg_expr))
     }
 
     fn emit_io_read_write_buffer_view_expr(&self, expr: &syn::Expr) -> String {
@@ -7195,10 +7300,10 @@ impl CodeGen {
     }
 
     /// If a block contains exactly one expression (tail expr), return its string form.
-    fn block_single_expr(&self, block: &syn::Block) -> Option<String> {
+    fn block_single_expr<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
         if block.stmts.len() == 1 {
             if let syn::Stmt::Expr(expr, None) = &block.stmts[0] {
-                return Some(self.emit_expr_to_string(expr));
+                return Some(expr);
             }
         }
         None
@@ -7246,9 +7351,13 @@ impl CodeGen {
 
     /// Best-effort lowering of a Rust block used in expression position.
     /// Emits an IIFE that preserves simple local bindings and tail-expression return.
-    fn block_expr_to_iife_string(&self, block: &syn::Block) -> Option<String> {
+    fn block_expr_to_iife_string(
+        &self,
+        block: &syn::Block,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
         if let Some(single) = self.block_single_expr(block) {
-            return Some(single);
+            return Some(self.emit_expr_to_string_with_expected(single, expected_ty));
         }
 
         if block.stmts.is_empty() {
@@ -7293,8 +7402,15 @@ impl CodeGen {
                     _ => return None,
                 },
                 syn::Stmt::Expr(expr, semi) => {
-                    if is_last && semi.is_none() {
-                        stmts.push(format!("return {};", self.emit_expr_to_string(expr)));
+                    let force_diverging_tail_return = is_last
+                        && semi.is_some()
+                        && expected_ty.is_some()
+                        && self.expr_is_noreturn_panic_like(expr);
+                    if (is_last && semi.is_none()) || force_diverging_tail_return {
+                        stmts.push(format!(
+                            "return {};",
+                            self.emit_expr_to_string_with_expected(expr, expected_ty)
+                        ));
                     } else {
                         stmts.push(format!("{};", self.emit_expr_to_string(expr)));
                     }
@@ -10605,11 +10721,77 @@ mod tests {
         "#,
         );
         assert!(!out.contains("/* for_both!("));
-        assert!(out.contains("return inner.read(std::move(buf));"));
-        assert!(out.contains("return inner.write(std::move(buf));"));
+        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
+        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
         assert!(out.contains("return inner.seek(std::move(pos));"));
         assert!(out.contains("const auto& inner = _v._0; return inner;"));
         assert!(out.contains("return inner.fmt(std::move(f));"));
+    }
+
+    #[test]
+    fn test_leaf439_for_both_read_uses_io_dispatch_helper() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            struct IO;
+            impl IO {
+                fn read(&mut self, _buf: &mut [u8]) -> usize { 0 }
+            }
+            fn read_like(e: &mut Either<IO, IO>, buf: &mut [u8]) -> usize {
+                for_both!(*e, ref mut inner => inner.read(buf))
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
+        assert!(!out.contains("return inner.read(std::move(buf));"));
+    }
+
+    #[test]
+    fn test_leaf439_for_both_write_uses_io_dispatch_helper() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            struct IO;
+            impl IO {
+                fn write(&mut self, _buf: &[u8]) -> usize { 0 }
+            }
+            fn write_like(e: &mut Either<IO, IO>, buf: &[u8]) -> usize {
+                for_both!(*e, ref mut inner => inner.write(buf))
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
+        assert!(!out.contains("return inner.write(std::move(buf));"));
+    }
+
+    #[test]
+    fn test_leaf439_match_bound_inner_read_write_use_io_dispatch_helper() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            struct IO;
+            impl IO {
+                fn read(&mut self, _buf: &mut [u8]) -> usize { 0 }
+                fn write(&mut self, _buf: &[u8]) -> usize { 0 }
+            }
+            fn read_like(e: &mut Either<IO, IO>, buf: &mut [u8]) -> usize {
+                match e {
+                    Either::Left(ref mut inner) => inner.read(buf),
+                    Either::Right(ref mut inner) => inner.read(buf),
+                }
+            }
+            fn write_like(e: &mut Either<IO, IO>, buf: &[u8]) -> usize {
+                match e {
+                    Either::Left(ref mut inner) => inner.write(buf),
+                    Either::Right(ref mut inner) => inner.write(buf),
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
+        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
+        assert!(!out.contains("return inner.read(std::move(buf));"));
+        assert!(!out.contains("return inner.write(std::move(buf));"));
     }
 
     #[test]
@@ -12335,6 +12517,41 @@ mod tests {
         assert!(out.contains("auto&& r = _v._0;"));
         assert!(!out.contains("const auto& r = _v._0;"));
         assert!(out.contains("return rusty::Option<R>(r);"));
+    }
+
+    #[test]
+    fn test_leaf438_match_panic_fmt_arm_in_nonvoid_context_is_typed() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn unwrap_right(self) -> R {
+                    match self {
+                        Either::Right(r) => r,
+                        Either::Left(l) => { core::panicking::panic_fmt(); },
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return [&]() -> R { rusty::panicking::panic_fmt("));
+        assert!(!out.contains("return [&]() { rusty::panicking::panic_fmt("));
+    }
+
+    #[test]
+    fn test_leaf438_match_unreachable_arm_in_nonvoid_context_is_typed() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            fn f(e: E) -> i32 {
+                match e {
+                    E::A(x) => x,
+                    E::B => { core::intrinsics::unreachable(); },
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return [&]() -> int32_t { rusty::intrinsics::unreachable(); }();"));
     }
 
     #[test]

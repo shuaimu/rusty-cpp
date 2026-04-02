@@ -4673,6 +4673,113 @@ Design rationale:
   - no global removal of `std::move(...)` across constructor emission,
   - no global forced `const auto&` or forced `auto` for all pattern bindings.
 
+### 10.11.44 Leaf 4.38: Fix panic-path return typing in non-void match expressions
+
+Problem:
+
+- After Leaf 4.37, first deterministic expanded blockers moved to non-void match-expression paths
+  (`unwrap_right()` / `expect_*`) where panic-style branches lowered to `void` in value-return
+  contexts.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - threaded expected-type context into block-expression IIFE lowering (`Expr::Block` in
+    `emit_expr_to_string_with_expected`),
+  - added typed noreturn-call emission for panic-like calls in expected contexts
+    (`rusty::panicking::panic*`, `rusty::panicking::assert_failed`,
+    `rusty::intrinsics::unreachable`),
+  - allowed semicolon-terminated diverging tail expressions in expected-typed block IIFEs to
+    satisfy non-void branch typing.
+
+Regression tests:
+
+- `codegen::tests::test_leaf438_match_panic_fmt_arm_in_nonvoid_context_is_typed`
+- `codegen::tests::test_leaf438_match_unreachable_arm_in_nonvoid_context_is_typed`
+
+Re-probe result:
+
+- Previous panic-branch `void` mismatch signatures are removed.
+- Next first deterministic blockers moved to io method-shape dispatch in expanded
+  `Either::read`/`Either::write`, then downstream `description()`/equality families.
+
+Design rationale:
+
+- Fixed at expression typing boundaries rather than adding per-method ad-hoc patches.
+- Avoided wrong approaches from §11:
+  - no broad replacement of panic calls across all contexts,
+  - no statement-only fallback that would reintroduce non-void match fallthrough regressions.
+
+### 10.11.45 Leaf 4.39: Fix expanded io method-shape dispatch in `Either::read`/`Either::write`
+
+Problem:
+
+- Expanded runnable tests instantiate `Either<L, R>::read/write` for mixed payload shapes
+  (for example `Either<rusty::io::Stdin, std::span<const int>>`).
+- Generated visit-arm bodies called `inner.read(...)` / `inner.write(...)` directly on both
+  variants, forcing member instantiation on non-io payloads and causing hard compile errors.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one narrow codegen rewrite for the expanded shape (`inner.read/write(...)`),
+  - io runtime dispatch helpers for member-pass-through + span fallback,
+  - focused transpiler/runtime regressions,
+  - expanded compile re-probe.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - for expanded match-bound receiver `inner`, rewrote `inner.read(arg)` / `inner.write(arg)` to
+    `rusty::io::read(inner, arg)` / `rusty::io::write(inner, arg)`,
+  - preserved existing by-reference buffer normalization path (`&buf` → `rusty::slice_full(buf)`)
+    for regular direct method calls.
+- In `include/rusty/io.hpp`:
+  - added `rusty::io::read` / `rusty::io::write` dispatch helpers with:
+    - member-method passthrough when available,
+    - integral-span fallback behavior (including dynamic-span advance),
+    - explicit `Unsupported` error fallback for unsupported/read-only write targets.
+- In `tests/test_rusty_io.cpp`:
+  - added span-dispatch read/write tests and read-only-write rejection test.
+
+Regression tests:
+
+- Transpiler:
+  - `codegen::tests::test_leaf439_for_both_read_uses_io_dispatch_helper`
+  - `codegen::tests::test_leaf439_for_both_write_uses_io_dispatch_helper`
+  - `codegen::tests::test_leaf439_match_bound_inner_read_write_use_io_dispatch_helper`
+- Runtime:
+  - `test_read_dispatch_for_integral_span`
+  - `test_write_dispatch_for_integral_span`
+  - `test_write_dispatch_rejects_read_only_span`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf439 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf4297 -- --nocapture`
+  - `g++ -std=c++20 -I include -o /tmp/test_rusty_io_leaf439 tests/test_rusty_io.cpp && /tmp/test_rusty_io_leaf439`
+- Expanded re-probe:
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf439.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf439.rs --output /tmp/either-expanded-tests-leaf439.cppm --module-name rustycpp.either_expanded_leaf439`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=40 -c /tmp/either-expanded-tests-leaf439.cppm -o /tmp/either-expanded-tests-leaf439.o`
+
+Re-probe result:
+
+- Previous deterministic `Either::read`/`Either::write` non-io-branch member-instantiation errors
+  are removed.
+- Next first deterministic blockers now start at `description()` method-shape dispatch and
+  downstream equality-visit return-type mismatch families.
+
+Design rationale:
+
+- Chose narrow receiver-shape dispatch for expanded io blockers instead of broad global method
+  rewriting.
+- Avoided wrong approaches from §11:
+  - no blind namespace-shape method rewrite (§11.4),
+  - no global argument/reference normalization rewrite (§11.5),
+  - no broad unknown-macro/symbol stripping to force green builds (§11.28/§11.30).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

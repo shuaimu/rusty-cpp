@@ -236,6 +236,50 @@ void test_seek_negative_error() {
     std::cout << "  test_seek_negative_error PASSED" << std::endl;
 }
 
+void test_read_dispatch_for_integral_span() {
+    std::array<int, 4> data = {255, 2, 3, 4};
+    auto reader = std::span<const int>(data.data(), data.size());
+    uint8_t out[3] = {0, 0, 0};
+
+    auto result = read(reader, std::span<uint8_t>(out, 3));
+    assert(result.is_ok());
+    assert(result.unwrap() == 3);
+    assert(out[0] == 255);
+    assert(out[1] == 2);
+    assert(out[2] == 3);
+    assert(reader.size() == 1); // dynamic span advances like Rust &[u8] Read impl
+
+    std::cout << "  test_read_dispatch_for_integral_span PASSED" << std::endl;
+}
+
+void test_write_dispatch_for_integral_span() {
+    std::array<uint8_t, 4> storage = {0, 0, 0, 0};
+    auto writer = std::span<uint8_t>(storage.data(), storage.size());
+    const uint8_t input[] = {9, 8, 7};
+
+    auto result = write(writer, std::span<const uint8_t>(input, 3));
+    assert(result.is_ok());
+    assert(result.unwrap() == 3);
+    assert(storage[0] == 9);
+    assert(storage[1] == 8);
+    assert(storage[2] == 7);
+    assert(writer.size() == 1); // dynamic span advances like Rust &mut [u8] Write impl
+
+    std::cout << "  test_write_dispatch_for_integral_span PASSED" << std::endl;
+}
+
+void test_write_dispatch_rejects_read_only_span() {
+    const std::array<uint8_t, 4> storage = {0, 0, 0, 0};
+    auto writer = std::span<const uint8_t>(storage.data(), storage.size());
+    const uint8_t input[] = {1, 2};
+
+    auto result = write(writer, std::span<const uint8_t>(input, 2));
+    assert(result.is_err());
+    assert(result.unwrap_err().kind() == Error::Kind::Unsupported);
+
+    std::cout << "  test_write_dispatch_rejects_read_only_span PASSED" << std::endl;
+}
+
 // ── Main ───────────────────────────────────────────────
 
 int main() {
@@ -254,7 +298,10 @@ int main() {
     test_cursor_into_inner();
     test_io_copy();
     test_seek_negative_error();
+    test_read_dispatch_for_integral_span();
+    test_write_dispatch_for_integral_span();
+    test_write_dispatch_rejects_read_only_span();
 
-    std::cout << "\nAll 13 rusty::io tests PASSED" << std::endl;
+    std::cout << "\nAll 16 rusty::io tests PASSED" << std::endl;
     return 0;
 }
