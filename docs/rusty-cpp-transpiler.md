@@ -3375,6 +3375,69 @@ Design rationale:
 - Avoided broad assertion-body rewriting; this keeps parity debugging focused on one deterministic
   blocker family at a time.
 
+### 10.53 Phase 18 Progress: End-to-End (Leaf 4.25) — DONE
+
+Leaf 4.25 fixed the first post-4.24 assertion-shape mismatch family in runnable expanded tests:
+
+- tuple-binding statement matches in expanded assertions emitted mixed comparison operands:
+  `Either<...>` on one side and `Left/Right` variant-struct temporary on the other.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): a targeted lowering change in tuple-binding statement match
+  emission plus focused regressions.
+
+Execution plan:
+
+1. Reproduce first expanded compile failure after Leaf 4.24 and confirm mismatch location.
+2. Apply a local fix in tuple-binding statement-match lowering only.
+3. Add focused regressions for the fixed shape.
+4. Re-run transpiler tests and expanded compile probe to capture the next deterministic blocker.
+
+Implementation:
+
+- In `try_emit_binding_tuple_match(...)`, tuple element emission now applies a scoped conversion:
+  - when tuple expected type is a known data enum and a tuple element expression is
+    `Left(...)`/`Right(...)`, emit `ExpectedEnum(Left<...>(...))` / `ExpectedEnum(Right<...>(...))`
+    before reference-taking/comparison.
+- Added helper methods:
+  - `expected_data_enum_name(...)` to classify expected enum context;
+  - `maybe_wrap_variant_constructor_with_expected_enum(...)` to perform the scoped wrap.
+- Kept constructor wrapping local to tuple-binding statement matches (did not change global
+  constructor emission behavior for typed-`let`, assignment, or return lowering).
+
+Regression tests added/updated:
+
+- Updated:
+  - `codegen::tests::test_leaf420_binding_tuple_match_statement_avoids_visit_and_rvalue_address_of`
+    to assert enum-wrapped constructor temp shape.
+- Added:
+  - `codegen::tests::test_leaf425_binding_tuple_match_wraps_variant_constructor_to_expected_enum`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf425 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf420 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- Expanded-tests compile probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf425-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf425-post.rs -o /tmp/either-expanded-tests-leaf425-post.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf425-post.cppm -o /tmp/either-expanded-tests-leaf425-post.o`
+
+Re-probe result:
+
+- Previous `Either<...>` vs `Either_Left/Either_Right<...>` equality-mismatch signature is gone
+  from the first failing diagnostics.
+- Next deterministic first blocker family is now malformed deref emission in expanded `deref`
+  paths (`Either::operator*` producing invalid deref over non-pointer payload types), followed by
+  deeper iterator/io lowering families.
+
+Design rationale:
+
+- Chose a narrow, AST-local fix at the tuple-binding assertion lowering site instead of broad
+  constructor-shape rewrites, minimizing regression risk and preserving existing type-context
+  behavior elsewhere.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3739,3 +3802,16 @@ later to compensate.
   before semantic parity can be evaluated.
 - Fixing at equality/assertion sites duplicates conversion logic and risks broad special-casing.
 - Emitting `rusty::SomeRef(...)` at construction is the direct, local, and type-correct mapping.
+
+### 11.37 Global Constructor-Wrapping Rewrite for `Left/Right(...)`
+
+**Rejected approach:** Change all `Left/Right(...)` emission with expected types to always
+return `ExpectedEnum(Left/Right(...))` globally across expression contexts.
+
+**Why it was rejected:**
+
+- It touches many unrelated paths (typed-let, assignments, return arms, match-expression contexts)
+  where existing behavior is already stable.
+- It introduces broad output churn and can obscure future blocker attribution.
+- The observed mismatch was localized to tuple-binding statement assertions, so a scoped fix at
+  that lowering site is safer and easier to validate.

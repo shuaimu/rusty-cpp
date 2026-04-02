@@ -337,6 +337,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Expanded stable-lvalue detection to treat untyped locals as stable reference sources, so `Some(&x)` lowers directly to `rusty::SomeRef(x)` without unnecessary temporary materialization
             - [x] *done* Added focused regressions for Leaf 4.24 (`rusty::SomeRef` shape for `Some(&...)`/`Some(&mut ...)`, and lvalue no-address behavior)
             - [x] *done* Re-probe: `rusty::Option<&T>` parity mismatch signatures are gone; next deterministic blockers start at `Either`-vs-variant assertion shape mismatches in expanded `macros()` (for example `Either<...> == Either_Left<...>`)
+          - [x] *done* Leaf 4.25: Fix first post-4.24 assertion-shape mismatch family in expanded tuple-binding matches (`Either<...>` compared against `Left/Right` variant struct temporaries), then re-probe compile/link
+            - [x] *done* In tuple-binding statement match lowering, wrap `Left/Right` constructor tuple elements into the inferred expected enum type (`Either<...>(Left<...>(...))`) before taking references/comparing
+            - [x] *done* Kept scope narrow to tuple-binding match path only (no global constructor-shape rewrite), preserving existing typed-let/assignment constructor behavior
+            - [x] *done* Added focused regressions for Leaf 4.25 (tuple-binding match with callable-return `Either<rusty::String, std::string_view>` and `Left(String::from(...))`)
+            - [x] *done* Re-probe: previous `Either`-vs-variant assertion equality mismatch signature is removed; next deterministic first blocker is malformed deref emission in expanded `deref` path (`Either::operator*` returning invalid `*` on non-pointer payloads), followed by iterator/io families
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

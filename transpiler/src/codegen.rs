@@ -1947,8 +1947,13 @@ impl CodeGen {
             let elem_name = format!("_m{}", idx);
             match elem {
                 syn::Expr::Reference(r) => {
-                    let inner =
+                    let inner_raw =
                         self.emit_expr_to_string_with_expected(&r.expr, tuple_expected_ty.as_ref());
+                    let inner = self.maybe_wrap_variant_constructor_with_expected_enum(
+                        &r.expr,
+                        inner_raw,
+                        tuple_expected_ty.as_ref(),
+                    );
                     if self.is_stable_reference_lvalue_expr(&r.expr) {
                         self.writeln(&format!("auto {} = &{};", elem_name, inner));
                     } else {
@@ -1958,8 +1963,13 @@ impl CodeGen {
                     }
                 }
                 _ => {
-                    let elem_expr =
+                    let elem_expr_raw =
                         self.emit_expr_to_string_with_expected(elem, tuple_expected_ty.as_ref());
+                    let elem_expr = self.maybe_wrap_variant_constructor_with_expected_enum(
+                        elem,
+                        elem_expr_raw,
+                        tuple_expected_ty.as_ref(),
+                    );
                     self.writeln(&format!("auto {} = {};", elem_name, elem_expr));
                 }
             }
@@ -4153,6 +4163,56 @@ impl CodeGen {
             }
             _ => None,
         }
+    }
+
+    fn expected_data_enum_name(&self, ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                let name = if last.ident == "Self" {
+                    self.current_struct.clone()?
+                } else {
+                    last.ident.to_string()
+                };
+                if self.data_enum_types.contains(&name) {
+                    Some(name)
+                } else {
+                    None
+                }
+            }
+            syn::Type::Reference(r) => self.expected_data_enum_name(&r.elem),
+            syn::Type::Paren(p) => self.expected_data_enum_name(&p.elem),
+            syn::Type::Group(g) => self.expected_data_enum_name(&g.elem),
+            _ => None,
+        }
+    }
+
+    fn maybe_wrap_variant_constructor_with_expected_enum(
+        &self,
+        expr: &syn::Expr,
+        emitted: String,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let Some(ty) = expected_ty else {
+            return emitted;
+        };
+        if self.expected_data_enum_name(ty).is_none() {
+            return emitted;
+        }
+        let Some(value_expr) = self.extract_value_expr(expr) else {
+            return emitted;
+        };
+        let syn::Expr::Call(call) = value_expr else {
+            return emitted;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return emitted;
+        };
+        if self.variant_ctor_name_from_path(&path.path).is_none() {
+            return emitted;
+        }
+        let expected_cpp_ty = self.map_type(ty);
+        format!("{}({})", expected_cpp_ty, emitted)
     }
 
     /// Look up the nearest in-scope local binding type for a variable name.
@@ -10207,10 +10267,35 @@ mod tests {
         "#,
         );
         assert!(!out.contains("std::visit(overloaded {"));
-        assert!(out.contains("auto _m1_tmp = Left<int32_t, int32_t>(2);"));
+        assert!(out.contains(
+            "auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"
+        ));
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("const auto& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("const auto& right_val = std::get<1>(_m_tuple);"));
+    }
+
+    #[test]
+    fn test_leaf425_binding_tuple_match_wraps_variant_constructor_to_expected_enum() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let b = || -> Either<String, &'static str> { Right("foo") };
+                match (&b(), &Left(String::from("foo"))) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "auto _m1_tmp = Either<rusty::String, std::string_view>(Left<rusty::String, std::string_view>(rusty::String::from(\"foo\")));"
+        ));
+        assert!(!out.contains(
+            "auto _m1_tmp = Left<rusty::String, std::string_view>(rusty::String::from(\"foo\"));"
+        ));
     }
 
     #[test]
