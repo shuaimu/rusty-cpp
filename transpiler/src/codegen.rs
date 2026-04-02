@@ -12,6 +12,12 @@ struct UfcsTraitCallInfo {
     non_receiver_arg_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VariantTypeContext {
+    enum_name: String,
+    template_args: Vec<String>,
+}
+
 /// Code generation context tracking indentation and output buffer.
 pub struct CodeGen {
     output: String,
@@ -31,6 +37,9 @@ pub struct CodeGen {
     /// Stack of in-scope generic type parameter names.
     /// Used for dependent-type emission (`typename T::Assoc`).
     type_param_scopes: Vec<HashSet<String>>,
+    /// Generic type parameters declared by enum name.
+    /// Used to recover variant template arguments in pattern lowering.
+    enum_type_params: HashMap<String, Vec<String>>,
     /// Set of variable names that are reassigned in the current block.
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
@@ -38,6 +47,8 @@ pub struct CodeGen {
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
+    /// Function/method parameter bindings visible to expression/type inference.
+    param_bindings: Vec<HashMap<String, syn::Type>>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
     /// Current inline module nesting path while emitting items.
@@ -68,8 +79,10 @@ impl CodeGen {
             operator_renames: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
+            enum_type_params: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
+            param_bindings: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -121,6 +134,8 @@ impl CodeGen {
         self.skipped_module_traits.clear();
         self.emitted_method_conflict_keys.clear();
         self.return_value_scopes.clear();
+        self.enum_type_params.clear();
+        self.param_bindings.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -410,7 +425,9 @@ impl CodeGen {
         if is_test {
             self.writeln(&format!("TEST_CASE(\"{}\") {{", name));
             self.indent += 1;
+            self.push_param_bindings(&f.sig.inputs);
             self.emit_block(&f.block);
+            self.pop_param_bindings();
             self.indent -= 1;
             self.writeln("}");
             self.pop_type_param_scope();
@@ -440,7 +457,9 @@ impl CodeGen {
         let prev_async = self.in_async;
         self.in_async = is_async;
         self.push_return_value_scope(&return_type);
+        self.push_param_bindings(&f.sig.inputs);
         self.emit_block(&f.block);
+        self.pop_param_bindings();
         self.pop_return_value_scope();
         self.in_async = prev_async;
 
@@ -611,6 +630,8 @@ impl CodeGen {
                 None
             }
         }).collect();
+        self.enum_type_params
+            .insert(name.to_string(), type_params.clone());
         let has_generics = !type_params.is_empty();
         let template_prefix = if has_generics {
             format!("template<{}>", type_params.iter().map(|p| format!("typename {}", p)).collect::<Vec<_>>().join(", "))
@@ -1343,7 +1364,9 @@ impl CodeGen {
         ));
         self.indent += 1;
         self.push_return_value_scope(&return_type);
+        self.push_param_bindings(&method.sig.inputs);
         self.emit_block(&method.block);
+        self.pop_param_bindings();
         self.pop_return_value_scope();
         self.indent -= 1;
         self.writeln("}");
@@ -1454,12 +1477,13 @@ impl CodeGen {
 
     fn emit_match(&mut self, match_expr: &syn::ExprMatch) {
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+        let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
 
         // Decide strategy: switch (for literals/wildcards) or std::visit (for variant patterns)
         if self.all_arms_are_literal_or_wild(&match_expr.arms) {
             self.emit_match_as_switch(&scrutinee, &match_expr.arms);
         } else {
-            self.emit_match_as_visit(&scrutinee, &match_expr.arms);
+            self.emit_match_as_visit(&scrutinee, &match_expr.arms, variant_ctx.as_ref());
         }
     }
 
@@ -1539,24 +1563,29 @@ impl CodeGen {
         self.writeln("}");
     }
 
-    fn emit_match_as_visit(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
+    fn emit_match_as_visit(
+        &mut self,
+        scrutinee: &str,
+        arms: &[syn::Arm],
+        variant_ctx: Option<&VariantTypeContext>,
+    ) {
         // Emit: std::visit(overloaded { [](Type& v) { ... }, ... }, scrutinee);
         self.writeln(&format!("std::visit(overloaded {{"));
         self.indent += 1;
 
         for arm in arms {
-            self.emit_visit_arm(arm);
+            self.emit_visit_arm(arm, variant_ctx);
         }
 
         self.indent -= 1;
         self.writeln(&format!("}}, {});", scrutinee));
     }
 
-    fn emit_visit_arm(&mut self, arm: &syn::Arm) {
+    fn emit_visit_arm(&mut self, arm: &syn::Arm, variant_ctx: Option<&VariantTypeContext>) {
         match &arm.pat {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
-                let cpp_type = self.variant_pattern_cpp_type(&ts.path);
+                let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
                 let bindings = self.extract_tuple_struct_bindings(&ts.elems);
 
                 self.write_indent();
@@ -1590,7 +1619,7 @@ impl CodeGen {
             }
             syn::Pat::Struct(ps) => {
                 // Pattern like `Shape::Rect { w, h }` → [](const Shape_Rect& _v) { ... }
-                let cpp_type = self.variant_pattern_cpp_type(&ps.path);
+                let cpp_type = self.variant_pattern_cpp_type(&ps.path, variant_ctx);
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}& _v) {{\n", cpp_type));
@@ -1626,7 +1655,7 @@ impl CodeGen {
             }
             syn::Pat::Path(pp) => {
                 // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
-                let cpp_type = self.variant_pattern_cpp_type(&pp.path);
+                let cpp_type = self.variant_pattern_cpp_type(&pp.path, variant_ctx);
 
                 self.write_indent();
                 self.output.push_str(&format!("[&](const {}&) {{\n", cpp_type));
@@ -1870,13 +1899,17 @@ impl CodeGen {
     }
 
     /// Emit a variant match as expression body (returns string for visit lambdas).
-    fn emit_match_expr_visit(&self, arms: &[syn::Arm]) -> String {
+    fn emit_match_expr_visit(
+        &self,
+        arms: &[syn::Arm],
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
             let body = self.emit_expr_to_string(&arm.body);
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
-                    let cpp_type = self.variant_pattern_cpp_type(&ts.path);
+                    let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
                     let bindings = self.extract_tuple_struct_bindings(&ts.elems);
                     let binding_stmts: Vec<String> = bindings.iter().enumerate()
                         .filter(|(_, n)| *n != "_")
@@ -1900,7 +1933,7 @@ impl CodeGen {
                     }
                 }
                 syn::Pat::Path(pp) => {
-                    let cpp_type = self.variant_pattern_cpp_type(&pp.path);
+                    let cpp_type = self.variant_pattern_cpp_type(&pp.path, variant_ctx);
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
                         parts.push(format!(
@@ -1934,7 +1967,12 @@ impl CodeGen {
     /// Emit a tuple-scrutinee match expression as overloaded std::visit lambdas.
     /// This handles patterns like:
     /// `(E::A(x), E::A(y)) => x == y`
-    fn emit_match_expr_visit_tuple(&self, arms: &[syn::Arm], arity: usize) -> String {
+    fn emit_match_expr_visit_tuple(
+        &self,
+        arms: &[syn::Arm],
+        arity: usize,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
         let mut parts = Vec::new();
         for arm in arms {
             let body = self.emit_expr_to_string(&arm.body);
@@ -1949,6 +1987,7 @@ impl CodeGen {
                             idx,
                             &mut params,
                             &mut binding_stmts,
+                            variant_ctx,
                         ) {
                             supported = false;
                             break;
@@ -2002,10 +2041,11 @@ impl CodeGen {
         index: usize,
         params: &mut Vec<String>,
         binding_stmts: &mut Vec<String>,
+        variant_ctx: Option<&VariantTypeContext>,
     ) -> bool {
         match pat {
             syn::Pat::TupleStruct(ts) => {
-                let cpp_type = self.variant_pattern_cpp_type(&ts.path);
+                let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
                 let param_name = format!("_v{}", index);
                 params.push(format!("const {}& {}", cpp_type, param_name));
                 let bindings = self.extract_tuple_struct_bindings(&ts.elems);
@@ -2018,7 +2058,7 @@ impl CodeGen {
                 true
             }
             syn::Pat::Path(pp) => {
-                let cpp_type = self.variant_pattern_cpp_type(&pp.path);
+                let cpp_type = self.variant_pattern_cpp_type(&pp.path, variant_ctx);
                 params.push(format!("const {}& _v{}", cpp_type, index));
                 true
             }
@@ -2043,7 +2083,13 @@ impl CodeGen {
     /// - `Either::Left` -> `Either_Left`
     /// - `crate::Either::Left` -> `Either_Left`
     /// - `Left` inside `impl Either` -> `Either_Left`
-    fn variant_pattern_cpp_type(&self, path: &syn::Path) -> String {
+    /// When generic context is known, append template arguments:
+    /// - `Either::Left` in `Either<L, R>` context -> `Either_Left<L, R>`
+    fn variant_pattern_cpp_type(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
         let raw = self.emit_path_to_string(path).replace("::", "_");
         let stripped = raw
             .strip_prefix("crate_")
@@ -2051,19 +2097,158 @@ impl CodeGen {
             .or_else(|| raw.strip_prefix("super_"))
             .unwrap_or(&raw)
             .to_string();
-        if stripped.contains('_') {
-            return stripped;
-        }
-        if let Some(struct_name) = &self.current_struct {
+        let base = if stripped.contains('_') {
+            stripped
+        } else if let Some(struct_name) = &self.current_struct {
             if stripped
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_uppercase())
             {
-                return format!("{}_{}", struct_name, stripped);
+                format!("{}_{}", struct_name, stripped)
+            } else {
+                stripped
+            }
+        } else {
+            stripped
+        };
+
+        let enum_name = self.extract_variant_pattern_enum_name(path, &base);
+        let template_args =
+            self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
+        if template_args.is_empty() {
+            base
+        } else {
+            format!("{}<{}>", base, template_args.join(", "))
+        }
+    }
+
+    fn extract_variant_pattern_enum_name(
+        &self,
+        path: &syn::Path,
+        resolved_cpp_type: &str,
+    ) -> Option<String> {
+        if path.segments.len() >= 2 {
+            return path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|s| s.ident.to_string());
+        }
+        if let Some(struct_name) = &self.current_struct {
+            if resolved_cpp_type.starts_with(&format!("{}_", struct_name)) {
+                return Some(struct_name.clone());
             }
         }
-        stripped
+        None
+    }
+
+    fn variant_pattern_template_args(
+        &self,
+        path: &syn::Path,
+        enum_name: Option<&str>,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Vec<String> {
+        if path.segments.len() >= 2 {
+            if let Some(enum_segment) = path.segments.iter().nth_back(1) {
+                if let syn::PathArguments::AngleBracketed(args) = &enum_segment.arguments {
+                    let explicit_args: Vec<String> = args
+                        .args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !explicit_args.is_empty() {
+                        return explicit_args;
+                    }
+                }
+            }
+        }
+
+        if let (Some(name), Some(ctx)) = (enum_name, variant_ctx) {
+            if ctx.enum_name == name && !ctx.template_args.is_empty() {
+                return ctx.template_args.clone();
+            }
+        }
+
+        if let Some(name) = enum_name {
+            if let Some(params) = self.enum_type_params.get(name) {
+                if !params.is_empty() && params.iter().all(|p| self.is_type_param_in_scope(p)) {
+                    return params.clone();
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn infer_variant_type_context_from_expr(&self, expr: &syn::Expr) -> Option<VariantTypeContext> {
+        match expr {
+            syn::Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if name == "self" {
+                        if let Some(enum_name) = &self.current_struct {
+                            let template_args = self
+                                .enum_type_params
+                                .get(enum_name)
+                                .map(|p| {
+                                    p.iter()
+                                        .filter(|name| self.is_type_param_in_scope(name))
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            return Some(VariantTypeContext {
+                                enum_name: enum_name.clone(),
+                                template_args,
+                            });
+                        }
+                        return None;
+                    }
+                    let ty = self.lookup_local_binding_type(&name)?;
+                    return self.infer_variant_type_context_from_type(&ty);
+                }
+                None
+            }
+            syn::Expr::Paren(p) => self.infer_variant_type_context_from_expr(&p.expr),
+            syn::Expr::Group(g) => self.infer_variant_type_context_from_expr(&g.expr),
+            syn::Expr::Reference(r) => self.infer_variant_type_context_from_expr(&r.expr),
+            _ => None,
+        }
+    }
+
+    fn infer_variant_type_context_from_type(&self, ty: &syn::Type) -> Option<VariantTypeContext> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let enum_name = last.ident.to_string();
+        let mut template_args = if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
+            args.args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        if template_args.is_empty() {
+            if let Some(params) = self.enum_type_params.get(&enum_name) {
+                if params.iter().all(|p| self.is_type_param_in_scope(p)) {
+                    template_args = params.clone();
+                }
+            }
+        }
+
+        Some(VariantTypeContext {
+            enum_name,
+            template_args,
+        })
     }
 
     fn emit_arm_body(&mut self, body: &syn::Expr) {
@@ -2508,7 +2693,31 @@ impl CodeGen {
                 return maybe_ty.clone();
             }
         }
+        for scope in self.param_bindings.iter().rev() {
+            if let Some(ty) = scope.get(name) {
+                return Some(ty.clone());
+            }
+        }
         None
+    }
+
+    fn push_param_bindings(
+        &mut self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) {
+        let mut scope = HashMap::new();
+        for input in inputs {
+            if let syn::FnArg::Typed(pat_type) = input {
+                if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
+                    scope.insert(pi.ident.to_string(), (*pat_type.ty).clone());
+                }
+            }
+        }
+        self.param_bindings.push(scope);
+    }
+
+    fn pop_param_bindings(&mut self) {
+        self.param_bindings.pop();
     }
 
     /// Emit an expression with optional expected type context from its parent.
@@ -2887,6 +3096,7 @@ impl CodeGen {
                 }
             }
             syn::Expr::Match(match_expr) => {
+                let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
                 // Match as expression → immediately-invoked lambda
                 if self.all_arms_are_literal_or_wild(&match_expr.arms) {
                     let scrutinee = self.emit_expr_to_string(&match_expr.expr);
@@ -2895,6 +3105,10 @@ impl CodeGen {
                         scrutinee,
                         self.emit_match_expr_switch(&match_expr.arms))
                 } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
+                    let tuple_variant_ctx = tuple_scrutinee
+                        .elems
+                        .iter()
+                        .find_map(|e| self.infer_variant_type_context_from_expr(e));
                     // Tuple scrutinee variant patterns: std::visit over each tuple element.
                     let visit_args: Vec<String> = tuple_scrutinee
                         .elems
@@ -2903,7 +3117,11 @@ impl CodeGen {
                         .collect();
                     format!(
                         "[&]() {{ return std::visit(overloaded {{ {} }}, {}); }}()",
-                        self.emit_match_expr_visit_tuple(&match_expr.arms, tuple_scrutinee.elems.len()),
+                        self.emit_match_expr_visit_tuple(
+                            &match_expr.arms,
+                            tuple_scrutinee.elems.len(),
+                            tuple_variant_ctx.as_ref(),
+                        ),
                         visit_args.join(", ")
                     )
                 } else {
@@ -2911,7 +3129,7 @@ impl CodeGen {
                     // Variant match → IIFE with std::visit
                     format!("[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
                         scrutinee,
-                        self.emit_match_expr_visit(&match_expr.arms))
+                        self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref()))
                 }
             }
             syn::Expr::Try(try_expr) => {
@@ -3546,8 +3764,10 @@ impl CodeGen {
             operator_renames: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
+            enum_type_params: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
+            param_bindings: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -6933,6 +7153,44 @@ mod tests {
         );
         assert!(!out.contains("/* TODO: expr */"));
         assert!(out.contains("const auto y = x + 1;"));
+    }
+
+    #[test]
+    fn test_leaf48_generic_enum_match_on_self_uses_variant_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn flip(self) -> Either<R, L> {
+                    match self {
+                        Either::Left(l) => Right(l),
+                        Either::Right(r) => Left(r),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("[&](const Either_Left<L, R>& _v)"));
+        assert!(out.contains("[&](const Either_Right<L, R>& _v)"));
+        assert!(!out.contains("[&](const Either_Left& _v)"));
+        assert!(!out.contains("[&](const Either_Right& _v)"));
+    }
+
+    #[test]
+    fn test_leaf48_typed_param_match_uses_concrete_variant_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn sum(e: Either<i32, i32>) -> i32 {
+                match e {
+                    Either::Left(x) => x,
+                    Either::Right(y) => y,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("[&](const Either_Left<int32_t, int32_t>& _v)"));
+        assert!(out.contains("[&](const Either_Right<int32_t, int32_t>& _v)"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────

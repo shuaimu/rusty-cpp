@@ -290,6 +290,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Leaf 4.5: De-duplicate overlapping method emissions in expanded impl merges (`cloned`, `copied`, `as_ref`, `as_mut`) with deterministic signature conflict handling
           - [x] *done* Leaf 4.6: Remove invalid expression placeholders and missing-return match lowering in generated method bodies (`/* TODO: expr */`, undefined temps, non-void fallthrough)
           - [x] *done* Leaf 4.7: Re-run parity harness to capture the next reduced blocker set after Leaf 4.1-4.6
+          - [x] *done* Leaf 4.8: Fix generic variant pattern type emission in visitor lambdas (`Either_Left`/`Either_Right` should include template arguments when generic context is known)
+            - [x] *done* Thread variant type context from match scrutinee into visitor-arm type emission (statement and expression `match`)
+            - [x] *done* Infer template args from explicit pattern path generics, typed scrutinee bindings (including function params), and in-scope enum generic params
+            - [x] *done* Add regression tests for generic `self` match and typed-parameter match; re-run parity harness build stage to verify old `missing template argument list` errors disappear
+          - [ ] Leaf 4.9: Fix dependent constructor call/name lookup in generic match arms (`Left`/`Right` should be emitted as dependent calls when required)
+          - [ ] Leaf 4.10: Resolve remaining unresolved expanded-output names in iterator paths (`IterEither*`, `core`, `rusty_cmp_Ordering_Equal`, generic placeholders)
+          - [ ] Leaf 4.11: Fix module-linkage issue for `export using iterator::IterEither` re-export lowering
+          - [ ] Leaf 4.12: Fix `RUSTY_TRY` availability/emission in templated generated iterator paths
+          - [ ] Leaf 4.13: Fix residual malformed `switch`/`case` placement in generated blocks
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

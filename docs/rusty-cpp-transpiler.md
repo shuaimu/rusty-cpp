@@ -2447,6 +2447,44 @@ Verification:
 - `cargo test -p rusty-cpp-transpiler --quiet` passes.
 - `cargo test --workspace --quiet` passes.
 
+### 10.33 Phase 18 Progress: End-to-End (Leaf 4.8) — DONE
+
+Leaf 4.8 fixed generic variant pattern type emission in generated visitor lambdas.
+
+Changes:
+
+- Added contextual variant-type inference (`VariantTypeContext`) from match scrutinees.
+  - inferred from local typed bindings and function/method parameters;
+  - inferred from `self` in enum impl scope using tracked enum generic params.
+- Threaded variant context through statement/expression match lowering:
+  - `emit_match_as_visit` / `emit_visit_arm`
+  - `emit_match_expr_visit`
+  - `emit_match_expr_visit_tuple` and tuple subpattern lowering
+- Upgraded `variant_pattern_cpp_type(...)` to append template arguments when available:
+  - explicit enum generic arguments in the pattern path (`Enum::<...>::Variant`);
+  - inferred scrutinee type context (`Either<i32, i32>` -> `Either_Left<int32_t, int32_t>`);
+  - in-scope enum generic parameters (`Either<L, R>` -> `Either_Left<L, R>`).
+- Added parameter binding tracking (`param_bindings`) so scrutinee type lookup works for function/method parameters, not only local `let` bindings.
+
+Regression tests added:
+
+- `test_leaf48_generic_enum_match_on_self_uses_variant_template_args`
+- `test_leaf48_typed_param_match_uses_concrete_variant_template_args`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf48 -- --nocapture` passes.
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- Re-ran parity harness build stage:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf48 --stop-after build`
+  - prior `missing template argument list after 'Either_Left'/'Either_Right'` diagnostics are no longer present in the build log;
+  - next blockers remain in later leaves (unresolved iterator path names, module re-export linkage, `RUSTY_TRY` in templated paths, and residual switch/case placement).
+
+Design rationale:
+
+- Kept the fix scoped to typed visitor-parameter emission in match lowering, instead of broad rewrites of unrelated path handling.
+- This aligns with rejected broad-rewrite approaches in §11.4 and §11.7.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
