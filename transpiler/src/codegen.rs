@@ -2052,7 +2052,9 @@ impl CodeGen {
         match expr {
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
-                name == "self" || self.lookup_local_binding_type(&name).is_some()
+                name == "self"
+                    || self.lookup_local_binding_type(&name).is_some()
+                    || self.is_local_binding_in_scope(&name)
             }
             syn::Expr::Field(field) => self.is_stable_reference_lvalue_expr(&field.base),
             syn::Expr::Index(index) => self.is_stable_reference_lvalue_expr(&index.expr),
@@ -3071,7 +3073,9 @@ impl CodeGen {
         }
 
         if let (Some(name), Some(ctx)) = (enum_name, variant_ctx) {
-            if ctx.enum_name == name && !ctx.template_args.is_empty() {
+            if (ctx.enum_name == name || matches!(name, "crate" | "self" | "super"))
+                && !ctx.template_args.is_empty()
+            {
                 return ctx.template_args.clone();
             }
         }
@@ -4166,6 +4170,13 @@ impl CodeGen {
         None
     }
 
+    fn is_local_binding_in_scope(&self, name: &str) -> bool {
+        self.local_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+    }
+
     fn lookup_field_type_for_expr_base(
         &self,
         base: &syn::Expr,
@@ -4318,8 +4329,19 @@ impl CodeGen {
 
         // Map Rust Option::Some(x) → std::optional{x}
         if func == "Some" && call.args.len() == 1 {
+            if let Some(ref_arg) = self.emit_some_ref_constructor_arg(&call.args[0]) {
+                return format!("rusty::SomeRef({})", ref_arg);
+            }
             let arg = self.emit_expr_to_string(&call.args[0]);
             return format!("std::make_optional({})", arg);
+        }
+        // Map Rust conversion shim in expanded output.
+        if self.is_core_from_path_expr(call.func.as_ref()) && call.args.len() == 1 {
+            if let Some(expected) = expected_ty {
+                let expected_cpp = self.map_type(expected);
+                return self.emit_from_conversion_to_target(&call.args[0], &expected_cpp);
+            }
+            return self.emit_expr_maybe_move(&call.args[0]);
         }
         // Map Ok(x) and Err(x) for Result
         if func == "Ok" && call.args.len() == 1 {
@@ -4357,6 +4379,99 @@ impl CodeGen {
         format!("{}({})", func, args.join(", "))
     }
 
+    fn emit_some_ref_constructor_arg(&self, arg: &syn::Expr) -> Option<String> {
+        let syn::Expr::Reference(r) = arg else {
+            return None;
+        };
+        let inner = self.emit_expr_to_string(&r.expr);
+        if self.is_stable_reference_lvalue_expr(&r.expr) {
+            return Some(inner);
+        }
+        if r.mutability.is_none() {
+            // `Some(&<rvalue>)` appears in expanded assertions (`&2`, etc.).
+            // Materialize a static object and return a stable const reference.
+            return Some(format!(
+                "[&]() -> const auto& {{ static const auto _some_ref_tmp = {}; return _some_ref_tmp; }}()",
+                inner
+            ));
+        }
+        // Mutable references to rvalues need a stable storage target as well.
+        Some(format!(
+            "[&]() -> auto& {{ static auto _some_mut_ref_tmp = {}; return _some_mut_ref_tmp; }}()",
+            inner
+        ))
+    }
+
+    fn variant_ctor_name_from_path(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.is_empty() {
+            return None;
+        }
+        let last = path.segments.last()?.ident.to_string();
+        if !matches!(last.as_str(), "Left" | "Right") {
+            return None;
+        }
+        if path.segments.len() == 1 {
+            return Some(last);
+        }
+        let first = path.segments.first()?.ident.to_string();
+        if matches!(first.as_str(), "crate" | "self" | "super") {
+            return Some(last);
+        }
+        None
+    }
+
+    fn is_string_from_call_expr(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return false;
+        };
+        let joined = path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "String::from" | "std::string::String::from" | "alloc::string::String::from"
+        )
+    }
+
+    fn is_core_from_path_expr(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = expr else {
+            return false;
+        };
+        let joined = path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        joined == "core::convert::From::from" || joined == "std::convert::From::from"
+    }
+
+    fn emit_from_conversion_to_target(&self, arg: &syn::Expr, target_cpp_ty: &str) -> String {
+        let inner = match arg {
+            syn::Expr::Call(call)
+                if self.is_core_from_path_expr(call.func.as_ref()) && call.args.len() == 1 =>
+            {
+                self.emit_expr_maybe_move(&call.args[0])
+            }
+            _ => self.emit_expr_maybe_move(arg),
+        };
+        if target_cpp_ty == "rusty::String" {
+            if self.is_string_from_call_expr(arg) || inner.starts_with("rusty::String::from(") {
+                return inner;
+            }
+            return format!("rusty::String::from({})", inner);
+        }
+        inner
+    }
+
     fn lookup_constructor_template_args(&self, ctor_name: &str) -> Option<Vec<String>> {
         for scope in self.constructor_template_hints.iter().rev() {
             if let Some(args) = scope.get(ctor_name) {
@@ -4376,27 +4491,26 @@ impl CodeGen {
             syn::Expr::Path(path) => &path.path,
             _ => return None,
         };
-        if func_path.segments.len() != 1 {
-            return None;
-        }
         if call.args.len() != 1 {
             return None;
         }
 
-        let ctor_name = func_path.segments[0].ident.to_string();
-        if !matches!(ctor_name.as_str(), "Left" | "Right") {
-            return None;
-        }
-        if !matches!(func_path.segments[0].arguments, syn::PathArguments::None) {
+        let ctor_name = self.variant_ctor_name_from_path(func_path)?;
+        if !matches!(
+            func_path.segments.last().map(|s| &s.arguments),
+            Some(syn::PathArguments::None)
+        ) {
             return None;
         }
 
         let args = self.lookup_constructor_template_args(&ctor_name)?;
-        let arg = self.emit_expr_maybe_move(&call.args[0]);
-        Some(format!(
-            "{}<{}, {}>({})",
-            ctor_name, args[0], args[1], arg
-        ))
+        let target_cpp_ty = if ctor_name == "Left" {
+            args[0].as_str()
+        } else {
+            args[1].as_str()
+        };
+        let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
+        Some(format!("{}<{}, {}>({})", ctor_name, args[0], args[1], arg))
     }
 
     fn try_emit_variant_constructor_call_with_template_args(
@@ -4411,24 +4525,23 @@ impl CodeGen {
             syn::Expr::Path(path) => &path.path,
             _ => return None,
         };
-        if func_path.segments.len() != 1 {
-            return None;
-        }
         if call.args.len() != 1 {
             return None;
         }
-        if !matches!(func_path.segments[0].arguments, syn::PathArguments::None) {
+        if !matches!(
+            func_path.segments.last().map(|s| &s.arguments),
+            Some(syn::PathArguments::None)
+        ) {
             return None;
         }
-        let ctor_name = func_path.segments[0].ident.to_string();
-        if !matches!(ctor_name.as_str(), "Left" | "Right") {
-            return None;
-        }
-        let arg = self.emit_expr_maybe_move(&call.args[0]);
-        Some(format!(
-            "{}<{}, {}>({})",
-            ctor_name, template_args[0], template_args[1], arg
-        ))
+        let ctor_name = self.variant_ctor_name_from_path(func_path)?;
+        let target_cpp_ty = if ctor_name == "Left" {
+            template_args[0].as_str()
+        } else {
+            template_args[1].as_str()
+        };
+        let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
+        Some(format!("{}<{}, {}>({})", ctor_name, template_args[0], template_args[1], arg))
     }
 
     fn emit_expr_to_string_with_variant_ctx(
@@ -4516,13 +4629,7 @@ impl CodeGen {
             syn::Expr::Path(path) => &path.path,
             _ => return None,
         };
-
-        // Constructor helpers are emitted as unqualified free functions (`Left`, `Right`).
-        if func_path.segments.len() != 1 {
-            return None;
-        }
-
-        let ctor_name = func_path.segments[0].ident.to_string();
+        let ctor_name = self.variant_ctor_name_from_path(func_path)?;
 
         // Keep existing special mappings intact.
         if matches!(ctor_name.as_str(), "Some" | "Ok" | "Err") {
@@ -4542,11 +4649,22 @@ impl CodeGen {
         if expected_args.is_empty() {
             return None;
         }
+        if !matches!(
+            func_path.segments.last().map(|s| &s.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+        let target_cpp_ty = if ctor_name == "Left" {
+            expected_args[0].as_str()
+        } else {
+            expected_args[1].as_str()
+        };
 
         let args: Vec<String> = call
             .args
             .iter()
-            .map(|a| self.emit_expr_maybe_move(a))
+            .map(|a| self.emit_from_conversion_to_target(a, target_cpp_ty))
             .collect();
 
         Some(format!("{}<{}>({})", ctor_name, expected_args.join(", "), args.join(", ")))
@@ -4839,6 +4957,11 @@ impl CodeGen {
         match_expr: &syn::ExprMatch,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if self.match_expr_has_explicit_return_arm(match_expr) {
+            if let Some(lowered) = self.emit_try_style_either_match_expr(match_expr, expected_ty) {
+                return lowered;
+            }
+        }
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
         if let Some(runtime_expr) =
             self.emit_runtime_match_expr(match_expr, variant_ctx.as_ref(), expected_ty)
@@ -4884,6 +5007,187 @@ impl CodeGen {
                 self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
             )
         }
+    }
+
+    fn match_expr_has_explicit_return_arm(&self, match_expr: &syn::ExprMatch) -> bool {
+        match_expr.arms.iter().any(|arm| {
+            self.extract_value_expr(&arm.body)
+                .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)))
+        })
+    }
+
+    fn emit_try_style_either_match_expr(
+        &self,
+        match_expr: &syn::ExprMatch,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if match_expr.arms.len() != 2 {
+            return None;
+        }
+
+        let mut left_arm: Option<&syn::Arm> = None;
+        let mut right_arm: Option<&syn::Arm> = None;
+        for arm in &match_expr.arms {
+            if arm.guard.is_some() {
+                return None;
+            }
+            let syn::Pat::TupleStruct(ts) = &arm.pat else {
+                return None;
+            };
+            if ts.elems.len() != 1 {
+                return None;
+            }
+            let variant = ts.path.segments.last()?.ident.to_string();
+            match variant.as_str() {
+                "Left" => left_arm = Some(arm),
+                "Right" => right_arm = Some(arm),
+                _ => return None,
+            }
+        }
+
+        let left_arm = left_arm?;
+        let right_arm = right_arm?;
+        let left_is_return = self
+            .extract_value_expr(&left_arm.body)
+            .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)));
+        let right_is_return = self
+            .extract_value_expr(&right_arm.body)
+            .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)));
+        if left_is_return == right_is_return {
+            return None;
+        }
+
+        let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr)?;
+        if variant_ctx.template_args.len() < 2 {
+            return None;
+        }
+
+        let mut scrutinee =
+            self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, Some(&variant_ctx));
+        if let syn::Expr::Call(call) = match_expr.expr.as_ref() {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                if self.variant_ctor_name_from_path(&path.path).is_some() {
+                    let enum_ty = format!(
+                        "{}<{}>",
+                        variant_ctx.enum_name,
+                        variant_ctx.template_args.join(", ")
+                    );
+                    scrutinee = format!("{}({})", enum_ty, scrutinee);
+                }
+            }
+        }
+
+        let (success_arm, success_variant, return_arm, return_variant) = if left_is_return {
+            (right_arm, "Right", left_arm, "Left")
+        } else {
+            (left_arm, "Left", right_arm, "Right")
+        };
+        let value_ty = expected_ty.map(|t| self.map_type(t)).unwrap_or_else(|| {
+            if success_variant == "Left" {
+                variant_ctx.template_args[0].clone()
+            } else {
+                variant_ctx.template_args[1].clone()
+            }
+        });
+        let success_body = self.emit_expr_to_string_with_expected(&success_arm.body, expected_ty);
+        let return_body = match self.extract_value_expr(&return_arm.body) {
+            Some(syn::Expr::Return(ret)) => {
+                self.emit_return_expr_with_variant_ctx(ret, &variant_ctx)
+            }
+            _ => return None,
+        };
+
+        let success_ts = match &success_arm.pat {
+            syn::Pat::TupleStruct(ts) => ts,
+            _ => return None,
+        };
+        let return_ts = match &return_arm.pat {
+            syn::Pat::TupleStruct(ts) => ts,
+            _ => return None,
+        };
+        let mut success_bindings = Vec::new();
+        if !self.collect_pattern_binding_stmts(&success_ts.elems[0], "_mv", &mut success_bindings) {
+            return None;
+        }
+        let mut return_bindings = Vec::new();
+        if !self.collect_pattern_binding_stmts(&return_ts.elems[0], "_mv", &mut return_bindings) {
+            return None;
+        }
+        let success_bindings_str = if success_bindings.is_empty() {
+            String::new()
+        } else {
+            success_bindings.push(String::new());
+            success_bindings.join(" ")
+        };
+        let return_bindings_str = if return_bindings.is_empty() {
+            String::new()
+        } else {
+            return_bindings.push(String::new());
+            return_bindings.join(" ")
+        };
+
+        let success_check = if success_variant == "Left" {
+            "is_left"
+        } else {
+            "is_right"
+        };
+        let success_unwrap = if success_variant == "Left" {
+            "unwrap_left"
+        } else {
+            "unwrap_right"
+        };
+        let return_unwrap = if return_variant == "Left" {
+            "unwrap_left"
+        } else {
+            "unwrap_right"
+        };
+
+        Some(format!(
+            "({{ auto _m = {}; {} _match_value; if (_m.{}()) {{ auto _mv = _m.{}(); {}_match_value = {}; }} else {{ auto _mv = _m.{}(); {}{}; }} _match_value; }})",
+            scrutinee,
+            value_ty,
+            success_check,
+            success_unwrap,
+            success_bindings_str,
+            success_body,
+            return_unwrap,
+            return_bindings_str,
+            return_body
+        ))
+    }
+
+    fn emit_return_expr_with_variant_ctx(
+        &self,
+        ret: &syn::ExprReturn,
+        variant_ctx: &VariantTypeContext,
+    ) -> String {
+        let Some(expr) = &ret.expr else {
+            return "return".to_string();
+        };
+        if let syn::Expr::Call(call) = expr.as_ref() {
+            if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                if let Some(ctor_name) = self.variant_ctor_name_from_path(&path_expr.path) {
+                    if call.args.len() == 1 && variant_ctx.template_args.len() >= 2 {
+                        let return_ctor_args = self
+                            .current_return_type_hint()
+                            .and_then(|ty| self.expected_type_template_args(ty))
+                            .filter(|args| args.len() >= 2)
+                            .unwrap_or_else(|| variant_ctx.template_args.clone());
+                        let target_cpp_ty = if ctor_name == "Left" {
+                            return_ctor_args[0].as_str()
+                        } else {
+                            return_ctor_args[1].as_str()
+                        };
+                        let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
+                        return format!(
+                            "return {}<{}, {}>({})",
+                            ctor_name, return_ctor_args[0], return_ctor_args[1], arg
+                        );
+                    }
+                }
+            }
+        }
+        format!("return {}", self.emit_expr_to_string(expr))
     }
 
     fn emit_lit(&self, lit: &syn::Lit) -> String {
@@ -4965,6 +5269,44 @@ impl CodeGen {
         // Resolve `self` to `(*this)` — for field access, `self.x` becomes `this->x`
         if segments.len() == 1 && segments[0] == "self" {
             return "(*this)".to_string();
+        }
+
+        // Resolve module-relative Rust path prefixes in expression/type paths.
+        if let Some(first) = segments.first() {
+            match first.as_str() {
+                "crate" if segments.len() > 1 => {
+                    let mut resolved = segments[1..].to_vec();
+                    if let Some(last) = resolved.last_mut() {
+                        *last = escape_cpp_keyword(last);
+                    }
+                    return resolved.join("::");
+                }
+                "self" if segments.len() > 1 => {
+                    let mut resolved = if self.module_stack.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.module_stack.clone()
+                    };
+                    resolved.extend(segments[1..].iter().cloned());
+                    if let Some(last) = resolved.last_mut() {
+                        *last = escape_cpp_keyword(last);
+                    }
+                    return resolved.join("::");
+                }
+                "super" if segments.len() > 1 => {
+                    let mut resolved = if self.module_stack.len() > 1 {
+                        self.module_stack[..self.module_stack.len() - 1].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    resolved.extend(segments[1..].iter().cloned());
+                    if let Some(last) = resolved.last_mut() {
+                        *last = escape_cpp_keyword(last);
+                    }
+                    return resolved.join("::");
+                }
+                _ => {}
+            }
         }
 
         // Map Rust Option constructors
@@ -6284,6 +6626,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_io_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_string_import(normalized) {
+        return action;
+    }
     if is_rust_only_import(normalized) {
         return UseImportAction::RustOnly;
     }
@@ -6356,6 +6701,13 @@ fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
         _ => UseImportAction::RustOnly,
     };
     Some(action)
+}
+
+fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::string::String" {
+        return Some(UseImportAction::Using("rusty::String".to_string()));
+    }
+    None
 }
 
 /// Check if a using path refers to a Rust-only trait/module with no C++ equivalent.
@@ -7919,6 +8271,92 @@ mod tests {
         let out = transpile_str("fn f() { let x = core::option::Option::None; }");
         assert!(out.contains("std::nullopt"));
         assert!(!out.contains("core::option::Option::None"));
+    }
+
+    #[test]
+    fn test_leaf423_some_ref_rvalue_no_address_of_rvalue() {
+        let out = transpile_str("fn f() { let x = Some(&2); }");
+        assert!(!out.contains("std::make_optional(&2)"));
+        assert!(out.contains("static const auto _some_ref_tmp = 2"));
+    }
+
+    #[test]
+    fn test_leaf424_some_ref_uses_rusty_someref_shape() {
+        let out = transpile_str("fn f() { let x = Some(&2); let y = Some(&mut 2); }");
+        assert!(out.contains("rusty::SomeRef("));
+        assert!(!out.contains("std::make_optional([&]() { static const auto _some_ref_tmp"));
+        assert!(out.contains("static auto _some_mut_ref_tmp = 2"));
+    }
+
+    #[test]
+    fn test_leaf424_some_ref_lvalue_does_not_take_address() {
+        let out = transpile_str("fn f() { let x = 2; let y = Some(&x); }");
+        assert!(out.contains("rusty::SomeRef(x)"));
+        assert!(!out.contains("rusty::SomeRef(&x)"));
+    }
+
+    #[test]
+    fn test_leaf423_std_string_import_rewritten() {
+        let out = transpile_str("use std::string::String;");
+        assert!(out.contains("using rusty::String;"));
+        assert!(!out.contains("using std::string::String;"));
+    }
+
+    #[test]
+    fn test_leaf423_core_from_ctor_uses_target_conversion() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() -> Either<String, &'static str> {
+                Left(core::convert::From::from("foo"))
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "return Left<rusty::String, std::string_view>(rusty::String::from(\"foo\"));"
+        ));
+        assert!(!out.contains("core::convert::From::from"));
+        assert!(!out.contains("rusty::String::from(rusty::String::from("));
+    }
+
+    #[test]
+    fn test_leaf423_match_return_arm_lowers_without_return_return() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() -> Either<String, &'static str> {
+                Right(match Left("foo bar") {
+                    Left(err) => return Left(err),
+                    Right(val) => val,
+                })
+            }
+        "#,
+        );
+        assert!(!out.contains("return return"));
+        assert!(!out.contains("std::visit(overloaded {"));
+        assert!(out.contains("_m.is_right()"));
+        assert!(out.contains("return Left<rusty::String, std::string_view>("));
+    }
+
+    #[test]
+    fn test_leaf423_crate_prefixed_variant_paths_use_template_args() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn make_left() -> Either<i32, i32> {
+                crate::Left(1)
+            }
+            fn sum(x: Either<i32, i32>) -> i32 {
+                match x {
+                    crate::Left(v) => v,
+                    crate::Right(v) => v,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return Left<int32_t, int32_t>(1);"));
+        assert!(out.contains("const Either_Left<int32_t, int32_t>& _v"));
+        assert!(out.contains("const Either_Right<int32_t, int32_t>& _v"));
     }
 
     #[test]

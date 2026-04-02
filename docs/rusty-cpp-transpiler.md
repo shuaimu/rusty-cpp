@@ -3240,6 +3240,141 @@ Design rationale:
 - Followed §11.13: fixed one deterministic blocker family end-to-end, then re-probed to
   capture the next reduced set.
 
+### 10.51 Phase 18 Progress: End-to-End (Leaf 4.23) — DONE
+
+Leaf 4.23 fixed the first post-4.22 compile blocker family in runnable expanded tests:
+
+- invalid `Some(&<rvalue>)` lowering (`std::make_optional(&2)` shape);
+- malformed expanded `macros()` branch lowering (`return return`, unresolved `crate::...`,
+  unresolved `core::convert::From::from`, and missing constructor specialization).
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): targeted call/match lowering updates in
+  `transpiler/src/codegen.rs` plus focused regression tests.
+
+Execution plan:
+
+1. Fix `Some(&<rvalue>)` emission so generated C++ no longer takes addresses of rvalues.
+2. Fix expanded return-arm match lowering used by macro-expanded `Either` paths.
+3. Add constructor specialization and conversion-path handling for `crate/self/super` and
+   `core::convert::From::from` patterns.
+4. Re-run transpiler tests, workspace tests, and expanded-tests compile probe.
+
+Implementation:
+
+- Added `emit_some_constructor_arg(...)` and used it in `Some(...)` call lowering:
+  - stable lvalue references remain direct;
+  - rvalue-reference cases now materialize a stable temporary target before pointer emission.
+- Added conversion-path helpers:
+  - `is_core_from_path_expr(...)`;
+  - `emit_from_conversion_to_target(...)` (including `rusty::String` target conversion).
+- Extended variant-constructor specialization to support prefixed paths
+  (`crate::Left`, `self::Right`, `super::Left`) via `variant_ctor_name_from_path(...)`.
+- Added try-style `Either` match lowering for explicit return-arm expression matches:
+  - avoids `return return` generation;
+  - emits direct `is_left/is_right + unwrap_*` control flow for this shape;
+  - uses current return-type hints for return-arm `Left/Right` constructor specialization.
+- Added `std::string::String` import rewrite to `using rusty::String;`.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf423_some_ref_rvalue_no_address_of_rvalue`
+- `codegen::tests::test_leaf423_std_string_import_rewritten`
+- `codegen::tests::test_leaf423_core_from_ctor_uses_target_conversion`
+- `codegen::tests::test_leaf423_match_return_arm_lowers_without_return_return`
+- `codegen::tests::test_leaf423_crate_prefixed_variant_paths_use_template_args`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf423 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+- Expanded-tests compile probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf423-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf423-post.rs -o /tmp/either-expanded-tests-leaf423-post.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf423-post.cppm -o /tmp/either-expanded-tests-leaf423-post.o`
+
+Re-probe result:
+
+- Previous Leaf 4.23 blocker signatures are removed:
+  - no `std::make_optional(&2)` emissions;
+  - no `return return` emissions in expanded `macros()` paths;
+  - no unresolved `crate::...` / `core::convert::From::from` diagnostics for that family.
+- Next deterministic blockers are:
+  - `rusty::Option<&T>` / `rusty::Option<&mut T>` parity mismatches against emitted
+    `std::optional<T*>` shapes in expanded assertions;
+  - `Either`-vs-variant assertion shape mismatches in expanded `macros()` comparisons.
+
+Design rationale:
+
+- Kept fixes structural (AST-aware lowering) rather than text post-processing.
+- Re-used existing type-hint/context mechanisms to avoid broad constructor-template forcing.
+
+### 10.52 Phase 18 Progress: End-to-End (Leaf 4.24) — DONE
+
+Leaf 4.24 fixed the first post-4.23 Option-reference parity blocker family in runnable
+expanded tests:
+
+- `rusty::Option<&T>` / `rusty::Option<&mut T>` assertion operands were being emitted as
+  `std::optional<T*>` from `Some(&...)` lowering;
+- this produced deterministic `operator==` mismatches in expanded `basic()` assertions.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): targeted `Some(...)` call lowering and stable-reference
+  detection updates in `transpiler/src/codegen.rs`, plus focused regressions.
+
+Execution plan:
+
+1. Reproduce first compile blockers on expanded tests and isolate the first deterministic family.
+2. Change `Some(&...)` lowering to preserve `rusty::Option<&...>` shape.
+3. Add focused regressions for reference `Some` lowering (rvalue and lvalue).
+4. Re-run transpiler tests, workspace tests, and expanded-tests compile probe.
+
+Implementation:
+
+- Updated `emit_call_expr_to_string(...)` for `Some(...)`:
+  - reference arguments now lower to `rusty::SomeRef(...)`;
+  - non-reference arguments keep existing `std::make_optional(...)` lowering.
+- Replaced pointer-oriented helper with `emit_some_ref_constructor_arg(...)`:
+  - stable lvalues lower directly (`Some(&x)` -> `rusty::SomeRef(x)`);
+  - rvalue references materialize stable static storage and return references
+    (`const auto&` / `auto&`) instead of pointer shape.
+- Expanded stable-reference classification:
+  - `is_stable_reference_lvalue_expr(...)` now treats in-scope untyped locals as stable, not only
+    locals with known explicit/inferred type metadata.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf424_some_ref_uses_rusty_someref_shape`
+- `codegen::tests::test_leaf424_some_ref_lvalue_does_not_take_address`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf424 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf423 -- --nocapture`
+- Expanded-tests compile probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf424-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf424-post.rs -o /tmp/either-expanded-tests-leaf424-post.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf424-post.cppm -o /tmp/either-expanded-tests-leaf424-post.o`
+
+Re-probe result:
+
+- Previous Option-reference mismatch signatures are gone from first errors:
+  - no `rusty::Option<&...> == std::optional<...*>` mismatch remains at the previous first-failing
+    assertion sites.
+- Next deterministic blockers begin with `Either`-vs-variant assertion shape mismatches in
+  expanded `macros()` paths (`Either<...> == Either_Left<...>`), followed by additional deeper
+  iterator/io families.
+
+Design rationale:
+
+- Preserved type-shape parity at constructor emission (`SomeRef` for reference options) rather than
+  patching equality logic after the fact.
+- Avoided broad assertion-body rewriting; this keeps parity debugging focused on one deterministic
+  blocker family at a time.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3577,3 +3712,30 @@ temporary materialization or pointer-like emission everywhere.
   that still need deterministic handling for other expanded code.
 - Narrow symbol-path lowering plus `rusty::Option` interop fixes the blocker family with
   lower regression risk and keeps parity debugging focused on the next real blockers.
+
+### 11.35 Text-Patching `return return`/`crate::` as Raw String Replacements
+
+**Rejected approach:** Patch generated C++ with ad-hoc string rewrites (for example replacing
+`return return` with `return`, stripping `crate::` text globally, or regex-rewriting
+`Left(...)`/`Right(...)` constructor calls after emission).
+
+**Why it was rejected:**
+
+- These failures are AST-shape dependent (return-arm match expressions, constructor expected-type
+  context, path prefix scope), so text-level rewrites are brittle and easy to over-match.
+- Global replacements can silently corrupt unrelated output (for example valid `crate` text in
+  comments/strings or non-constructor `Left/Right` identifiers).
+- Structural lowering in codegen keeps behavior deterministic and testable across crates.
+
+### 11.36 Keeping Reference `Some(...)` as Pointer-Shaped `std::make_optional`
+
+**Rejected approach:** Keep lowering `Some(&...)` / `Some(&mut ...)` as
+`std::make_optional(pointer-like-expression)` and try to patch equality or assertion logic
+later to compensate.
+
+**Why it was rejected:**
+
+- It creates a deterministic type-shape mismatch (`rusty::Option<&T>` vs `std::optional<T*>`)
+  before semantic parity can be evaluated.
+- Fixing at equality/assertion sites duplicates conversion logic and risks broad special-casing.
+- Emitting `rusty::SomeRef(...)` at construction is the direct, local, and type-correct mapping.
