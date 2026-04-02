@@ -10,9 +10,30 @@
 #include <utility>
 #include <optional>
 #include <limits>
+#include <span>
+#include <stdexcept>
 #include <rusty/vec.hpp>
 
 namespace rusty {
+
+namespace detail {
+template<typename Index>
+size_t checked_index(Index idx) {
+    if constexpr (std::is_signed_v<Index>) {
+        if (idx < 0) {
+            throw std::out_of_range("slice index cannot be negative");
+        }
+    }
+    return static_cast<size_t>(idx);
+}
+
+template<typename SpanLike>
+void validate_slice_bounds(const SpanLike& span, size_t start, size_t end) {
+    if (start > end || end > span.size()) {
+        throw std::out_of_range("slice range out of bounds");
+    }
+}
+} // namespace detail
 
 /// Create a vector filled with `count` copies of `value`.
 /// Equivalent to Rust's `[value; count]` array repeat syntax.
@@ -31,6 +52,54 @@ auto collect_range(Range&& range_like) {
         out.push(std::forward<decltype(item)>(item));
     }
     return out;
+}
+
+/// Slice helpers used by transpiled Rust range-index expressions.
+/// Examples:
+/// - `x[..]` -> `slice_full(x)`
+/// - `x[..n]` -> `slice_to(x, n)`
+/// - `x[a..b]` -> `slice(x, a, b)`
+template<typename Container>
+auto slice_full(Container& container) {
+    using Elem = std::remove_reference_t<decltype(*std::data(container))>;
+    return std::span<Elem>(std::data(container), std::size(container));
+}
+
+template<typename Container, typename End>
+auto slice_to(Container& container, End end) {
+    auto span = slice_full(container);
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(span, 0, end_index);
+    return span.first(end_index);
+}
+
+template<typename Container, typename End>
+auto slice_to_inclusive(Container& container, End end) {
+    const size_t end_index = detail::checked_index(end);
+    return slice_to(container, end_index + 1);
+}
+
+template<typename Container, typename Start>
+auto slice_from(Container& container, Start start) {
+    auto span = slice_full(container);
+    const size_t start_index = detail::checked_index(start);
+    detail::validate_slice_bounds(span, start_index, span.size());
+    return span.subspan(start_index);
+}
+
+template<typename Container, typename Start, typename End>
+auto slice(Container& container, Start start, End end) {
+    auto span = slice_full(container);
+    const size_t start_index = detail::checked_index(start);
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(span, start_index, end_index);
+    return span.subspan(start_index, end_index - start_index);
+}
+
+template<typename Container, typename Start, typename End>
+auto slice_inclusive(Container& container, Start start, End end) {
+    const size_t end_index = detail::checked_index(end);
+    return slice(container, start, end_index + 1);
 }
 
 /// Iterable range [start, end) — equivalent to Rust's `start..end`.

@@ -2,8 +2,10 @@
 #include "../include/rusty/array.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <type_traits>
 
 void test_range_next_and_count() {
     printf("test_range_next_and_count: ");
@@ -50,11 +52,52 @@ void test_range_from_next_and_count_shape() {
     printf("PASS\n");
 }
 
+void test_slice_helpers_basic_shapes() {
+    printf("test_slice_helpers_basic_shapes: ");
+    std::vector<uint8_t> data{10, 11, 12, 13, 14};
+
+    auto full = rusty::slice_full(data);
+    static_assert(std::is_same_v<decltype(full), std::span<uint8_t>>);
+    assert(full.size() == 5);
+    assert(full[0] == 10);
+
+    auto to = rusty::slice_to(data, 3);
+    assert(to.size() == 3);
+    assert(to[2] == 12);
+
+    auto from = rusty::slice_from(data, 2);
+    assert(from.size() == 3);
+    assert(from[0] == 12);
+
+    auto mid = rusty::slice(data, 1, 4);
+    assert(mid.size() == 3);
+    assert(mid[0] == 11);
+    assert(mid[2] == 13);
+
+    auto to_inclusive = rusty::slice_to_inclusive(data, 2);
+    assert(to_inclusive.size() == 3);
+    assert(to_inclusive[2] == 12);
+
+    auto mid_inclusive = rusty::slice_inclusive(data, 1, 3);
+    assert(mid_inclusive.size() == 3);
+    assert(mid_inclusive[0] == 11);
+    assert(mid_inclusive[2] == 13);
+
+    const std::vector<uint8_t>& cdata = data;
+    auto cfull = rusty::slice_full(cdata);
+    static_assert(std::is_same_v<decltype(cfull), std::span<const uint8_t>>);
+    assert(cfull.size() == 5);
+    assert(cfull[4] == 14);
+
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty range helpers ===\n");
 
     test_range_next_and_count();
     test_range_from_next_and_count_shape();
+    test_slice_helpers_basic_shapes();
 
     printf("\nAll rusty range tests passed!\n");
     return 0;

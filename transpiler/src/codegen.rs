@@ -4625,6 +4625,11 @@ impl CodeGen {
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
                     return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
                 }
+                if let syn::Expr::Index(idx) = ref_inner {
+                    if self.is_slice_range_index_expr(&idx.index) {
+                        return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
+                    }
+                }
                 if let syn::Expr::Unary(un) = ref_inner {
                     if matches!(un.op, syn::UnOp::Deref(_))
                         && self.should_collapse_reborrow_of_deref_operand(&un.expr)
@@ -5178,6 +5183,11 @@ impl CodeGen {
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
                     return self.emit_expr_to_string(ref_inner);
                 }
+                if let syn::Expr::Index(idx) = ref_inner {
+                    if self.is_slice_range_index_expr(&idx.index) {
+                        return self.emit_expr_to_string(ref_inner);
+                    }
+                }
                 if let syn::Expr::Unary(un) = ref_inner {
                     if matches!(un.op, syn::UnOp::Deref(_))
                         && self.should_collapse_reborrow_of_deref_operand(&un.expr)
@@ -5323,6 +5333,9 @@ impl CodeGen {
                 format!("static_cast<{}>({})", ty, expr)
             }
             syn::Expr::Index(idx) => {
+                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
+                    return slice_expr;
+                }
                 let base = self.emit_expr_to_string(&idx.expr);
                 let index = self.emit_expr_to_string(&idx.index);
                 format!("{}[{}]", base, index)
@@ -5360,6 +5373,35 @@ impl CodeGen {
             }
             _ => self.match_expr_unreachable_fallback().to_string(),
         }
+    }
+
+    fn is_slice_range_index_expr(&self, index: &syn::Expr) -> bool {
+        matches!(
+            self.peel_paren_group_expr(index),
+            syn::Expr::Range(_)
+        )
+    }
+
+    fn try_emit_slice_index_expr_to_string(&self, idx: &syn::ExprIndex) -> Option<String> {
+        let range = match self.peel_paren_group_expr(&idx.index) {
+            syn::Expr::Range(r) => r,
+            _ => return None,
+        };
+        let base = self.emit_expr_to_string(&idx.expr);
+        let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
+        let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));
+        let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+        let emitted = match (start, end, inclusive) {
+            (Some(s), Some(e), false) => format!("rusty::slice({}, {}, {})", base, s, e),
+            (Some(s), Some(e), true) => {
+                format!("rusty::slice_inclusive({}, {}, {})", base, s, e)
+            }
+            (Some(s), None, _) => format!("rusty::slice_from({}, {})", base, s),
+            (None, Some(e), false) => format!("rusty::slice_to({}, {})", base, e),
+            (None, Some(e), true) => format!("rusty::slice_to_inclusive({}, {})", base, e),
+            (None, None, _) => format!("rusty::slice_full({})", base),
+        };
+        Some(emitted)
     }
 
     fn is_range_expression(expr: &syn::Expr) -> bool {
@@ -10072,6 +10114,22 @@ mod tests {
     fn test_range_to_inclusive() {
         let out = transpile_str("fn f() { let r = ..=10; }");
         assert!(out.contains("rusty::range_to_inclusive(10)"));
+    }
+
+    #[test]
+    fn test_leaf4292_full_slice_index_lowers_to_slice_helper() {
+        let out = transpile_str("fn f() { let v = [0u8; 8]; let s = &v[..]; }");
+        assert!(out.contains("const auto& s = rusty::slice_full(v);"));
+        assert!(!out.contains("v[rusty::range_full()]"));
+        assert!(!out.contains("= &rusty::slice_full(v)"));
+    }
+
+    #[test]
+    fn test_leaf4292_range_to_slice_index_lowers_to_slice_helper() {
+        let out = transpile_str("fn f(n: usize) { let v = [0u8; 8]; let s = &v[..n]; }");
+        assert!(out.contains("const auto& s = rusty::slice_to(v, n);"));
+        assert!(!out.contains("v[rusty::range_to(n)]"));
+        assert!(!out.contains("= &rusty::slice_to(v, n)"));
     }
 
     #[test]

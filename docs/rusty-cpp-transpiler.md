@@ -3685,6 +3685,79 @@ Design rationale:
   - no blanket UFCS disablement,
   - no global reference-argument stripping outside UFCS rewrite scope.
 
+### 10.11.30 Leaf 4.29.2: Slice/index lowering for Rust slice ranges in io paths
+
+Problem:
+
+- Expanded seek/read_write tests emitted Rust slice index forms as raw C++ indexing:
+  - `mockdata[rusty::range_full()]`
+  - `mockdata[rusty::range_to(...)]`
+- This is not valid for STL/rusty containers because `operator[]` expects an integer index, not a
+  range object.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): targeted index-expression lowering in
+  `transpiler/src/codegen.rs`, plus compact runtime slice helpers in `include/rusty/array.hpp`
+  and focused tests.
+
+Execution plan:
+
+1. Keep ordinary scalar indexing unchanged (`x[i]`).
+2. Add range-index-specific lowering for slice shapes:
+   - `x[..]`, `x[..n]`, `x[a..]`, `x[a..b]`, inclusive variants.
+3. Ensure reference forms (`&x[..]`) do not emit `&` over a slice helper temporary.
+4. Add focused transpiler and runtime tests, then re-probe expanded tests.
+
+Implementation:
+
+- In codegen:
+  - Added `try_emit_slice_index_expr_to_string(...)` to lower range-index expressions to helper
+    calls:
+    - `rusty::slice_full(base)`
+    - `rusty::slice_to(base, end)`
+    - `rusty::slice_from(base, start)`
+    - `rusty::slice(base, start, end)`
+    - inclusive helper variants.
+  - Added `is_slice_range_index_expr(...)` and used it in reference emission so `&x[..]` lowers to
+    `rusty::slice_full(x)` instead of `&rusty::slice_full(x)`.
+- In runtime helpers (`include/rusty/array.hpp`):
+  - Added span-based slice helper APIs above (`slice_*`) with bounds checks.
+
+Regression tests added:
+
+- Transpiler:
+  - `codegen::tests::test_leaf4292_full_slice_index_lowers_to_slice_helper`
+  - `codegen::tests::test_leaf4292_range_to_slice_index_lowers_to_slice_helper`
+- Runtime:
+  - `tests/rusty_array_test.cpp::test_slice_helpers_basic_shapes`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4292 -- --nocapture`
+- `cmake --build build-tests --target rusty_array_test.out`
+- `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+- Expanded-tests compile re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4292.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4292.rs -o /tmp/either-expanded-tests-leaf4292.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf4292.cppm -o /tmp/either-expanded-tests-leaf4292.o`
+
+Re-probe result:
+
+- Previous range-object indexing signatures are removed from io paths (`[...]` with
+  `rusty::range_full` / `rusty::range_to`).
+- Next deterministic blocker family remains:
+  - container length-call shape (`buf.len()`),
+  - and then residual tuple assertion reference artifacts (`&&...`) / Cursor template-context
+    shape.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first) and §11.38 guidance:
+  - fixed the exact AST shape (`Expr::Index` with range index) rather than broad reference/index
+    rewrites.
+- Avoided broad post-generation string patching.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4091,3 +4164,18 @@ multi-deref forms everywhere, regardless of receiver/type context.
 - The real issue is overbroad constructor classification, not UFCS as a mechanism.
 - A narrow constructor-path guard preserves working UFCS behavior while eliminating the false
   positive.
+
+### 11.40 Keeping Rust Range-Index Expressions as Raw `operator[]` Calls
+
+**Rejected approach:** Leave `x[..]` / `x[..n]` lowering as `x[rusty::range_*]` and try to fix
+resulting compile errors by adding ad-hoc container-specific `operator[]` overloads or post-hoc
+string patches.
+
+**Why it was rejected:**
+
+- It pushes a codegen bug into runtime types and creates inconsistent behavior across container
+  families (`std::vector`, spans, custom wrappers).
+- It makes slice semantics implicit and fragile instead of explicit (`slice_*` helpers with clear
+  bounds/shape behavior).
+- A direct `Expr::Index` range-shape lowering is local, auditable, and preserves normal scalar
+  indexing unchanged.
