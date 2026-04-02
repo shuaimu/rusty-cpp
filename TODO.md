@@ -424,6 +424,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - transpiler: `test_leaf440_match_bound_inner_description_uses_error_dispatch_helper`, `test_leaf440_non_inner_description_call_is_not_rewritten`
               - runtime: `tests/rusty_error_test.cpp` (`test_description_dispatch_uses_member_when_available`, `test_description_dispatch_falls_back_to_empty_for_non_error_types`)
             - [x] *done* Re-probe: previous `inner.description()` non-error payload blocker signatures are removed; next deterministic blockers start at equality-visit return-type mismatch families in generated `Either::operator==`
+          - [x] *done* Leaf 4.41: Fix equality `std::visit` return-type mismatch family in generated `Either::operator==` (expanded tests), then re-probe compile/link
+            - [x] *done* Threaded `bool` expected-type context through logical binary emission (`&&` / `||`) so nested RHS `match` expressions emit typed fallback/unreachable paths in non-void contexts
+            - [x] *done* Added expected-type-aware expression lowering for `unsafe { ... }` blocks so expanded `_ => unsafe { core::intrinsics::unreachable() }` match arms preserve typed noreturn emission (`-> bool`, etc.)
+            - [x] *done* Added focused transpiler regressions: `leaf441` tests for tuple-visit fallback typing, guard fallback typing, logical-RHS match typing, and unsafe-unreachable arm typing
+            - [x] *done* Re-probe: previous deterministic `Either::operator==` visitor return-type mismatch signature is removed; next deterministic blockers shift to `as_ref` / `as_mut` visitor return-shape parity and reference-constructor emission families
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

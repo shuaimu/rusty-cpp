@@ -3008,7 +3008,7 @@ impl CodeGen {
                     else {
                         parts.push(format!(
                             "[&](const auto&) {{ return {}; }}",
-                            self.match_expr_unreachable_fallback()
+                            self.match_expr_unreachable_fallback_with_expected(expected_ty)
                         ));
                         continue;
                     };
@@ -3028,7 +3028,7 @@ impl CodeGen {
                             binding_stmts.join(" "),
                             guard_str,
                             body,
-                            self.match_expr_unreachable_fallback(),
+                            self.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
                         let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "));
@@ -3056,7 +3056,7 @@ impl CodeGen {
                             cpp_type,
                             guard_str,
                             body,
-                            self.match_expr_unreachable_fallback(),
+                            self.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
                         parts.push(format!("[&](const {}&) {{ return {}; }}", cpp_type, body));
@@ -3071,7 +3071,7 @@ impl CodeGen {
                 _ => {
                     parts.push(format!(
                         "[&](const auto&) {{ return {}; }}",
-                        self.match_expr_unreachable_fallback()
+                        self.match_expr_unreachable_fallback_with_expected(expected_ty)
                     ));
                 }
             }
@@ -3221,7 +3221,10 @@ impl CodeGen {
             return None;
         }
 
-        out.push_str(&format!("return {}; }}()", self.match_expr_unreachable_fallback()));
+        out.push_str(&format!(
+            "return {}; }}()",
+            self.match_expr_unreachable_fallback_with_expected(expected_ty)
+        ));
         Some(out)
     }
 
@@ -3259,7 +3262,7 @@ impl CodeGen {
                     if !supported {
                         parts.push(format!(
                             "[&](const auto&...) {{ return {}; }}",
-                            self.match_expr_unreachable_fallback()
+                            self.match_expr_unreachable_fallback_with_expected(expected_ty)
                         ));
                         continue;
                     }
@@ -3272,7 +3275,7 @@ impl CodeGen {
                             binding_stmts.join(" "),
                             guard_str,
                             body,
-                            self.match_expr_unreachable_fallback()
+                            self.match_expr_unreachable_fallback_with_expected(expected_ty)
                         ));
                     } else {
                         parts.push(format!(
@@ -3289,7 +3292,7 @@ impl CodeGen {
                 _ => {
                     parts.push(format!(
                         "[&](const auto&...) {{ return {}; }}",
-                        self.match_expr_unreachable_fallback()
+                        self.match_expr_unreachable_fallback_with_expected(expected_ty)
                     ));
                 }
             }
@@ -3335,6 +3338,19 @@ impl CodeGen {
 
     fn match_expr_unreachable_fallback(&self) -> &'static str {
         "rusty::intrinsics::unreachable()"
+    }
+
+    fn match_expr_unreachable_fallback_with_expected(
+        &self,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        if let Some(expected) = expected_ty {
+            return format!(
+                "[&]() -> {} {{ rusty::intrinsics::unreachable(); }}()",
+                self.map_type(expected)
+            );
+        }
+        self.match_expr_unreachable_fallback().to_string()
     }
 
     /// Map Rust enum-variant pattern paths to generated C++ variant struct names.
@@ -5007,6 +5023,9 @@ impl CodeGen {
         match expr {
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
             syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, expected_ty),
+            syn::Expr::Binary(bin) => {
+                self.emit_binary_expr_to_string_with_expected(bin, expected_ty)
+            }
             syn::Expr::Reference(r) => {
                 let ref_inner = self.peel_paren_group_expr(&r.expr);
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
@@ -5050,6 +5069,17 @@ impl CodeGen {
                 self.emit_expr_path_to_string(&path.path)
             }
             syn::Expr::If(if_expr) => self.emit_if_expr_to_string(if_expr, expected_ty),
+            syn::Expr::Unsafe(unsafe_expr) => {
+                if let Some(single_expr) = self.extract_single_expr_from_block(&unsafe_expr.block) {
+                    self.emit_expr_to_string_with_expected(single_expr, expected_ty)
+                } else if let Some(expr_str) =
+                    self.block_expr_to_iife_string(&unsafe_expr.block, expected_ty)
+                {
+                    expr_str
+                } else {
+                    self.match_expr_unreachable_fallback_with_expected(expected_ty)
+                }
+            }
             syn::Expr::Block(block_expr) => {
                 if let Some(expr_str) =
                     self.block_expr_to_iife_string(&block_expr.block, expected_ty)
@@ -5060,6 +5090,31 @@ impl CodeGen {
                 }
             }
             _ => self.emit_expr_to_string(expr),
+        }
+    }
+
+    fn emit_binary_expr_to_string_with_expected(
+        &self,
+        bin: &syn::ExprBinary,
+        _expected_ty: Option<&syn::Type>,
+    ) -> String {
+        match &bin.op {
+            // Logical operators always require boolean operands.
+            // Thread `bool` into both sides so nested match fallbacks emit typed
+            // unreachable lambdas compatible with std::visit return unification.
+            syn::BinOp::And(_) | syn::BinOp::Or(_) => {
+                let bool_ty: syn::Type = parse_quote!(bool);
+                let left = self.emit_expr_to_string_with_expected(&bin.left, Some(&bool_ty));
+                let op = self.emit_binop(&bin.op);
+                let right = self.emit_expr_to_string_with_expected(&bin.right, Some(&bool_ty));
+                format!("{} {} {}", left, op, right)
+            }
+            _ => {
+                let left = self.emit_expr_to_string(&bin.left);
+                let op = self.emit_binop(&bin.op);
+                let right = self.emit_expr_to_string(&bin.right);
+                format!("{} {} {}", left, op, right)
+            }
         }
     }
 
@@ -5888,6 +5943,18 @@ impl CodeGen {
             syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
             syn::Expr::Block(block_expr) => {
                 if let Some(expr_str) = self.block_expr_to_iife_string(&block_expr.block, None) {
+                    expr_str
+                } else {
+                    self.match_expr_unreachable_fallback().to_string()
+                }
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                if let Some(single_expr) = self.extract_single_expr_from_block(&unsafe_expr.block)
+                {
+                    self.emit_expr_to_string(single_expr)
+                } else if let Some(expr_str) =
+                    self.block_expr_to_iife_string(&unsafe_expr.block, None)
+                {
                     expr_str
                 } else {
                     self.match_expr_unreachable_fallback().to_string()
@@ -10855,6 +10922,85 @@ mod tests {
         );
         assert!(out.contains("return err.description();"));
         assert!(!out.contains("rusty::error::description(err)"));
+    }
+
+    #[test]
+    fn test_leaf441_tuple_visit_unreachable_fallback_is_typed_for_bool() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn eq_like(a: &Either<i32, i32>, b: &Either<i32, i32>) -> bool {
+                match (a, b) {
+                    (Either::Left(x), Either::Left(y)) => x == y,
+                    (Either::Right(x), Either::Right(y)) => x == y,
+                    _ => core::intrinsics::unreachable(),
+                }
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }"
+        ));
+        assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
+    }
+
+    #[test]
+    fn test_leaf441_variant_guard_unreachable_fallback_is_typed_for_bool() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn guard_like(e: &Either<i32, i32>) -> bool {
+                match *e {
+                    Either::Left(x) if x > 0 => true,
+                    _ => false,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return [&]() -> bool { rusty::intrinsics::unreachable(); }();"));
+        assert!(!out.contains("return rusty::intrinsics::unreachable();"));
+    }
+
+    #[test]
+    fn test_leaf441_logical_binary_propagates_bool_expected_type_to_match_rhs() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn logical_match_rhs(a: &Either<i32, i32>, b: &Either<i32, i32>) -> bool {
+                true && match (a, b) {
+                    (Either::Left(x), Either::Left(y)) => x == y,
+                    (Either::Right(x), Either::Right(y)) => x == y,
+                    _ => core::intrinsics::unreachable(),
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return true &&"));
+        assert!(out.contains(
+            "[&](const auto&...) { return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }"
+        ));
+        assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
+    }
+
+    #[test]
+    fn test_leaf441_unsafe_unreachable_arm_is_typed_in_logical_match_rhs() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn logical_match_rhs_unsafe(a: &Either<i32, i32>, b: &Either<i32, i32>) -> bool {
+                true && match (a, b) {
+                    (Either::Left(x), Either::Left(y)) => x == y,
+                    (Either::Right(x), Either::Right(y)) => x == y,
+                    _ => unsafe { core::intrinsics::unreachable() },
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return true &&"));
+        assert!(out.contains(
+            "[&]() -> bool { rusty::intrinsics::unreachable(); }()"
+        ));
+        assert!(!out.contains("[&](const auto&...) { return rusty::intrinsics::unreachable(); }"));
     }
 
     #[test]

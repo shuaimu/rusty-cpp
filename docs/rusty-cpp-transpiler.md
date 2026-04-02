@@ -4847,6 +4847,70 @@ Design rationale:
   - no type-specific hardcoded special cases in generated `Either` methods (§11.5),
   - no broad symbol stripping to bypass compile failures (§11.28/§11.30).
 
+### 10.11.47 Leaf 4.41: Fix expanded `Either::operator==` equality-visit return-type mismatch family
+
+Problem:
+
+- After Leaf 4.40, first deterministic expanded-tests blockers moved to generated
+  `Either::operator==`:
+  - `std::visit` in equality dispatch still contained an untyped `unreachable()` arm,
+  - expanded wildcard arms often appear as `_ => unsafe { core::intrinsics::unreachable() }`,
+  - GCC rejected visitor return unification (`std::visit requires the visitor to have the same return type`).
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - targeted expected-type propagation for logical binary expressions,
+  - targeted expected-aware lowering for `unsafe` expressions in value position,
+  - focused transpiler regressions,
+  - expanded compile re-probe.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - added `emit_binary_expr_to_string_with_expected(...)` and routed
+    `emit_expr_to_string_with_expected` through it for `Expr::Binary`,
+  - for `&&`/`||`, explicitly threaded `bool` expected type into both operands so RHS nested
+    `match`/`visit` paths emit typed noreturn wrappers,
+  - added expected-aware `Expr::Unsafe` lowering:
+    - unwrap single-expression unsafe blocks and continue with expected typing,
+    - otherwise lower through expected-aware block-IIFE path.
+- This preserves prior behavior for non-logical binary operators while fixing the return-type
+  context gap in equality-style boolean expressions.
+
+Regression tests:
+
+- `codegen::tests::test_leaf441_tuple_visit_unreachable_fallback_is_typed_for_bool`
+- `codegen::tests::test_leaf441_variant_guard_unreachable_fallback_is_typed_for_bool`
+- `codegen::tests::test_leaf441_logical_binary_propagates_bool_expected_type_to_match_rhs`
+- `codegen::tests::test_leaf441_unsafe_unreachable_arm_is_typed_in_logical_match_rhs`
+
+Verification:
+
+- Focused:
+  - `cargo test -q -p rusty-cpp-transpiler leaf441 -- --nocapture`
+- Expanded re-probe:
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf441.rs`
+  - `cargo run -q -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf441.rs --output /tmp/either-expanded-tests-leaf441.cppm --module-name rustycpp.either_expanded_leaf441`
+  - `g++ -std=c++20 -fmodules-ts -I include -I tests/cpp/include -x c++ -c /tmp/either-expanded-tests-leaf441.cppm -o /tmp/either-expanded-tests-leaf441.o`
+
+Re-probe result:
+
+- Previous deterministic equality-family blocker in `Either::operator==` is removed:
+  - generated fallback arm is now typed (`-> bool`) in that visitor.
+- Next deterministic blockers shift to:
+  - `as_ref` / `as_mut` visitor return-shape parity,
+  - reference-constructor emission families (`Left<L&,R&>(...)` / `Right<L&,R&>(...)`).
+
+Design rationale:
+
+- Fixed the type-context loss at expression emission boundaries rather than hardcoding special-case
+  patches in generated `operator==`.
+- Avoided wrong approaches from §11:
+  - no one-off textual rewrite against specific generated method names (§11.5),
+  - no global `visit` fallback coercion without parent-context typing (§11.4),
+  - no “skip failing branches” symbol stripping to force compile success (§11.28/§11.30).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
