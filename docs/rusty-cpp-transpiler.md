@@ -2912,6 +2912,48 @@ Design rationale:
 - Followed §11.13: fixed the deterministic macro-lowering gap at the expression-emission boundary, where invalid fallbacks were introduced.
 - Followed §11.30 (below): avoid broad unknown-macro skipping; lower the known `for_both!` shape and keep strict conservative fallback for unsupported patterns.
 
+### 10.45 Phase 18 Progress: End-to-End (Leaf 4.17.4) — DONE
+
+Leaf 4.17.4 re-ran the expanded-tests compile probe and captured the next reduced
+blocker set after Leaf 4.17.1-4.17.3.
+
+Execution plan:
+
+1. Re-generate expanded `either` test output (`cargo expand --lib --tests`).
+2. Transpile expanded output into a module interface unit.
+3. Compile with `g++` and inspect diagnostics for remaining blocker classes.
+
+Probe commands:
+
+- `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4174.rs`
+- `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4174.rs -o /tmp/either-expanded-tests-leaf4174.cppm --module-name either`
+- `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=200 -c /tmp/either-expanded-tests-leaf4174.cppm -o /tmp/either-expanded-tests-leaf4174.o > /tmp/either-expanded-tests-leaf4174-build.log 2>&1`
+
+Results:
+
+- Expanded test output transpiled successfully.
+- C++ module compile exited successfully (`exit 0`).
+- Build log contains warning-only diagnostics (deprecation warnings in
+  `include/rusty/function.hpp` and `include/rusty/result.hpp`), with no compile
+  errors.
+
+Reduced blocker set:
+
+- Expanded-tests compile-stage blockers: none found in this probe.
+- Next leaf work should focus on runtime/link and behavior parity for expanded tests,
+  not syntax/compile blockers in the module output.
+
+Verification:
+
+- Full regression suite passed: `cargo test --workspace`.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first): verify blocker collapse with an end-to-end probe
+  before introducing new lowering work.
+- Checked §11 wrong-approach guidance; avoided broad symbol suppression or blanket
+  unknown-macro skipping beyond targeted prior leaves.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
