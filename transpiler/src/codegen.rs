@@ -48,6 +48,9 @@ pub struct CodeGen {
     /// Per-type method signature keys already emitted in the current type body.
     /// This catches collisions that only appear after Rust-path → C++ mapping.
     emitted_method_conflict_keys: Vec<HashSet<String>>,
+    /// Stack tracking whether current function/method context returns a value.
+    /// Used for tail expression lowering decisions (e.g., tail `match`).
+    return_value_scopes: Vec<bool>,
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
@@ -71,6 +74,7 @@ impl CodeGen {
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
+            return_value_scopes: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -116,6 +120,7 @@ impl CodeGen {
         self.operator_renames.clear();
         self.skipped_module_traits.clear();
         self.emitted_method_conflict_keys.clear();
+        self.return_value_scopes.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -364,7 +369,9 @@ impl CodeGen {
             name, params, ret_annotation
         ));
         self.indent += 1;
+        self.push_return_value_scope(&return_type);
         self.emit_block(&f.block);
+        self.pop_return_value_scope();
         self.indent -= 1;
         self.writeln("};");
     }
@@ -432,7 +439,9 @@ impl CodeGen {
         // Async functions use co_return instead of return
         let prev_async = self.in_async;
         self.in_async = is_async;
+        self.push_return_value_scope(&return_type);
         self.emit_block(&f.block);
+        self.pop_return_value_scope();
         self.in_async = prev_async;
 
         self.indent -= 1;
@@ -975,7 +984,9 @@ impl CodeGen {
                         params.join(", ")
                     ));
                     self.indent += 1;
+                    self.push_return_value_scope(&return_type);
                     self.emit_block(default_body);
+                    self.pop_return_value_scope();
                     self.indent -= 1;
                     self.writeln("}");
                 }
@@ -1331,7 +1342,9 @@ impl CodeGen {
             qualifier
         ));
         self.indent += 1;
+        self.push_return_value_scope(&return_type);
         self.emit_block(&method.block);
+        self.pop_return_value_scope();
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
@@ -1359,8 +1372,16 @@ impl CodeGen {
         match stmt {
             syn::Stmt::Local(local) => self.emit_local(local),
             syn::Stmt::Expr(expr, semi) => {
+                // Tail `match` expressions in non-void functions must stay in
+                // expression-lowering path so we emit `return <iife>;` instead
+                // of a statement-level `std::visit(...)` with fallthrough.
+                let force_expr_path =
+                    self.in_value_return_scope()
+                        && is_tail
+                        && semi.is_none()
+                        && matches!(expr, syn::Expr::Match(_));
                 // Control flow expressions are emitted as statements directly
-                if self.try_emit_control_flow(expr) {
+                if !force_expr_path && self.try_emit_control_flow(expr) {
                     return;
                 }
                 let expr_str = self.emit_expr_to_string(expr);
@@ -1535,13 +1556,11 @@ impl CodeGen {
         match &arm.pat {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
-                let path = self.emit_path_to_string(&ts.path);
-                // Convert :: to _ for variant struct name
-                let cpp_type = path.replace("::", "_");
+                let cpp_type = self.variant_pattern_cpp_type(&ts.path);
                 let bindings = self.extract_tuple_struct_bindings(&ts.elems);
 
                 self.write_indent();
-                self.output.push_str(&format!("[](const {}& _v) {{", cpp_type));
+                self.output.push_str(&format!("[&](const {}& _v) {{", cpp_type));
 
                 if !bindings.is_empty() || arm.guard.is_some() {
                     self.output.push('\n');
@@ -1571,11 +1590,10 @@ impl CodeGen {
             }
             syn::Pat::Struct(ps) => {
                 // Pattern like `Shape::Rect { w, h }` → [](const Shape_Rect& _v) { ... }
-                let path = self.emit_path_to_string(&ps.path);
-                let cpp_type = path.replace("::", "_");
+                let cpp_type = self.variant_pattern_cpp_type(&ps.path);
 
                 self.write_indent();
-                self.output.push_str(&format!("[](const {}& _v) {{\n", cpp_type));
+                self.output.push_str(&format!("[&](const {}& _v) {{\n", cpp_type));
                 self.indent += 1;
 
                 // Emit field bindings
@@ -1608,11 +1626,10 @@ impl CodeGen {
             }
             syn::Pat::Path(pp) => {
                 // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
-                let path = self.emit_path_to_string(&pp.path);
-                let cpp_type = path.replace("::", "_");
+                let cpp_type = self.variant_pattern_cpp_type(&pp.path);
 
                 self.write_indent();
-                self.output.push_str(&format!("[](const {}&) {{\n", cpp_type));
+                self.output.push_str(&format!("[&](const {}&) {{\n", cpp_type));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
@@ -1621,7 +1638,7 @@ impl CodeGen {
             syn::Pat::Wild(_) => {
                 // Wildcard: `_ =>` → [](const auto&) { ... }
                 self.write_indent();
-                self.output.push_str("[](const auto&) {\n");
+                self.output.push_str("[&](const auto&) {\n");
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
@@ -1631,7 +1648,7 @@ impl CodeGen {
                 // Catch-all binding: `x =>` → [](const auto& x) { ... }
                 let name = &pi.ident;
                 self.write_indent();
-                self.output.push_str(&format!("[](const auto& {}) {{\n", name));
+                self.output.push_str(&format!("[&](const auto& {}) {{\n", name));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.indent -= 1;
@@ -1639,7 +1656,7 @@ impl CodeGen {
             }
             _ => {
                 self.writeln("// TODO: unhandled match pattern");
-                self.writeln("[](const auto&) {},");
+                self.writeln("[&](const auto&) {},");
             }
         }
     }
@@ -1653,7 +1670,7 @@ impl CodeGen {
             .map(|p| match p {
                 syn::Pat::Ident(pi) => pi.ident.to_string(),
                 syn::Pat::Wild(_) => "_".to_string(),
-                _ => "/* TODO */".to_string(),
+                _ => "_".to_string(),
             })
             .collect()
     }
@@ -1859,32 +1876,194 @@ impl CodeGen {
             let body = self.emit_expr_to_string(&arm.body);
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
-                    let path = self.emit_path_to_string(&ts.path);
-                    let cpp_type = path.replace("::", "_");
+                    let cpp_type = self.variant_pattern_cpp_type(&ts.path);
                     let bindings = self.extract_tuple_struct_bindings(&ts.elems);
                     let binding_stmts: Vec<String> = bindings.iter().enumerate()
                         .filter(|(_, n)| *n != "_")
-                        .map(|(i, n)| format!("auto& {} = _v._{};", n, i))
+                        .map(|(i, n)| format!("const auto& {} = _v._{};", n, i))
                         .collect();
-                    parts.push(format!(
-                        "[](const {}& _v) {{ {} return {}; }}",
-                        cpp_type, binding_stmts.join(" "), body
-                    ));
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        parts.push(format!(
+                            "[&](const {}& _v) {{ {} if ({}) return {}; return {}; }}",
+                            cpp_type,
+                            binding_stmts.join(" "),
+                            guard_str,
+                            body,
+                            self.match_expr_unreachable_fallback(),
+                        ));
+                    } else {
+                        parts.push(format!(
+                            "[&](const {}& _v) {{ {} return {}; }}",
+                            cpp_type, binding_stmts.join(" "), body
+                        ));
+                    }
                 }
                 syn::Pat::Path(pp) => {
-                    let path = self.emit_path_to_string(&pp.path);
-                    let cpp_type = path.replace("::", "_");
-                    parts.push(format!("[](const {}&) {{ return {}; }}", cpp_type, body));
+                    let cpp_type = self.variant_pattern_cpp_type(&pp.path);
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        parts.push(format!(
+                            "[&](const {}& _v) {{ if ({}) return {}; return {}; }}",
+                            cpp_type,
+                            guard_str,
+                            body,
+                            self.match_expr_unreachable_fallback(),
+                        ));
+                    } else {
+                        parts.push(format!("[&](const {}&) {{ return {}; }}", cpp_type, body));
+                    }
                 }
                 syn::Pat::Wild(_) => {
-                    parts.push(format!("[](const auto&) {{ return {}; }}", body));
+                    parts.push(format!("[&](const auto&) {{ return {}; }}", body));
+                }
+                syn::Pat::Ident(pi) => {
+                    parts.push(format!("[&](const auto& {}) {{ return {}; }}", pi.ident, body));
                 }
                 _ => {
-                    parts.push(format!("[](const auto&) {{ return {}; }}", body));
+                    parts.push(format!(
+                        "[&](const auto&) {{ return {}; }}",
+                        self.match_expr_unreachable_fallback()
+                    ));
                 }
             }
         }
         parts.join(", ")
+    }
+
+    /// Emit a tuple-scrutinee match expression as overloaded std::visit lambdas.
+    /// This handles patterns like:
+    /// `(E::A(x), E::A(y)) => x == y`
+    fn emit_match_expr_visit_tuple(&self, arms: &[syn::Arm], arity: usize) -> String {
+        let mut parts = Vec::new();
+        for arm in arms {
+            let body = self.emit_expr_to_string(&arm.body);
+            match &arm.pat {
+                syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
+                    let mut params = Vec::new();
+                    let mut binding_stmts = Vec::new();
+                    let mut supported = true;
+                    for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                        if !self.emit_tuple_visit_subpattern(
+                            elem_pat,
+                            idx,
+                            &mut params,
+                            &mut binding_stmts,
+                        ) {
+                            supported = false;
+                            break;
+                        }
+                    }
+
+                    if !supported {
+                        parts.push(format!(
+                            "[&](const auto&...) {{ return {}; }}",
+                            self.match_expr_unreachable_fallback()
+                        ));
+                        continue;
+                    }
+
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        parts.push(format!(
+                            "[&]({}) {{ {} if ({}) return {}; return {}; }}",
+                            params.join(", "),
+                            binding_stmts.join(" "),
+                            guard_str,
+                            body,
+                            self.match_expr_unreachable_fallback()
+                        ));
+                    } else {
+                        parts.push(format!(
+                            "[&]({}) {{ {} return {}; }}",
+                            params.join(", "),
+                            binding_stmts.join(" "),
+                            body
+                        ));
+                    }
+                }
+                syn::Pat::Wild(_) => {
+                    parts.push(format!("[&](const auto&...) {{ return {}; }}", body));
+                }
+                _ => {
+                    parts.push(format!(
+                        "[&](const auto&...) {{ return {}; }}",
+                        self.match_expr_unreachable_fallback()
+                    ));
+                }
+            }
+        }
+        parts.join(", ")
+    }
+
+    fn emit_tuple_visit_subpattern(
+        &self,
+        pat: &syn::Pat,
+        index: usize,
+        params: &mut Vec<String>,
+        binding_stmts: &mut Vec<String>,
+    ) -> bool {
+        match pat {
+            syn::Pat::TupleStruct(ts) => {
+                let cpp_type = self.variant_pattern_cpp_type(&ts.path);
+                let param_name = format!("_v{}", index);
+                params.push(format!("const {}& {}", cpp_type, param_name));
+                let bindings = self.extract_tuple_struct_bindings(&ts.elems);
+                for (field_idx, name) in bindings.iter().enumerate() {
+                    if name != "_" {
+                        binding_stmts
+                            .push(format!("const auto& {} = {}._{};", name, param_name, field_idx));
+                    }
+                }
+                true
+            }
+            syn::Pat::Path(pp) => {
+                let cpp_type = self.variant_pattern_cpp_type(&pp.path);
+                params.push(format!("const {}& _v{}", cpp_type, index));
+                true
+            }
+            syn::Pat::Ident(pi) => {
+                params.push(format!("const auto& {}", pi.ident));
+                true
+            }
+            syn::Pat::Wild(_) => {
+                params.push(format!("const auto& _v{}", index));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn match_expr_unreachable_fallback(&self) -> &'static str {
+        "rusty::intrinsics::unreachable()"
+    }
+
+    /// Map Rust enum-variant pattern paths to generated C++ variant struct names.
+    /// Examples:
+    /// - `Either::Left` -> `Either_Left`
+    /// - `crate::Either::Left` -> `Either_Left`
+    /// - `Left` inside `impl Either` -> `Either_Left`
+    fn variant_pattern_cpp_type(&self, path: &syn::Path) -> String {
+        let raw = self.emit_path_to_string(path).replace("::", "_");
+        let stripped = raw
+            .strip_prefix("crate_")
+            .or_else(|| raw.strip_prefix("self_"))
+            .or_else(|| raw.strip_prefix("super_"))
+            .unwrap_or(&raw)
+            .to_string();
+        if stripped.contains('_') {
+            return stripped;
+        }
+        if let Some(struct_name) = &self.current_struct {
+            if stripped
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                return format!("{}_{}", struct_name, stripped);
+            }
+        }
+        stripped
     }
 
     fn emit_arm_body(&mut self, body: &syn::Expr) {
@@ -2532,6 +2711,7 @@ impl CodeGen {
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
             syn::Expr::Path(path) => self.emit_path_to_string(&path.path),
+            syn::Expr::Group(group) => self.emit_expr_to_string(&group.expr),
             syn::Expr::Binary(bin) => {
                 let left = self.emit_expr_to_string(&bin.left);
                 let op = self.emit_binop(&bin.op);
@@ -2699,15 +2879,35 @@ impl CodeGen {
                 format!("std::make_tuple({})", elems.join(", "))
             }
             syn::Expr::Macro(m) => self.emit_macro_expr(&m.mac),
+            syn::Expr::Block(block_expr) => {
+                if let Some(expr_str) = self.block_expr_to_iife_string(&block_expr.block) {
+                    expr_str
+                } else {
+                    self.match_expr_unreachable_fallback().to_string()
+                }
+            }
             syn::Expr::Match(match_expr) => {
                 // Match as expression → immediately-invoked lambda
-                let scrutinee = self.emit_expr_to_string(&match_expr.expr);
                 if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+                    let scrutinee = self.emit_expr_to_string(&match_expr.expr);
                     // Simple switch-like match → ternary chain or IIFE with switch
                     format!("[&]() {{ auto _m = {}; {} }}()",
                         scrutinee,
                         self.emit_match_expr_switch(&match_expr.arms))
+                } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
+                    // Tuple scrutinee variant patterns: std::visit over each tuple element.
+                    let visit_args: Vec<String> = tuple_scrutinee
+                        .elems
+                        .iter()
+                        .map(|e| self.emit_expr_to_string(e))
+                        .collect();
+                    format!(
+                        "[&]() {{ return std::visit(overloaded {{ {} }}, {}); }}()",
+                        self.emit_match_expr_visit_tuple(&match_expr.arms, tuple_scrutinee.elems.len()),
+                        visit_args.join(", ")
+                    )
                 } else {
+                    let scrutinee = self.emit_expr_to_string(&match_expr.expr);
                     // Variant match → IIFE with std::visit
                     format!("[&]() {{ auto _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
                         scrutinee,
@@ -2730,7 +2930,7 @@ impl CodeGen {
                 let len = self.emit_expr_to_string(&rep.len);
                 format!("rusty::array_repeat({}, {})", val, len)
             }
-            _ => format!("/* TODO: expr */"),
+            _ => self.match_expr_unreachable_fallback().to_string(),
         }
     }
 
@@ -3352,6 +3552,7 @@ impl CodeGen {
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
+            return_value_scopes: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -3485,6 +3686,86 @@ impl CodeGen {
             syn::Expr::Block(block) => self.block_single_expr(&block.block),
             _ => Some(self.emit_expr_to_string(expr)),
         }
+    }
+
+    fn push_return_value_scope(&mut self, return_type: &str) {
+        self.return_value_scopes.push(return_type != "void");
+    }
+
+    fn pop_return_value_scope(&mut self) {
+        self.return_value_scopes.pop();
+    }
+
+    fn in_value_return_scope(&self) -> bool {
+        self.return_value_scopes.last().copied().unwrap_or(false)
+    }
+
+    /// Best-effort lowering of a Rust block used in expression position.
+    /// Emits an IIFE that preserves simple local bindings and tail-expression return.
+    fn block_expr_to_iife_string(&self, block: &syn::Block) -> Option<String> {
+        if let Some(single) = self.block_single_expr(block) {
+            return Some(single);
+        }
+
+        if block.stmts.is_empty() {
+            return Some(self.match_expr_unreachable_fallback().to_string());
+        }
+
+        let mut stmts = Vec::new();
+        let last_idx = block.stmts.len() - 1;
+
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            let is_last = idx == last_idx;
+            match stmt {
+                syn::Stmt::Local(local) => match &local.pat {
+                    syn::Pat::Ident(pi) => {
+                        let qualifier = if pi.mutability.is_some() { "" } else { "const " };
+                        let ty = if let Some(ty) = get_local_type(local) {
+                            self.map_type(ty)
+                        } else {
+                            "auto".to_string()
+                        };
+                        if let Some(init) = &local.init {
+                            let init_str = self.emit_expr_to_string(&init.expr);
+                            stmts.push(format!("{}{} {} = {};", qualifier, ty, pi.ident, init_str));
+                        } else {
+                            stmts.push(format!("{}{} {};", qualifier, ty, pi.ident));
+                        }
+                    }
+                    syn::Pat::Type(pt) => {
+                        if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
+                            let qualifier = if pi.mutability.is_some() { "" } else { "const " };
+                            let ty = self.map_type(&pt.ty);
+                            if let Some(init) = &local.init {
+                                let init_str = self.emit_expr_to_string(&init.expr);
+                                stmts.push(format!("{}{} {} = {};", qualifier, ty, pi.ident, init_str));
+                            } else {
+                                stmts.push(format!("{}{} {};", qualifier, ty, pi.ident));
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                },
+                syn::Stmt::Expr(expr, semi) => {
+                    if is_last && semi.is_none() {
+                        stmts.push(format!("return {};", self.emit_expr_to_string(expr)));
+                    } else {
+                        stmts.push(format!("{};", self.emit_expr_to_string(expr)));
+                    }
+                }
+                syn::Stmt::Macro(stmt_macro) => {
+                    if is_last {
+                        return None;
+                    }
+                    stmts.push(format!("{};", self.emit_macro_expr(&stmt_macro.mac)));
+                }
+                syn::Stmt::Item(_) => return None,
+            }
+        }
+
+        Some(format!("[&]() {{ {} }}()", stmts.join(" ")))
     }
 
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
@@ -4905,9 +5186,9 @@ mod tests {
         "#,
         );
         assert!(out.contains("std::visit(overloaded {"));
-        assert!(out.contains("[](const E_A& _v)"));
+        assert!(out.contains("[&](const E_A& _v)"));
         assert!(out.contains("const auto& x = _v._0;"));
-        assert!(out.contains("[](const E_B&)"));
+        assert!(out.contains("[&](const E_B&)"));
     }
 
     #[test]
@@ -4918,7 +5199,7 @@ mod tests {
             fn f(m: M) { match m { M::Point { x, y } => { use_point(x, y); } } }
         "#,
         );
-        assert!(out.contains("[](const M_Point& _v)"));
+        assert!(out.contains("[&](const M_Point& _v)"));
         assert!(out.contains("const auto& x = _v.x;"));
         assert!(out.contains("const auto& y = _v.y;"));
     }
@@ -4931,7 +5212,7 @@ mod tests {
             fn f(e: E) { match e { E::A(x) => { a(); } _ => { other(); } } }
         "#,
         );
-        assert!(out.contains("[](const auto&) {"));
+        assert!(out.contains("[&](const auto&) {"));
         assert!(out.contains("other();"));
     }
 
@@ -4953,9 +5234,9 @@ mod tests {
         "#,
         );
         assert!(out.contains("std::visit(overloaded {"));
-        assert!(out.contains("[](const E_A&)"));
-        assert!(out.contains("[](const E_B&)"));
-        assert!(out.contains("[](const E_C&)"));
+        assert!(out.contains("[&](const E_A&)"));
+        assert!(out.contains("[&](const E_B&)"));
+        assert!(out.contains("[&](const E_C&)"));
     }
 
     #[test]
@@ -4966,7 +5247,7 @@ mod tests {
             fn f(e: E) { match e { E::A(x) => { a(); } other => { b(); } } }
         "#,
         );
-        assert!(out.contains("[](const auto& other)"));
+        assert!(out.contains("[&](const auto& other)"));
     }
 
     // ── Phase 4: Trait / Proxy facade tests ─────────────────────
@@ -6588,6 +6869,70 @@ mod tests {
         assert!(out.contains("[&]()"));
         assert!(out.contains("if (_m == 1) return 10;"));
         assert!(out.contains("return 0;"));
+    }
+
+    #[test]
+    fn test_leaf46_tail_match_expr_returns_from_function() {
+        let out = transpile_str("fn f(x: i32) -> i32 { match x { 1 => 10, _ => 0 } }");
+        assert!(out.contains("return [&]() { auto _m = x;"));
+        assert!(out.contains("if (_m == 1) return 10;"));
+        assert!(out.contains("return 0;"));
+        assert!(!out.contains("switch (x) {"));
+    }
+
+    #[test]
+    fn test_leaf46_tuple_match_expr_lowers_to_multi_visit_args() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B(i32) }
+            fn eq_like(a: E, b: E) -> bool {
+                match (a, b) {
+                    (E::A(x), E::A(y)) => x == y,
+                    _ => false,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return std::visit(overloaded {"));
+        assert!(out.contains("}, a, b);"));
+        assert!(out.contains("const auto& x = _v0._0;"));
+        assert!(out.contains("const auto& y = _v1._0;"));
+        assert!(!out.contains("/* TODO: expr */"));
+    }
+
+    #[test]
+    fn test_leaf46_visit_lambdas_capture_outer_locals() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B(i32) }
+            fn f(e: E, n: i32) -> i32 {
+                match e {
+                    E::A(x) => x + n,
+                    E::B(y) => y + n,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("[&](const E_A& _v)"));
+        assert!(out.contains("[&](const E_B& _v)"));
+        assert!(!out.contains("[](const E_A& _v)"));
+    }
+
+    #[test]
+    fn test_leaf46_block_expr_arm_no_todo_placeholder() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B(i32) }
+            fn f(e: E) -> i32 {
+                match e {
+                    E::A(x) => { let y = x + 1; y },
+                    E::B(y) => y,
+                }
+            }
+        "#,
+        );
+        assert!(!out.contains("/* TODO: expr */"));
+        assert!(out.contains("const auto y = x + 1;"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────

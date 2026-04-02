@@ -2340,6 +2340,44 @@ Verification:
   - duplicate-overload diagnostics are no longer present (`cannot be overloaded` / `previous declaration` absent from harness log);
   - next blockers are later-leaf semantic/lowering issues (`Leaf 4.6+`), not impl-merge duplicate signatures.
 
+### 10.30 Phase 18 Progress: End-to-End (Leaf 4.6) — DONE
+
+Leaf 4.6 removed invalid expression placeholders and fixed missing-return match lowering in generated method bodies.
+
+Changes:
+
+- Tail `match` in value-returning function/method contexts now lowers through expression path (IIFE) so codegen emits `return <match_expr>;` instead of statement-only `std::visit(...)` fallthrough.
+  - Added return-context tracking in `CodeGen` (`return_value_scopes`) and gated tail-match expression forcing to non-void return scopes only.
+- Match-lowering lambdas now capture surrounding locals by reference:
+  - statement-level `emit_visit_arm` lambdas switched from `[]` to `[&]`;
+  - expression-level `emit_match_expr_visit` lambdas switched from `[]` to `[&]`.
+- Added tuple-scrutinee expression match lowering:
+  - `(a, b)` scrutinee now emits `std::visit(overloaded { ... }, a, b)` with tuple-pattern parameter binding (`_v0`, `_v1`) and bound names (`x`, `y`) in lambda bodies.
+- Added robust pattern-type mapping for match arms:
+  - `variant_pattern_cpp_type(...)` handles `crate::Either::Left`, `Either::Left`, and bare `Left` (inside `impl Either`) to generated variant struct forms.
+- Removed invalid placeholder expression emissions from this path:
+  - expression fallback now uses `rusty::intrinsics::unreachable()` instead of `/* TODO: expr */`;
+  - added best-effort block-expression lowering (`block_expr_to_iife_string`) for simple block-valued arms.
+
+Regression tests added:
+
+- `test_leaf46_tail_match_expr_returns_from_function`
+- `test_leaf46_tuple_match_expr_lowers_to_multi_visit_args`
+- `test_leaf46_visit_lambdas_capture_outer_locals`
+- `test_leaf46_block_expr_arm_no_todo_placeholder`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf46 -- --nocapture` passes.
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+- Re-ran parity harness build stage:
+  - pre: `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf46-pre.1775091411 --stop-after build`
+  - post: `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf46-post.1775092825 --stop-after build`
+  - `/* TODO: expr */` is absent in generated `either.cppm` and harness log;
+  - `no return statement in function returning non-void` / `control reaches end` diagnostics are removed from harness log;
+  - next blockers are now later semantic/type-lowering issues (`Leaf 4.7` capture-and-reduce phase), not placeholder/fallthrough match lowering.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2520,3 +2558,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - Some distinct Rust paths collapse to the same C++ mapped type (for example `core::fmt::*` and `fmt::*`), so raw Rust-only keys can miss real C++ signature collisions.
 - It still allows duplicate C++ method declarations in generated output, causing hard compile failures.
 - A two-stage approach (raw-Rust dedup during impl collection + mapped-C++ dedup during emission) is needed to cover both source-level and lowered-signature conflicts safely.
+
+### 11.19 Statement-Only Lowering for Tail `match` in Non-Void Functions
+
+**Rejected approach:** Treat every `match` as statement control flow (`emit_match(...)`) even when it is the tail expression of a non-void function/method.
+
+**Why it was rejected:**
+- It emits statement-only `std::visit(...)`/`switch` bodies with no enclosing `return`, producing non-void fallthrough diagnostics.
+- It obscures expression semantics from Rust, where tail `match` is a value producer.
+- A return-context-aware approach (tail `match` lowered through expression IIFE only in value-return scopes) preserves intended Rust semantics while avoiding regressions in void-return statement matches.

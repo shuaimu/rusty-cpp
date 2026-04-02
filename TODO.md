@@ -288,6 +288,6 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Leaf 4.3: Fix dependent/associated-type emission in signatures and aliases (`typename L::IntoIter`, reference-qualified associated types, `Self::Output`) to valid C++ forms
           - [x] *done* Leaf 4.4: Fix nested-module export/import lowering (`export struct` inside namespace blocks, unqualified `using` re-export emissions) to C++-legal module syntax
           - [x] *done* Leaf 4.5: De-duplicate overlapping method emissions in expanded impl merges (`cloned`, `copied`, `as_ref`, `as_mut`) with deterministic signature conflict handling
-          - [ ] Leaf 4.6: Remove invalid expression placeholders and missing-return match lowering in generated method bodies (`/* TODO: expr */`, undefined temps, non-void fallthrough)
+          - [x] *done* Leaf 4.6: Remove invalid expression placeholders and missing-return match lowering in generated method bodies (`/* TODO: expr */`, undefined temps, non-void fallthrough)
           - [ ] Leaf 4.7: Re-run parity harness to capture the next reduced blocker set after Leaf 4.1-4.6
         - [ ] Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
