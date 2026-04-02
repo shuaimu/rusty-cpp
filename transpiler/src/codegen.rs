@@ -40,6 +40,11 @@ pub struct CodeGen {
     /// Generic type parameters declared by enum name.
     /// Used to recover variant template arguments in pattern lowering.
     enum_type_params: HashMap<String, Vec<String>>,
+    /// Enum names that lower to `std::variant` wrappers (enums with data).
+    /// Used to decide when match-path patterns require `std::visit` rather than `switch`.
+    data_enum_types: HashSet<String>,
+    /// Named struct field types for local type-context recovery in match lowering.
+    struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
     /// Set of variable names that are reassigned in the current block.
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
@@ -83,6 +88,8 @@ impl CodeGen {
             current_struct: None,
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
+            data_enum_types: HashSet::new(),
+            struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -140,6 +147,8 @@ impl CodeGen {
         self.return_value_scopes.clear();
         self.return_type_hints.clear();
         self.enum_type_params.clear();
+        self.data_enum_types.clear();
+        self.struct_field_types.clear();
         self.param_bindings.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
@@ -191,6 +200,9 @@ impl CodeGen {
         let mut helper_text = String::new();
         if self.output.contains("std::visit(overloaded {") {
             helper_text.push_str(visit_overloaded_helper_text());
+        }
+        if self.output.contains("iterator::IterEither<") {
+            helper_text.push_str(iterator_iter_either_forward_decl_text());
         }
         if needs_runtime_path_fallback_helpers(&self.output) {
             helper_text.push_str(runtime_path_fallback_helpers_text());
@@ -273,19 +285,23 @@ impl CodeGen {
                                 }
                             }
                         }
+                        let mut collected_item = impl_item.clone();
                         if let syn::ImplItem::Fn(method) = impl_item {
-                            let key = impl_method_conflict_key(method);
+                            let mut merged = method.clone();
+                            merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                            let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
                                 continue;
                             }
                             seen_method_keys.insert(key);
+                            if let Some(op) = &op_name {
+                                let method_name = merged.sig.ident.to_string();
+                                self.operator_renames
+                                    .insert((type_name.clone(), method_name), op.clone());
+                            }
+                            collected_item = syn::ImplItem::Fn(merged);
                         }
-                        if let (Some(op), syn::ImplItem::Fn(method)) = (&op_name, impl_item) {
-                            let method_name = method.sig.ident.to_string();
-                            self.operator_renames
-                                .insert((type_name.clone(), method_name), op.clone());
-                        }
-                        entry.push(impl_item.clone());
+                        entry.push(collected_item);
                     }
                 }
                 syn::Item::Mod(m) => {
@@ -414,6 +430,8 @@ impl CodeGen {
 
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let is_async = f.sig.asyncness.is_some();
+        // Emit template prefix if generic
+        self.emit_template_prefix(&f.sig.generics);
         self.push_type_param_scope(&f.sig.generics);
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
@@ -424,9 +442,6 @@ impl CodeGen {
         } else {
             return_type
         };
-
-        // Emit template prefix if generic
-        self.emit_template_prefix(&f.sig.generics);
 
         // Emit test case wrapper if #[test]
         if is_test {
@@ -512,6 +527,7 @@ impl CodeGen {
         self.indent += 1;
 
         // Emit fields
+        let mut named_field_types: HashMap<String, syn::Type> = HashMap::new();
         match &s.fields {
             syn::Fields::Named(fields) => {
                 for field in &fields.named {
@@ -520,6 +536,7 @@ impl CodeGen {
                     let field_name = field.ident.as_ref().unwrap();
                     let field_type = self.map_type(&field.ty);
                     self.writeln(&format!("{} {};", field_type, field_name));
+                    named_field_types.insert(field_name.to_string(), field.ty.clone());
                 }
             }
             syn::Fields::Unnamed(fields) => {
@@ -529,6 +546,12 @@ impl CodeGen {
                 }
             }
             syn::Fields::Unit => {}
+        }
+        if !named_field_types.is_empty() {
+            self.struct_field_types
+                .insert(name_str.clone(), named_field_types.clone());
+            let scoped_name = self.scoped_type_key(&name_str);
+            self.struct_field_types.insert(scoped_name, named_field_types);
         }
 
         // Emit methods from impl blocks (merged)
@@ -629,6 +652,11 @@ impl CodeGen {
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
+        if has_data {
+            self.data_enum_types.insert(name.to_string());
+        } else {
+            self.data_enum_types.remove(&name.to_string());
+        }
         self.push_type_param_scope(&e.generics);
 
         // Collect type parameters (skip lifetimes)
@@ -1292,6 +1320,10 @@ impl CodeGen {
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
+
+        // Emit template prefix for generic methods (excluding names already
+        // bound by outer type/impl scopes to avoid shadowing).
+        self.emit_template_prefix(&method.sig.generics);
         self.push_type_param_scope(&method.sig.generics);
 
         // Check if this method is an operator trait impl (renamed)
@@ -1314,9 +1346,6 @@ impl CodeGen {
         };
 
         let return_type = self.map_return_type(&method.sig.output);
-
-        // Emit template prefix for generic methods
-        self.emit_template_prefix(&method.sig.generics);
 
         // Analyze receiver to determine method kind
         let (qualifier, is_static) = match method.sig.inputs.first() {
@@ -1496,23 +1525,53 @@ impl CodeGen {
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
 
-        // Decide strategy: switch (for literals/wildcards) or std::visit (for variant patterns)
-        if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+        // Decide strategy: switch-compatible value patterns vs std::visit variant dispatch.
+        if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
             self.emit_match_as_switch(&scrutinee, &match_expr.arms);
         } else {
             self.emit_match_as_visit(&scrutinee, &match_expr.arms, variant_ctx.as_ref());
         }
     }
 
-    /// Check if all match arms use literal patterns, wildcards, or ident bindings.
-    fn all_arms_are_literal_or_wild(&self, arms: &[syn::Arm]) -> bool {
+    /// Check if all match arms can be lowered to value-based switch/if matching.
+    fn all_arms_are_switch_compatible(
+        &self,
+        arms: &[syn::Arm],
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
         arms.iter().all(|arm| {
-            matches!(
-                &arm.pat,
-                syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_)
-                    | syn::Pat::Or(_) | syn::Pat::Range(_)
-            )
+            match &arm.pat {
+                syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => true,
+                syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
+                syn::Pat::Or(or_pat) => or_pat.cases.iter().all(|case| match case {
+                    syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Range(_) => true,
+                    syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
+                    _ => false,
+                }),
+                _ => false,
+            }
         })
+    }
+
+    fn path_pattern_requires_visit(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        let enum_name = if path.segments.len() >= 2 {
+            path.segments
+                .iter()
+                .nth_back(1)
+                .map(|s| s.ident.to_string())
+        } else if let Some(ctx) = variant_ctx {
+            Some(ctx.enum_name.clone())
+        } else {
+            self.current_struct.clone()
+        };
+
+        enum_name
+            .as_ref()
+            .is_some_and(|name| self.data_enum_types.contains(name))
     }
 
     fn emit_match_as_switch(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
@@ -1524,6 +1583,10 @@ impl CodeGen {
                 }
                 syn::Pat::Lit(lit) => {
                     let val = self.emit_lit(&lit.lit);
+                    self.writeln(&format!("case {}: {{", val));
+                }
+                syn::Pat::Path(pp) => {
+                    let val = self.emit_path_to_string(&pp.path);
                     self.writeln(&format!("case {}: {{", val));
                 }
                 syn::Pat::Or(or_pat) => {
@@ -1538,6 +1601,13 @@ impl CodeGen {
                             }
                         } else if let syn::Pat::Wild(_) = case {
                             self.writeln("default: {");
+                        } else if let syn::Pat::Path(pp) = case {
+                            let val = self.emit_path_to_string(&pp.path);
+                            if i < or_pat.cases.len() - 1 {
+                                self.writeln(&format!("case {}:", val));
+                            } else {
+                                self.writeln(&format!("case {}: {{", val));
+                            }
                         }
                     }
                 }
@@ -1909,6 +1979,32 @@ impl CodeGen {
                     let val = self.emit_lit(&lit.lit);
                     parts.push(format!("if (_m == {}) return {};", val, body));
                 }
+                syn::Pat::Path(pp) => {
+                    let val = self.emit_path_to_string(&pp.path);
+                    parts.push(format!("if (_m == {}) return {};", val, body));
+                }
+                syn::Pat::Or(or_pat) => {
+                    let mut conds = Vec::new();
+                    for case in &or_pat.cases {
+                        match case {
+                            syn::Pat::Lit(lit) => conds.push(format!("_m == {}", self.emit_lit(&lit.lit))),
+                            syn::Pat::Path(pp) => {
+                                conds.push(format!("_m == {}", self.emit_path_to_string(&pp.path)))
+                            }
+                            syn::Pat::Wild(_) => {
+                                conds.clear();
+                                conds.push("true".to_string());
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if conds.is_empty() {
+                        parts.push(format!("return {};", body));
+                    } else {
+                        parts.push(format!("if ({}) return {};", conds.join(" || "), body));
+                    }
+                }
                 _ => parts.push(format!("return {};", body)),
             }
         }
@@ -2116,15 +2212,21 @@ impl CodeGen {
             .or_else(|| raw.strip_prefix("super_"))
             .unwrap_or(&raw)
             .to_string();
+        let looks_like_variant_name = stripped
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
         let base = if stripped.contains('_') {
             stripped
-        } else if let Some(struct_name) = &self.current_struct {
-            if stripped
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-            {
-                format!("{}_{}", struct_name, stripped)
+        } else if looks_like_variant_name {
+            if let Some(ctx) = variant_ctx {
+                format!("{}_{}", ctx.enum_name, stripped)
+            } else if let Some(struct_name) = &self.current_struct {
+                if self.data_enum_types.contains(struct_name) {
+                    format!("{}_{}", struct_name, stripped)
+                } else {
+                    stripped
+                }
             } else {
                 stripped
             }
@@ -2132,7 +2234,9 @@ impl CodeGen {
             stripped
         };
 
-        let enum_name = self.extract_variant_pattern_enum_name(path, &base);
+        let enum_name = self
+            .extract_variant_pattern_enum_name(path, &base)
+            .or_else(|| variant_ctx.map(|ctx| ctx.enum_name.clone()));
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
         if template_args.is_empty() {
@@ -2230,6 +2334,14 @@ impl CodeGen {
                     return self.infer_variant_type_context_from_type(&ty);
                 }
                 None
+            }
+            syn::Expr::Field(field) => {
+                let member = match &field.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(_) => return None,
+                };
+                let ty = self.lookup_field_type_for_expr_base(&field.base, &member)?;
+                self.infer_variant_type_context_from_type(&ty)
             }
             syn::Expr::Paren(p) => self.infer_variant_type_context_from_expr(&p.expr),
             syn::Expr::Group(g) => self.infer_variant_type_context_from_expr(&g.expr),
@@ -2720,6 +2832,55 @@ impl CodeGen {
         None
     }
 
+    fn lookup_field_type_for_expr_base(
+        &self,
+        base: &syn::Expr,
+        field_name: &str,
+    ) -> Option<syn::Type> {
+        match base {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let base_name = path.path.segments[0].ident.to_string();
+                if base_name == "self" {
+                    if let Some(struct_name) = &self.current_struct {
+                        return self.lookup_struct_field_type(struct_name, field_name);
+                    }
+                    return None;
+                }
+                let base_ty = self.lookup_local_binding_type(&base_name)?;
+                self.lookup_field_type_from_type(&base_ty, field_name)
+            }
+            syn::Expr::Paren(p) => self.lookup_field_type_for_expr_base(&p.expr, field_name),
+            syn::Expr::Group(g) => self.lookup_field_type_for_expr_base(&g.expr, field_name),
+            syn::Expr::Reference(r) => self.lookup_field_type_for_expr_base(&r.expr, field_name),
+            _ => None,
+        }
+    }
+
+    fn lookup_field_type_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let struct_name = tp.path.segments.last()?.ident.to_string();
+        let struct_name = if struct_name == "Self" {
+            self.current_struct.clone()?
+        } else {
+            struct_name
+        };
+        self.lookup_struct_field_type(&struct_name, field_name)
+    }
+
+    fn lookup_struct_field_type(&self, struct_name: &str, field_name: &str) -> Option<syn::Type> {
+        self.struct_field_types
+            .get(struct_name)
+            .and_then(|fields| fields.get(field_name).cloned())
+            .or_else(|| {
+                let scoped = self.scoped_type_key(struct_name);
+                self.struct_field_types
+                    .get(&scoped)
+                    .and_then(|fields| fields.get(field_name).cloned())
+            })
+    }
+
     fn push_param_bindings(
         &mut self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -2760,6 +2921,9 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(ty) = expected_ty {
+            if let Some(emitted) = self.try_emit_iter_either_new_call_with_expected(call, ty) {
+                return emitted;
+            }
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
                 return emitted;
             }
@@ -2905,6 +3069,32 @@ impl CodeGen {
             .collect();
 
         Some(format!("{}<{}>({})", ctor_name, expected_args.join(", "), args.join(", ")))
+    }
+
+    /// If this is `IterEither::new_(...)` in expression position with a known
+    /// expected return type, emit a fully-specialized static call:
+    /// `iterator::IterEither<A, B>::new_(...)`.
+    fn try_emit_iter_either_new_call_with_expected(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: &syn::Type,
+    ) -> Option<String> {
+        let func = self.emit_expr_to_string(&call.func);
+        if !func.ends_with("IterEither::new_") {
+            return None;
+        }
+
+        let expected_cpp_ty = self.map_type(expected_ty);
+        if !expected_cpp_ty.contains("IterEither<") {
+            return None;
+        }
+
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+        Some(format!("{}::new_({})", expected_cpp_ty, args.join(", ")))
     }
 
     /// Extract mapped template arguments from an expected type path.
@@ -3172,7 +3362,7 @@ impl CodeGen {
     ) -> String {
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
         // Match as expression → immediately-invoked lambda
-        if self.all_arms_are_literal_or_wild(&match_expr.arms) {
+        if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
             let scrutinee = self.emit_expr_to_string(&match_expr.expr);
             // Simple switch-like match → ternary chain or IIFE with switch
             format!(
@@ -3284,6 +3474,19 @@ impl CodeGen {
         // Map Rust Option constructors
         if segments.len() == 1 && segments[0] == "None" {
             return "std::nullopt".to_string();
+        }
+
+        // Expanded either crate commonly references `IterEither` through imports.
+        // Use a stable fully-qualified path so type/call sites resolve before re-exports.
+        if !segments.is_empty() && segments[0] == "IterEither" {
+            if segments.len() == 1 {
+                return "iterator::IterEither".to_string();
+            }
+            let mut escaped = segments.clone();
+            if let Some(last) = escaped.last_mut() {
+                *last = escape_cpp_keyword(last);
+            }
+            return format!("iterator::{}", escaped.join("::"));
         }
 
         // Map Rust Ordering enum variants to fallback ordering enum variants.
@@ -3420,25 +3623,9 @@ impl CodeGen {
                             .collect();
 
                         if !type_args.is_empty() {
-                            // Re-map the base without the args we already processed
-                            let mut base = {
-                                let segs: Vec<String> = tp
-                                    .path
-                                    .segments
-                                    .iter()
-                                    .map(|s| s.ident.to_string())
-                                    .collect();
-                                let joined = segs.join("::");
-                                if let Some((cpp, _)) = types::map_std_type(&joined) {
-                                    cpp.to_string()
-                                } else if segs.len() == 1 {
-                                    types::map_primitive_type(&segs[0])
-                                        .map(|s| s.to_string())
-                                        .unwrap_or(joined)
-                                } else {
-                                    joined
-                                }
-                            };
+                            // Reuse path_str so single-segment remaps (e.g. IterEither →
+                            // iterator::IterEither) are preserved for generic type paths.
+                            let mut base = path_str.clone();
                             if self.current_struct.is_some() && base.starts_with("Self::") {
                                 base = base.trim_start_matches("Self::").to_string();
                             }
@@ -3817,6 +4004,8 @@ impl CodeGen {
             current_struct: None,
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
+            data_enum_types: HashSet::new(),
+            struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -4114,6 +4303,7 @@ impl CodeGen {
                     None // Skip lifetime and const params
                 }
             })
+            .filter(|tp| !self.is_type_param_in_scope(&tp.ident.to_string()))
             .collect();
 
         if type_params.is_empty() {
@@ -4261,6 +4451,53 @@ fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
     )
 }
 
+/// Merge impl-level type params into a method's generic parameter list.
+/// This preserves placeholders introduced by specialized impl blocks
+/// (e.g., impl<L, R, E> Either<Result<L,E>, Result<R,E>>).
+fn merge_impl_type_generics_into_method(
+    method: &mut syn::ImplItemFn,
+    impl_generics: &syn::Generics,
+) {
+    let mut existing: HashSet<String> = method
+        .sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    for param in &impl_generics.params {
+        if let syn::GenericParam::Type(tp) = param {
+            if existing.insert(tp.ident.to_string()) {
+                method
+                    .sig
+                    .generics
+                    .params
+                    .push(syn::GenericParam::Type(tp.clone()));
+            }
+        }
+    }
+
+    if let Some(impl_where) = &impl_generics.where_clause {
+        let where_clause = method.sig.generics.make_where_clause();
+        let mut seen_preds: HashSet<String> = where_clause
+            .predicates
+            .iter()
+            .map(|p| normalize_token_text(p.to_token_stream().to_string()))
+            .collect();
+
+        for pred in &impl_where.predicates {
+            let key = normalize_token_text(pred.to_token_stream().to_string());
+            if seen_preds.insert(key) {
+                where_clause.predicates.push(pred.clone());
+            }
+        }
+    }
+}
+
 fn normalize_token_text(tokens: String) -> String {
     tokens.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -4288,6 +4525,14 @@ overloaded(Ts...) -> overloaded<Ts...>;\n\
 \n"
 }
 
+fn iterator_iter_either_forward_decl_text() -> &'static str {
+    "namespace iterator {\n\
+template<typename L, typename R>\n\
+struct IterEither;\n\
+}\n\
+\n"
+}
+
 fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
     let markers = [
         "rusty::intrinsics::",
@@ -4298,6 +4543,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::path::Path",
         "rusty::ffi::",
         "rusty::cmp::Ordering",
+        "core::cmp::",
     ];
     markers.iter().any(|m| output.contains(m))
 }
@@ -4370,6 +4616,24 @@ Discriminant discriminant_value(const V& value) {\n\
     return Discriminant{static_cast<std::size_t>(value.index())};\n\
 }\n\
 [[noreturn]] inline void unreachable() { std::abort(); }\n\
+}\n\
+}\n\
+\n\
+namespace core {\n\
+namespace cmp {\n\
+using Ordering = ::rusty::cmp::Ordering;\n\
+struct PartialOrd {\n\
+    template<typename A, typename B>\n\
+    static auto partial_cmp(A&& a, B&& b) {\n\
+        return std::forward<A>(a).partial_cmp(std::forward<B>(b));\n\
+    }\n\
+};\n\
+struct Ord {\n\
+    template<typename A, typename B>\n\
+    static auto cmp(A&& a, B&& b) {\n\
+        return std::forward<A>(a).cmp(std::forward<B>(b));\n\
+    }\n\
+};\n\
 }\n\
 }\n\
 \n"
@@ -5521,10 +5785,10 @@ mod tests {
             fn f(e: E) { match e { E::A => { a(); } E::B => { b(); } E::C => { c(); } } }
         "#,
         );
-        assert!(out.contains("std::visit(overloaded {"));
-        assert!(out.contains("[&](const E_A&)"));
-        assert!(out.contains("[&](const E_B&)"));
-        assert!(out.contains("[&](const E_C&)"));
+        assert!(out.contains("switch (e) {"));
+        assert!(out.contains("case E::A: {"));
+        assert!(out.contains("case E::B: {"));
+        assert!(out.contains("case E::C: {"));
     }
 
     #[test]
@@ -5875,8 +6139,8 @@ mod tests {
     fn test_visit_overloaded_helper_emitted_once() {
         let out = transpile_str(
             r#"
-            enum E { A, B }
-            fn f(e: E) { match e { E::A => {}, E::B => {} } }
+            enum E { A(i32), B(i32) }
+            fn f(e: E) { match e { E::A(x) => { use_x(x); }, E::B(y) => { use_y(y); } } }
         "#,
         );
         assert!(out.contains("struct overloaded : Ts... { using Ts::operator()...; };"));
@@ -5892,8 +6156,8 @@ mod tests {
     fn test_visit_overloaded_helper_precedes_visit_use_in_module_mode() {
         let out = transpile_str_module(
             r#"
-            pub enum E { A, B }
-            pub fn f(e: E) { match e { E::A => {}, E::B => {} } }
+            pub enum E { A(i32), B(i32) }
+            pub fn f(e: E) { match e { E::A(x) => { use_x(x); }, E::B(y) => { use_y(y); } } }
         "#,
             "my_crate",
         );
@@ -7295,6 +7559,80 @@ mod tests {
         );
         assert!(out.contains("return Left<L, R>(std::move(e));"));
         assert!(out.contains("return Right<L, R>(std::move(o));"));
+    }
+
+    #[test]
+    fn test_leaf410_iter_either_new_call_uses_expected_return_specialization() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            mod iterator {
+                struct IterEither<L, R> { inner: Either<L, R> }
+                impl<L, R> IterEither<L, R> {
+                    fn new_(inner: Either<L, R>) -> Self { IterEither { inner } }
+                }
+            }
+            impl<L, R> Either<L, R> {
+                fn factor(self) -> iterator::IterEither<L, R> {
+                    iterator::IterEither::new_(self)
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("iterator::IterEither<L, R>::new_("));
+        assert!(!out.contains("iterator::IterEither::new_("));
+    }
+
+    #[test]
+    fn test_leaf410_core_cmp_fallback_helpers_emitted_for_core_cmp_calls() {
+        let out = transpile_str(
+            r#"
+            fn f<T>(a: T, b: T) {
+                core::cmp::Ord::cmp(a, b);
+                core::cmp::PartialOrd::partial_cmp(a, b);
+            }
+        "#,
+        );
+        assert!(out.contains("core::cmp::Ord::cmp("));
+        assert!(out.contains("core::cmp::PartialOrd::partial_cmp("));
+        assert!(out.contains("namespace core {"));
+        assert!(out.contains("struct PartialOrd {"));
+        assert!(out.contains("struct Ord {"));
+    }
+
+    #[test]
+    fn test_leaf410_ordering_match_does_not_emit_flattened_placeholder_name() {
+        let out = transpile_str(
+            r#"
+            fn is_eq(o: rusty::cmp::Ordering) -> bool {
+                match o {
+                    rusty::cmp::Ordering::Equal => true,
+                    _ => false,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::cmp::Ordering::Equal"));
+        assert!(!out.contains("rusty_cmp_Ordering_Equal"));
+    }
+
+    #[test]
+    fn test_leaf410_specialized_impl_method_keeps_impl_generic_placeholders() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R, E> Either<Result<L, E>, Result<R, E>> {
+                fn factor_err(self) -> Result<Either<L, R>, E> {
+                    match self {
+                        Left(l) => l.map(Left),
+                        Right(r) => r.map(Right),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("template<typename E>"));
+        assert!(out.contains("rusty::Result<Either<L, R>, E> factor_err()"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────

@@ -298,7 +298,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Propagate function/method return type hints into match-expression arm body emission (including `return` paths) so arm constructor calls receive expected type context
             - [x] *done* Extend expected-type template-arg inference to cover bare `Self`/enum return hints in generic impl scope, emitting `Left<...>/Right<...>` dependent calls
             - [x] *done* Add regression tests for explicit generic return and `Self` return; re-run parity harness build stage and verify previous `there are no arguments to Left/Right` diagnostics are gone
-          - [ ] Leaf 4.10: Resolve remaining unresolved expanded-output names in iterator paths (`IterEither*`, `core`, `rusty_cmp_Ordering_Equal`, generic placeholders)
+          - [x] Leaf 4.10: Resolve remaining unresolved expanded-output names in iterator paths (`IterEither*`, `core`, `rusty_cmp_Ordering_Equal`, generic placeholders)
           - [ ] Leaf 4.11: Fix module-linkage issue for `export using iterator::IterEither` re-export lowering
           - [ ] Leaf 4.12: Fix `RUSTY_TRY` availability/emission in templated generated iterator paths
           - [ ] Leaf 4.13: Fix residual malformed `switch`/`case` placement in generated blocks

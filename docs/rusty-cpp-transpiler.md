@@ -2517,6 +2517,42 @@ Design rationale:
 
 - This follows rejected broad-rewrite approaches in §11.4 and §11.7 by fixing only the dependent-call typing path instead of introducing global constructor/path rewrites.
 
+### 10.35 Phase 18 Progress: End-to-End (Leaf 4.10) — DONE
+
+Leaf 4.10 resolved remaining unresolved-name classes in expanded either output for iterator paths and fallback runtime paths.
+
+Changes:
+
+- Added expected-type-aware static call lowering for `IterEither::new_(...)`:
+  - when return-type context is known, emit fully specialized calls such as
+    `iterator::IterEither<typename L::IntoIter, typename R::IntoIter>::new_(...)`;
+  - avoids unresolved template-name calls (`iterator::IterEither::new_` without template args).
+- Extended runtime fallback helper trigger detection:
+  - `needs_runtime_path_fallback_helpers(...)` now also activates on `core::cmp::` call sites;
+  - guarantees `core::cmp::{Ord, PartialOrd}` fallback wrappers are emitted when needed.
+- Preserved/validated impl-generic propagation in specialized impl methods to prevent unresolved placeholder names in merged method bodies.
+- Retained match-path lowering updates so ordering variants emit as `rusty::cmp::Ordering::Equal` (no flattened placeholder identifiers).
+
+Regression tests added:
+
+- `test_leaf410_iter_either_new_call_uses_expected_return_specialization`
+- `test_leaf410_core_cmp_fallback_helpers_emitted_for_core_cmp_calls`
+- `test_leaf410_ordering_match_does_not_emit_flattened_placeholder_name`
+- `test_leaf410_specialized_impl_method_keeps_impl_generic_placeholders`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf410 -- --nocapture` passes.
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf410-fix6 --stop-after build`
+  - prior unresolved-name diagnostics for `IterEither*`, `core::cmp::*`, `rusty_cmp_Ordering_Equal`, and merged generic placeholders are no longer present in `cpp_build.log`;
+  - remaining failures belong to later leaves (e.g., default-keyword emission, `Self_*`/`Result_*` variant typing, module re-export linkage).
+
+Design rationale:
+
+- Followed rejected broad/global-rewrite approaches in §11.4 and §11.15.
+- Avoided introducing ad-hoc shim types for template static calls; used return-type context to emit correct dependent template specializations directly.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2715,3 +2751,13 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - In the current parity snapshot these are mostly cascade errors from earlier lambda signature/type failures (for example missing template arguments on variant types).
 - Local patches at the binding-use sites hide root causes and create brittle, non-general fixes.
 - The correct next step is root-cause-first on upstream pattern type/templated variant emission and dependent-name resolution, then re-evaluate remaining binding diagnostics.
+
+### 11.21 Adding Non-Template `IterEither` Shims to Absorb `IterEither::new_` Calls
+
+**Rejected approach:** Introduce ad-hoc non-template shim types/functions (for example `iterator::IterEitherFactory` or a non-template `IterEither` wrapper) just to make unspecialized `IterEither::new_(...)` calls compile.
+
+**Why it was rejected:**
+- It papers over a type-context emission bug instead of fixing the real issue (missing dependent template specialization at the call site).
+- It increases runtime/helper surface with artificial compatibility layers that can drift from real semantics.
+- It risks creating ambiguous name lookup and module-linkage complications around real `iterator::IterEither<L, R>` declarations.
+- The robust fix is expected-type-aware call lowering that emits `iterator::IterEither<...>::new_(...)` directly at the original call site.
