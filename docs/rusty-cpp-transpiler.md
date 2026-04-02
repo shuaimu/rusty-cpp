@@ -2307,6 +2307,39 @@ Verification:
   - no bare `using Name;` from nested `super` imports (`using ::Either;`, etc. are emitted);
   - skipped trait re-export comment for `into_either::IntoEither` instead of invalid export-using emission.
 
+### 10.29 Phase 18 Progress: End-to-End (Leaf 4.5) — DONE
+
+Leaf 4.5 de-duplicated overlapping method emissions from merged expanded `impl` blocks with deterministic conflict handling.
+
+Changes:
+
+- Added collection-time method conflict tracking in `collect_impl_blocks` keyed by:
+  - method name;
+  - receiver form (`&self`, `&mut self`, by-value `self`, static);
+  - method generics;
+  - parameter-type token forms.
+- Return type is intentionally excluded from conflict keys because C++ cannot overload by return type alone.
+- Added emission-time per-type conflict tracking in `emit_method` keyed on mapped C++ signature components.
+  - This catches collisions that only appear after Rust-path lowering (for example `core::fmt::Formatter` and `fmt::Formatter` both mapping to `rusty::fmt::Formatter`).
+- Conflict handling is deterministic and keep-first: later duplicates are skipped.
+
+Regression tests added:
+
+- `test_leaf45_duplicate_method_signature_keeps_first`
+- `test_leaf45_methods_with_different_params_not_deduped`
+- `test_leaf45_same_name_different_return_type_is_deduped`
+- `test_leaf45_mapped_param_type_collision_is_deduped`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf45 -- --nocapture` passes.
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+- Re-ran parity harness build stage:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf45-post3.1775091235 --stop-after build`
+  - duplicate-overload diagnostics are no longer present (`cannot be overloaded` / `previous declaration` absent from harness log);
+  - next blockers are later-leaf semantic/lowering issues (`Leaf 4.6+`), not impl-merge duplicate signatures.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2478,3 +2511,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It over-exports module-internal declarations, changing visibility semantics far beyond the original Rust `pub` intent.
 - It can force linkage checks on nested `using` imports and trigger new module-linkage export errors (for example, exporting `using ::Either`/`::Left`/`::Right` declarations).
 - A targeted fix (no nested `export` keyword + legal qualified nested `using` lowering + selective trait re-export suppression) is narrower, safer, and easier to reason about.
+
+### 11.18 Raw-Rust-Only Method De-duplication
+
+**Rejected approach:** De-duplicate merged methods using only raw Rust-signature identity and assume that is sufficient for emitted C++ uniqueness.
+
+**Why it was rejected:**
+- Some distinct Rust paths collapse to the same C++ mapped type (for example `core::fmt::*` and `fmt::*`), so raw Rust-only keys can miss real C++ signature collisions.
+- It still allows duplicate C++ method declarations in generated output, causing hard compile failures.
+- A two-stage approach (raw-Rust dedup during impl collection + mapped-C++ dedup during emission) is needed to cover both source-level and lowered-signature conflicts safely.

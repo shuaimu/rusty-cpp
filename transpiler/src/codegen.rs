@@ -19,6 +19,10 @@ pub struct CodeGen {
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
+    /// Dedup keys for merged impl methods by type.
+    /// Prevents duplicate C++ method emissions when expanded Rust yields
+    /// overlapping inherent impl methods with the same callable signature.
+    impl_method_conflict_keys: HashMap<String, HashSet<String>>,
     /// Maps (type_name, method_name) → C++ operator name for operator trait impls.
     operator_renames: HashMap<(String, String), String>,
     /// Current struct name when emitting methods inside a struct.
@@ -41,6 +45,9 @@ pub struct CodeGen {
     /// Traits intentionally skipped in module mode (Proxy facade unavailable),
     /// tracked by scoped path so `pub use` can be lowered as Rust-only imports.
     skipped_module_traits: HashSet<String>,
+    /// Per-type method signature keys already emitted in the current type body.
+    /// This catches collisions that only appear after Rust-path → C++ mapping.
+    emitted_method_conflict_keys: Vec<HashSet<String>>,
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
@@ -54,6 +61,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             impl_blocks: HashMap::new(),
+            impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
@@ -62,6 +70,7 @@ impl CodeGen {
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
+            emitted_method_conflict_keys: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -103,8 +112,10 @@ impl CodeGen {
         self.module_name = module_name.map(|s| s.to_string());
         self.module_stack.clear();
         self.impl_blocks.clear();
+        self.impl_method_conflict_keys.clear();
         self.operator_renames.clear();
         self.skipped_module_traits.clear();
+        self.emitted_method_conflict_keys.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -223,6 +234,10 @@ impl CodeGen {
                     });
 
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
+                    let seen_method_keys = self
+                        .impl_method_conflict_keys
+                        .entry(type_name.clone())
+                        .or_default();
                     for impl_item in &impl_block.items {
                         if op_name.is_some() {
                             if let syn::ImplItem::Type(assoc) = impl_item {
@@ -232,6 +247,13 @@ impl CodeGen {
                                     continue;
                                 }
                             }
+                        }
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            let key = impl_method_conflict_key(method);
+                            if seen_method_keys.contains(&key) {
+                                continue;
+                            }
+                            seen_method_keys.insert(key);
                         }
                         if let (Some(op), syn::ImplItem::Fn(method)) = (&op_name, impl_item) {
                             let method_name = method.sig.ident.to_string();
@@ -478,9 +500,11 @@ impl CodeGen {
                 self.newline();
             }
             self.current_struct = Some(name_str.clone());
+            self.emitted_method_conflict_keys.push(HashSet::new());
             for impl_item in &methods {
                 self.emit_impl_item(impl_item);
             }
+            self.emitted_method_conflict_keys.pop();
             self.current_struct = None;
         }
 
@@ -668,9 +692,11 @@ impl CodeGen {
                 if let Some(methods) = self.take_impls_for_type(&name.to_string()) {
                     self.newline();
                     self.current_struct = Some(name.to_string());
+                    self.emitted_method_conflict_keys.push(HashSet::new());
                     for impl_item in &methods {
                         self.emit_impl_item(impl_item);
                     }
+                    self.emitted_method_conflict_keys.pop();
                     self.current_struct = None;
                 }
 
@@ -1049,6 +1075,36 @@ impl CodeGen {
         self.skipped_module_traits.contains(normalized)
     }
 
+    fn emitted_method_conflict_key(
+        &self,
+        method_name: &str,
+        generics: &syn::Generics,
+        qualifier: &str,
+        is_static: bool,
+        params: &[String],
+    ) -> String {
+        let static_key = if is_static { "static" } else { "instance" };
+        let qualifier_key = qualifier.trim();
+        let generics_key = normalize_token_text(generics.to_token_stream().to_string());
+        format!(
+            "{}|{}|{}|{}|{}",
+            method_name,
+            static_key,
+            qualifier_key,
+            generics_key,
+            params.join(",")
+        )
+    }
+
+    /// Returns true if key is first-seen in current type scope, false if duplicate.
+    fn mark_emitted_method_conflict_key(&mut self, key: String) -> bool {
+        if let Some(scope) = self.emitted_method_conflict_keys.last_mut() {
+            scope.insert(key)
+        } else {
+            true
+        }
+    }
+
     /// Flatten a use tree into a list of fully-qualified C++ paths.
     /// Handles groups by expanding each item with the parent prefix.
     fn flatten_use_tree(&self, tree: &syn::UseTree, prefix: &str) -> Vec<String> {
@@ -1260,6 +1316,12 @@ impl CodeGen {
             .collect();
 
         let static_prefix = if is_static { "static " } else { "" };
+        let conflict_key =
+            self.emitted_method_conflict_key(&name, &method.sig.generics, qualifier, is_static, &params);
+        if !self.mark_emitted_method_conflict_key(conflict_key) {
+            self.pop_type_param_scope();
+            return;
+        }
         self.writeln(&format!(
             "{}{} {}({}){} {{",
             static_prefix,
@@ -3280,6 +3342,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             impl_blocks: HashMap::new(),
+            impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
@@ -3288,6 +3351,7 @@ impl CodeGen {
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
+            emitted_method_conflict_keys: Vec::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -3594,6 +3658,42 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "PartialOrd" => Some("operator<=>"),
         _ => None,
     }
+}
+
+/// Build a deterministic conflict key for merged impl methods.
+/// Return type is intentionally excluded because C++ cannot overload by return type.
+fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
+    let receiver_key = match method.sig.inputs.first() {
+        Some(syn::FnArg::Receiver(recv)) => {
+            if recv.reference.is_some() {
+                if recv.mutability.is_some() {
+                    "recv:&mut"
+                } else {
+                    "recv:&"
+                }
+            } else {
+                "recv:self"
+            }
+        }
+        _ => "recv:static",
+    };
+
+    let mut params = Vec::new();
+    for arg in &method.sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            params.push(normalize_token_text(pt.ty.to_token_stream().to_string()));
+        }
+    }
+    let params_key = params.join(",");
+    let generics_key = normalize_token_text(method.sig.generics.to_token_stream().to_string());
+    format!(
+        "{}|{}|{}|{}",
+        method.sig.ident, receiver_key, generics_key, params_key
+    )
+}
+
+fn normalize_token_text(tokens: String) -> String {
+    tokens.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
@@ -4353,6 +4453,68 @@ mod tests {
         let b_pos = out.find("double b()").unwrap();
         assert!(a_pos > struct_pos && a_pos < close_pos);
         assert!(b_pos > struct_pos && b_pos < close_pos);
+    }
+
+    #[test]
+    fn test_leaf45_duplicate_method_signature_keeps_first() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn cloned(&self) -> i32 { 1 } }
+            impl Foo { fn cloned(&self) -> i32 { 2 } }
+        "#,
+        );
+
+        assert_eq!(out.matches("int32_t cloned() const {").count(), 1);
+        assert!(out.contains("return 1;"));
+        assert!(!out.contains("return 2;"));
+    }
+
+    #[test]
+    fn test_leaf45_methods_with_different_params_not_deduped() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn as_ref(&self) -> i32 { 1 } }
+            impl Foo { fn as_ref(&self, x: i32) -> i32 { x } }
+        "#,
+        );
+
+        assert_eq!(out.matches("as_ref(").count(), 2);
+        assert!(out.contains("int32_t as_ref() const {"));
+        assert!(out.contains("int32_t as_ref(int32_t x) const {"));
+    }
+
+    #[test]
+    fn test_leaf45_same_name_different_return_type_is_deduped() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn as_mut(&self) -> i32 { 1 } }
+            impl Foo { fn as_mut(&self) -> bool { true } }
+        "#,
+        );
+
+        assert_eq!(out.matches(" as_mut() const {").count(), 1);
+        assert!(out.contains("int32_t as_mut() const {"));
+        assert!(!out.contains("bool as_mut() const {"));
+    }
+
+    #[test]
+    fn test_leaf45_mapped_param_type_collision_is_deduped() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn fmt(&self, f: core::fmt::Formatter) -> core::fmt::Result { true } }
+            impl Foo { fn fmt(&self, f: fmt::Formatter) -> fmt::Result { true } }
+        "#,
+        );
+
+        assert_eq!(
+            out.matches("rusty::fmt::Result fmt(rusty::fmt::Formatter f) const {")
+                .count(),
+            1
+        );
     }
 
     #[test]
