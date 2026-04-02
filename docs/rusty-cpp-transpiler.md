@@ -4159,6 +4159,142 @@ Design rationale:
   trait-bound constraints.
 - Preserved existing behavior for local/user trait-bound constraints that still rely on facade emission.
 
+### 10.11.37 Leaf 4.31: Remove expanded-test facade/proxy blocker family
+
+Problem:
+
+- After Leaf 4.30, expanded compile probes moved to the next deterministic facade/proxy blockers:
+  - unresolved `DoubleEndedIteratorFacade`, `AsRefFacade`, `AsMutFacade` in generated `requires` constraints,
+  - unresolved trait facade/proxy emissions (`PRO_DEF_MEM_DISPATCH`, `pro::facade_builder`) from trait items in expanded test output.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one upfront expanded-libtest detection path,
+  - one trait-emission guard branch for expanded test mode,
+  - one trait-facade classification update,
+  - focused regressions and expanded re-probe.
+
+Execution plan:
+
+1. Detect expanded libtest output before item emission so trait strategy does not depend on declaration order.
+2. Skip trait facade/proxy emission in expanded test mode (same spirit as existing module-mode guard).
+3. Skip unresolved standard trait-facade constraints for `DoubleEndedIterator`/`AsRef`/`AsMut`.
+4. Re-probe expanded compile and capture the next deterministic blocker family.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added `expanded_libtest_mode` in `CodeGen` state and initialization paths.
+  - Added upfront detection:
+    - `detect_expanded_libtest_mode(...)` (recursive scan),
+    - `has_rustc_test_marker_attr(...)`.
+  - In `emit_trait(...)`, added an expanded-test guard:
+    - emit Rust-only trait comment and skip facade/proxy emission in expanded-test mode.
+  - Extended `facade_name_for_trait_path(...)` skip list with:
+    - `DoubleEndedIterator`, `AsRef`, `AsMut`.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf431_trait_facade_emission_skipped_in_expanded_libtest_mode`
+- `codegen::tests::test_leaf431_additional_std_traits_requires_skipped`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf431 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf431.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf431.rs -o /tmp/either-expanded-tests-leaf431.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=40 -c /tmp/either-expanded-tests-leaf431.cppm -o /tmp/either-expanded-tests-leaf431.o`
+
+Re-probe result:
+
+- Previous Leaf 4.31 facade/proxy blockers are removed:
+  - no first-failure diagnostics for `DoubleEndedIteratorFacade`/`AsRefFacade`/`AsMutFacade`,
+  - no first-failure diagnostics for unresolved `PRO_DEF_MEM_DISPATCH`/`pro::facade_builder`.
+- Next deterministic blockers are eager associated-type member declarations on concrete
+  non-iterator instantiations (`Either<int,int>` family), for example `L::Item`, `L::IntoIter`,
+  `L::Output`, `L::Target`.
+
+Design rationale:
+
+- Preserved existing module-mode guard behavior and made expanded-test mode explicit.
+- Avoided injecting fake Proxy runtime stubs that could mask real semantic lowering gaps.
+
+### 10.11.38 Leaf 4.32: Remove eager associated-type instantiation blockers in expanded tests
+
+Problem:
+
+- After Leaf 4.31, expanded compile probes moved to eager associated-type instantiation on
+  concrete non-trait uses such as `Either<int,int>`.
+- The generated class still contained declarations like:
+  - `using Item = typename L::Item;`
+  - `Either<typename L::IntoIter, typename R::IntoIter> ...`
+  - `rusty::Option<Either::Item> ...`
+  which instantiate invalid `int::...` lookups even when those trait-heavy methods are never used.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one constrained-mode helper,
+  - one method softening condition extension,
+  - one current-struct associated-projection detector,
+  - focused regressions and re-probe.
+
+Execution plan:
+
+1. Extend associated-type constrained emission behavior to expanded-test mode (not only named modules).
+2. Soften method return signatures to `auto` when return types contain dependent associated projections
+   or current-struct associated projections (for example `Either::Item`).
+3. Add focused regressions for expanded mode.
+4. Re-run expanded compile probe and capture next blockers.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added `should_soften_dependent_assoc_mode()`:
+    - true for `module_name.is_some()` or `expanded_libtest_mode`.
+  - Updated impl associated-type alias emission:
+    - skip dependent aliases in constrained mode, with comment
+      `Rust-only dependent associated type alias skipped in constrained mode`.
+  - Updated method return softening condition:
+    - now applies in constrained mode,
+    - triggers on both:
+      - existing dependent associated detection (`L::IntoIter`, `Self::Output`, etc.),
+      - and current-struct associated projections (`Either::Item`) via
+        `return_type_references_current_struct_assoc(...)`.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf432_expanded_mode_dependent_assoc_signatures_are_softened`
+- `codegen::tests::test_leaf432_expanded_mode_softens_current_struct_assoc_projection_returns`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf432 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf432-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf432-post.rs -o /tmp/either-expanded-tests-leaf432-post.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf432-post.cppm -o /tmp/either-expanded-tests-leaf432-post.o`
+
+Re-probe result:
+
+- Previous eager associated-type blocker family is removed:
+  - no `using Item/Output/Target = typename ...` emissions in this path,
+  - no `Either<typename L::IntoIter, typename R::IntoIter>` signatures for this family.
+- Next deterministic blockers are now in later families:
+  - `read_write()` local redeclaration (`buf`),
+  - error-path assertion lowering (`core::panicking::panic`, malformed `unreachable()` ternary condition),
+  - constructor lookup ordering (`Left`/`Right` in `as_ref`/`as_mut` before helper declaration).
+
+Design rationale:
+
+- Reused the existing module-mode associated-type strategy instead of inventing a separate
+  expanded-test-only rewrite path.
+- Kept changes scoped to constrained emission modes to avoid broad behavior shifts in regular output.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4660,3 +4796,30 @@ non-module output to avoid unresolved `*Facade` symbols quickly.
 - It hides the true unresolved-trait classification problem by over-disabling code generation.
 - A targeted skip for known unresolved standard trait families keeps the fix auditable while
   preserving supported trait-bound behavior.
+
+### 11.47 Injecting Fake Global Proxy Stubs (`PRO_DEF_MEM_DISPATCH`/`pro::*`) to Force Compile
+
+**Rejected approach:** Add synthetic global fallback definitions for `PRO_DEF_MEM_DISPATCH`,
+`pro::facade_builder`, `pro::proxy`, and `pro::proxy_view` so expanded compile probes pass
+without changing trait emission decisions.
+
+**Why it was rejected:**
+
+- It can hide real lowering/runtime integration gaps by making unresolved proxy paths appear
+  compilable under fake semantics.
+- It risks introducing non-trivial API/behavior divergence for trait default-method call shapes.
+- A mode-aware trait emission guard in expanded-test output is narrower, explicit, and easier to audit.
+
+### 11.48 Keeping Dependent Associated-Type Member Declarations and Trying to Mask Failures Later
+
+**Rejected approach:** Keep emitting dependent associated aliases/signatures (`using Item = typename L::Item`,
+`Either<typename L::IntoIter, ...>`, `Either::Item` returns) in expanded tests and rely on downstream
+wrappers/casts/stubs to silence instantiation errors.
+
+**Why it was rejected:**
+
+- Template instantiation fails before runtime wrappers can help; the declarations themselves are
+  the hard blocker for concrete `Either<int,int>` instantiations.
+- It would spread workaround logic across unrelated lowering stages and hide the true emission-mode issue.
+- Constrained-mode signature softening/alias skipping is local, auditable, and matches the existing
+  module-mode design used for the same failure class.

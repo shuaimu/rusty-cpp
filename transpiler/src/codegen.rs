@@ -85,6 +85,11 @@ pub struct CodeGen {
     /// `test::TestDescAndFn` metadata consts.
     /// Used to emit runnable wrappers for transpiled test-body functions.
     expanded_test_markers: Vec<String>,
+    /// True when input appears to be `cargo expand --tests` output containing
+    /// Rust libtest harness metadata/scaffolding.
+    /// In this mode, trait facade/proxy emission is skipped to avoid unresolved
+    /// Proxy runtime symbols in generated compile probes.
+    expanded_libtest_mode: bool,
     /// Top-level function names emitted in this file.
     /// Used to validate marker→function wrapper emission.
     emitted_top_level_functions: HashSet<String>,
@@ -137,6 +142,7 @@ impl CodeGen {
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
             expanded_test_markers: Vec::new(),
+            expanded_libtest_mode: false,
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
             declared_item_names: HashSet::new(),
@@ -189,6 +195,7 @@ impl CodeGen {
         self.operator_renames.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
+        self.expanded_libtest_mode = false;
         self.emitted_top_level_functions.clear();
         self.macro_rules_names.clear();
         self.declared_item_names.clear();
@@ -204,6 +211,10 @@ impl CodeGen {
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
+
+        // Detect expanded libtest output up front so trait emission strategy can be
+        // selected consistently regardless of item ordering.
+        self.expanded_libtest_mode = self.detect_expanded_libtest_mode(&file.items);
 
         // Pass 1a: collect globally declared item names for unresolved bare-import
         // filtering and impl target disambiguation.
@@ -580,6 +591,43 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("}");
         }
+    }
+
+    fn has_rustc_test_marker_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| attr.path().is_ident("rustc_test_marker"))
+    }
+
+    fn detect_expanded_libtest_mode(&self, items: &[syn::Item]) -> bool {
+        for item in items {
+            match item {
+                syn::Item::Const(c) => {
+                    if self.is_rust_libtest_metadata_type(&c.ty)
+                        || Self::has_rustc_test_marker_attr(&c.attrs)
+                    {
+                        return true;
+                    }
+                }
+                syn::Item::Static(s) => {
+                    if self.is_rust_libtest_metadata_type(&s.ty) {
+                        return true;
+                    }
+                }
+                syn::Item::Fn(f) => {
+                    if self.is_rust_libtest_main(f) {
+                        return true;
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        if self.detect_expanded_libtest_mode(nested_items) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Emit a nested function definition as a C++ lambda.
@@ -1127,14 +1175,22 @@ impl CodeGen {
 
     fn emit_trait(&mut self, t: &syn::ItemTrait) {
         let trait_name = &t.ident;
+        let scoped = self.scoped_type_key(&trait_name.to_string());
 
         // Expanded crate output in module mode commonly lacks Proxy runtime wiring.
         // Guard by skipping trait-facade emission there to avoid unresolved `pro::*` symbols.
         if self.module_name.is_some() {
-            let scoped = self.scoped_type_key(&trait_name.to_string());
             self.skipped_module_traits.insert(scoped);
             self.writeln(&format!(
                 "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
+                trait_name
+            ));
+            return;
+        }
+        if self.expanded_libtest_mode {
+            self.skipped_module_traits.insert(scoped);
+            self.writeln(&format!(
+                "// Rust-only trait {} (Proxy facade emission skipped in expanded-test mode)",
                 trait_name
             ));
             return;
@@ -1648,9 +1704,11 @@ impl CodeGen {
                 self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
             }
             syn::ImplItem::Type(t) => {
-                if self.module_name.is_some() && self.type_contains_dependent_assoc(&t.ty) {
+                if self.should_soften_dependent_assoc_mode()
+                    && self.type_contains_dependent_assoc(&t.ty)
+                {
                     self.writeln(&format!(
-                        "// Rust-only dependent associated type alias skipped in module mode: {}",
+                        "// Rust-only dependent associated type alias skipped in constrained mode: {}",
                         t.ident
                     ));
                     return;
@@ -1696,12 +1754,14 @@ impl CodeGen {
         let is_deref_mut_method = method_ident == "deref_mut";
 
         let mut return_type = self.map_return_type(&method.sig.output);
-        // In module-mode expanded output, merged trait impls can surface
-        // unconstrained associated-type returns (e.g. `L::IntoIter`, `Self::Output`)
-        // that hard-fail when instantiating concrete `Either<int,int>`.
+        // In constrained emission modes (named module output and expanded tests),
+        // merged trait impls can surface unconstrained associated-type returns
+        // (e.g. `L::IntoIter`, `Self::Output`, `Either::Item`) that hard-fail when
+        // instantiating concrete `Either<int,int>`.
         // Falling back to `auto` keeps these methods lazily checked at use sites.
-        if self.module_name.is_some()
-            && self.return_type_contains_dependent_assoc(&method.sig.output)
+        if self.should_soften_dependent_assoc_mode()
+            && (self.return_type_contains_dependent_assoc(&method.sig.output)
+                || self.return_type_references_current_struct_assoc(&method.sig.output))
         {
             return_type = "auto".to_string();
         }
@@ -6570,6 +6630,7 @@ impl CodeGen {
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
             expanded_test_markers: Vec::new(),
+            expanded_libtest_mode: false,
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
             declared_item_names: HashSet::new(),
@@ -6874,11 +6935,22 @@ impl CodeGen {
         }
     }
 
+    fn should_soften_dependent_assoc_mode(&self) -> bool {
+        self.module_name.is_some() || self.expanded_libtest_mode
+    }
+
     fn return_type_contains_dependent_assoc(&self, output: &syn::ReturnType) -> bool {
         let syn::ReturnType::Type(_, ty) = output else {
             return false;
         };
         self.type_contains_dependent_assoc(ty)
+    }
+
+    fn return_type_references_current_struct_assoc(&self, output: &syn::ReturnType) -> bool {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return false;
+        };
+        self.type_references_current_struct_assoc(ty)
     }
 
     fn type_contains_dependent_assoc(&self, ty: &syn::Type) -> bool {
@@ -6924,6 +6996,54 @@ impl CodeGen {
             syn::Type::Paren(p) => self.type_contains_dependent_assoc(&p.elem),
             syn::Type::Group(g) => self.type_contains_dependent_assoc(&g.elem),
             syn::Type::Tuple(tup) => tup.elems.iter().any(|elem| self.type_contains_dependent_assoc(elem)),
+            _ => false,
+        }
+    }
+
+    fn type_references_current_struct_assoc(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() >= 2 {
+                    let first = tp.path.segments.first().map(|s| s.ident.to_string());
+                    if let (Some(struct_name), Some(first_seg)) =
+                        (self.current_struct.as_ref(), first.as_ref())
+                    {
+                        if first_seg == struct_name {
+                            return true;
+                        }
+                    }
+                }
+
+                if let Some(qself) = &tp.qself {
+                    if self.type_references_current_struct_assoc(&qself.ty) {
+                        return true;
+                    }
+                }
+
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| {
+                            if let syn::GenericArgument::Type(inner_ty) = arg {
+                                self.type_references_current_struct_assoc(inner_ty)
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_references_current_struct_assoc(&r.elem),
+            syn::Type::Ptr(p) => self.type_references_current_struct_assoc(&p.elem),
+            syn::Type::Slice(s) => self.type_references_current_struct_assoc(&s.elem),
+            syn::Type::Array(a) => self.type_references_current_struct_assoc(&a.elem),
+            syn::Type::Paren(p) => self.type_references_current_struct_assoc(&p.elem),
+            syn::Type::Group(g) => self.type_references_current_struct_assoc(&g.elem),
+            syn::Type::Tuple(tup) => tup
+                .elems
+                .iter()
+                .any(|elem| self.type_references_current_struct_assoc(elem)),
             _ => false,
         }
     }
@@ -7134,9 +7254,12 @@ fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
                 | "Hasher"
                 | "IntoIterator"
                 | "Iterator"
+                | "DoubleEndedIterator"
                 | "Extend"
                 | "FromIterator"
                 | "Default"
+                | "AsRef"
+                | "AsMut"
         );
     if skip {
         return None;
@@ -8759,6 +8882,22 @@ mod tests {
         assert!(!out.contains("export using into_either::IntoEither;"));
     }
 
+    #[test]
+    fn test_leaf431_trait_facade_emission_skipped_in_expanded_libtest_mode() {
+        let out = transpile_str(
+            r#"
+            #[rustc_test_marker = "basic"]
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            trait IntoEither { fn into_either(self) -> i32; }
+        "#,
+        );
+        assert!(out.contains(
+            "// Rust-only trait IntoEither (Proxy facade emission skipped in expanded-test mode)"
+        ));
+        assert!(!out.contains("PRO_DEF_MEM_DISPATCH("));
+        assert!(!out.contains("struct IntoEitherFacade : pro::facade_builder"));
+    }
+
     // ── Phase 5: Generics / templates tests ─────────────────────
 
     #[test]
@@ -8859,6 +8998,23 @@ mod tests {
         assert!(!out.contains("ExtendFacade::is_satisfied_by"));
         assert!(!out.contains("FromIteratorFacade::is_satisfied_by"));
         assert!(!out.contains("DefaultFacade::is_satisfied_by"));
+    }
+
+    #[test]
+    fn test_leaf431_additional_std_traits_requires_skipped() {
+        let out = transpile_str(
+            r#"
+            fn f<I, A, M>(iter: I, a: A, m: M)
+            where
+                I: DoubleEndedIterator,
+                A: AsRef<str>,
+                M: AsMut<str>,
+            {}
+        "#,
+        );
+        assert!(!out.contains("DoubleEndedIteratorFacade::is_satisfied_by"));
+        assert!(!out.contains("AsRefFacade::is_satisfied_by"));
+        assert!(!out.contains("AsMutFacade::is_satisfied_by"));
     }
 
     #[test]
@@ -11254,6 +11410,49 @@ mod tests {
         assert!(out.contains("auto deref("));
         assert!(!out.contains("using Output = typename L::Output;"));
         assert!(!out.contains("using Target = typename L::Target;"));
+    }
+
+    #[test]
+    fn test_leaf432_expanded_mode_dependent_assoc_signatures_are_softened() {
+        let out = transpile_str(
+            r#"
+            #[rustc_test_marker = "basic"]
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            trait IntoIterLike { type IntoIter; fn into_iter(self) -> Self::IntoIter; }
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn iter(self) -> Either<L::IntoIter, R::IntoIter> { todo!() }
+            }
+            impl<L: IntoIterLike, R: IntoIterLike<IntoIter = L::IntoIter>> IntoIterLike for Either<L, R> {
+                type IntoIter = L::IntoIter;
+                fn into_iter(self) -> Either::IntoIter { todo!() }
+            }
+        "#,
+        );
+        assert!(out.contains("auto iter("));
+        assert!(!out.contains("Either<typename L::IntoIter, typename R::IntoIter> iter("));
+        assert!(out.contains("auto into_iter("));
+        assert!(!out.contains("Either::IntoIter into_iter("));
+        assert!(!out.contains("using IntoIter = typename L::IntoIter;"));
+    }
+
+    #[test]
+    fn test_leaf432_expanded_mode_softens_current_struct_assoc_projection_returns() {
+        let out = transpile_str(
+            r#"
+            #[rustc_test_marker = "basic"]
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            trait IteratorLike { type Item; fn next(self) -> Self::Item; }
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for Either<L, R> {
+                type Item = L::Item;
+                fn next(self) -> rusty::Option<Either::Item> { todo!() }
+            }
+        "#,
+        );
+        assert!(out.contains("auto next("));
+        assert!(!out.contains("rusty::Option<Either::Item> next("));
+        assert!(!out.contains("using Item = typename L::Item;"));
     }
 
     #[test]
