@@ -1157,22 +1157,98 @@ impl CodeGen {
     fn emitted_method_conflict_key(
         &self,
         method_name: &str,
-        generics: &syn::Generics,
+        emitted_template_key: &str,
         qualifier: &str,
         is_static: bool,
         params: &[String],
     ) -> String {
         let static_key = if is_static { "static" } else { "instance" };
         let qualifier_key = qualifier.trim();
-        let generics_key = normalize_token_text(generics.to_token_stream().to_string());
         format!(
             "{}|{}|{}|{}|{}",
             method_name,
             static_key,
             qualifier_key,
-            generics_key,
+            emitted_template_key,
             params.join(",")
         )
+    }
+
+    fn collect_emitted_template_parts(
+        &self,
+        generics: &syn::Generics,
+    ) -> (Vec<String>, Vec<String>) {
+        let type_params: Vec<&syn::TypeParam> = generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let syn::GenericParam::Type(tp) = p {
+                    Some(tp)
+                } else {
+                    None
+                }
+            })
+            .filter(|tp| !self.is_type_param_in_scope(&tp.ident.to_string()))
+            .collect();
+
+        if type_params.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let params_str: Vec<String> = type_params.iter().map(|tp| tp.ident.to_string()).collect();
+
+        let mut constraints: Vec<String> = Vec::new();
+        let skip_facade_constraints = self.module_name.is_some();
+
+        for tp in &type_params {
+            for bound in &tp.bounds {
+                if let syn::TypeParamBound::Trait(tb) = bound {
+                    if skip_facade_constraints {
+                        continue;
+                    }
+                    if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
+                        constraints.push(format!(
+                            "{}::is_satisfied_by<{}>()",
+                            facade_name, tp.ident
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(where_clause) = &generics.where_clause {
+            for pred in &where_clause.predicates {
+                if let syn::WherePredicate::Type(pt) = pred {
+                    let ty_name = self.map_type(&pt.bounded_ty);
+                    for bound in &pt.bounds {
+                        if let syn::TypeParamBound::Trait(tb) = bound {
+                            if skip_facade_constraints {
+                                continue;
+                            }
+                            if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
+                                constraints.push(format!(
+                                    "{}::is_satisfied_by<{}>()",
+                                    facade_name, ty_name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (params_str, constraints)
+    }
+
+    fn emitted_template_signature_key(&self, generics: &syn::Generics) -> String {
+        let (params, constraints) = self.collect_emitted_template_parts(generics);
+        if params.is_empty() {
+            return String::new();
+        }
+        if constraints.is_empty() {
+            return params.join(",");
+        }
+        format!("{}|{}", params.join(","), constraints.join(" && "))
     }
 
     /// Returns true if key is first-seen in current type scope, false if duplicate.
@@ -1328,6 +1404,7 @@ impl CodeGen {
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
+        let emitted_template_key = self.emitted_template_signature_key(&method.sig.generics);
 
         // Emit template prefix for generic methods (excluding names already
         // bound by outer type/impl scopes to avoid shadowing).
@@ -1396,8 +1473,13 @@ impl CodeGen {
             .collect();
 
         let static_prefix = if is_static { "static " } else { "" };
-        let conflict_key =
-            self.emitted_method_conflict_key(&name, &method.sig.generics, qualifier, is_static, &params);
+        let conflict_key = self.emitted_method_conflict_key(
+            &name,
+            &emitted_template_key,
+            qualifier,
+            is_static,
+            &params,
+        );
         if !self.mark_emitted_method_conflict_key(conflict_key) {
             self.pop_type_param_scope();
             return;
@@ -4311,71 +4393,14 @@ impl CodeGen {
     /// have type parameters. Lifetime parameters are erased (skipped).
     /// Trait bounds are emitted as `requires` clauses.
     fn emit_template_prefix(&mut self, generics: &syn::Generics) {
-        let type_params: Vec<&syn::TypeParam> = generics
-            .params
-            .iter()
-            .filter_map(|p| {
-                if let syn::GenericParam::Type(tp) = p {
-                    Some(tp)
-                } else {
-                    None // Skip lifetime and const params
-                }
-            })
-            .filter(|tp| !self.is_type_param_in_scope(&tp.ident.to_string()))
-            .collect();
-
-        if type_params.is_empty() {
+        let (params, constraints) = self.collect_emitted_template_parts(generics);
+        if params.is_empty() {
             return;
         }
 
-        let params_str: Vec<String> = type_params
-            .iter()
-            .map(|tp| format!("typename {}", tp.ident))
-            .collect();
+        let params_str: Vec<String> = params.iter().map(|p| format!("typename {}", p)).collect();
 
         self.writeln(&format!("template<{}>", params_str.join(", ")));
-
-        // Emit requires clause for trait bounds
-        let mut constraints: Vec<String> = Vec::new();
-        let skip_facade_constraints = self.module_name.is_some();
-
-        for tp in &type_params {
-            for bound in &tp.bounds {
-                if let syn::TypeParamBound::Trait(tb) = bound {
-                    if skip_facade_constraints {
-                        continue;
-                    }
-                    if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
-                        constraints.push(format!(
-                            "{}::is_satisfied_by<{}>()",
-                            facade_name, tp.ident
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Also check where clause
-        if let Some(where_clause) = &generics.where_clause {
-            for pred in &where_clause.predicates {
-                if let syn::WherePredicate::Type(pt) = pred {
-                    let ty_name = self.map_type(&pt.bounded_ty);
-                    for bound in &pt.bounds {
-                        if let syn::TypeParamBound::Trait(tb) = bound {
-                            if skip_facade_constraints {
-                                continue;
-                            }
-                            if let Some(facade_name) = facade_name_for_trait_path(&tb.path) {
-                                constraints.push(format!(
-                                    "{}::is_satisfied_by<{}>()",
-                                    facade_name, ty_name
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         if !constraints.is_empty() {
             self.writeln(&format!("    requires ({})", constraints.join(" && ")));
@@ -5391,6 +5416,28 @@ mod tests {
 
         assert_eq!(
             out.matches("rusty::fmt::Result fmt(rusty::fmt::Formatter f) const {")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_leaf414_impl_bounds_not_emitted_do_not_bypass_dedup() {
+        let out = transpile_str_module(
+            r#"
+            struct Foo<T> { inner: T }
+            impl<T: core::fmt::Debug> Foo<T> {
+                fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { true }
+            }
+            impl<T: core::fmt::Display> Foo<T> {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { true }
+            }
+        "#,
+            "either",
+        );
+
+        assert_eq!(
+            out.matches("rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {")
                 .count(),
             1
         );

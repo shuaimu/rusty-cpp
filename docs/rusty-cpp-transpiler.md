@@ -2662,6 +2662,42 @@ Design rationale:
 - Followed rejected approach in §11.24 by avoiding a broad switch-lowering rewrite.
 - Applied the minimal parser-safe fix at keyword escaping boundaries.
 
+### 10.39 Phase 18 Progress: End-to-End (Leaf 4.14) — DONE
+
+Leaf 4.14 fixed duplicate method emission where different Rust impl bounds collapse to the same emitted C++ signature.
+
+Root cause:
+
+- Method de-dup conflict keys used raw Rust generic/where-clause text (`method.sig.generics`).
+- In module mode, many facade constraints are intentionally not emitted.
+- Two Rust impl methods (for example `fmt` from different trait impl bounds) can therefore produce the same C++ method signature even though their raw Rust generic tokens differ.
+- Result: duplicate emitted methods such as `rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const`.
+
+Changes:
+
+- Added `collect_emitted_template_parts(...)` to compute template params/constraints exactly as they are emitted.
+- Refactored `emit_template_prefix(...)` to use that shared helper.
+- Updated emitted-method conflict-key generation to use an emitted-template signature key instead of raw Rust generics.
+- Kept the existing two-stage de-dup structure (impl-collection and emit-time checks), but aligned emit-time identity with real emitted C++.
+
+Regression tests added:
+
+- `test_leaf414_impl_bounds_not_emitted_do_not_bypass_dedup`
+
+Verification:
+
+- Focused transpiler tests pass:
+  - `cargo test -p rusty-cpp-transpiler leaf4 -- --nocapture`
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf414 --stop-after build`
+  - prior duplicate `Either::fmt(...) const` compile error is gone;
+  - remaining failures are from later unresolved-name blocker families.
+
+Design rationale:
+
+- Followed rejected approach in §11.25 by avoiding raw Rust-only generic identity for emitted method de-dup.
+- Kept the fix local to method identity generation rather than broad trait/method renaming.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2897,3 +2933,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - The observed diagnostics were caused by unescaped `::default()` call emission, not malformed `switch` structure.
 - A broad switch-lowering rewrite would increase risk of regressions in already-stable match lowering paths.
 - The correct fix is narrow keyword escaping (`default` -> `default_`) at path/call emission boundaries.
+
+### 11.25 Raw Rust Generic/Where-Clause Identity for Emitted Method De-duplication
+
+**Rejected approach:** Use raw Rust method generic text (including impl-level bounds/where clauses) as the emit-time de-dup identity key for merged methods.
+
+**Why it was rejected:**
+- Emit-time identity must reflect emitted C++ signatures, not Rust-only bounds that may be intentionally skipped in output (especially in module mode).
+- This allows distinct Rust keys to collapse into the same emitted C++ method signature, causing deterministic duplicate-declaration compile failures.
+- The correct strategy is emitted-signature-based identity (method name + receiver/static shape + emitted template shape + mapped parameter types).
