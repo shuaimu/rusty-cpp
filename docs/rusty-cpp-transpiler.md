@@ -4033,6 +4033,73 @@ Design rationale:
 - Solved the mismatch at AST emission time for `if` expression branches.
 - Avoided post-hoc text rewriting or broad global constructor wrapping changes outside the ternary path.
 
+### 10.11.35 Leaf 4.29.7: io read/write buffer-argument lowering to byte-slice views
+
+Problem:
+
+- After Leaf 4.29.6, the first deterministic expanded `seek()`/`read_write()` blocker was:
+  - `reader.read(&buf)` / `writer.write(&buf)` lowering to pointer/container-int shapes instead of byte-slice view arguments,
+  - causing method-signature mismatches in generated C++.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one scoped method-call lowering path update in `transpiler/src/codegen.rs`,
+  - targeted literal/type mapping adjustment needed by `[0u8; N]` / `[1u8; N]` io buffers,
+  - focused transpiler regression tests,
+  - expanded compile re-probe.
+
+Execution plan:
+
+1. Add a narrow method-call interception for io buffer methods (`read`/`read_exact`/`write`/`write_all`)
+   only when the call argument is a Rust reference expression.
+2. Emit byte-slice views (`rusty::slice_full(...)` or existing slice-range lowering) instead of
+   pointer-shaped argument forms.
+3. Preserve byte literal type for `u8` repeats used by io test buffers.
+4. Re-run focused tests and expanded compile probe to confirm the buffer-argument blocker family is removed.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added `try_emit_io_read_write_buffer_call(...)` in method-call emission to rewrite only
+    io buffer-call shapes with one reference argument.
+  - Added `emit_io_read_write_buffer_view_expr(...)` to lower referenced buffer expressions into
+    slice-view arguments (`rusty::slice_full(...)` for full buffers, existing slice-range emission when applicable).
+  - Preserved byte literal type in `emit_lit(...)` for `u8` integers:
+    - `0u8` / `1u8` now emit `static_cast<uint8_t>(...)`.
+  - Added reference-slice type mapping for direct Rust slice references:
+    - `&[T]` -> `std::span<const T>`,
+    - `&mut [T]` -> `std::span<T>`.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf4297_read_write_ref_buffer_args_lower_to_slice_view`
+- `codegen::tests::test_leaf4297_u8_repeat_preserves_byte_literal_type`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf4297 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf429 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4297.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4297.rs -o /tmp/either-expanded-tests-leaf4297.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=40 -c /tmp/either-expanded-tests-leaf4297.cppm -o /tmp/either-expanded-tests-leaf4297.o`
+
+Re-probe result:
+
+- Previous io buffer-argument blockers are removed:
+  - no first-failure signatures for `read(&buf)`/`write(&buf)` pointer-like argument mismatches.
+- Next deterministic blocker family is now earlier in the file:
+  - unresolved trait-facade concept symbols in generated `requires` clauses
+    (`IntoIteratorFacade`, `IteratorFacade`, `ExtendFacade`, `FromIteratorFacade`, `DefaultFacade`).
+
+Design rationale:
+
+- Kept emission changes narrow to explicit io buffer-call patterns to avoid broad method-call regressions.
+- Avoided text-level rewrites and preserved existing range-slice lowering behavior.
+- Ensured byte-typed io buffer literals stay byte-typed at emission time rather than patching at call sites.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4508,3 +4575,17 @@ pass.
   and untyped paths.
 - A scoped AST-level `if` expression lowering fix keeps branch typing deterministic and testable
   without broad side effects.
+
+### 11.45 Global `&arg` Rewrite to `slice_full(...)` for All Method Calls
+
+**Rejected approach:** Rewrite every method call argument shaped like `&arg` or `&mut arg` into
+`rusty::slice_full(arg)` globally.
+
+**Why it was rejected:**
+
+- Most referenced arguments are not byte buffers; global rewriting would silently corrupt call
+  semantics for non-io methods.
+- The observed blocker was specific to io read/write buffer methods, so broad rewriting adds
+  unnecessary regression risk.
+- A narrow method-name + argument-shape guard (`read`/`read_exact`/`write`/`write_all` with one
+  reference buffer argument) is deterministic, testable, and easier to audit.

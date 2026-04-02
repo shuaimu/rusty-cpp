@@ -5292,6 +5292,9 @@ impl CodeGen {
                     let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!("rusty::collect_range({})", receiver);
                 }
+                if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
+                    return io_call;
+                }
                 let method = &mc.method;
                 let args: Vec<String> = mc
                     .args
@@ -5568,6 +5571,39 @@ impl CodeGen {
             ("Right", "Left") => Some(vec![rhs_ty, lhs_ty]),
             _ => None,
         }
+    }
+
+    fn try_emit_io_read_write_buffer_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        let method = mc.method.to_string();
+        if !matches!(
+            method.as_str(),
+            "read" | "read_exact" | "write" | "write_all"
+        ) {
+            return None;
+        }
+        if mc.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Reference(arg_ref) = mc.args.first()? else {
+            return None;
+        };
+        let buffer_view = self.emit_io_read_write_buffer_view_expr(&arg_ref.expr);
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
+            if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
+        if is_self {
+            return Some(format!("{}({})", method, buffer_view));
+        }
+        Some(format!("{}.{}({})", receiver, method, buffer_view))
+    }
+
+    fn emit_io_read_write_buffer_view_expr(&self, expr: &syn::Expr) -> String {
+        let target = self.peel_reference_target_expr(expr);
+        if self.is_slice_range_index_target_expr(target) {
+            return self.emit_expr_to_string(target);
+        }
+        let target_expr = self.emit_expr_to_string(target);
+        format!("rusty::slice_full({})", target_expr)
     }
 
     fn is_slice_range_index_expr(&self, index: &syn::Expr) -> bool {
@@ -5847,7 +5883,12 @@ impl CodeGen {
 
     fn emit_lit(&self, lit: &syn::Lit) -> String {
         match lit {
-            syn::Lit::Int(i) => i.base10_digits().to_string(),
+            syn::Lit::Int(i) => {
+                if i.suffix() == "u8" {
+                    return format!("static_cast<uint8_t>({})", i.base10_digits());
+                }
+                i.base10_digits().to_string()
+            }
             syn::Lit::Float(f) => f.base10_digits().to_string(),
             syn::Lit::Bool(b) => if b.value { "true" } else { "false" }.to_string(),
             syn::Lit::Str(s) => format!("\"{}\"", s.value()),
@@ -6152,6 +6193,15 @@ impl CodeGen {
                     if tp.path.segments.len() == 1 && tp.path.segments[0].ident == "str" {
                         return "std::string_view".to_string();
                     }
+                }
+                // Special case: slice references map to span-by-value.
+                // `&[T]` -> `std::span<const T>`, `&mut [T]` -> `std::span<T>`.
+                if let syn::Type::Slice(s) = r.elem.as_ref() {
+                    let elem = self.map_type(&s.elem);
+                    if r.mutability.is_some() {
+                        return format!("std::span<{}>", elem);
+                    }
+                    return format!("std::span<const {}>", elem);
                 }
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
@@ -7818,6 +7868,47 @@ mod tests {
         );
         assert!(out.contains(
             "const Either<int32_t, int32_t> e = (c ? Either<int32_t, int32_t>(Left<int32_t, int32_t>(1)) : Either<int32_t, int32_t>(Right<int32_t, int32_t>(2)));"
+        ));
+    }
+
+    #[test]
+    fn test_leaf4297_read_write_ref_buffer_args_lower_to_slice_view() {
+        let out = transpile_str(
+            r#"
+            struct IO;
+            impl IO {
+                fn read(&mut self, _buf: &mut [u8]) -> usize { 0 }
+                fn write(&mut self, _buf: &[u8]) -> usize { 0 }
+            }
+            fn f(io: &mut IO) {
+                let mut read_buf = [0u8; 16];
+                let write_buf = [1u8; 16];
+                io.read(&mut read_buf);
+                io.write(&write_buf);
+            }
+        "#,
+        );
+        assert!(out.contains("io.read(rusty::slice_full(read_buf));"));
+        assert!(out.contains("io.write(rusty::slice_full(write_buf));"));
+        assert!(!out.contains("io.read(&read_buf);"));
+        assert!(!out.contains("io.write(&write_buf);"));
+    }
+
+    #[test]
+    fn test_leaf4297_u8_repeat_preserves_byte_literal_type() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let a = [0u8; 4];
+                let b = [1u8; 8];
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "const auto a = rusty::array_repeat(static_cast<uint8_t>(0), 4);"
+        ));
+        assert!(out.contains(
+            "const auto b = rusty::array_repeat(static_cast<uint8_t>(1), 8);"
         ));
     }
 

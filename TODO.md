@@ -356,14 +356,16 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Kept inline-module impl merge and mutable visit-binding fixes so `Iterator` impl methods (`next`, `count`) merge onto top-level `Either` and emit mutable visitor params when arm bindings are `ref mut`
             - [x] *done* Added Rust-iterator-compatible `.next()` / `.count()` helpers to `rusty::range<T>` and `rusty::range_from<T>` in `include/rusty/array.hpp`, with dedicated C++ coverage in `tests/rusty_array_test.cpp`
             - [x] *done* Re-probe: previous iterator blocker family is removed; first deterministic blockers now start in seek/read_write io lowering (`Cursor` template args, `range_full` indexing, `buf.len()` shape, and related assertion tuple lowering)
-          - [ ] Leaf 4.29: Collapse first seek/read_write io lowering blocker family in expanded runnable tests
+          - [x] *done* Leaf 4.29: Collapse first seek/read_write io lowering blocker family in expanded runnable tests
             - [x] *done* Leaf 4.29.1: Guard UFCS rewrite to avoid treating constructor-like calls (`io::Cursor::new(&...)`) as trait-method dot calls (`receiver.new(...)`), then re-probe compile/link
             - [x] *done* Leaf 4.29.2: Fix slice/index lowering for full/range slices on array-backed buffers used by io paths (`x[..]`, `x[..n]`) so generated C++ avoids invalid `operator[]` with range objects
             - [x] *done* Leaf 4.29.3: Fix container length-call shape in expanded io tests (`buf.len()` on C++ `std::vector`/array-like lowers to valid size expression)
             - [x] *done* Leaf 4.29.4: Fix residual tuple-assertion address/reference lowering artifacts in io tests (`&&value`/mixed ref temp shape), then re-probe compile/link
             - [x] *done* Leaf 4.29.5: Fix Cursor constructor lowering/type-context shape in io tests (`io::Cursor::new(...)` inside `decltype`/constructor-hint contexts), including empty-array arg handling, then re-probe compile/link
             - [x] *done* Leaf 4.29.6: Fix `if`/ternary arm unification for `Left(...)`/`Right(...)` constructor expressions in io/read_write paths (emit converged `Either<...>` arm type), then re-probe compile/link
-            - [ ] Leaf 4.29.7: Fix io read/write buffer-argument lowering in expanded tests (`read(&buf)` / `write(&buf)` currently emit pointer/vector-int shape instead of span<uint8_t> view), then re-probe compile/link
+            - [x] *done* Leaf 4.29.7: Fix io read/write buffer-argument lowering in expanded tests (`read(&buf)` / `write(&buf)` now lower to byte-slice views), then re-probe compile/link
+            - [x] *done* Re-probe: previous io buffer-argument blocker family is removed; next deterministic blockers are unresolved trait-facade concept symbols in generated `requires` clauses (`IntoIteratorFacade`, `IteratorFacade`, `ExtendFacade`, `FromIteratorFacade`, `DefaultFacade`)
+          - [ ] Leaf 4.30: Fix unresolved trait-facade concept symbols in expanded runnable tests (`IntoIteratorFacade`/`IteratorFacade`/`ExtendFacade`/`FromIteratorFacade`/`DefaultFacade` in generated `requires` clauses), then re-probe compile/link
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
