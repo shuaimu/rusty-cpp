@@ -7,8 +7,12 @@ Usage: run_parity_harness.sh [options]
 
 Automates the Phase 18 end-to-end parity workflow for tests/transpile_tests/either:
 1) Rust baseline: cargo test
-2) Transpile: rusty-cpp-transpiler --crate --expand
-3) C++ build: compile generated either.cppm
+2) Transpile:
+   - crate output via rusty-cpp-transpiler --crate --expand
+   - expanded tests output via cargo expand --lib --tests + single-file transpile
+3) C++ build:
+   - compile generated either.cppm
+   - compile generated either_expanded_tests.cppm
 4) C++ run: run generated smoke executable
 
 Options:
@@ -90,6 +94,9 @@ LOG_CPP_BUILD="${WORK_DIR}/cpp_build.log"
 LOG_CPP_RUN="${WORK_DIR}/cpp_run.log"
 CPP_OUT_DIR="${WORK_DIR}/cpp_out"
 MODULE_OBJ="${WORK_DIR}/either.o"
+EXPANDED_TESTS_RS="${WORK_DIR}/either_expanded_tests.rs"
+EXPANDED_TESTS_CPPM="${CPP_OUT_DIR}/either_expanded_tests.cppm"
+EXPANDED_TESTS_OBJ="${WORK_DIR}/either_expanded_tests.o"
 SMOKE_MAIN="${WORK_DIR}/either_smoke_main.cpp"
 SMOKE_BIN="${WORK_DIR}/either_smoke"
 
@@ -122,7 +129,7 @@ reset_artifacts() {
   : > "${LOG_CPP_BUILD}"
   : > "${LOG_CPP_RUN}"
 
-  rm -f "${MODULE_OBJ}" "${SMOKE_MAIN}" "${SMOKE_BIN}"
+  rm -f "${MODULE_OBJ}" "${EXPANDED_TESTS_RS}" "${EXPANDED_TESTS_OBJ}" "${SMOKE_MAIN}" "${SMOKE_BIN}"
 }
 
 run_logged() {
@@ -188,6 +195,10 @@ fi
 echo "Stage 2/4: Transpile expanded either crate"
 run_logged_in_dir "${REPO_ROOT}" "${LOG_TRANSPILE}" \
   cargo run -p rusty-cpp-transpiler -- --crate "${EITHER_MANIFEST}" --output-dir "${CPP_OUT_DIR}" --expand
+run_logged_in_dir "${REPO_ROOT}" "${LOG_TRANSPILE}" \
+  bash -lc "cargo expand --manifest-path \"${EITHER_MANIFEST}\" --lib --tests > \"${EXPANDED_TESTS_RS}\""
+run_logged_in_dir "${REPO_ROOT}" "${LOG_TRANSPILE}" \
+  cargo run -p rusty-cpp-transpiler -- "${EXPANDED_TESTS_RS}" --output "${EXPANDED_TESTS_CPPM}" --module-name "rustycpp.either_expanded_tests"
 if [[ "${STOP_AFTER}" == "transpile" ]]; then
   echo "Stopped after stage: transpile"
   exit 0
@@ -197,10 +208,16 @@ if [[ "${DRY_RUN}" -eq 0 && ! -f "${CPP_OUT_DIR}/either.cppm" ]]; then
   echo "error: expected transpiled output not found: ${CPP_OUT_DIR}/either.cppm" >&2
   exit 1
 fi
+if [[ "${DRY_RUN}" -eq 0 && ! -f "${EXPANDED_TESTS_CPPM}" ]]; then
+  echo "error: expected expanded-tests transpiled output not found: ${EXPANDED_TESTS_CPPM}" >&2
+  exit 1
+fi
 
 echo "Stage 3/4: Build transpiled C++ module"
 run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_BUILD}" \
   g++ -std=c++23 -fmodules-ts -I "${REPO_ROOT}/include" -x c++ -c "${CPP_OUT_DIR}/either.cppm" -o "${MODULE_OBJ}"
+run_logged_in_dir "${WORK_DIR}" "${LOG_CPP_BUILD}" \
+  g++ -std=c++20 -fmodules-ts -fmax-errors=80 -I "${REPO_ROOT}/include" -I "${REPO_ROOT}/tests/cpp/include" -x c++ -c "${EXPANDED_TESTS_CPPM}" -o "${EXPANDED_TESTS_OBJ}"
 if [[ "${STOP_AFTER}" == "build" ]]; then
   echo "Stopped after stage: build"
   exit 0

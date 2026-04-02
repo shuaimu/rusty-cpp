@@ -5040,6 +5040,57 @@ Design rationale:
   - no broad disabling of move-only semantics to “make copies work” in runtime wrappers (§11.52),
   - no probe-path narrowing that would hide expanded-tests failures behind smoke-only checks (§11.31).
 
+### 10.11.50 Leaf 4.44: Extend parity harness default path to include expanded `--lib --tests` transpile+compile
+
+Problem:
+
+- The parity harness default workflow was still smoke-oriented:
+  - it transpiled crate output (`--crate --expand`) and compiled `either.cppm`,
+  - but did not transpile/compile the `cargo expand --lib --tests` output by default.
+- That left a gap where expanded-tests regressions could reappear without failing the regular
+  parity harness run.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - harness script updates only,
+  - harness integration test expectation updates only,
+  - no runtime API or transpiler codegen behavior changes.
+
+Implementation:
+
+- Updated `tests/transpile_tests/either/run_parity_harness.sh`:
+  - Stage 2 now also runs:
+    - `cargo expand --manifest-path ... --lib --tests > $WORK_DIR/either_expanded_tests.rs`
+    - `cargo run -p rusty-cpp-transpiler -- $WORK_DIR/either_expanded_tests.rs --output $CPP_OUT_DIR/either_expanded_tests.cppm --module-name rustycpp.either_expanded_tests`
+  - Stage 3 now also compiles:
+    - `g++ -std=c++20 -fmodules-ts -fmax-errors=80 -I include -I tests/cpp/include -x c++ -c either_expanded_tests.cppm -o either_expanded_tests.o`
+  - artifact reset/cleanup updated for the new intermediate/output files.
+- Updated `transpiler/tests/either_parity_harness.rs` dry-run assertions to lock the new command
+  path (`cargo expand --lib --tests`, expanded-tests module-name/output, and stricter compile flags).
+
+Regression tests:
+
+- Focused harness integration:
+  - `cargo test -p rusty-cpp-transpiler --test either_parity_harness -- --nocapture`
+- Runtime harness re-probe:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf444-post`
+
+Verification:
+
+- Harness integration tests pass (including updated dry-run stage listing and command assertions).
+- Full harness run passes with expanded-tests transpile+compile included in the default path.
+- Existing 4-stage flow semantics are preserved (`baseline`, `transpile`, `build`, `run` stop-after values unchanged).
+
+Design rationale:
+
+- This closes a concrete parity-observability gap without broadening transpiler behavior changes.
+- It keeps existing harness ergonomics while making expanded-tests compilation a first-class gate in
+  the same command path used for regular parity probes.
+- Avoided wrong approaches from §11:
+  - no replacing the current harness with a separate second script (split ownership/drift risk) (§11.53),
+  - no dropping existing crate-output compile smoke to “speed up” expanded-tests checks (§11.31).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -5625,3 +5676,16 @@ move-only (deleted copy constructor).
   design for `Option`.
 - The correct local fix is explicit view reconstruction from stored pointer state
   (`Option<...>(*ptr)` / `None`), which preserves semantics and avoids hidden ownership changes.
+
+### 11.53 Splitting Expanded-Tests Coverage Into a Separate Ad-Hoc Harness
+
+**Rejected approach:** Leave the default parity harness unchanged and add a second standalone
+script/command just for expanded `--lib --tests` transpile+compile checks.
+
+**Why it was rejected:**
+
+- It creates process drift: one command can stay green while the other silently regresses.
+- It increases maintenance overhead for duplicated stage logic, logging behavior, and stop-after
+  semantics.
+- Integrating expanded-tests transpile+compile into the existing harness keeps one authoritative
+  path and makes regressions visible in the normal parity workflow.

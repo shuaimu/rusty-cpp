@@ -47,7 +47,13 @@ fn test_either_parity_harness_dry_run_lists_all_stages() {
     assert!(stdout.contains("cargo test --manifest-path"));
     assert!(stdout.contains("Cargo.toml"));
     assert!(stdout.contains("cargo run -p rusty-cpp-transpiler -- --crate"));
+    assert!(stdout.contains("bash -lc cargo\\ expand\\ --manifest-path"));
+    assert!(stdout.contains("--lib\\ --tests"));
+    assert!(stdout.contains("either_expanded_tests.rs"));
+    assert!(stdout.contains("--module-name rustycpp.either_expanded_tests"));
+    assert!(stdout.contains("either_expanded_tests.cppm"));
     assert!(stdout.contains("g++ -std=c++23 -fmodules-ts"));
+    assert!(stdout.contains("-fmax-errors=80"));
     assert!(stdout.contains("either_smoke_main.cpp"));
 }
 
