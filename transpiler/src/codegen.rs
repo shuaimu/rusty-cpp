@@ -38,6 +38,9 @@ pub struct CodeGen {
     module_name: Option<String>,
     /// Current inline module nesting path while emitting items.
     module_stack: Vec<String>,
+    /// Traits intentionally skipped in module mode (Proxy facade unavailable),
+    /// tracked by scoped path so `pub use` can be lowered as Rust-only imports.
+    skipped_module_traits: HashSet<String>,
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
@@ -58,6 +61,7 @@ impl CodeGen {
             local_bindings: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
+            skipped_module_traits: HashSet::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -100,6 +104,7 @@ impl CodeGen {
         self.module_stack.clear();
         self.impl_blocks.clear();
         self.operator_renames.clear();
+        self.skipped_module_traits.clear();
 
         // Pass 1: collect all impl blocks (including inline-module nested ones) by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -273,9 +278,12 @@ impl CodeGen {
         None
     }
 
-    /// Returns true if visibility is pub and we're in module mode.
+    /// Returns true if visibility is pub, we're in module mode, and the item is at
+    /// top-level module scope (not nested inside an inline namespace block).
     fn is_exported(&self, vis: &syn::Visibility) -> bool {
-        self.module_name.is_some() && matches!(vis, syn::Visibility::Public(_))
+        self.module_name.is_some()
+            && self.module_stack.is_empty()
+            && matches!(vis, syn::Visibility::Public(_))
     }
 
     /// Emit doc comments from attributes as Doxygen-style `///` comments.
@@ -808,6 +816,8 @@ impl CodeGen {
         // Expanded crate output in module mode commonly lacks Proxy runtime wiring.
         // Guard by skipping trait-facade emission there to avoid unresolved `pro::*` symbols.
         if self.module_name.is_some() {
+            let scoped = self.scoped_type_key(&trait_name.to_string());
+            self.skipped_module_traits.insert(scoped);
             self.writeln(&format!(
                 "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
                 trait_name
@@ -1015,18 +1025,28 @@ impl CodeGen {
 
         let export_prefix = if is_pub && self.module_name.is_some() { "export " } else { "" };
         for path in &paths {
+            if self.is_skipped_module_trait_import(path) {
+                self.writeln(&format!("// Rust-only: using {};", path));
+                continue;
+            }
             match classify_use_import(path) {
                 UseImportAction::RustOnly => {
                     self.writeln(&format!("// Rust-only: using {};", path));
                 }
                 UseImportAction::Using(mapped_path) => {
-                    self.writeln(&format!("{}using {};", export_prefix, mapped_path));
+                    let using_path = make_using_path_cpp_legal(&mapped_path);
+                    self.writeln(&format!("{}using {};", export_prefix, using_path));
                 }
                 UseImportAction::Raw(statement) => {
                     self.writeln(&format!("{}{}", export_prefix, statement));
                 }
             }
         }
+    }
+
+    fn is_skipped_module_trait_import(&self, path: &str) -> bool {
+        let normalized = normalize_use_import_path(path);
+        self.skipped_module_traits.contains(normalized)
     }
 
     /// Flatten a use tree into a list of fully-qualified C++ paths.
@@ -1044,14 +1064,21 @@ impl CodeGen {
                         // so keep these as local namespace paths (same as `self::`).
                         return self.flatten_use_tree(&p.tree, prefix);
                     }
-                    "self" => return self.flatten_use_tree(&p.tree, prefix),
+                    "self" => {
+                        if self.module_stack.is_empty() {
+                            return self.flatten_use_tree(&p.tree, prefix);
+                        }
+                        let module_prefix = self.module_stack.join("::");
+                        let new_prefix = if prefix.is_empty() {
+                            module_prefix
+                        } else {
+                            format!("{}::{}", prefix, module_prefix)
+                        };
+                        return self.flatten_use_tree(&p.tree, &new_prefix);
+                    }
                     "super" => {
-                        if let Some(ref mod_name) = self.module_name {
-                            if let Some((parent, _)) = mod_name.rsplit_once('.') {
-                                parent.to_string()
-                            } else {
-                                return self.flatten_use_tree(&p.tree, prefix);
-                            }
+                        if self.module_stack.len() > 1 {
+                            self.module_stack[..self.module_stack.len() - 1].join("::")
                         } else {
                             return self.flatten_use_tree(&p.tree, prefix);
                         }
@@ -3260,6 +3287,7 @@ impl CodeGen {
             local_bindings: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
+            skipped_module_traits: HashSet::new(),
             in_async: false,
             user_type_map: types::UserTypeMap::default(),
         }
@@ -3756,6 +3784,22 @@ fn classify_use_import(path: &str) -> UseImportAction {
 
 fn normalize_use_import_path(path: &str) -> &str {
     path.strip_prefix("namespace ").unwrap_or(path)
+}
+
+/// C++ `using` declarations require either a nested-name-specifier (`a::b`) or alias
+/// form (`X = Y`). Rust `use super::{Foo}` can flatten to bare names, so normalize
+/// those to global-qualified form.
+fn make_using_path_cpp_legal(path: &str) -> String {
+    if path.is_empty()
+        || path.starts_with("namespace ")
+        || path.starts_with("::")
+        || path.contains("::")
+        || path.contains(" = ")
+    {
+        path.to_string()
+    } else {
+        format!("::{}", path)
+    }
 }
 
 /// `pub use ...::Either::{Left, Right};` often appears before the enum declaration in the
@@ -4882,6 +4926,26 @@ mod tests {
         assert!(!out.contains("struct FooFacade : pro::facade_builder"));
     }
 
+    #[test]
+    fn test_trait_reexport_skipped_when_trait_emission_is_skipped_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            mod into_either {
+                pub trait IntoEither {
+                    fn into_either(self) -> i32;
+                }
+            }
+            pub use into_either::IntoEither;
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains(
+            "// Rust-only trait IntoEither (Proxy facade emission skipped in module mode)"
+        ));
+        assert!(out.contains("// Rust-only: using into_either::IntoEither;"));
+        assert!(!out.contains("export using into_either::IntoEither;"));
+    }
+
     // ── Phase 5: Generics / templates tests ─────────────────────
 
     #[test]
@@ -5319,6 +5383,44 @@ mod tests {
         assert!(!out.contains("import my_crate.inner;"));
         assert!(out.contains("namespace inner {"));
         assert!(out.contains("void foo()"));
+    }
+
+    #[test]
+    fn test_leaf44_no_nested_export_prefix_for_inline_pub_items() {
+        let out = transpile_str_module(
+            r#"
+            mod inner {
+                pub struct Foo { pub x: i32 }
+                pub fn f() {}
+            }
+        "#,
+            "my_crate",
+        );
+
+        assert!(out.contains("namespace inner {"));
+        assert!(out.contains("struct Foo {"));
+        assert!(out.contains("void f()"));
+        assert!(!out.contains("export struct Foo"));
+        assert!(!out.contains("export void f()"));
+    }
+
+    #[test]
+    fn test_leaf44_nested_super_group_use_emits_qualified_using_names() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            fn bar() {}
+            mod inner {
+                use super::{Foo, bar};
+            }
+        "#,
+        );
+
+        assert!(out.contains("namespace inner {"));
+        assert!(out.contains("using ::Foo;"));
+        assert!(out.contains("using ::bar;"));
+        assert!(!out.contains("using Foo;"));
+        assert!(!out.contains("using bar;"));
     }
 
     #[test]

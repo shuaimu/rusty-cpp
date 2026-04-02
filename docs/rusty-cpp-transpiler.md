@@ -2273,6 +2273,40 @@ Verification:
   - prior dependent-type syntax diagnostics are removed (no `use 'typename L::IntoIter'` errors; no `const L&::IntoIter` forms; `Self::Output` rewritten);
   - next blockers remain aligned with later leaves (`Leaf 4.4+`: nested export/re-export lowering, impl merge conflicts/duplicates, placeholder match lowering, unresolved specialized generic names).
 
+### 10.28 Phase 18 Progress: End-to-End (Leaf 4.4) — DONE
+
+Leaf 4.4 fixed nested-module export/import syntax emissions that were invalid C++20 module syntax in expanded output.
+
+Changes:
+
+- Tightened top-level export behavior:
+  - `is_exported(...)` now emits `export` only at top-level module scope (never inside inline `namespace` blocks).
+  - This removes invalid forms like `namespace inner { export struct Foo { ... }; }`.
+- Fixed nested-module `use` lowering for single-name imports:
+  - Added `make_using_path_cpp_legal(...)` so flattened bare names emit as global-qualified `using ::Name;` instead of invalid `using Name;`.
+  - This fixes `use super::{Either, Left, Right};` style emissions inside inline modules.
+- Improved relative `use` path lowering for inline modules:
+  - `self::...` now resolves with current inline module stack.
+  - `super::...` now resolves with parent inline module stack.
+- Guarded trait re-exports when trait emission is intentionally skipped in module mode:
+  - Added `skipped_module_traits` tracking and suppresses `pub use` of those traits as Rust-only comments.
+  - Prevents invalid re-export emissions like `export using into_either::IntoEither;` when `IntoEither` trait facade emission is skipped.
+
+Regression tests added:
+
+- `test_leaf44_no_nested_export_prefix_for_inline_pub_items`
+- `test_leaf44_nested_super_group_use_emits_qualified_using_names`
+- `test_trait_reexport_skipped_when_trait_emission_is_skipped_in_module_mode`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+- Generated expanded `either.cppm` now has:
+  - no `export struct` declarations nested inside `namespace` blocks;
+  - no bare `using Name;` from nested `super` imports (`using ::Either;`, etc. are emitted);
+  - skipped trait re-export comment for `into_either::IntoEither` instead of invalid export-using emission.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2435,3 +2469,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - `typename` is only valid for dependent names; applying it to ordinary namespace/type paths is invalid and introduces new compile errors.
 - It obscures actual dependency context and makes emitted code harder to reason about.
 - Scope-aware detection (generic-type-parameter tracking + qself normalization) provides correct `typename` insertion only where required and avoids widespread regressions.
+
+### 11.17 Blanket `export { namespace ... }` Wrapping for Inline Modules
+
+**Rejected approach:** Wrap every inline module namespace in an `export { namespace ... }` block as a quick way to avoid invalid nested `export` declarations.
+
+**Why it was rejected:**
+- It over-exports module-internal declarations, changing visibility semantics far beyond the original Rust `pub` intent.
+- It can force linkage checks on nested `using` imports and trigger new module-linkage export errors (for example, exporting `using ::Either`/`::Left`/`::Right` declarations).
+- A targeted fix (no nested `export` keyword + legal qualified nested `using` lowering + selective trait re-export suppression) is narrower, safer, and easier to reason about.
