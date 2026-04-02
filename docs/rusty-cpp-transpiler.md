@@ -2738,6 +2738,49 @@ Design rationale:
 - Followed rejected approach in §11.26 by avoiding a fallback that keeps bodies referencing unbound identifiers.
 - Used explicit recursive binding emission so generated lambdas always bind every pattern-local name they reference.
 
+### 10.41 Phase 18 Progress: End-to-End (Leaf 4.16) — DONE
+
+Leaf 4.16 removed the next unresolved-name blocker family in expanded either output:
+`Self_Left`/`Self_Right`, `Result_Err`/`Result_Ok`, untyped `rusty::Result::err/ok`, and `using ::for_both`.
+
+Root causes:
+
+- `Self::Variant` paths in match patterns were not resolved before variant-pattern type lowering, producing `Self_*` pseudo-type names.
+- `Result` tuple-variant matches (`Ok`/`Err`) were lowered via `std::visit` as if `Result` were a generated data-enum variant wrapper.
+- `Ok(...)` / `Err(...)` constructor emission ignored expected result type context, emitting untyped calls.
+- Expanded output can retain bare lower-case `use super::...` imports (for macro-origin names) that have no matching C++ declaration; lowering them to `using ::name;` causes hard compile failures.
+
+Changes:
+
+- Resolved `Self::...` expression/path emission in impl scope to the concrete struct name.
+- Updated variant-pattern enum-name recovery so `Self::Left`/`Self::Right` recover current enum context and template args.
+- Added runtime conditional match-expression lowering for `Result`/`Option` patterns (`is_ok/is_err/is_some/is_none` + unwrap binding) instead of variant `std::visit` lowering.
+- Emitted `Ok`/`Err` calls as `rusty::Result<T,E>::Ok/Err(...)` when expected result type is known.
+- Added import filtering for unresolved bare lower-case inline-module imports and macro-only imports to avoid invalid `using ::...;` emissions.
+
+Regression tests added:
+
+- `test_leaf416_self_variant_patterns_emit_resolved_enum_variant_types`
+- `test_leaf416_result_match_expression_uses_runtime_conditionals`
+- `test_leaf416_result_constructors_use_expected_result_specialization`
+- `test_leaf416_macro_rules_import_is_skipped_as_rust_only`
+- `test_leaf416_unresolved_bare_super_import_is_skipped`
+
+Verification:
+
+- Focused transpiler tests:
+  - `cargo test -p rusty-cpp-transpiler leaf416 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler leaf44 -- --nocapture`
+- Parity harness build-stage rerun:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf416 --stop-after build`
+  - build now succeeds (warnings only), removing this compile blocker family.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first) instead of patching downstream diagnostics.
+- Followed §11.26 by keeping pattern-driven binding/type emission explicit.
+- Added §11.27 to record why unresolved bare macro-origin imports should not be lowered to normal C++ `using` declarations.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -2991,3 +3034,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It leaves arm-local names (`t/l/r`) unbound while still emitting body expressions that reference them, producing immediate compile failures.
 - It masks a deterministic codegen gap and shifts failures to downstream diagnostics, reducing signal quality for parity debugging.
 - The correct approach is recursive binding emission from the pattern tree (including tuple subpatterns), so every referenced binding is explicitly declared in generated C++.
+
+### 11.27 Emitting Unresolved Bare Inline-Module Imports as Normal C++ `using` Declarations
+
+**Rejected approach:** Always lower bare inline-module imports like `use super::for_both;` to `using ::for_both;` even when no matching C++ declaration exists in generated output.
+
+**Why it was rejected:**
+- In expanded output, macro-origin names can appear in `use` trees without a runtime C++ declaration, so unconditional `using ::name;` produces deterministic compile errors.
+- It turns import artifacts into hard blockers and obscures the real codegen path under test.
+- The safer behavior is to keep unresolved bare lower-case imports as Rust-only comments unless a matching declared top-level C++ item exists.
