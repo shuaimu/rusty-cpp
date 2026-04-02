@@ -3758,6 +3758,145 @@ Design rationale:
     rewrites.
 - Avoided broad post-generation string patching.
 
+### 10.11.31 Leaf 4.29.3: Normalize `.len()` call shape for expanded io tests
+
+Problem:
+
+- After Leaf 4.29.2, expanded seek/read_write io paths still failed on container length calls like:
+  - `buf.len()`
+- In these paths, `buf` lowers to C++ containers/spans (`std::vector`, `std::span`, arrays) that
+  do not share a uniform `.len()` API.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC): a local method-call lowering rule in
+  `transpiler/src/codegen.rs`, plus a compact runtime helper in `include/rusty/array.hpp`
+  and focused tests.
+
+Execution plan:
+
+1. Keep normal method-call lowering untouched except for zero-arg `.len()`.
+2. Lower `.len()` to a unified helper (`rusty::len(receiver)`).
+3. Provide helper semantics that prefer `.len()` when present and otherwise use `.size()`/`std::size`.
+4. Re-run focused tests and expanded probe to verify `buf.len()` signatures disappear.
+
+Implementation:
+
+- In codegen:
+  - Added a `MethodCall` fast path:
+    - `receiver.len()` (no args) -> `rusty::len(receiver)`.
+- In runtime helpers (`include/rusty/array.hpp`):
+  - Added `rusty::len(const Container&)`:
+    - uses `container.len()` when available,
+    - otherwise `container.size()`,
+    - otherwise `std::size(container)` for native arrays.
+
+Regression tests added:
+
+- Transpiler:
+  - `codegen::tests::test_leaf4293_len_method_call_lowers_to_rusty_len_helper`
+- Runtime:
+  - `tests/rusty_array_test.cpp::test_len_helper_shapes`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4293 -- --nocapture`
+- `cmake --build build-tests --target rusty_array_test.out`
+- `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+- Expanded-tests re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf4293.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4293.rs -o /tmp/either-expanded-tests-leaf4293.cppm --module-name either`
+  - confirmed no `buf.len()` signatures remain in generated output.
+
+Re-probe result:
+
+- Previous `buf.len()` blockers are removed.
+- Next deterministic blockers are now clearer:
+  - residual tuple-assertion reference/address artifacts around slice comparisons,
+  - and remaining `Cursor` template-context/type-shape issues.
+
+Design rationale:
+
+- Followed §11.13 root-cause-first iteration: remove one deterministic blocker family at a time.
+- Avoided broad type-specific `.len()->.size()` text rewriting; used a single helper with explicit
+  API precedence (`len` > `size` > `std::size`).
+
+### 10.11.32 Leaf 4.29.4: Tuple-assertion reference/address artifact cleanup in io tests
+
+Problem:
+
+- After Leaf 4.29.3, expanded io assertions still emitted invalid or mismatched borrow shapes in
+  tuple-binding `match` lowering:
+  - nested borrow artifacts (`&&buf`) in `read_write()`,
+  - taking address of slice helper rvalues (`&rusty::slice_to(...)`) in `seek()`,
+  - mixed tuple value shapes for slice assertions (`&buf` vs `&mock[..n]`) that did not align in
+    generated C++ comparisons.
+
+Scope analysis:
+
+- This leaf stayed small (<1000 LOC):
+  - targeted changes in `try_emit_binding_tuple_match(...)` and local helper predicates in
+    `transpiler/src/codegen.rs`,
+  - one compact runtime compatibility helper in `include/rusty/array.hpp`,
+  - focused transpiler/runtime regressions.
+
+Execution plan:
+
+1. Keep tuple-binding match optimization (`match (&a, &b)`) and avoid broad global reference rewrites.
+2. In tuple reference lowering, flatten nested reference targets and avoid direct address-of on
+   slice-helper rvalues by materializing temporaries.
+3. When a tuple assertion mixes full-borrow and slice-range-borrow forms (`&buf` with
+   `&mock[..n]`), normalize the full-borrow side to `rusty::slice_full(...)` so both operands
+   lower to slice-shaped values.
+4. Add focused tests and re-probe expanded compile to ensure prior `&&...` / `&slice_to(...)`
+   signatures disappear.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added tuple-scope detection for slice-range reference elements.
+  - Added reference-target peeling for tuple reference elements (collapses nested `&...` layers for
+    this lowering path).
+  - Added explicit slice-range target detection so these tuple elements always materialize a stable
+    temporary before taking an address.
+  - Added scoped normalization for mixed tuple slice assertions:
+    - if tuple includes a slice-range borrow, stable full-container borrows are emitted as
+      `rusty::slice_full(...)` temporaries to keep comparison operand shapes aligned.
+- In `include/rusty/array.hpp`:
+  - Added a narrow `operator==` overload for `std::span` pairs (GCC/libstdc++ C++23 toolchain
+    compatibility where `std::span` equality is not provided), used by transpiled slice assertions.
+
+Regression tests added:
+
+- Transpiler:
+  - `codegen::tests::test_leaf4294_tuple_match_slice_assertion_materializes_slice_temps`
+  - `codegen::tests::test_leaf4294_tuple_match_nested_reference_avoids_double_address_artifact`
+- Runtime:
+  - `tests/rusty_array_test.cpp::test_span_equality_helper_shape`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4294 -- --nocapture`
+- `cmake --build build-tests --target rusty_array_test.out`
+- `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+- Expanded-tests re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf4294.rs -o /tmp/either-expanded-tests-leaf4294.cppm --module-name either`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf4294.cppm -o /tmp/either-expanded-tests-leaf4294.o`
+
+Re-probe result:
+
+- Previous tuple-assertion artifact signatures are removed:
+  - no emitted `auto _m0 = &&buf;`,
+  - no emitted `auto _m1 = &rusty::slice_to(...);`,
+  - mixed full/slice assertion pairs now lower to temporary-backed slice shapes.
+- Next deterministic blockers are now outside this leaf’s scope and remain in io/type-context
+  families (notably `Cursor` template-context/type-shape issues and later unrelated expanded paths).
+
+Design rationale:
+
+- Kept the fix local to tuple-binding assertion lowering and slice-shape interop.
+- Avoided broad global reference rewriting in line with §11.33.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4179,3 +4318,29 @@ string patches.
   bounds/shape behavior).
 - A direct `Expr::Index` range-shape lowering is local, auditable, and preserves normal scalar
   indexing unchanged.
+
+### 11.41 Broad Global Text Rewrite of `.len()` to `.size()`
+
+**Rejected approach:** Apply a global string-level replacement of `.len()` with `.size()` in
+generated C++.
+
+**Why it was rejected:**
+
+- It would break rusty runtime types that intentionally expose `.len()` and may not expose
+  `.size()` in all cases.
+- It ignores receiver-type shape and is brittle in macro-expanded outputs and nested expressions.
+- A scoped AST lowering to `rusty::len(receiver)` keeps semantics explicit and centrally testable.
+
+### 11.42 Global Nested-Reference Flattening Across All Expression Lowering
+
+**Rejected approach:** Flatten every nested Rust borrow expression globally (`&&expr` -> `&expr` or
+`expr`) across all expression lowering paths.
+
+**Why it was rejected:**
+
+- Nested reference forms appear in many contexts (assertions, trait/runtime calls, generic methods);
+  global flattening can silently change semantics outside the failing tuple-assertion path.
+- The deterministic blocker was tuple-binding assertion scrutinee lowering in io tests, so a scoped
+  fix there provides better attribution and lower regression risk.
+- Localized tuple-match handling plus focused regression tests keeps parity debugging incremental and
+  auditable.

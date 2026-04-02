@@ -14,6 +14,13 @@
 #include <stdexcept>
 #include <rusty/vec.hpp>
 
+// GCC/libstdc++ C++23 does not provide span equality operators.
+// Keep a narrow value-comparison overload so transpiled Rust slice assertions compile.
+template<typename L, std::size_t LExtent, typename R, std::size_t RExtent>
+constexpr bool operator==(std::span<L, LExtent> lhs, std::span<R, RExtent> rhs) {
+    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
 namespace rusty {
 
 namespace detail {
@@ -52,6 +59,19 @@ auto collect_range(Range&& range_like) {
         out.push(std::forward<decltype(item)>(item));
     }
     return out;
+}
+
+/// Unified length helper for transpiled `.len()` calls.
+/// Supports rusty types (`.len()`), STL/span (`.size()`), and native arrays.
+template<typename Container>
+size_t len(const Container& container) {
+    if constexpr (requires { container.len(); }) {
+        return static_cast<size_t>(container.len());
+    } else if constexpr (requires { container.size(); }) {
+        return static_cast<size_t>(container.size());
+    } else {
+        return static_cast<size_t>(std::size(container));
+    }
 }
 
 /// Slice helpers used by transpiled Rust range-index expressions.

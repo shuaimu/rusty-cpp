@@ -92,12 +92,47 @@ void test_slice_helpers_basic_shapes() {
     printf("PASS\n");
 }
 
+void test_len_helper_shapes() {
+    printf("test_len_helper_shapes: ");
+    std::vector<uint8_t> data{1, 2, 3, 4};
+    assert(rusty::len(data) == 4);
+
+    auto full = rusty::slice_full(data);
+    assert(rusty::len(full) == 4);
+
+    int native[3] = {1, 2, 3};
+    assert(rusty::len(native) == 3);
+
+    struct HasLenMethod {
+        size_t len() const { return 7; }
+    } has_len;
+    assert(rusty::len(has_len) == 7);
+
+    printf("PASS\n");
+}
+
+void test_span_equality_helper_shape() {
+    printf("test_span_equality_helper_shape: ");
+    std::vector<uint8_t> data{1, 2, 3, 4};
+
+    auto lhs = rusty::slice_full(data);
+    auto rhs = rusty::slice_to(data, 4);
+    auto rhs_short = rusty::slice_to(data, 3);
+
+    assert(lhs == rhs);
+    assert(!(lhs == rhs_short));
+
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty range helpers ===\n");
 
     test_range_next_and_count();
     test_range_from_next_and_count_shape();
     test_slice_helpers_basic_shapes();
+    test_len_helper_shapes();
+    test_span_equality_helper_shape();
 
     printf("\nAll rusty range tests passed!\n");
     return 0;

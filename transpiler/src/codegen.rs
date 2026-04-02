@@ -1971,6 +1971,10 @@ impl CodeGen {
         }
 
         let tuple_expected_ty = self.infer_expected_type_from_tuple_elements(&tuple_scrutinee.elems);
+        let tuple_has_slice_range_reference = tuple_scrutinee
+            .elems
+            .iter()
+            .any(|elem| self.is_reference_to_slice_range_index_expr(elem));
 
         self.writeln("{");
         self.indent += 1;
@@ -1980,18 +1984,34 @@ impl CodeGen {
             let elem_name = format!("_m{}", idx);
             match elem {
                 syn::Expr::Reference(r) => {
-                    let inner_raw =
-                        self.emit_expr_to_string_with_expected(&r.expr, tuple_expected_ty.as_ref());
+                    let reference_target = self.peel_reference_target_expr(&r.expr);
+                    let mut inner_raw = self
+                        .emit_expr_to_string_with_expected(reference_target, tuple_expected_ty.as_ref());
                     let inner = self.maybe_wrap_variant_constructor_with_expected_enum(
-                        &r.expr,
+                        reference_target,
                         inner_raw,
                         tuple_expected_ty.as_ref(),
                     );
-                    if self.is_stable_reference_lvalue_expr(&r.expr) {
-                        self.writeln(&format!("auto {} = &{};", elem_name, inner));
+                    let is_slice_range_target =
+                        self.is_slice_range_index_target_expr(reference_target);
+                    let should_normalize_to_slice_full = tuple_has_slice_range_reference
+                        && self.should_normalize_tuple_reference_target_to_slice_full(
+                            reference_target,
+                        );
+                    if should_normalize_to_slice_full {
+                        inner_raw = format!("rusty::slice_full({})", inner);
+                    } else {
+                        inner_raw = inner;
+                    }
+
+                    if self.is_stable_reference_lvalue_expr(reference_target)
+                        && !is_slice_range_target
+                        && !should_normalize_to_slice_full
+                    {
+                        self.writeln(&format!("auto {} = &{};", elem_name, inner_raw));
                     } else {
                         let tmp_name = format!("_m{}_tmp", idx);
-                        self.writeln(&format!("auto {} = {};", tmp_name, inner));
+                        self.writeln(&format!("auto {} = {};", tmp_name, inner_raw));
                         self.writeln(&format!("auto {} = &{};", elem_name, tmp_name));
                     }
                 }
@@ -2105,6 +2125,41 @@ impl CodeGen {
             syn::Expr::Reference(r) => self.is_stable_reference_lvalue_expr(&r.expr),
             syn::Expr::Paren(p) => self.is_stable_reference_lvalue_expr(&p.expr),
             syn::Expr::Group(g) => self.is_stable_reference_lvalue_expr(&g.expr),
+            _ => false,
+        }
+    }
+
+    fn peel_reference_target_expr<'a>(&self, expr: &'a syn::Expr) -> &'a syn::Expr {
+        let mut current = self.peel_paren_group_expr(expr);
+        while let syn::Expr::Reference(r) = current {
+            current = self.peel_paren_group_expr(&r.expr);
+        }
+        current
+    }
+
+    fn is_reference_to_slice_range_index_expr(&self, expr: &syn::Expr) -> bool {
+        let reference_target = match self.peel_paren_group_expr(expr) {
+            syn::Expr::Reference(r) => self.peel_reference_target_expr(&r.expr),
+            _ => return false,
+        };
+        self.is_slice_range_index_target_expr(reference_target)
+    }
+
+    fn is_slice_range_index_target_expr(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Index(idx) => self.is_slice_range_index_expr(&idx.index),
+            _ => false,
+        }
+    }
+
+    fn should_normalize_tuple_reference_target_to_slice_full(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                self.is_stable_reference_lvalue_expr(expr)
+            }
+            syn::Expr::Field(field) => {
+                self.should_normalize_tuple_reference_target_to_slice_full(&field.base)
+            }
             _ => false,
         }
     }
@@ -5200,6 +5255,10 @@ impl CodeGen {
             }
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, None),
             syn::Expr::MethodCall(mc) => {
+                if mc.method == "len" && mc.args.is_empty() {
+                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    return format!("rusty::len({})", receiver);
+                }
                 if mc.method == "collect" && mc.args.is_empty() && Self::is_range_expression(&mc.receiver)
                 {
                     let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -10133,6 +10192,13 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4293_len_method_call_lowers_to_rusty_len_helper() {
+        let out = transpile_str("fn f() { let buf = [0u8; 16]; let n = buf.len(); }");
+        assert!(out.contains("const auto n = rusty::len(buf);"));
+        assert!(!out.contains("buf.len()"));
+    }
+
+    #[test]
     fn test_collect_on_range_expression() {
         let out = transpile_str("fn f() { let v = (0..10).collect(); }");
         assert!(out.contains("rusty::collect_range("));
@@ -10815,6 +10881,47 @@ mod tests {
         assert!(!out.contains("auto _m = *(*this);"));
         assert!(out.contains("return rusty::deref_ref("));
         assert!(!out.contains("&**inner"));
+    }
+
+    #[test]
+    fn test_leaf4294_tuple_match_slice_assertion_materializes_slice_temps() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut mock = [0u8; 32];
+                let buf = [0u8; 8];
+                match (&buf, &mock[..buf.len()]) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto _m0_tmp = rusty::slice_full(buf);"));
+        assert!(out.contains("auto _m1_tmp = rusty::slice_to(mock, rusty::len(buf));"));
+        assert!(!out.contains("auto _m1 = &rusty::slice_to(mock, rusty::len(buf));"));
+    }
+
+    #[test]
+    fn test_leaf4294_tuple_match_nested_reference_avoids_double_address_artifact() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut mock = [0u8; 32];
+                let buf = [0u8; 8];
+                match (&&buf, &&mock[..buf.len()]) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(!out.contains("auto _m0 = &&buf;"));
+        assert!(out.contains("auto _m0_tmp = rusty::slice_full(buf);"));
+        assert!(out.contains("auto _m1_tmp = rusty::slice_to(mock, rusty::len(buf));"));
+        assert!(!out.contains("auto _m1 = &rusty::slice_to(mock, rusty::len(buf));"));
     }
 
     #[test]
