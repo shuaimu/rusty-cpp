@@ -2781,6 +2781,47 @@ Design rationale:
 - Followed §11.26 by keeping pattern-driven binding/type emission explicit.
 - Added §11.27 to record why unresolved bare macro-origin imports should not be lowered to normal C++ `using` declarations.
 
+### 10.42 Phase 18 Progress: End-to-End (Leaf 4.17.1) — DONE
+
+Leaf 4.17.1 starts the `cargo expand --tests` parity path for `either` by removing Rust libtest harness scaffolding items that are not meaningful C++ module output.
+
+Root causes:
+
+- Expanded test output includes `const`/`static` metadata items typed as `test::TestDescAndFn`; these are Rust libtest registration internals and resolve to unknown symbols in C++.
+- Expanded test output also contains generated Rust libtest `main` that calls `test::test_main_static`; lowering this directly causes immediate unresolved symbol failures and duplicates executable-entry semantics in module builds.
+
+Changes:
+
+- Added targeted metadata detection helper (`is_rust_libtest_metadata_type`) that recognizes `test::TestDescAndFn` inside const/static type trees.
+- In const/static emission, skip only libtest metadata declarations and emit trace comments:
+  - `// Rust-only libtest metadata const skipped: <name>`
+  - `// Rust-only libtest metadata static skipped: <name>`
+- Added generated-main detection helper (`is_rust_libtest_main`) for `fn main` bodies containing `test::test_main_static(...)`.
+- In function emission, skip only the generated libtest `main` and emit:
+  - `// Rust-only libtest main omitted`
+
+Regression tests added:
+
+- `test_leaf417_skips_libtest_metadata_const_and_static`
+- `test_leaf417_skips_generated_libtest_main_function`
+- `test_leaf417_regular_main_without_libtest_call_is_not_skipped`
+
+Verification:
+
+- Focused transpiler tests:
+  - `cargo test -p rusty-cpp-transpiler leaf417 -- --nocapture`
+- Expanded-tests compile probe:
+  - `cargo expand --lib --tests` on `tests/transpile_tests/either`
+  - transpile probe output with `rusty-cpp-transpiler`
+  - compile with `g++ -std=c++23 -fmodules-ts`
+- The previous `test::TestDescAndFn` and `test::test_main_static` blocker family no longer appears.
+- Next blocker family is now expected-type context for untyped constructors in expanded tests (`Left/Right/Ok/Err`), tracked as Leaf 4.17.2.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first) by collapsing the first deterministic blocker family before tackling deeper semantic mismatches.
+- Followed §11.28 (below) by applying a narrow, shape-based skip only for known Rust libtest scaffolding rather than broad symbol stripping.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3043,3 +3084,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - In expanded output, macro-origin names can appear in `use` trees without a runtime C++ declaration, so unconditional `using ::name;` produces deterministic compile errors.
 - It turns import artifacts into hard blockers and obscures the real codegen path under test.
 - The safer behavior is to keep unresolved bare lower-case imports as Rust-only comments unless a matching declared top-level C++ item exists.
+
+### 11.28 Broad Symbol-Stripping for Expanded Test Output
+
+**Rejected approach:** Skip or comment-out all expanded test items whose paths look unfamiliar (for example any `test::*` path, any generated `main`, or any unknown const/static shape) to force compilation quickly.
+
+**Why it was rejected:**
+- Broad stripping can remove real runtime code and hide genuine transpiler gaps, producing a false parity signal.
+- It makes behavior non-deterministic across crates because symbol-shape heuristics become too general and hard to audit.
+- The safer approach is narrow structural filtering for known Rust libtest scaffolding only (`test::TestDescAndFn` metadata and generated `test_main_static` main), with explicit regression tests.

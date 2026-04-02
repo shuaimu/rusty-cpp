@@ -460,6 +460,33 @@ impl CodeGen {
         })
     }
 
+    fn is_rust_libtest_metadata_type(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                let parts: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                parts.len() >= 2
+                    && parts[0] == "test"
+                    && matches!(parts.last().map(|s| s.as_str()), Some("TestDescAndFn"))
+            }
+            syn::Type::Reference(r) => self.is_rust_libtest_metadata_type(&r.elem),
+            syn::Type::Ptr(p) => self.is_rust_libtest_metadata_type(&p.elem),
+            syn::Type::Paren(p) => self.is_rust_libtest_metadata_type(&p.elem),
+            syn::Type::Group(g) => self.is_rust_libtest_metadata_type(&g.elem),
+            syn::Type::Array(a) => self.is_rust_libtest_metadata_type(&a.elem),
+            syn::Type::Slice(s) => self.is_rust_libtest_metadata_type(&s.elem),
+            syn::Type::Tuple(t) => t.elems.iter().any(|elem| self.is_rust_libtest_metadata_type(elem)),
+            _ => false,
+        }
+    }
+
+    fn is_rust_libtest_main(&self, f: &syn::ItemFn) -> bool {
+        if f.sig.ident != "main" {
+            return false;
+        }
+        let body = normalize_token_text(f.block.to_token_stream().to_string());
+        body.contains("test :: test_main_static") || body.contains("test::test_main_static")
+    }
+
     /// Emit a nested function definition as a C++ lambda.
     /// `fn foo(x: i32) -> i32 { x + 1 }` → `const auto foo = [&](int32_t x) -> int32_t { return x + 1; };`
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
@@ -490,6 +517,11 @@ impl CodeGen {
     fn emit_function(&mut self, f: &syn::ItemFn) {
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
+
+        if self.is_rust_libtest_main(f) {
+            self.writeln("// Rust-only libtest main omitted");
+            return;
+        }
 
         let is_test = Self::has_test_attr(&f.attrs);
 
@@ -963,6 +995,13 @@ impl CodeGen {
     }
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
+        if self.is_rust_libtest_metadata_type(&c.ty) {
+            self.writeln(&format!(
+                "// Rust-only libtest metadata const skipped: {}",
+                c.ident
+            ));
+            return;
+        }
         let name = &c.ident;
         let ty = self.map_type(&c.ty);
         let expr = self.emit_expr_to_string(&c.expr);
@@ -970,6 +1009,13 @@ impl CodeGen {
     }
 
     fn emit_static(&mut self, s: &syn::ItemStatic) {
+        if self.is_rust_libtest_metadata_type(&s.ty) {
+            self.writeln(&format!(
+                "// Rust-only libtest metadata static skipped: {}",
+                s.ident
+            ));
+            return;
+        }
         let name = &s.ident;
         let ty = self.map_type(&s.ty);
         let expr = self.emit_expr_to_string(&s.expr);
@@ -6906,6 +6952,44 @@ mod tests {
         );
         assert!(out.contains("// Rust-only unresolved import: using for_both;"));
         assert!(!out.contains("using ::for_both;"));
+    }
+
+    #[test]
+    fn test_leaf417_skips_libtest_metadata_const_and_static() {
+        let out = transpile_str(
+            r#"
+            const BASIC: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            static HARNESS: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            const KEEP: i32 = 7;
+        "#,
+        );
+
+        assert!(out.contains("// Rust-only libtest metadata const skipped: BASIC"));
+        assert!(out.contains("// Rust-only libtest metadata static skipped: HARNESS"));
+        assert!(out.contains("constexpr int32_t KEEP = 7;"));
+        assert!(!out.contains("BASIC ="));
+        assert!(!out.contains("HARNESS ="));
+    }
+
+    #[test]
+    fn test_leaf417_skips_generated_libtest_main_function() {
+        let out = transpile_str(
+            r#"
+            fn main() { test::test_main_static(&[]); }
+            fn helper() {}
+        "#,
+        );
+
+        assert!(out.contains("// Rust-only libtest main omitted"));
+        assert!(out.contains("void helper() {"));
+        assert!(!out.contains("void main("));
+    }
+
+    #[test]
+    fn test_leaf417_regular_main_without_libtest_call_is_not_skipped() {
+        let out = transpile_str("fn main() {}");
+        assert!(!out.contains("// Rust-only libtest main omitted"));
+        assert!(out.contains("void main() {"));
     }
 
     #[test]

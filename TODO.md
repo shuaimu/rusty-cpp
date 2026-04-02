@@ -305,6 +305,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] Leaf 4.14: De-duplicate impl methods by emitted C++ template/signature shape (not raw Rust impl bounds) so expanded `fmt` impl pairs do not emit duplicate `Either::fmt(...) const`
           - [x] Leaf 4.15: Emit nested tuple-destructuring bindings inside variant match arms (`Left((t, l))`, `Right((t, r))`) so generated visit lambdas bind all referenced names and remove `t/l/r` unresolved compile errors
           - [x] *done* Leaf 4.16: Fix unresolved expanded-output names in `Self`/`Result` pattern paths and macro-only imports (`Self_Left`/`Self_Right`, `Result_Err`/`Result_Ok`, `rusty::Result::err/ok`, `using ::for_both`)
+          - [ ] Leaf 4.17: Start `cargo expand --tests` parity path for either (currently emits Rust libtest scaffolding and test-body blockers that do not compile as C++ module output)
+            - [x] *done* Leaf 4.17.1: Skip Rust libtest harness scaffolding items in expanded test output (`test::TestDescAndFn` const/static metadata and `test::test_main_static` generated `main`) so first compile blockers are removed without broad symbol stripping
+            - [ ] Leaf 4.17.2: Add expected-type context recovery for untyped variant constructors in expanded test bodies (`Left(...)` / `Right(...)` / `Ok(...)` / `Err(...)` in assertion tuples and local bindings)
+            - [ ] Leaf 4.17.3: Replace unresolved `for_both!`-comment fallbacks in returned-expression methods (read/write/seek/deref/fmt paths) with compilable lowerings or conservative Rust-only skips
+            - [ ] Leaf 4.17.4: Re-run expanded-tests compile probe and capture next reduced blocker set for subsequent leaf work
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
