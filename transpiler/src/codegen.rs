@@ -61,6 +61,10 @@ pub struct CodeGen {
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
+    /// Scoped Rust-local to emitted-C++ local name mappings.
+    /// Used to preserve Rust shadowing semantics where repeated `let` names
+    /// in the same block must be renamed for valid C++.
+    local_cpp_bindings: Vec<HashMap<String, String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
@@ -133,6 +137,7 @@ impl CodeGen {
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
+            local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -207,6 +212,8 @@ impl CodeGen {
         self.data_enum_types.clear();
         self.struct_field_types.clear();
         self.param_bindings.clear();
+        self.local_bindings.clear();
+        self.local_cpp_bindings.clear();
         self.self_receiver_ref_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
@@ -995,6 +1002,66 @@ impl CodeGen {
                 })
                 .collect();
 
+            // Predeclare variant constructor helpers so template methods emitted
+            // inside the wrapper can reference `Left<...>/Right<...>` before the
+            // helper definitions appear later in the file.
+            for variant in &e.variants {
+                let vname = &variant.ident;
+                let variant_struct = if has_generics {
+                    format!("{}_{}{}", name, vname, template_args)
+                } else {
+                    format!("{}_{}", name, vname)
+                };
+                match &variant.fields {
+                    syn::Fields::Unnamed(fields) => {
+                        let params: Vec<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                let ty = self.map_type(&f.ty);
+                                format!("{} _{}", ty, i)
+                            })
+                            .collect();
+                        if has_generics {
+                            self.writeln(&template_prefix);
+                        }
+                        self.writeln(&format!(
+                            "{} {}({});",
+                            variant_struct,
+                            vname,
+                            params.join(", ")
+                        ));
+                    }
+                    syn::Fields::Named(fields) => {
+                        let params: Vec<String> = fields
+                            .named
+                            .iter()
+                            .map(|f| {
+                                let fname = f.ident.as_ref().unwrap();
+                                let ftype = self.map_type(&f.ty);
+                                format!("{} {}", ftype, fname)
+                            })
+                            .collect();
+                        if has_generics {
+                            self.writeln(&template_prefix);
+                        }
+                        self.writeln(&format!(
+                            "{} {}({});",
+                            variant_struct,
+                            vname,
+                            params.join(", ")
+                        ));
+                    }
+                    syn::Fields::Unit => {
+                        if has_generics {
+                            self.writeln(&template_prefix);
+                        }
+                        self.writeln(&format!("{} {}();", variant_struct, vname));
+                    }
+                }
+            }
+
             // Use struct wrapper if recursive OR has impl blocks (so methods can be added)
             let has_impls = self.has_impls_for_type(&name.to_string());
             if is_recursive || has_impls {
@@ -1051,7 +1118,8 @@ impl CodeGen {
                         let args: Vec<String> = (0..fields.unnamed.len()).map(|i| format!("std::move(_{})", i)).collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "auto {}({}) {{ return {}{{{}}};  }}",
+                            "{} {}({}) {{ return {}{{{}}};  }}",
+                            variant_struct,
                             vname, params.join(", "),
                             variant_struct,
                             args.join(", ")
@@ -1069,7 +1137,8 @@ impl CodeGen {
                         }).collect();
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "auto {}({}) {{ return {}{{{}}};  }}",
+                            "{} {}({}) {{ return {}{{{}}};  }}",
+                            variant_struct,
                             vname, params.join(", "),
                             variant_struct,
                             args.join(", ")
@@ -1078,8 +1147,10 @@ impl CodeGen {
                     syn::Fields::Unit => {
                         if has_generics { self.writeln(&template_prefix); }
                         self.writeln(&format!(
-                            "auto {}() {{ return {}{{}};  }}",
-                            vname, variant_struct
+                            "{} {}() {{ return {}{{}};  }}",
+                            variant_struct,
+                            vname,
+                            variant_struct
                         ));
                     }
                 }
@@ -1850,6 +1921,7 @@ impl CodeGen {
         let reassigned = collect_reassigned_vars(&block.stmts);
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
         self.local_bindings.push(HashMap::new());
+        self.local_cpp_bindings.push(HashMap::new());
 
         let stmts = &block.stmts;
         let len = stmts.len();
@@ -1860,6 +1932,7 @@ impl CodeGen {
         }
 
         self.local_bindings.pop();
+        self.local_cpp_bindings.pop();
         self.reassigned_vars = prev;
     }
 
@@ -3731,6 +3804,7 @@ impl CodeGen {
             syn::Pat::Ident(pat_ident) => {
                 let name = &pat_ident.ident;
                 let name_str = name.to_string();
+                let cpp_name = self.allocate_local_cpp_name(&name_str);
                 let is_mut = pat_ident.mutability.is_some();
                 let inferred_binding_ty = local
                     .init
@@ -3763,7 +3837,7 @@ impl CodeGen {
                     if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
                         self.writeln(&format!(
                             "{}{} {} = [&]() {{",
-                            qualifier, type_str, name
+                            qualifier, type_str, cpp_name
                         ));
                         self.indent += 1;
                         self.writeln("while (true) {");
@@ -3781,7 +3855,7 @@ impl CodeGen {
                             let ptr_type = self.map_ref_as_pointer_type(local, &init.expr);
                             self.writeln(&format!(
                                 "{} {} = &{};",
-                                ptr_type, name, inner
+                                ptr_type, cpp_name, inner
                             ));
                         } else {
                             // No rebinding: `let r = &x` → `const auto& r = x`
@@ -3791,7 +3865,7 @@ impl CodeGen {
                             let ref_type = self.map_ref_as_ref_type(local, &init.expr);
                             self.writeln(&format!(
                                 "{}{} {} = {};",
-                                ref_qualifier, ref_type, name, inner
+                                ref_qualifier, ref_type, cpp_name, inner
                             ));
                         }
                     } else {
@@ -3812,11 +3886,11 @@ impl CodeGen {
                         }
                         self.writeln(&format!(
                             "{}{} {} = {};",
-                            qualifier, type_str, name, expr_str
+                            qualifier, type_str, cpp_name, expr_str
                         ));
                     }
                 } else {
-                    self.writeln(&format!("{}{} {};", qualifier, type_str, name));
+                    self.writeln(&format!("{}{} {};", qualifier, type_str, cpp_name));
                 }
             }
             syn::Pat::Tuple(tuple) => {
@@ -3836,15 +3910,16 @@ impl CodeGen {
                 // The type annotation is on the pattern, inner pat has the name
                 if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
                     let name = &pi.ident;
+                    let cpp_name = self.allocate_local_cpp_name(&name.to_string());
                     let is_mut = pi.mutability.is_some();
                     let ty = self.map_type(&pat_type.ty);
                     let qualifier = if is_mut { "" } else { "const " };
                     if let Some(init) = &local.init {
                         let expr_str =
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
-                        self.writeln(&format!("{}{} {} = {};", qualifier, ty, name, expr_str));
+                        self.writeln(&format!("{}{} {} = {};", qualifier, ty, cpp_name, expr_str));
                     } else {
-                        self.writeln(&format!("{}{} {};", qualifier, ty, name));
+                        self.writeln(&format!("{}{} {};", qualifier, ty, cpp_name));
                     }
                 } else {
                     self.writeln("// TODO: complex typed pattern binding");
@@ -3885,6 +3960,35 @@ impl CodeGen {
         if let Some(scope) = self.local_bindings.last_mut() {
             scope.insert(name, ty);
         }
+    }
+
+    fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
+        let Some(scope) = self.local_cpp_bindings.last_mut() else {
+            return rust_name.to_string();
+        };
+
+        if !scope.contains_key(rust_name) && !scope.values().any(|v| v == rust_name) {
+            let cpp_name = rust_name.to_string();
+            scope.insert(rust_name.to_string(), cpp_name.clone());
+            return cpp_name;
+        }
+
+        let mut idx = 1usize;
+        loop {
+            let candidate = format!("{}_shadow{}", rust_name, idx);
+            if !scope.values().any(|v| v == &candidate) {
+                scope.insert(rust_name.to_string(), candidate.clone());
+                return candidate;
+            }
+            idx += 1;
+        }
+    }
+
+    fn lookup_local_binding_cpp_name(&self, rust_name: &str) -> Option<String> {
+        self.local_cpp_bindings
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(rust_name).cloned())
     }
 
     fn update_local_binding_type(&mut self, name: String, ty: syn::Type) {
@@ -4775,9 +4879,44 @@ impl CodeGen {
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 1
+                    && path.path.segments[0].ident == "None" =>
+            {
+                if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
+                    return format!("rusty::Option<{}>(rusty::None)", inner_cpp);
+                }
+                self.emit_expr_path_to_string(&path.path)
+            }
             syn::Expr::If(if_expr) => self.emit_if_expr_to_string(if_expr, expected_ty),
             _ => self.emit_expr_to_string(expr),
         }
+    }
+
+    fn option_ctor_inner_cpp_type(&self, expected_ty: Option<&syn::Type>) -> Option<String> {
+        let ty = expected_ty?;
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Option" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let inner_ty = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })?;
+
+        let needs_explicit_ctor = matches!(inner_ty, syn::Type::Reference(_))
+            || self.type_mentions_in_scope_type_param(inner_ty)
+            || self.type_contains_dependent_assoc(inner_ty);
+        if !needs_explicit_ctor {
+            return None;
+        }
+        Some(self.map_type(inner_ty))
     }
 
     /// Emit a call expression, optionally using expected type context from parent.
@@ -4841,6 +4980,10 @@ impl CodeGen {
 
         // Map Rust Option::Some(x) → std::optional{x}
         if func == "Some" && call.args.len() == 1 {
+            if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
+                let arg = self.emit_expr_to_string(&call.args[0]);
+                return format!("rusty::Option<{}>({})", inner_cpp, arg);
+            }
             if let Some(ref_arg) = self.emit_some_ref_constructor_arg(&call.args[0]) {
                 return format!("rusty::SomeRef({})", ref_arg);
             }
@@ -5285,7 +5428,7 @@ impl CodeGen {
     fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
-            syn::Expr::Path(path) => self.emit_path_to_string(&path.path),
+            syn::Expr::Path(path) => self.emit_expr_path_to_string(&path.path),
             syn::Expr::Group(group) => self.emit_expr_to_string(&group.expr),
             syn::Expr::Binary(bin) => {
                 let left = self.emit_expr_to_string(&bin.left);
@@ -5520,6 +5663,14 @@ impl CodeGen {
         if_expr: &syn::ExprIf,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            if let Some(lowered) =
+                self.emit_if_let_expr_to_string(let_expr, &if_expr.then_branch, &if_expr.else_branch, expected_ty)
+            {
+                return lowered;
+            }
+        }
+
         // If used as an expression (e.g., `let x = if c { 1 } else { 2 };`)
         // -> C++ ternary when branches are simple single-expression values.
         let Some((_, else_branch)) = &if_expr.else_branch else {
@@ -5574,6 +5725,114 @@ impl CodeGen {
             expected_cpp_ty.as_deref(),
         );
         format!("({} ? {} : {})", cond, then_val, else_val)
+    }
+
+    fn emit_if_let_expr_to_string(
+        &self,
+        let_expr: &syn::ExprLet,
+        then_branch: &syn::Block,
+        else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let Some((_, else_expr_box)) = else_branch else {
+            return None;
+        };
+        let then_expr = self.extract_single_expr_from_block(then_branch)?;
+        let else_expr = self.extract_single_value_expr(else_expr_box.as_ref())?;
+        let (cond_expr, binding_name, unwrap_method) =
+            self.if_let_expr_condition_parts(let_expr)?;
+
+        let inferred_expected_ty = if expected_ty.is_none() {
+            self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
+        } else {
+            None
+        };
+        let branch_expected_ty = expected_ty.or(inferred_expected_ty.as_ref());
+        let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+
+        let then_value = {
+            let emitted = self.emit_expr_to_string_with_expected(then_expr, branch_expected_ty);
+            if let Some(binding) = binding_name {
+                if let Some(unwrap) = unwrap_method {
+                    format!(
+                        "([&]() {{ auto {} = _iflet.{}(); return {}; }}())",
+                        binding, unwrap, emitted
+                    )
+                } else {
+                    format!("([&]() {{ auto {} = _iflet; return {}; }}())", binding, emitted)
+                }
+            } else {
+                emitted
+            }
+        };
+
+        let else_value = match else_expr {
+            syn::Expr::If(else_if) => self.emit_if_expr_to_string(else_if, branch_expected_ty),
+            _ => self.emit_expr_to_string_with_expected(else_expr, branch_expected_ty),
+        };
+
+        Some(format!(
+            "[&]() {{ auto&& _iflet = {}; return ({} ? {} : {}); }}()",
+            scrutinee, cond_expr, then_value, else_value
+        ))
+    }
+
+    fn if_let_expr_condition_parts(
+        &self,
+        let_expr: &syn::ExprLet,
+    ) -> Option<(String, Option<String>, Option<&'static str>)> {
+        match &*let_expr.pat {
+            syn::Pat::TupleStruct(ts) => {
+                let path_str = ts
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let (cond, unwrap) = match path_str.as_str() {
+                    "Some" | "Option::Some" => ("_iflet.is_some()", Some("unwrap")),
+                    "Ok" | "Result::Ok" => ("_iflet.is_ok()", Some("unwrap")),
+                    "Err" | "Result::Err" => ("_iflet.is_err()", Some("unwrap_err")),
+                    _ => return None,
+                };
+                let binding = if ts.elems.len() == 1 {
+                    match ts.elems.first()? {
+                        syn::Pat::Ident(pi) if pi.ident != "_" => Some(pi.ident.to_string()),
+                        syn::Pat::Wild(_) => None,
+                        _ => return None,
+                    }
+                } else if ts.elems.is_empty() {
+                    None
+                } else {
+                    return None;
+                };
+                Some((cond.to_string(), binding, unwrap))
+            }
+            syn::Pat::Path(pp) => {
+                let path_str = pp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let cond = match path_str.as_str() {
+                    "None" | "Option::None" => "_iflet.is_none()",
+                    _ => return None,
+                };
+                Some((cond.to_string(), None, None))
+            }
+            syn::Pat::Ident(pi) => {
+                let binding = if pi.ident == "_" {
+                    None
+                } else {
+                    Some(pi.ident.to_string())
+                };
+                Some(("true".to_string(), binding, None))
+            }
+            _ => None,
+        }
     }
 
     fn emit_if_ternary_branch_expr(
@@ -6092,6 +6351,9 @@ impl CodeGen {
         if let Some(kind) = joined.strip_prefix("core::panicking::AssertKind::") {
             return format!("rusty::panicking::AssertKind::{}", kind);
         }
+        if joined == "core::panicking::panic" {
+            return "rusty::panicking::panic".to_string();
+        }
 
         // Map Rust Ordering enum variants to fallback ordering enum variants.
         match joined.as_str() {
@@ -6134,6 +6396,16 @@ impl CodeGen {
 
         // Single segment — escape if keyword
         escape_cpp_keyword(&joined)
+    }
+
+    fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {
+        if path.segments.len() == 1 {
+            let name = path.segments[0].ident.to_string();
+            if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
+                return mapped;
+            }
+        }
+        self.emit_path_to_string(path)
     }
 
     fn map_type(&self, ty: &syn::Type) -> String {
@@ -6621,6 +6893,7 @@ impl CodeGen {
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             local_bindings: Vec::new(),
+            local_cpp_bindings: Vec::new(),
             param_bindings: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -7365,6 +7638,8 @@ namespace panicking {\n\
 enum class AssertKind { Eq, Ne };\n\
 template<typename... Args>\n\
 [[noreturn]] inline void assert_failed(Args&&...) { std::abort(); }\n\
+template<typename... Args>\n\
+[[noreturn]] inline void panic(Args&&...) { std::abort(); }\n\
 template<typename... Args>\n\
 [[noreturn]] inline void panic_fmt(Args&&...) { std::abort(); }\n\
 }\n\
@@ -10747,23 +11022,22 @@ mod tests {
     #[test]
     fn test_variant_constructor_generated() {
         let out = transpile_str("enum Maybe<T> { Just(T), Nothing }");
-        // Constructor functions return auto (variant struct) for implicit conversion
-        assert!(out.contains("auto Just(T _0)"));
-        assert!(out.contains("auto Nothing()"));
+        assert!(out.contains("Maybe_Just<T> Just(T _0)"));
+        assert!(out.contains("Maybe_Nothing<T> Nothing()"));
     }
 
     #[test]
     fn test_variant_constructor_two_params() {
         let out = transpile_str("enum Either<L, R> { Left(L), Right(R) }");
-        assert!(out.contains("auto Left(L _0)"));
-        assert!(out.contains("auto Right(R _0)"));
+        assert!(out.contains("Either_Left<L, R> Left(L _0)"));
+        assert!(out.contains("Either_Right<L, R> Right(R _0)"));
     }
 
     #[test]
     fn test_variant_constructor_non_generic() {
         let out = transpile_str("enum Token { Num(i32), Str(String) }");
-        assert!(out.contains("auto Num(int32_t _0)"));
-        assert!(out.contains("auto Str(rusty::String _0)"));
+        assert!(out.contains("Token_Num Num(int32_t _0)"));
+        assert!(out.contains("Token_Str Str(rusty::String _0)"));
     }
 
     #[test]
@@ -11453,6 +11727,100 @@ mod tests {
         assert!(out.contains("auto next("));
         assert!(!out.contains("rusty::Option<Either::Item> next("));
         assert!(!out.contains("using Item = typename L::Item;"));
+    }
+
+    #[test]
+    fn test_leaf433_same_scope_shadowing_local_is_renamed() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut buf = [0u8; 4];
+                let _x = buf.len();
+                let buf = [1u8; 4];
+                let _y = buf.len();
+            }
+        "#,
+        );
+        assert!(out.contains("auto buf = rusty::array_repeat(static_cast<uint8_t>(0), 4);"));
+        assert!(out.contains(
+            "const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"
+        ));
+        assert!(out.contains("const auto _y = rusty::len(buf_shadow1);"));
+    }
+
+    #[test]
+    fn test_leaf433_if_let_expr_lowers_without_unreachable_condition() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let invalid_utf8 = b"\xff";
+                let _res = if let Err(error) = std::str::from_utf8(invalid_utf8) {
+                    Err(Left(error))
+                } else if let Err(error) = "x".parse::<i32>() {
+                    Err(Right(error))
+                } else {
+                    Ok(())
+                };
+            }
+        "#,
+        );
+        assert!(!out.contains("rusty::intrinsics::unreachable() ?"));
+        assert!(out.contains("auto&& _iflet = std::str::from_utf8("));
+        assert!(out.contains("_iflet.is_err() ?"));
+        assert!(out.contains("auto error = _iflet.unwrap_err();"));
+    }
+
+    #[test]
+    fn test_leaf433_generic_option_some_none_use_option_ctor_shape() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn right(self) -> Option<R> {
+                    match self {
+                        Either::Left(_) => None,
+                        Either::Right(r) => Some(r),
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::Option<R>(rusty::None);"));
+        assert!(out.contains("return rusty::Option<R>(r);"));
+        assert!(!out.contains("return std::nullopt;"));
+    }
+
+    #[test]
+    fn test_leaf433_core_panicking_panic_path_is_mapped() {
+        let out = transpile_str("fn f() { core::panicking::panic(\"boom\"); }");
+        assert!(out.contains("rusty::panicking::panic(\"boom\")"));
+    }
+
+    #[test]
+    fn test_leaf433_variant_constructor_helpers_are_predeclared_before_wrapper_methods() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            impl<L, R> Either<L, R> {
+                fn as_ref(&self) -> Either<&L, &R> {
+                    match *self {
+                        Either::Left(ref inner) => Left(inner),
+                        Either::Right(ref inner) => Right(inner),
+                    }
+                }
+            }
+        "#,
+        );
+        let decl_pos = out
+            .find("Either_Left<L, R> Left(L _0);")
+            .expect("expected Left predeclaration");
+        let wrapper_pos = out
+            .find("struct Either : std::variant<")
+            .expect("expected enum wrapper");
+        assert!(decl_pos < wrapper_pos);
+        assert!(!out.contains("auto Left(L _0)"));
+        assert!(!out.contains("auto Right(R _0)"));
     }
 
     #[test]

@@ -4295,6 +4295,78 @@ Design rationale:
   expanded-test-only rewrite path.
 - Kept changes scoped to constrained emission modes to avoid broad behavior shifts in regular output.
 
+### 10.11.39 Leaf 4.33: Fix post-4.32 `read_write`/`error`/`as_ref` blocker family
+
+Problem:
+
+- After Leaf 4.32, the first deterministic compile blockers moved to:
+  - same-scope local redeclaration in expanded `read_write()` (`let buf` shadowing),
+  - malformed `if let` expression lowering in `error()` (`unreachable() ? ...` condition shape),
+  - early `Left`/`Right` lookup inside `as_ref`/`as_mut` wrapper methods before helper declarations.
+
+Scope analysis:
+
+- Kept this leaf under the requested size:
+  - scoped local-binding map for same-scope shadowing,
+  - targeted if-let-expression emitter path,
+  - narrow panic-path mapping and constructor-helper ordering fixes,
+  - focused regressions plus expanded re-probe.
+
+Execution plan:
+
+1. Add block-local C++ name remapping for Rust locals so same-scope shadowing remains valid C++.
+2. Lower expression-position `if let` via IIFE/ternary with valid condition extraction and stable bindings.
+3. Map `core::panicking::panic` to `rusty::panicking::panic`.
+4. Predeclare variant constructor helpers before enum wrappers to satisfy early method lookup.
+5. Re-probe expanded tests and capture the next blocker set.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Added `local_cpp_bindings` stack and wired it through block/local/path emission so same-scope
+    shadowed locals get distinct C++ names and later references resolve to the newest binding.
+  - Added expression-position if-let lowering helpers (`emit_if_let_expr_to_string`,
+    `if_let_expr_condition_parts`) and routed `emit_if_expr_to_string` through them first.
+  - Added path mapping `core::panicking::panic` → `rusty::panicking::panic` and runtime fallback
+    panic helper stub in constrained output mode.
+  - Emitted variant constructor helper predeclarations before enum wrappers and aligned helper
+    definitions with explicit variant return signatures (`Either_Left<...> Left(...)` etc.) so the
+    declaration/definition pair is a single function (no overload ambiguity).
+  - Extended Option constructor shaping for dependent/reference expected contexts so `Some/None`
+    emission uses `rusty::Option<T>(...)` where needed.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf433_same_scope_shadowing_local_is_renamed`
+- `codegen::tests::test_leaf433_if_let_expr_lowers_without_unreachable_condition`
+- `codegen::tests::test_leaf433_generic_option_some_none_use_option_ctor_shape`
+- `codegen::tests::test_leaf433_core_panicking_panic_path_is_mapped`
+- `codegen::tests::test_leaf433_variant_constructor_helpers_are_predeclared_before_wrapper_methods`
+
+Verification:
+
+- Focused tests:
+  - `cargo test -p rusty-cpp-transpiler leaf433 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler variant_constructor -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf433-post.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf433-post.rs -o /tmp/either-expanded-tests-leaf433-post.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf433-post.cppm -o /tmp/either-expanded-tests-leaf433-post.o`
+
+Re-probe result:
+
+- Previous Leaf 4.32 first blockers are removed (no local `buf` redeclaration error, no malformed
+  `unreachable() ?` ternary shape, and no early unresolved `Left`/`Right` lookup family).
+- Next deterministic blockers now start at constrained associated-type use sites in value position
+  (for example `rusty::Option<IterEither::Item>`), followed by remaining expanded error-path runtime
+  lowering gaps (`std::str::from_utf8`, `"x".parse()`), and ref-return parity issues in
+  `as_ref`/`as_mut`.
+
+Design rationale:
+
+- Kept the fixes local to the observed blocker family and existing constrained-emission architecture.
+- Avoided broad global rewrites; each change is now covered by focused regressions and a compile re-probe.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4823,3 +4895,17 @@ wrappers/casts/stubs to silence instantiation errors.
 - It would spread workaround logic across unrelated lowering stages and hide the true emission-mode issue.
 - Constrained-mode signature softening/alias skipping is local, auditable, and matches the existing
   module-mode design used for the same failure class.
+
+### 11.49 Mixing Constructor-Helper Predeclarations with Mismatched `auto` Definitions
+
+**Rejected approach:** Predeclare variant constructor helpers with explicit return types
+(`Either_Left<L, R> Left(L)`) but define them later as independent `auto Left(...)` functions.
+
+**Why it was rejected:**
+
+- In generated output this creates two viable overloads with the same parameter list and different
+  return-type formulation, producing ambiguous `Left<...>`/`Right<...>` calls in expanded tests.
+- The ambiguity masks the original ordering fix and creates new compile failures unrelated to the
+  target leaf intent.
+- Declarations and definitions must use the same signature shape (explicit variant return type in
+  both places) so lookup ordering is fixed without introducing overload ambiguity.
