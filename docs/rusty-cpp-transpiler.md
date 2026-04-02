@@ -3077,6 +3077,73 @@ Design rationale:
 - Followed §11.13: make test bodies runnable first, then collapse to the first
   deterministic compile blocker family.
 
+### 10.48 Phase 18 Progress: End-to-End (Leaf 4.20) — DONE
+
+Leaf 4.20 fixed the first runnable expanded-test compile blocker family in `basic()`
+by replacing invalid tuple-address `std::visit` lowering and fixing local sum-type
+inference for `let mut e = Left(...); e = r;`.
+
+Scope analysis:
+
+- This leaf is small (<1000 LOC): a focused `codegen.rs` change set plus targeted
+  regression tests and a re-probe compile run.
+
+Execution plan:
+
+1. Add a statement-level tuple-binding match lowering path for assertion-style tuple
+   matches (`(left_val, right_val)`), bypassing variant-only `std::visit` lowering.
+2. Materialize temporaries for `&<rvalue>` tuple scrutinee elements so C++ never takes
+   the address of a temporary.
+3. Emit explicit inferred sum type for mutable reassigned constructor locals when no
+   explicit type annotation is present.
+4. Re-run focused tests and expanded-tests compile probe to confirm blocker removal.
+
+Implementation:
+
+- Added `try_emit_binding_tuple_match(...)` in statement match lowering:
+  - handles binding-only tuple arm patterns;
+  - emits tuple element locals + tuple binding statements + arm body execution;
+  - avoids `std::visit(overloaded {...}, std::make_tuple(...))` for this shape.
+- Added stable-reference checks for tuple-scrutinee reference elements and temporary
+  materialization for rvalue reference targets (`_mN_tmp` then `&_mN_tmp`).
+- Updated local binding emission:
+  - when a mutable untyped local is reassigned and initializer inference yields an
+    enum constructor sum type (`Either`/`Result`), emit explicit mapped type instead
+    of `auto`.
+  - this fixes `e = r` where `e` would otherwise be deduced as `Either_Left<...>`.
+
+Regression tests added:
+
+- `test_leaf420_mut_reassigned_untyped_variant_local_uses_sum_type`
+- `test_leaf420_binding_tuple_match_statement_avoids_visit_and_rvalue_address_of`
+
+Focused verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf420 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+
+Expanded-tests compile re-probe:
+
+- `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf420.rs`
+- `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf420.rs -o /tmp/either-expanded-tests-leaf420.cppm --module-name either`
+- `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=120 -c /tmp/either-expanded-tests-leaf420.cppm -o /tmp/either-expanded-tests-leaf420.o`
+- Previous Leaf 4.20 blocker family is removed in generated `basic()`:
+  - no tuple-`std::visit` on `std::make_tuple(...)`;
+  - no address-of-rvalue emissions for `&Left(...)` / `&Right(...)` / `&None`;
+  - no `e = r` variant-struct mismatch (`e` now emitted as `Either<...>`).
+- Next deterministic blocker family from this probe:
+  - unconstrained associated-type members instantiated on concrete non-iterator
+    `Either<int,int>` (`typename L::IntoIter`, etc.);
+  - remaining Rust runtime assertion-path lowerings (`core::panicking::*`,
+    `core::option::Option::None`) and `rusty::Option` vs `std::nullopt` comparison gaps.
+
+Design rationale:
+
+- Followed §11.13 (root-cause-first): fixed the first deterministic compile family
+  before touching downstream assertion/runtime fallbacks.
+- Followed §11.29 and §11.33: avoided broad global constructor/reference rewrites;
+  kept fixes scoped to tuple-binding statement matches and reassigned constructor locals.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3387,3 +3454,17 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It breaks Rust visibility semantics and over-exposes internal helper APIs.
 - It creates avoidable module API drift and increases the risk of name/linkage conflicts.
 - The safer approach is targeted wrapper emission keyed by explicit libtest marker metadata and emitted function presence.
+
+### 11.33 Global Reference-Lowering Rewrite for `&expr` Temporary Handling
+
+**Rejected approach:** Rewrite all reference expressions (`&expr`) globally to force
+temporary materialization or pointer-like emission everywhere.
+
+**Why it was rejected:**
+
+- It is too broad and risks changing behavior outside the failing expanded-test tuple
+  assertion path.
+- Many reference expressions are already valid and should remain direct borrows;
+  blanket rewriting would introduce avoidable churn/regression risk.
+- The immediate blocker was statement-level tuple match lowering with rvalue-address
+  scrutinee elements, so a scoped fix there is safer and easier to verify.

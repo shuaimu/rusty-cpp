@@ -1848,6 +1848,13 @@ impl CodeGen {
     }
 
     fn emit_match(&mut self, match_expr: &syn::ExprMatch) {
+        // Expanded test assertions commonly lower to tuple-binding statement matches:
+        // `match (&a, &b) { (left_val, right_val) => ... }`.
+        // These are pure bindings and do not need variant visitation.
+        if self.try_emit_binding_tuple_match(match_expr) {
+            return;
+        }
+
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
 
@@ -1898,6 +1905,147 @@ impl CodeGen {
         enum_name
             .as_ref()
             .is_some_and(|name| self.data_enum_types.contains(name))
+    }
+
+    fn try_emit_binding_tuple_match(&mut self, match_expr: &syn::ExprMatch) -> bool {
+        let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() else {
+            return false;
+        };
+
+        let arity = tuple_scrutinee.elems.len();
+        if !match_expr
+            .arms
+            .iter()
+            .all(|arm| self.is_binding_only_tuple_arm_pattern(&arm.pat, arity))
+        {
+            return false;
+        }
+
+        let tuple_expected_ty = self.infer_expected_type_from_tuple_elements(&tuple_scrutinee.elems);
+
+        self.writeln("{");
+        self.indent += 1;
+
+        let mut tuple_elem_names = Vec::new();
+        for (idx, elem) in tuple_scrutinee.elems.iter().enumerate() {
+            let elem_name = format!("_m{}", idx);
+            match elem {
+                syn::Expr::Reference(r) => {
+                    let inner =
+                        self.emit_expr_to_string_with_expected(&r.expr, tuple_expected_ty.as_ref());
+                    if self.is_stable_reference_lvalue_expr(&r.expr) {
+                        self.writeln(&format!("auto {} = &{};", elem_name, inner));
+                    } else {
+                        let tmp_name = format!("_m{}_tmp", idx);
+                        self.writeln(&format!("auto {} = {};", tmp_name, inner));
+                        self.writeln(&format!("auto {} = &{};", elem_name, tmp_name));
+                    }
+                }
+                _ => {
+                    let elem_expr =
+                        self.emit_expr_to_string_with_expected(elem, tuple_expected_ty.as_ref());
+                    self.writeln(&format!("auto {} = {};", elem_name, elem_expr));
+                }
+            }
+            tuple_elem_names.push(elem_name);
+        }
+
+        self.writeln(&format!(
+            "auto _m_tuple = std::make_tuple({});",
+            tuple_elem_names.join(", ")
+        ));
+        self.writeln("do {");
+        self.indent += 1;
+
+        for arm in &match_expr.arms {
+            self.writeln("{");
+            self.indent += 1;
+
+            let mut binding_stmts = Vec::new();
+            match &arm.pat {
+                syn::Pat::Tuple(_) => {
+                    let _ =
+                        self.collect_pattern_binding_stmts(&arm.pat, "_m_tuple", &mut binding_stmts);
+                }
+                syn::Pat::Ident(pi) => {
+                    if pi.ident != "_" {
+                        binding_stmts.push(format!("const auto& {} = _m_tuple;", pi.ident));
+                    }
+                }
+                syn::Pat::Wild(_) => {}
+                _ => {}
+            }
+
+            for stmt in binding_stmts {
+                self.writeln(&stmt);
+            }
+
+            if let Some((_, guard)) = &arm.guard {
+                let guard_str = self.emit_expr_to_string(guard);
+                self.writeln(&format!("if ({}) {{", guard_str));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.writeln("break;");
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                self.emit_arm_body(&arm.body);
+                self.writeln("break;");
+            }
+
+            self.indent -= 1;
+            self.writeln("}");
+        }
+
+        self.indent -= 1;
+        self.writeln("} while (false);");
+        self.indent -= 1;
+        self.writeln("}");
+        true
+    }
+
+    fn is_binding_only_tuple_arm_pattern(&self, pat: &syn::Pat, arity: usize) -> bool {
+        match pat {
+            syn::Pat::Tuple(tuple_pat) => {
+                tuple_pat.elems.len() == arity
+                    && tuple_pat
+                        .elems
+                        .iter()
+                        .all(|elem| self.is_binding_only_pattern(elem))
+            }
+            syn::Pat::Wild(_) | syn::Pat::Ident(_) => true,
+            _ => false,
+        }
+    }
+
+    fn is_binding_only_pattern(&self, pat: &syn::Pat) -> bool {
+        match pat {
+            syn::Pat::Ident(_) | syn::Pat::Wild(_) => true,
+            syn::Pat::Tuple(tuple_pat) => tuple_pat
+                .elems
+                .iter()
+                .all(|elem| self.is_binding_only_pattern(elem)),
+            syn::Pat::Type(pt) => self.is_binding_only_pattern(&pt.pat),
+            syn::Pat::Reference(r) => self.is_binding_only_pattern(&r.pat),
+            syn::Pat::Paren(p) => self.is_binding_only_pattern(&p.pat),
+            _ => false,
+        }
+    }
+
+    fn is_stable_reference_lvalue_expr(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                name == "self" || self.lookup_local_binding_type(&name).is_some()
+            }
+            syn::Expr::Field(field) => self.is_stable_reference_lvalue_expr(&field.base),
+            syn::Expr::Index(index) => self.is_stable_reference_lvalue_expr(&index.expr),
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => true,
+            syn::Expr::Reference(r) => self.is_stable_reference_lvalue_expr(&r.expr),
+            syn::Expr::Paren(p) => self.is_stable_reference_lvalue_expr(&p.expr),
+            syn::Expr::Group(g) => self.is_stable_reference_lvalue_expr(&g.expr),
+            _ => false,
+        }
     }
 
     fn emit_match_as_switch(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
@@ -3327,17 +3475,28 @@ impl CodeGen {
         match pat {
             syn::Pat::Ident(pat_ident) => {
                 let name = &pat_ident.ident;
+                let name_str = name.to_string();
                 let is_mut = pat_ident.mutability.is_some();
                 let inferred_binding_ty = local
                     .init
                     .as_ref()
                     .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr));
                 if let Some(ty) = inferred_binding_ty.clone() {
-                    self.update_local_binding_type(name.to_string(), ty);
+                    self.update_local_binding_type(name_str.clone(), ty);
                 }
 
                 let type_str = if let Some(ty) = get_local_type(local) {
                     self.map_type(ty)
+                } else if self.should_emit_inferred_sum_type_for_local(
+                    local,
+                    &name_str,
+                    inferred_binding_ty.as_ref(),
+                ) {
+                    self.map_type(
+                        inferred_binding_ty
+                            .as_ref()
+                            .expect("inferred sum type should exist when selected"),
+                    )
                 } else {
                     "auto".to_string()
                 };
@@ -3361,7 +3520,7 @@ impl CodeGen {
                         self.writeln("}();");
                     } else if self.is_ref_init(&init.expr) {
                         let inner = self.extract_ref_inner(&init.expr);
-                        if is_mut && self.reassigned_vars.contains(&name.to_string()) {
+                        if is_mut && self.reassigned_vars.contains(&name_str) {
                             // Reference rebinding detected: `let mut r = &x; ... r = &y;`
                             // Emit as pointer instead of reference
                             let ptr_type = self.map_ref_as_pointer_type(local, &init.expr);
@@ -3524,6 +3683,39 @@ impl CodeGen {
                 self.lookup_local_binding_type(&name)
             }
             _ => None,
+        }
+    }
+
+    fn should_emit_inferred_sum_type_for_local(
+        &self,
+        local: &syn::Local,
+        binding_name: &str,
+        inferred_binding_ty: Option<&syn::Type>,
+    ) -> bool {
+        if get_local_type(local).is_some() || inferred_binding_ty.is_none() {
+            return false;
+        }
+        if !self.reassigned_vars.contains(binding_name) {
+            return false;
+        }
+
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let Some(expr) = self.extract_value_expr(&init.expr) else {
+            return false;
+        };
+
+        if self.extract_constructor_call_expr(expr).is_some() {
+            return true;
+        }
+
+        match expr {
+            syn::Expr::If(if_expr) => self.extract_constructor_pair_from_if(if_expr).is_some(),
+            syn::Expr::Match(match_expr) => {
+                self.extract_constructor_pair_from_match(match_expr).is_some()
+            }
+            _ => false,
         }
     }
 
@@ -9324,6 +9516,22 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf420_mut_reassigned_untyped_variant_local_uses_sum_type() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let mut e = Left(1);
+                let r = Right(2);
+                e = r;
+            }
+        "#,
+        );
+        assert!(out.contains("Either<int32_t, int32_t> e = Left<int32_t, int32_t>(1);"));
+        assert!(out.contains("e = r;"));
+    }
+
+    #[test]
     fn test_untyped_shadow_blocks_outer_assignment_type_context() {
         let out = transpile_str(
             r#"
@@ -9385,6 +9593,35 @@ mod tests {
         assert!(out.contains(
             "const auto t = std::make_tuple(&b(), &Left<rusty::String, std::string_view>(rusty::String::from(\"foo\")));"
         ));
+    }
+
+    #[test]
+    fn test_leaf420_binding_tuple_match_statement_avoids_visit_and_rvalue_address_of() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f() {
+                let mut e = Left(2);
+                let r = Right(2);
+                match (&e, &Left(2)) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+                e = r;
+                match (&e.left(), &None) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(!out.contains("std::visit(overloaded {"));
+        assert!(out.contains("auto _m1_tmp = Left<int32_t, int32_t>(2);"));
+        assert!(out.contains("auto _m1_tmp = std::nullopt;"));
+        assert!(out.contains("const auto& left_val = std::get<0>(_m_tuple);"));
+        assert!(out.contains("const auto& right_val = std::get<1>(_m_tuple);"));
     }
 
     #[test]

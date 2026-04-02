@@ -312,7 +312,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Leaf 4.17.4: Re-run expanded-tests compile probe and capture next reduced blocker set for subsequent leaf work
           - [x] *done* Leaf 4.18: Run expanded-tests execution/link parity probe (beyond module compile) and capture the first runtime/behavior blocker set
           - [x] *done* Leaf 4.19: Preserve expanded `#[test]` functions as runnable transpiled test bodies (currently omitted), then capture the first compile/link blocker from that runnable-test path
-          - [ ] Leaf 4.20: Fix first runnable expanded-test compile blocker family in `basic()` (invalid tuple-address `std::visit` lowering for equality assertions and Left/Right-typed local mismatch), then re-probe compile/link
+          - [x] *done* Leaf 4.20: Fix first runnable expanded-test compile blocker family in `basic()` (invalid tuple-address `std::visit` lowering for equality assertions and Left/Right-typed local mismatch), then re-probe compile/link
+            - [x] *done* Added tuple-binding statement-match lowering for expanded assertion-style matches so `(left_val, right_val)` tuple arms no longer emit `std::visit(..., std::make_tuple(...))`
+            - [x] *done* Materialized tuple-scrutinee temporaries for `&<rvalue>` elements (`&Left(...)`, `&Right(...)`, `&None`, etc.) before taking addresses
+            - [x] *done* Emitted explicit inferred sum type for mutable reassigned untyped constructor locals (`let mut e = Left(...); e = r;`) to avoid variant-struct mismatch
+            - [x] *done* Re-probe: previous `basic()` blocker family removed; next deterministic compile blockers are generic associated-type member declarations instantiated on non-iterator concrete types (`typename L::IntoIter` for `Either<int,int>`) plus remaining Rust runtime path fallbacks in assertion bodies
+          - [ ] Leaf 4.21: Fix first post-4.20 compile blocker family from expanded runnable tests (`Either<int,int>` instantiation hitting unconstrained associated-type members like `typename L::IntoIter`), then re-probe compile/link
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
