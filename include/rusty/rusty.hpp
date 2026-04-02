@@ -38,6 +38,9 @@
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
 
+// Error trait-shape helpers used by transpiled expanded output
+#include "rusty/error.hpp"
+
 // Move semantics (Rust-like reference handling)
 #include "rusty/move.hpp"
 

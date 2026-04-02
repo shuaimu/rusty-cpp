@@ -5730,6 +5730,9 @@ impl CodeGen {
                     let receiver = self.emit_expr_to_string(&mc.receiver);
                     return format!("rusty::len({})", receiver);
                 }
+                if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
+                    return description_call;
+                }
                 if mc.method == "parse" && mc.args.is_empty() {
                     if let Some(parsed_ty) = self.method_call_single_turbofish_type(mc) {
                         let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -6184,6 +6187,28 @@ impl CodeGen {
             return Some(format!("{}({})", method, arg_expr));
         }
         Some(format!("{}.{}({})", receiver, method, arg_expr))
+    }
+
+    fn try_emit_error_description_dispatch_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        if mc.method != "description" || !mc.args.is_empty() {
+            return None;
+        }
+        let receiver_name = match self.peel_paren_group_expr(&mc.receiver) {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            _ => None,
+        };
+        // Leaf 4.40: keep rewrite narrow to expanded match-bound payload shape
+        // (`ref inner => inner.description()`) to avoid broad method rewrites.
+        if receiver_name.as_deref() != Some("inner") {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::error::description({})", receiver))
     }
 
     fn emit_io_read_write_buffer_view_expr(&self, expr: &syn::Expr) -> String {
@@ -10792,6 +10817,44 @@ mod tests {
         assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
         assert!(!out.contains("return inner.read(std::move(buf));"));
         assert!(!out.contains("return inner.write(std::move(buf));"));
+    }
+
+    #[test]
+    fn test_leaf440_match_bound_inner_description_uses_error_dispatch_helper() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            struct E;
+            impl E {
+                fn description(&self) -> &str { "e" }
+            }
+            fn describe(e: &Either<E, E>) -> &str {
+                match *e {
+                    Either::Left(ref inner) => inner.description(),
+                    Either::Right(ref inner) => inner.description(),
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::error::description(inner);"));
+        assert!(!out.contains("return inner.description();"));
+    }
+
+    #[test]
+    fn test_leaf440_non_inner_description_call_is_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct E;
+            impl E {
+                fn description(&self) -> &str { "e" }
+            }
+            fn describe(err: &E) -> &str {
+                err.description()
+            }
+        "#,
+        );
+        assert!(out.contains("return err.description();"));
+        assert!(!out.contains("rusty::error::description(err)"));
     }
 
     #[test]

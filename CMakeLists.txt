@@ -20,6 +20,7 @@ set(TEST_SOURCES
     tests/rusty_vec_test.cpp
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp
+    tests/rusty_error_test.cpp
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp

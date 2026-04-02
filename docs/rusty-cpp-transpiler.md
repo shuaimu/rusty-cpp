@@ -4780,6 +4780,73 @@ Design rationale:
   - no global argument/reference normalization rewrite (§11.5),
   - no broad unknown-macro/symbol stripping to force green builds (§11.28/§11.30).
 
+### 10.11.46 Leaf 4.40: Fix expanded `description()` method-shape dispatch on non-error payloads
+
+Problem:
+
+- After Leaf 4.39, first deterministic expanded-tests blockers moved to `description()` dispatch in
+  `Either<L, R>::description()`:
+  - generated visit arms called `inner.description()` on both branches,
+  - non-error payloads (for example `rusty::String`) do not provide `description()`,
+  - this produced hard compile failures before deeper parity blockers could be evaluated.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one narrow method-call rewrite in codegen for the expanded `inner.description()` shape,
+  - one runtime helper header with constrained overload dispatch,
+  - focused transpiler/runtime regression tests,
+  - expanded compile re-probe.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - added `try_emit_error_description_dispatch_call(...)`,
+  - rewrites only `inner.description()` (zero-arg, receiver ident exactly `inner`) to
+    `rusty::error::description(inner)`.
+- In `include/rusty/error.hpp`:
+  - added `rusty::error::description(const T&)` constrained overloads:
+    - call `value.description()` when available and convertible to `std::string_view`,
+    - reject `std::string` by-value description returns (avoid dangling `std::string_view`),
+    - fallback to empty `std::string_view{}` when unavailable.
+- In `include/rusty/rusty.hpp`:
+  - included `rusty/error.hpp` so generated module output has helper visibility by default.
+- In `tests/rusty_error_test.cpp`:
+  - added runtime coverage for both helper dispatch paths (member available / fallback empty).
+
+Regression tests:
+
+- Transpiler:
+  - `codegen::tests::test_leaf440_match_bound_inner_description_uses_error_dispatch_helper`
+  - `codegen::tests::test_leaf440_non_inner_description_call_is_not_rewritten`
+- Runtime:
+  - `test_description_dispatch_uses_member_when_available`
+  - `test_description_dispatch_falls_back_to_empty_for_non_error_types`
+
+Verification:
+
+- Focused:
+  - `cargo test -q -p rusty-cpp-transpiler leaf440 -- --nocapture`
+- Expanded re-probe:
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf440.rs`
+  - `cargo run -q -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf440.rs --output /tmp/either-expanded-tests-leaf440.cppm --module-name rustycpp.either_expanded_leaf440`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=40 -c /tmp/either-expanded-tests-leaf440.cppm -o /tmp/either-expanded-tests-leaf440.o`
+
+Re-probe result:
+
+- Previous deterministic `inner.description()` non-error payload compile errors are removed.
+- Next first deterministic blockers now start at equality-visit return-type mismatch families in
+  generated `Either::operator==`.
+
+Design rationale:
+
+- Kept fix local to the proven expanded match-bound shape instead of introducing global
+  `description()` method rewriting.
+- Avoided wrong approaches from §11:
+  - no broad method-name rewrite across all receivers (§11.4),
+  - no type-specific hardcoded special cases in generated `Either` methods (§11.5),
+  - no broad symbol stripping to bypass compile failures (§11.28/§11.30).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

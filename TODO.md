@@ -417,6 +417,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - transpiler: `leaf439` tests for `for_both!` and expanded `match`-bound `inner.read/write` dispatch emission,
               - runtime: `tests/test_rusty_io.cpp` coverage for span read/write dispatch + read-only write rejection.
             - [x] *done* Re-probe: previous deterministic `Either::read`/`Either::write` `.read/.write` on non-io branch signatures are removed; next deterministic blockers now start at `description()` method-shape dispatch (`inner.description()` on non-error payloads) followed by downstream equality-visit return-type mismatch families.
+          - [x] *done* Leaf 4.40: Fix first post-4.39 expanded `description()` method-shape dispatch blocker family (`inner.description()` on non-error payload branches), then re-probe compile/link
+            - [x] *done* Added narrow codegen rewrite for expanded match-bound receiver shape `inner.description()` to `rusty::error::description(inner)` (kept scope limited to `inner`/zero-arg shape to avoid broad method rewrites)
+            - [x] *done* Added runtime helper header `include/rusty/error.hpp` with constrained dispatch: call member `description()` when available (excluding `std::string` by-value returns to avoid dangling views), otherwise fallback to empty `std::string_view`
+            - [x] *done* Added focused regressions:
+              - transpiler: `test_leaf440_match_bound_inner_description_uses_error_dispatch_helper`, `test_leaf440_non_inner_description_call_is_not_rewritten`
+              - runtime: `tests/rusty_error_test.cpp` (`test_description_dispatch_uses_member_when_available`, `test_description_dispatch_falls_back_to_empty_for_non_error_types`)
+            - [x] *done* Re-probe: previous `inner.description()` non-error payload blocker signatures are removed; next deterministic blockers start at equality-visit return-type mismatch families in generated `Either::operator==`
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
