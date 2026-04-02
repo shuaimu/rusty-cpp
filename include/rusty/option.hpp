@@ -361,7 +361,10 @@ public:
     // as_ref() for Option<T&> returns itself (already a reference)
     // @lifetime: (&'a) -> &'a self
     Option<T&> as_ref() & {
-        return *this;
+        if (ptr) {
+            return Option<T&>(*ptr);
+        }
+        return None;
     }
 
     
@@ -376,7 +379,10 @@ public:
     // as_mut() for Option<T&> returns itself (already mutable reference)
     // @lifetime: (&'a mut) -> &'a mut self
     Option<T&> as_mut() & {
-        return *this;
+        if (ptr) {
+            return Option<T&>(*ptr);
+        }
+        return None;
     }
 
     // Prevent calling as_ref()/as_mut() on rvalue
@@ -486,7 +492,10 @@ public:
     // as_ref() for Option<const T&> returns itself (already a const reference)
     // @lifetime: (&'a) -> &'a self
     Option<const T&> as_ref() const & {
-        return *this;
+        if (ptr) {
+            return Option<const T&>(*ptr);
+        }
+        return None;
     }
 
     // Prevent calling as_ref() on rvalue

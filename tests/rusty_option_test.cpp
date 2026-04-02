@@ -226,6 +226,49 @@ void test_option_bool() {
     printf("PASS\n");
 }
 
+// Test as_ref/as_mut for Option<T&> specialization
+void test_option_ref_specialization_as_ref_as_mut() {
+    printf("test_option_ref_specialization_as_ref_as_mut: ");
+    {
+        int value = 7;
+        Option<int&> opt_ref(value);
+
+        auto ref_view = opt_ref.as_ref();
+        assert(ref_view.is_some());
+        assert(ref_view.unwrap() == 7);
+
+        auto mut_view = opt_ref.as_mut();
+        assert(mut_view.is_some());
+        mut_view.unwrap() = 11;
+        assert(value == 11);
+
+        // Original Option remains valid after view creation.
+        assert(opt_ref.is_some());
+        assert(opt_ref.unwrap() == 11);
+    }
+    printf("PASS\n");
+}
+
+// Test as_ref for Option<const T&> specialization
+void test_option_const_ref_specialization_as_ref() {
+    printf("test_option_const_ref_specialization_as_ref: ");
+    {
+        const int value = 99;
+        Option<const int&> opt_ref(value);
+
+        auto view = opt_ref.as_ref();
+        assert(view.is_some());
+        assert(view.unwrap() == 99);
+        assert(opt_ref.is_some());
+        assert(opt_ref.unwrap() == 99);
+
+        Option<const int&> none(None);
+        auto none_view = none.as_ref();
+        assert(none_view.is_none());
+    }
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty::Option<T> ===\n");
     
@@ -242,6 +285,8 @@ int main() {
     test_option_custom_type();
     test_option_nested();
     test_option_bool();
+    test_option_ref_specialization_as_ref_as_mut();
+    test_option_const_ref_specialization_as_ref();
     
     printf("\nAll Option tests passed!\n");
     return 0;

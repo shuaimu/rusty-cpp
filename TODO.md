@@ -434,6 +434,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - [x] *done* Changed generated variant constructor helper definitions from unconditional `std::move(...)` to `std::forward<T>(...)` so reference-instantiated helper calls (`Left<L&,R&>(inner)`, `Right<L&,R&>(inner)`) no longer bind through rvalues
             - [x] *done* Added focused transpiler regressions: updated `leaf437` as_ref/as_mut return-shape expectations and added `leaf442` constructor-forwarding helper coverage
             - [x] *done* Re-probe: previous deterministic `as_ref`/`as_mut` visit mismatch and reference-helper binding signatures are removed; next deterministic blocker shifts to runtime `rusty::Option<const T&>::as_ref()` copy-path failure in `include/rusty/option.hpp`
+          - [x] *done* Leaf 4.43: Fix runtime `rusty::Option<const T&>::as_ref()` copy-path failure in expanded tests, then re-probe compile/link
+            - [x] *done* Updated `include/rusty/option.hpp` reference specializations so `as_ref()`/`as_mut()` construct return values from the stored pointer (`Option<...>(*ptr)` or `None`) instead of `return *this;` (which required deleted copy constructors)
+            - [x] *done* Added focused runtime regressions in `tests/rusty_option_test.cpp` for `Option<T&>::as_ref()/as_mut()` and `Option<const T&>::as_ref()` return paths (including `None` case and non-consuming behavior)
+            - [x] *done* Re-probe: expanded-tests compile probe and parity harness build/run now pass for this blocker family; no immediate follow-up blocker surfaced by the same probe path
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)

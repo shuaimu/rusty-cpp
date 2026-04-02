@@ -4981,6 +4981,65 @@ Design rationale:
   - no fake-green parity by relying only on smoke import/build while skipping real expanded-body
     compile blockers (§11.31).
 
+### 10.11.49 Leaf 4.43: Fix runtime `Option<const T&>::as_ref()` copy-path failure in expanded tests
+
+Problem:
+
+- After Leaf 4.42, expanded-tests compile moved to a runtime-header failure:
+  - `include/rusty/option.hpp: Option<const T&>::as_ref() const &` used `return *this;`
+  - `Option<const T&>` is move-only (`Option(const Option&) = delete`), so this path attempts a
+    deleted copy.
+- The same pattern existed in `Option<T&>::as_ref()` and `Option<T&>::as_mut()`.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - local runtime-header fix in `include/rusty/option.hpp`,
+  - focused runtime regression tests in `tests/rusty_option_test.cpp`,
+  - expanded-tests compile re-probe and parity harness re-run.
+
+Implementation:
+
+- In `include/rusty/option.hpp`:
+  - `Option<T&>::as_ref() &` now returns:
+    - `Option<T&>(*ptr)` when `ptr` is present, otherwise `None`.
+  - `Option<T&>::as_mut() &` now returns:
+    - `Option<T&>(*ptr)` when `ptr` is present, otherwise `None`.
+  - `Option<const T&>::as_ref() const &` now returns:
+    - `Option<const T&>(*ptr)` when `ptr` is present, otherwise `None`.
+- This preserves move-only semantics and keeps `as_ref`/`as_mut` non-consuming.
+
+Regression tests:
+
+- Added runtime tests in `tests/rusty_option_test.cpp`:
+  - `test_option_ref_specialization_as_ref_as_mut`
+  - `test_option_const_ref_specialization_as_ref`
+- Coverage includes:
+  - `Some`/`None` behavior for reference specializations,
+  - mutating through `Option<T&>::as_mut()`,
+  - verifying original `Option` remains valid after view-return calls.
+
+Verification:
+
+- Expanded compile probe (pre-fix failure and post-fix pass):
+  - `cargo expand --manifest-path tests/transpile_tests/either/Cargo.toml --lib --tests > /tmp/either-expanded-tests-leaf443-*.rs`
+  - `cargo run -q -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf443-*.rs --output /tmp/either-expanded-tests-leaf443-*.cppm --module-name rustycpp.either_expanded_leaf443_*`
+  - `g++ -std=c++20 -fmodules-ts -I include -I tests/cpp/include -x c++ -fmax-errors=80 -c /tmp/either-expanded-tests-leaf443-*.cppm -o /tmp/either-expanded-tests-leaf443-*.o`
+- Parity harness:
+  - `tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-leaf443-post`
+  - baseline/transpile/build/run stages all pass for this blocker family.
+
+Design rationale:
+
+- Fixed behavior at the runtime type boundary (`Option` specialization methods) rather than adding
+  transpiler-side or generated-code special casing.
+- Kept implementation explicit and local: construct return views from pointer state, avoid implicit
+  copy/move paths through `*this`.
+- Avoided wrong approaches from §11:
+  - no post-generated C++ string patching for failing call sites (§11.5),
+  - no broad disabling of move-only semantics to “make copies work” in runtime wrappers (§11.52),
+  - no probe-path narrowing that would hide expanded-tests failures behind smoke-only checks (§11.31).
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -5551,3 +5610,18 @@ for simplicity and broad copy-avoidance.
   drift), slowing parity debugging.
 - Scoped binding-shape selection (`ref mut` -> `auto&`, `ref` -> `const auto&`, by-value ->
   `auto&&`) preserves Rust pattern intent while keeping generated C++ reference categories stable.
+
+### 11.52 Returning `*this` from Move-Only `Option` Reference Specializations
+
+**Rejected approach:** Keep `Option<T&>::as_ref()/as_mut()` and
+`Option<const T&>::as_ref()` as `return *this;` even though these specializations are explicitly
+move-only (deleted copy constructor).
+
+**Why it was rejected:**
+
+- Returning `*this` from an lvalue return path requires copy construction; for move-only
+  specializations this is ill-formed and fails deterministically in expanded parity builds.
+- “Fixing” by re-enabling copy constructors would violate the project’s Rust-like move semantics
+  design for `Option`.
+- The correct local fix is explicit view reconstruction from stored pointer state
+  (`Option<...>(*ptr)` / `None`), which preserves semantics and avoids hidden ownership changes.
