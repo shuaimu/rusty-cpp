@@ -2420,6 +2420,33 @@ Verification:
 - `cargo test -p rusty-cpp-transpiler --quiet` passes.
 - `cargo test --workspace --quiet` passes.
 
+### 10.32 Phase 18 Progress: End-to-End (Leaf 5) — DONE
+
+Leaf 5 added CI-style regression coverage so the parity pipeline is re-runnable and reliably fails on regressions.
+
+Changes:
+
+- Hardened parity harness rerun behavior in `tests/transpile_tests/either/run_parity_harness.sh`:
+  - added upfront artifact reset per run (clear/recreate `cpp_out`, truncate all stage logs, remove prior build/smoke outputs);
+  - this prevents stale-output false greens when reusing `--work-dir`.
+- Made tool checks stage-aware:
+  - `cargo` remains required for real runs;
+  - `g++` is now required only when the workflow reaches build/run stages (not for `--stop-after baseline|transpile`).
+- Added integration coverage in `transpiler/tests/either_parity_harness.rs`:
+  - `test_either_parity_harness_baseline_stage_is_rerunnable` runs baseline stage twice with the same work directory and verifies logs are fresh (no append accumulation);
+  - `test_either_parity_harness_reports_stage_failure` injects a failing `cargo` shim and verifies non-zero exit propagation.
+
+Design rationale:
+
+- Keep the fix scoped to harness determinism and failure signaling, not transpiler semantics.
+- This follows the rejected-approach guidance to avoid broad, non-local rewrites (§11.4 and §11.7): we tighten only the parity automation contract needed for CI regression gating.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test either_parity_harness -- --nocapture` passes.
+- `cargo test -p rusty-cpp-transpiler --quiet` passes.
+- `cargo test --workspace --quiet` passes.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

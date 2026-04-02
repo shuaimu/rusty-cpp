@@ -111,6 +111,20 @@ require_cmd() {
   fi
 }
 
+reset_artifacts() {
+  # Make repeated runs with the same --work-dir deterministic by clearing stale
+  # logs and outputs up front. This prevents false-green runs from leftovers.
+  rm -rf "${CPP_OUT_DIR}"
+  mkdir -p "${CPP_OUT_DIR}"
+
+  : > "${LOG_RUST}"
+  : > "${LOG_TRANSPILE}"
+  : > "${LOG_CPP_BUILD}"
+  : > "${LOG_CPP_RUN}"
+
+  rm -f "${MODULE_OBJ}" "${SMOKE_MAIN}" "${SMOKE_BIN}"
+}
+
 run_logged() {
   local log_file="$1"
   shift
@@ -156,10 +170,12 @@ run_logged_in_dir() {
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
   require_cmd cargo
-  require_cmd g++
+  if [[ "${STOP_AFTER}" != "baseline" && "${STOP_AFTER}" != "transpile" ]]; then
+    require_cmd g++
+  fi
 fi
 
-mkdir -p "${CPP_OUT_DIR}"
+reset_artifacts
 
 echo "Stage 1/4: Rust baseline (cargo test on either crate)"
 run_logged "${LOG_RUST}" \

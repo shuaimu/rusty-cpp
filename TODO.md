@@ -290,4 +290,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Leaf 4.5: De-duplicate overlapping method emissions in expanded impl merges (`cloned`, `copied`, `as_ref`, `as_mut`) with deterministic signature conflict handling
           - [x] *done* Leaf 4.6: Remove invalid expression placeholders and missing-return match lowering in generated method bodies (`/* TODO: expr */`, undefined temps, non-void fallthrough)
           - [x] *done* Leaf 4.7: Re-run parity harness to capture the next reduced blocker set after Leaf 4.1-4.6
-        - [ ] Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
+        - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
+          - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
+          - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
+          - [x] *done* Add integration test that runs baseline stage twice with same work dir and verifies logs are reset (no stale append behavior)
+          - [x] *done* Add integration test that injects failing `cargo` shim and verifies harness exits non-zero (regression/failure propagation)
