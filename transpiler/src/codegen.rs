@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use proc_macro2::TokenTree;
 use quote::ToTokens;
+use syn::parse::Parser;
 use syn::parse_quote;
 use syn;
 
@@ -2155,10 +2157,101 @@ impl CodeGen {
             "dbg" => {
                 self.writeln(&format!("std::println(stderr, \"{{}}\", {});", self.convert_macro_tokens(&tokens)));
             }
+            "for_both" => {
+                if let Some(lowered) = self.try_lower_for_both_macro_expr(mac) {
+                    self.writeln(&format!("{};", lowered));
+                } else {
+                    self.writeln(&format!("// TODO: {}!(...)", macro_name));
+                }
+            }
             _ => {
                 self.writeln(&format!("// TODO: {}!(...)", macro_name));
             }
         }
+    }
+
+    fn split_for_both_macro_parts(
+        &self,
+        tokens: &proc_macro2::TokenStream,
+    ) -> Option<(
+        proc_macro2::TokenStream,
+        proc_macro2::TokenStream,
+        proc_macro2::TokenStream,
+    )> {
+        let token_vec: Vec<TokenTree> = tokens.clone().into_iter().collect();
+        let comma_idx = token_vec.iter().position(
+            |tt| matches!(tt, TokenTree::Punct(p) if p.as_char() == ','),
+        )?;
+        let receiver_tokens: proc_macro2::TokenStream =
+            token_vec[..comma_idx].iter().cloned().collect();
+
+        let rest: Vec<TokenTree> = token_vec[comma_idx + 1..].to_vec();
+        let arrow_idx = (0..rest.len().saturating_sub(1)).find(|&i| {
+            if let (TokenTree::Punct(eq), TokenTree::Punct(gt)) = (&rest[i], &rest[i + 1]) {
+                eq.as_char() == '=' && gt.as_char() == '>'
+            } else {
+                false
+            }
+        })?;
+
+        let pattern_tokens: proc_macro2::TokenStream = rest[..arrow_idx].iter().cloned().collect();
+        let body_tokens: proc_macro2::TokenStream = rest[arrow_idx + 2..].iter().cloned().collect();
+        if body_tokens.is_empty() {
+            return None;
+        }
+        Some((receiver_tokens, pattern_tokens, body_tokens))
+    }
+
+    fn for_both_lambda_components(
+        &self,
+        pat: &syn::Pat,
+    ) -> Option<(String, String, String)> {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                let name = pi.ident.to_string();
+                if pi.by_ref.is_some() && pi.mutability.is_some() {
+                    Some((
+                        "auto& _v".to_string(),
+                        format!("auto& {} = _v._0; ", name),
+                        "_m".to_string(),
+                    ))
+                } else if pi.by_ref.is_some() {
+                    Some((
+                        "const auto& _v".to_string(),
+                        format!("const auto& {} = _v._0; ", name),
+                        "_m".to_string(),
+                    ))
+                } else {
+                    Some((
+                        "auto&& _v".to_string(),
+                        format!("auto&& {} = _v._0; ", name),
+                        "std::move(_m)".to_string(),
+                    ))
+                }
+            }
+            syn::Pat::Wild(_) => Some((
+                "auto&& _v".to_string(),
+                String::new(),
+                "_m".to_string(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn try_lower_for_both_macro_expr(&self, mac: &syn::Macro) -> Option<String> {
+        let (receiver_tokens, pattern_tokens, body_tokens) =
+            self.split_for_both_macro_parts(&mac.tokens)?;
+        let receiver_expr = syn::parse2::<syn::Expr>(receiver_tokens).ok()?;
+        let binding_pat = syn::Pat::parse_single.parse2(pattern_tokens).ok()?;
+        let body_expr = syn::parse2::<syn::Expr>(body_tokens).ok()?;
+        let receiver_cpp = self.emit_expr_to_string(&receiver_expr);
+        let body_cpp = self.emit_expr_to_string(&body_expr);
+        let (lambda_param, binding_stmt, visit_arg) =
+            self.for_both_lambda_components(&binding_pat)?;
+        Some(format!(
+            "[&]() {{ auto _m = {}; return std::visit(overloaded {{ [&]({}) -> decltype(auto) {{ {}return {}; }} }}, {}); }}()",
+            receiver_cpp, lambda_param, binding_stmt, body_cpp, visit_arg
+        ))
     }
 
     /// Emit a macro invocation as an expression (returns a string).
@@ -2204,6 +2297,10 @@ impl CodeGen {
                 } else {
                     joined.join(" + ")
                 }
+            }
+            "for_both" => {
+                self.try_lower_for_both_macro_expr(mac)
+                    .unwrap_or_else(|| format!("/* {}!({}) */", macro_name, tokens))
             }
             _ => {
                 format!("/* {}!({}) */", macro_name, tokens)
@@ -7848,6 +7945,55 @@ mod tests {
     fn test_todo_expr() {
         let out = transpile_str("fn f() -> i32 { todo!() }");
         assert!(out.contains("throw std::logic_error"));
+    }
+
+    #[test]
+    fn test_leaf4173_for_both_lowers_read_write_seek_deref_fmt_paths() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            struct IO;
+            impl IO {
+                fn read(&mut self, _buf: &mut [u8]) -> usize { 0 }
+                fn write(&mut self, _buf: &[u8]) -> usize { 0 }
+                fn seek(&mut self, _pos: i32) -> usize { 0 }
+                fn fmt(&self, _f: i32) -> usize { 0 }
+            }
+            fn read_like(e: &mut Either<IO, IO>, buf: &mut [u8]) -> usize {
+                for_both!(*e, ref mut inner => inner.read(buf))
+            }
+            fn write_like(e: &mut Either<IO, IO>, buf: &[u8]) -> usize {
+                for_both!(*e, ref mut inner => inner.write(buf))
+            }
+            fn seek_like(e: &mut Either<IO, IO>, pos: i32) -> usize {
+                for_both!(*e, ref mut inner => inner.seek(pos))
+            }
+            fn deref_like(e: &Either<IO, IO>) -> &IO {
+                for_both!(*e, ref inner => inner)
+            }
+            fn fmt_like(e: &Either<IO, IO>, f: i32) -> usize {
+                for_both!(*e, ref inner => inner.fmt(f))
+            }
+        "#,
+        );
+        assert!(!out.contains("/* for_both!("));
+        assert!(out.contains("return inner.read(std::move(buf));"));
+        assert!(out.contains("return inner.write(std::move(buf));"));
+        assert!(out.contains("return inner.seek(std::move(pos));"));
+        assert!(out.contains("const auto& inner = _v._0; return inner;"));
+        assert!(out.contains("return inner.fmt(std::move(f));"));
+    }
+
+    #[test]
+    fn test_leaf4173_for_both_unsupported_pattern_uses_comment_fallback() {
+        let out = transpile_str(
+            r#"
+            fn f(e: i32) -> i32 {
+                for_both!(e, (a, b) => a)
+            }
+        "#,
+        );
+        assert!(out.contains("/* for_both!(e , (a , b) => a) */"));
     }
 
     // ── Phase 10: ? operator tests ──────────────────────────────

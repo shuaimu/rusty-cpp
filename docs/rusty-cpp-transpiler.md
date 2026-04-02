@@ -2871,6 +2871,47 @@ Design rationale:
 - Followed §11.13 (root-cause-first): fixed context propagation at expression/local scopes first rather than patching downstream compile cascades.
 - Followed §11.29 (below): used context-local recovery (typed local/callable/nested-fn and pair-structure hints) instead of global constructor-template forcing.
 
+### 10.44 Phase 18 Progress: End-to-End (Leaf 4.17.3) — DONE
+
+Leaf 4.17.3 replaces unresolved `for_both!` comment fallbacks in returned-expression
+methods (read/write/seek/deref/fmt family) with compilable lowering when pattern shape
+is known, while keeping conservative fallback for unsupported shapes.
+
+Root causes:
+
+- Unexpanded `either` sources can still contain `for_both!(...)` macro expressions.
+- Unknown macro fallback in expression position emitted comments (`/* for_both!(...) */`),
+  which produced non-compilable method bodies in return-position paths.
+
+Changes:
+
+- Added dedicated `for_both!` expression lowering:
+  - parse macro parts as `receiver, pattern => body` from token stream;
+  - lower to a returnable `std::visit(overloaded{...})` IIFE;
+  - bind variant payload as:
+    - `ref mut inner` → `auto& inner`
+    - `ref inner` → `const auto& inner`
+    - `inner` → `auto&& inner` with `std::move(_m)` visit argument.
+- Wired the lowering in both macro-expression and macro-statement emission paths.
+- Kept conservative fallback for unsupported `for_both!` pattern shapes (retain comment fallback instead of emitting invalid C++).
+
+Regression tests added:
+
+- `test_leaf4173_for_both_lowers_read_write_seek_deref_fmt_paths`
+- `test_leaf4173_for_both_unsupported_pattern_uses_comment_fallback`
+
+Verification:
+
+- Focused transpiler tests:
+  - `cargo test -p rusty-cpp-transpiler leaf4173 -- --nocapture`
+- Probe on unexpanded `either/src/lib.rs`:
+  - transpile output now contains compilable `std::visit` return lowerings for read/write/seek/deref/fmt paths and no `/* for_both!(...) */` fallbacks in those methods.
+
+Design rationale:
+
+- Followed §11.13: fixed the deterministic macro-lowering gap at the expression-emission boundary, where invalid fallbacks were introduced.
+- Followed §11.30 (below): avoid broad unknown-macro skipping; lower the known `for_both!` shape and keep strict conservative fallback for unsupported patterns.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -3152,3 +3193,12 @@ We use Microsoft Proxy exclusively for all trait mappings. See §3.2.
 - It can silently pick wrong types and mask real type-flow bugs, reducing parity signal quality.
 - It does not handle callable-return and nested-function contexts used by expanded assertions.
 - The safer approach is context-local recovery (typed locals, callable/nested-fn return hints, tuple sibling context, and paired constructor-hint extraction) with targeted tests.
+
+### 11.30 Broad Unknown-Macro Suppression for `for_both!` Return Paths
+
+**Rejected approach:** Treat all unknown macro expressions in return position as Rust-only comments or unconditional method skips.
+
+**Why it was rejected:**
+- It leaves deterministic non-compilable output in frequently used `Either` return-path methods (`read`/`write`/`seek`/`deref`/`fmt` families).
+- It discards useful semantic structure that can be lowered safely from `for_both!` shape (`receiver, pattern => body`).
+- The correct approach is targeted lowering for known macro structure, with conservative fallback only when pattern parsing is unsupported.

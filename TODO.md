@@ -308,7 +308,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [ ] Leaf 4.17: Start `cargo expand --tests` parity path for either (currently emits Rust libtest scaffolding and test-body blockers that do not compile as C++ module output)
             - [x] *done* Leaf 4.17.1: Skip Rust libtest harness scaffolding items in expanded test output (`test::TestDescAndFn` const/static metadata and `test::test_main_static` generated `main`) so first compile blockers are removed without broad symbol stripping
             - [x] *done* Leaf 4.17.2: Add expected-type context recovery for untyped variant constructors in expanded test bodies (`Left(...)` / `Right(...)` / `Ok(...)` / `Err(...)` in assertion tuples and local bindings)
-            - [ ] Leaf 4.17.3: Replace unresolved `for_both!`-comment fallbacks in returned-expression methods (read/write/seek/deref/fmt paths) with compilable lowerings or conservative Rust-only skips
+            - [x] *done* Leaf 4.17.3: Replace unresolved `for_both!`-comment fallbacks in returned-expression methods (read/write/seek/deref/fmt paths) with compilable lowerings or conservative Rust-only skips
             - [ ] Leaf 4.17.4: Re-run expanded-tests compile probe and capture next reduced blocker set for subsequent leaf work
         - [x] *done* Leaf 5: Add CI-style regression coverage so the parity pipeline is re-runnable and fails on regressions
           - [x] *done* Make parity harness re-runnable with the same `--work-dir`: clear stale logs and generated artifacts before each run
