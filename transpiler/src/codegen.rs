@@ -7124,7 +7124,20 @@ fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
     // Expanded crates frequently reference external traits that do not have generated
     // Proxy facade types in the transpiled module. Skip those facade references.
     let skip = matches!(first.as_str(), "std" | "core" | "alloc")
-        || matches!(last.as_str(), "Fn" | "FnMut" | "FnOnce" | "Into" | "Error" | "Hasher");
+        || matches!(
+            last.as_str(),
+            "Fn"
+                | "FnMut"
+                | "FnOnce"
+                | "Into"
+                | "Error"
+                | "Hasher"
+                | "IntoIterator"
+                | "Iterator"
+                | "Extend"
+                | "FromIterator"
+                | "Default"
+        );
     if skip {
         return None;
     }
@@ -8825,6 +8838,27 @@ mod tests {
     fn test_fnonce_trait_bound_requires_skipped() {
         let out = transpile_str("fn f<F: FnOnce(i32) -> i32>(x: F) {}");
         assert!(!out.contains("FnOnceFacade::is_satisfied_by"));
+    }
+
+    #[test]
+    fn test_leaf430_std_iterator_family_trait_bound_requires_skipped() {
+        let out = transpile_str(
+            r#"
+            fn f<T, I, E, C, D>(t: T, i: I, e: E, c: C, d: D)
+            where
+                T: IntoIterator,
+                I: Iterator,
+                E: Extend<u8>,
+                C: FromIterator<u8>,
+                D: Default,
+            {}
+        "#,
+        );
+        assert!(!out.contains("IntoIteratorFacade::is_satisfied_by"));
+        assert!(!out.contains("IteratorFacade::is_satisfied_by"));
+        assert!(!out.contains("ExtendFacade::is_satisfied_by"));
+        assert!(!out.contains("FromIteratorFacade::is_satisfied_by"));
+        assert!(!out.contains("DefaultFacade::is_satisfied_by"));
     }
 
     #[test]

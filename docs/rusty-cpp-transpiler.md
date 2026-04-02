@@ -4100,6 +4100,65 @@ Design rationale:
 - Avoided text-level rewrites and preserved existing range-slice lowering behavior.
 - Ensured byte-typed io buffer literals stay byte-typed at emission time rather than patching at call sites.
 
+### 10.11.36 Leaf 4.30: Skip unresolved standard iterator/default facade constraints
+
+Problem:
+
+- After Leaf 4.29.7, the first deterministic expanded compile blockers were unresolved
+  facade symbols in generated `requires (...)` constraints:
+  - `IntoIteratorFacade`, `IteratorFacade`, `ExtendFacade`,
+    `FromIteratorFacade`, and `DefaultFacade`.
+- These are standard-library trait bounds in expanded output, but the transpiler does not emit
+  matching facade declarations for them.
+
+Scope analysis:
+
+- Kept this leaf small (<1000 LOC):
+  - one focused trait-facade classification update,
+  - one focused transpiler regression test,
+  - expanded compile re-probe.
+
+Execution plan:
+
+1. Extend facade-skip classification for unresolved standard iterator/default trait names.
+2. Add a focused regression to ensure those specific `*Facade::is_satisfied_by` constraints are not emitted.
+3. Re-run expanded compile probe and capture the next deterministic blocker family.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`:
+  - Updated `facade_name_for_trait_path(...)` skip list to include:
+    - `IntoIterator`, `Iterator`, `Extend`, `FromIterator`, `Default`.
+  - This prevents emission of unresolved `requires` constraints for that trait family.
+
+Regression tests added:
+
+- `codegen::tests::test_leaf430_std_iterator_family_trait_bound_requires_skipped`
+
+Verification:
+
+- Focused:
+  - `cargo test -p rusty-cpp-transpiler leaf430 -- --nocapture`
+- Expanded re-probe:
+  - `cd tests/transpile_tests/either && cargo expand --lib --tests > /tmp/either-expanded-tests-leaf430.rs`
+  - `cargo run -p rusty-cpp-transpiler -- /tmp/either-expanded-tests-leaf430.rs -o /tmp/either-expanded-tests-leaf430.cppm`
+  - `g++ -std=c++23 -fmodules-ts -I include -x c++ -fmax-errors=40 -c /tmp/either-expanded-tests-leaf430.cppm -o /tmp/either-expanded-tests-leaf430.o`
+
+Re-probe result:
+
+- Previous Leaf 4.30 facade-symbol blockers are removed from emitted output:
+  - no `IntoIteratorFacade` / `IteratorFacade` / `ExtendFacade` /
+    `FromIteratorFacade` / `DefaultFacade` in generated constraints.
+- Next deterministic blockers are now:
+  - unresolved `DoubleEndedIteratorFacade` / `AsRefFacade` / `AsMutFacade` constraints, and
+  - unresolved trait-facade emissions using `PRO_DEF_MEM_DISPATCH` / `pro::facade_builder`.
+
+Design rationale:
+
+- Kept the fix narrow to the observed standard trait family rather than globally disabling
+  trait-bound constraints.
+- Preserved existing behavior for local/user trait-bound constraints that still rely on facade emission.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)
@@ -4589,3 +4648,15 @@ pass.
   unnecessary regression risk.
 - A narrow method-name + argument-shape guard (`read`/`read_exact`/`write`/`write_all` with one
   reference buffer argument) is deterministic, testable, and easier to audit.
+
+### 11.46 Disabling All Trait-Bound `requires` Constraints in Non-Module Mode
+
+**Rejected approach:** Remove all generated trait-facade `requires (...)` constraints in
+non-module output to avoid unresolved `*Facade` symbols quickly.
+
+**Why it was rejected:**
+
+- It erases useful generic-bound structure for local/user traits where facade constraints are valid.
+- It hides the true unresolved-trait classification problem by over-disabling code generation.
+- A targeted skip for known unresolved standard trait families keeps the fix auditable while
+  preserving supported trait-bound behavior.
