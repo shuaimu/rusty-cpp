@@ -250,10 +250,7 @@ mod tests {
             map_std_type("fmt::Arguments"),
             Some(("rusty::fmt::Arguments", false))
         );
-        assert_eq!(
-            map_std_type("Pin"),
-            Some(("rusty::pin::Pin", true))
-        );
+        assert_eq!(map_std_type("Pin"), Some(("rusty::pin::Pin", true)));
         assert_eq!(
             map_std_type("std::path::Path"),
             Some(("rusty::path::Path", false))
@@ -266,14 +263,8 @@ mod tests {
 
     #[test]
     fn test_std_types_full_path() {
-        assert_eq!(
-            map_std_type("std::vec::Vec"),
-            Some(("rusty::Vec", true))
-        );
-        assert_eq!(
-            map_std_type("std::sync::Arc"),
-            Some(("rusty::Arc", true))
-        );
+        assert_eq!(map_std_type("std::vec::Vec"), Some(("rusty::Vec", true)));
+        assert_eq!(map_std_type("std::sync::Arc"), Some(("rusty::Arc", true)));
         assert_eq!(
             map_std_type("std::collections::HashMap"),
             Some(("rusty::HashMap", true))
@@ -292,7 +283,10 @@ mod tests {
     fn test_interior_mutability() {
         assert_eq!(map_std_type("Cell"), Some(("rusty::Cell", true)));
         assert_eq!(map_std_type("RefCell"), Some(("rusty::RefCell", true)));
-        assert_eq!(map_std_type("UnsafeCell"), Some(("rusty::UnsafeCell", true)));
+        assert_eq!(
+            map_std_type("UnsafeCell"),
+            Some(("rusty::UnsafeCell", true))
+        );
     }
 
     #[test]
@@ -322,10 +316,19 @@ mod tests {
     #[test]
     fn test_function_path_mapping() {
         assert_eq!(map_function_path("Box::new"), Some("rusty::Box::new_"));
-        assert_eq!(map_function_path("String::from"), Some("rusty::String::from"));
-        assert_eq!(map_function_path("String::new"), Some("rusty::String::new_"));
+        assert_eq!(
+            map_function_path("String::from"),
+            Some("rusty::String::from")
+        );
+        assert_eq!(
+            map_function_path("String::new"),
+            Some("rusty::String::new_")
+        );
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
-        assert_eq!(map_function_path("thread::spawn"), Some("rusty::thread::spawn"));
+        assert_eq!(
+            map_function_path("thread::spawn"),
+            Some("rusty::thread::spawn")
+        );
         assert_eq!(map_function_path("Unknown::method"), None);
     }
 
@@ -375,8 +378,14 @@ mod tests {
         let table: toml::value::Table = toml::from_str(toml_str).unwrap();
         let mut mappings = std::collections::HashMap::new();
         UserTypeMap::flatten_table("", &table, &mut mappings);
-        assert_eq!(mappings.get("serde::Serialize").map(|s| s.as_str()), Some("serde::Serialize"));
-        assert_eq!(mappings.get("serde::Deserialize").map(|s| s.as_str()), Some("serde::Deserialize"));
+        assert_eq!(
+            mappings.get("serde::Serialize").map(|s| s.as_str()),
+            Some("serde::Serialize")
+        );
+        assert_eq!(
+            mappings.get("serde::Deserialize").map(|s| s.as_str()),
+            Some("serde::Deserialize")
+        );
     }
 
     #[test]
@@ -398,7 +407,10 @@ mod tests {
     #[test]
     fn test_user_type_map_lookup() {
         let mut map = UserTypeMap::default();
-        map.mappings.insert("serde::Serialize".to_string(), "/* Serialize */".to_string());
+        map.mappings.insert(
+            "serde::Serialize".to_string(),
+            "/* Serialize */".to_string(),
+        );
         assert_eq!(map.lookup("serde::Serialize"), Some("/* Serialize */"));
         assert_eq!(map.lookup("unknown::Type"), None);
     }

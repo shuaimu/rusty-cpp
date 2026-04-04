@@ -8,3 +8,5 @@ build/*
 *.lock
 
 build-tests/
+.apas
+.rusty-parity/

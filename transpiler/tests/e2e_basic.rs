@@ -51,7 +51,11 @@ const MAX: i32 = 100;
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let cpp = std::fs::read_to_string(&output_path).unwrap();
     assert!(cpp.contains("int32_t add(int32_t a, int32_t b)"));
@@ -77,7 +81,10 @@ fn test_cli_default_output_name() {
 
     // Should create hello.cppm in same directory
     let expected_output = dir.path().join("hello.cppm");
-    assert!(expected_output.exists(), "Expected hello.cppm to be created");
+    assert!(
+        expected_output.exists(),
+        "Expected hello.cppm to be created"
+    );
 }
 
 #[test]
@@ -220,7 +227,11 @@ path = "src/main.rs"
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify CMakeLists.txt was created
     let cmake_path = dir.path().join("CMakeLists.txt");
@@ -250,7 +261,10 @@ fn test_verify_flag_without_checker() {
         .expect("failed to run");
 
     // Transpilation should succeed (file written) even if verify fails
-    assert!(output_path.exists(), "output file should be written before verification");
+    assert!(
+        output_path.exists(),
+        "output file should be written before verification"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Transpiled"));
@@ -319,7 +333,11 @@ fn test_crate_mode_basic() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert!(out_dir.join("my_math.cppm").exists());
     assert!(out_dir.join("my_math.vector.cppm").exists());
@@ -359,11 +377,7 @@ fn test_type_map_flag() {
     let type_map = dir.path().join("types.toml");
 
     std::fs::write(&input, "fn f(s: serde::Serialize) {}").unwrap();
-    std::fs::write(
-        &type_map,
-        "[serde]\nSerialize = \"custom::Serialize\"\n",
-    )
-    .unwrap();
+    std::fs::write(&type_map, "[serde]\nSerialize = \"custom::Serialize\"\n").unwrap();
 
     let output = transpiler_bin()
         .arg(input.to_str().unwrap())
@@ -374,7 +388,11 @@ fn test_type_map_flag() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let cpp = std::fs::read_to_string(&output_path).unwrap();
     assert!(cpp.contains("custom::Serialize"));
@@ -393,11 +411,7 @@ fn test_crate_mode_with_path_dependency() {
         "[package]\nname = \"my_utils\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"my_utils\"\n",
     )
     .unwrap();
-    std::fs::write(
-        utils_src.join("lib.rs"),
-        "pub fn helper() -> i32 { 42 }",
-    )
-    .unwrap();
+    std::fs::write(utils_src.join("lib.rs"), "pub fn helper() -> i32 { 42 }").unwrap();
 
     // Create main crate: my_app (depends on my_utils via path)
     let app_dir = dir.path().join("my_app");
@@ -424,7 +438,11 @@ fn test_crate_mode_with_path_dependency() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Main crate output
     assert!(out_dir.join("my_app.cppm").exists());
@@ -455,7 +473,11 @@ fn test_parity_test_dry_run() {
         "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    std::fs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+    )
+    .unwrap();
 
     let output = transpiler_bin()
         .arg("parity-test")
@@ -465,7 +487,11 @@ fn test_parity_test_dry_run() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Parity Test: test_crate"));
     assert!(stdout.contains("[dry-run]"));
@@ -491,7 +517,11 @@ fn test_parity_test_missing_manifest() {
 fn test_parity_test_invalid_stop_after() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
 
     let output = transpiler_bin()

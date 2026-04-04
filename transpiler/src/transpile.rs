@@ -13,8 +13,7 @@ pub fn transpile_with_type_map(
     module_name: Option<&str>,
     type_map: &UserTypeMap,
 ) -> Result<String, String> {
-    let file: syn::File =
-        syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
+    let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
 
     let mut codegen = CodeGen::with_type_map(type_map.clone());
     codegen.emit_file(&file, module_name);

@@ -26,7 +26,7 @@ impl TargetKind {
         for k in kinds {
             match k.as_str() {
                 "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro" => {
-                    return TargetKind::Lib
+                    return TargetKind::Lib;
                 }
                 "bin" => return TargetKind::Bin,
                 "test" => return TargetKind::Test,
@@ -80,9 +80,7 @@ pub fn discover_targets(
     manifest_path: &Path,
     package_filter: Option<&str>,
 ) -> Result<(String, Vec<CrateTarget>), String> {
-    let project_dir = manifest_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
 
     let output = std::process::Command::new("cargo")
         .arg("metadata")
@@ -153,9 +151,18 @@ mod tests {
 
     #[test]
     fn test_target_kind_from_cargo() {
-        assert_eq!(TargetKind::from_cargo(&["lib".to_string()]), TargetKind::Lib);
-        assert_eq!(TargetKind::from_cargo(&["bin".to_string()]), TargetKind::Bin);
-        assert_eq!(TargetKind::from_cargo(&["test".to_string()]), TargetKind::Test);
+        assert_eq!(
+            TargetKind::from_cargo(&["lib".to_string()]),
+            TargetKind::Lib
+        );
+        assert_eq!(
+            TargetKind::from_cargo(&["bin".to_string()]),
+            TargetKind::Bin
+        );
+        assert_eq!(
+            TargetKind::from_cargo(&["test".to_string()]),
+            TargetKind::Test
+        );
         assert_eq!(
             TargetKind::from_cargo(&["example".to_string()]),
             TargetKind::Example
