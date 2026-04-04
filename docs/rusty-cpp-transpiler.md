@@ -5613,6 +5613,69 @@ Design rationale:
   - no dry-run-only control checks for `either` (§11.63),
   - no hand-maintained crate-specific parity execution path (§11.58).
 
+### 10.11.61 Phase 20 Leaf 4.2 (`tap`): remove unresolved-external-import build blocker and re-probe next deterministic failure
+
+Problem:
+
+- First deterministic `tap` parity failure after Phase 20 Leaf 1-3 occurred in Stage D build:
+  flattened runner contained unresolved external-crate import lowering:
+  - `using namespace tap;`
+- The same re-probe also surfaced a generic Stage D flattening edge case:
+  additional module units were always prelude-skipped, even when no runtime prelude had been
+  emitted yet.
+
+Scope analysis:
+
+- Implemented as a focused generic change under 1000 LOC:
+  - use-import lowering in `transpiler/src/codegen.rs`,
+  - runner flattening guard in `transpiler/src/main.rs`,
+  - fixture-agnostic regressions in existing transpiler tests.
+
+Implementation:
+
+- External unresolved `use` imports:
+  - keep TODO diagnostic for external crate root,
+  - emit Rust-only unresolved import comments instead of concrete C++ `using` declarations for
+    unresolved external paths.
+- Stage D prelude skipping:
+  - prelude skip for additional module units now only activates after runtime prelude was actually
+    emitted by earlier units (`namespace rusty {` observed), preventing accidental omission when
+    the first unit is prelude-light.
+
+Regression tests:
+
+- Updated codegen unit test:
+  - `test_use_external_crate_comment` now asserts unresolved external imports are Rust-only
+    comments (not concrete C++ `using` lines).
+- Added parity integration regression:
+  - `test_stop_after_build_succeeds_for_integration_only_crate` ensures Stage D build succeeds
+    for integration-only target shapes where runtime prelude can originate in non-first unit.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_test_verification`
+- `cargo test -p rusty-cpp-transpiler test_use_external_crate_comment`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <tap>/Cargo.toml --stop-after run --work-dir <tmp>`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- Previous deterministic blocker (`using namespace tap;`) is removed.
+- Next deterministic `tap` blockers are:
+  - `&rusty::intrinsics::unreachable()` lvalue misuse in generated code,
+  - unresolved extension-method call shape (`10.tap(...)` interpreted as numeric literal suffix).
+
+Design rationale:
+
+- Unresolved external imports should not become hard build errors in generic parity flow; they must
+  remain diagnostic-only until dependency transpilation/mapping is provided.
+- Runtime-prelude deduplication must be content-aware, not position-only, to keep multi-target
+  flattening deterministic.
+- Avoided wrong approaches from §11:
+  - no concrete C++ emission for unresolved external imports (§11.64),
+  - no unconditional prelude skipping for all non-first module units (§11.64).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6382,3 +6445,16 @@ real `--stop-after run` execution path in regression tests.
   regressions in the parity pipeline.
 - Phase 20 control-crate intent is to detect regressions after generic changes, which requires an
   actual end-to-end run signal.
+
+### 11.64 Emitting Unresolved External Imports as Concrete C++ and Skipping Prelude by File Position
+
+**Rejected approach:** Keep unresolved external `use` imports as concrete C++ `using` declarations
+and skip Stage D prelude content for every non-first module unit unconditionally.
+
+**Why it was rejected:**
+
+- Unresolved external imports become immediate compile errors (`using namespace <crate>;`) before
+  parity can report more meaningful transpilation/runtime blockers.
+- Position-only prelude skipping can drop required runtime definitions when the first module unit
+  is prelude-light and later units carry the actual runtime prelude.
+- Both behaviors reduce determinism and make multi-target parity diagnosis noisier.

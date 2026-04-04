@@ -1643,6 +1643,10 @@ impl CodeGen {
                 self.writeln(&format!("// Rust-only unresolved import: using {};", path));
                 continue;
             }
+            if is_external {
+                self.writeln(&format!("// Rust-only unresolved import: using {};", path));
+                continue;
+            }
             match classify_use_import(path) {
                 UseImportAction::RustOnly => {
                     self.writeln(&format!("// Rust-only: using {};", path));
@@ -11993,7 +11997,8 @@ mod tests {
     fn test_use_external_crate_comment() {
         let out = transpile_str("use serde::Serialize;");
         assert!(out.contains("// TODO: external crate 'serde'"));
-        assert!(out.contains("using serde::Serialize;"));
+        assert!(out.contains("// Rust-only unresolved import: using serde::Serialize;"));
+        assert!(!out.contains("\nusing serde::Serialize;"));
     }
 
     #[test]

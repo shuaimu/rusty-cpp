@@ -651,6 +651,41 @@ fn test_stop_after_transpile_collects_wrappers_for_integration_only_crate() {
 }
 
 #[test]
+fn test_stop_after_build_succeeds_for_integration_only_crate() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_integration_only_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("build")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stopped after build stage."));
+
+    assert!(runner_cpp_path(work_dir.path()).exists());
+    assert!(runner_binary_path(work_dir.path()).exists());
+    assert!(build_log_path(work_dir.path()).exists());
+    assert!(!run_log_path(work_dir.path()).exists());
+
+    let runner_cpp =
+        std::fs::read_to_string(runner_cpp_path(work_dir.path())).expect("failed to read runner");
+    assert!(runner_cpp.contains("rusty_test_integ_add_only();"));
+}
+
+#[test]
 fn test_stop_after_transpile_persists_unique_artifacts_for_normalized_collisions() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let manifest = create_module_name_collision_fixture(fixture_dir.path());

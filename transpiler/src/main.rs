@@ -1022,6 +1022,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Collect test names and transpiled code
         let mut test_entries: Vec<(String, String)> = Vec::new();
         let mut seen_test_fns: HashSet<String> = HashSet::new();
+        let mut runtime_prelude_emitted = false;
         let module_namespace_markers: Vec<String> = targets
             .iter()
             .map(|target| format!("{}::", target.module_name))
@@ -1032,7 +1033,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
 
             let mut pending_overloaded_template = false;
-            let mut skip_shared_prelude = cppm_index > 0;
+            let mut unit_emitted_runtime_prelude = false;
+            let mut skip_shared_prelude = cppm_index > 0 && runtime_prelude_emitted;
             collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
 
             // Strip module syntax and add code
@@ -1108,9 +1110,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 };
                 runner_src.push_str(line);
                 runner_src.push('\n');
+                if trimmed == "namespace rusty {" {
+                    unit_emitted_runtime_prelude = true;
+                }
             }
             if pending_overloaded_template {
                 runner_src.push_str("template<class... Ts>\n");
+            }
+            if unit_emitted_runtime_prelude {
+                runtime_prelude_emitted = true;
             }
             runner_src.push('\n');
         }

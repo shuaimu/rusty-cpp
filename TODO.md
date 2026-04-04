@@ -518,7 +518,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Leaf 4: Project-specific parity closure via generic fixes only (no per-project custom scripts)
         - [x] *done* `either`: keep as control crate; re-run parity after every generic change to prevent regressions
           - [x] *done* Added `either` control-crate regression in `transpiler/tests/either_parity_harness.rs` that runs the real harness through `--stop-after run` and asserts Stage E success (`Run: PASS`) plus persisted `baseline.txt`, `build.log`, and `run.log` artifacts
-        - [ ] `tap`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [x] *done* `tap`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+          - [x] *done* Reproduced Stage D deterministic blocker on `tap` parity run: unresolved external-crate import lowering emitted `using namespace tap;` into flattened runner and failed build before runtime parity stages
+          - [x] *done* Implemented generic fix (no crate-specific scripts): unresolved external `use` imports now emit Rust-only comments instead of concrete C++ `using` declarations; Stage D prelude skipping now activates only after runtime prelude was actually emitted in earlier units
+          - [x] *done* Added fixture-agnostic regressions: codegen unit coverage for unresolved external import lowering + parity integration regression proving integration-only build succeeds when first unit lacks runtime prelude and later unit provides it
+          - [x] *done* Re-probe on `tap` after fix: previous `using namespace tap` blocker removed; next deterministic blockers are `&rusty::intrinsics::unreachable()` lvalue misuse and unresolved extension-method call shape (`10.tap(...)`)
         - [ ] `cfg-if`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
         - [ ] `take_mut`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
         - [ ] `arrayvec`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
