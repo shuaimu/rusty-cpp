@@ -516,7 +516,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added parity verification coverage for mixed-target crates at each stop stage: `expand` (no transpile/build artifacts), `transpile` (no build/run artifacts), `build` (runner + build.log present, run.log absent), and `run` (run.log persisted)
           - [x] *done* Fixed multi-target build/run parity path uncovered by new regressions: preserve discovered target order for Stage D inputs, skip duplicated runtime prelude when flattening additional module units, and ignore invalid per-module `using` lines in flattened runner
       - [ ] Leaf 4: Project-specific parity closure via generic fixes only (no per-project custom scripts)
-        - [ ] `either`: keep as control crate; re-run parity after every generic change to prevent regressions
+        - [x] *done* `either`: keep as control crate; re-run parity after every generic change to prevent regressions
+          - [x] *done* Added `either` control-crate regression in `transpiler/tests/either_parity_harness.rs` that runs the real harness through `--stop-after run` and asserts Stage E success (`Run: PASS`) plus persisted `baseline.txt`, `build.log`, and `run.log` artifacts
         - [ ] `tap`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
         - [ ] `cfg-if`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
         - [ ] `take_mut`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity

@@ -5572,6 +5572,47 @@ Design rationale:
   - no blind module-unit concatenation that duplicates shared prelude or preserves invalid
     module-scoped `using` lines in runner context (§11.62).
 
+### 10.11.60 Phase 20 Leaf 4.1: `either` as parity control crate with run-stage regression guard
+
+Problem:
+
+- Phase 20 Leaf 4 requires keeping `either` as the control crate and re-running parity after each
+  generic pipeline change to catch regressions early.
+- Existing harness tests covered dry-run and baseline rerun behavior, but did not lock a full
+  Stage A→E run for `either`.
+
+Scope analysis:
+
+- Implemented as a small targeted test-only change (<1000 LOC):
+  - add one harness integration test in `transpiler/tests/either_parity_harness.rs`.
+
+Implementation:
+
+- Added test:
+  - `test_either_parity_harness_stop_after_run_passes_as_control_crate`
+- The test runs:
+  - `tests/transpile_tests/either/run_parity_harness.sh --stop-after run --work-dir <temp>`
+- Assertions:
+  - command succeeds,
+  - stdout includes Stage E and `Run: PASS`,
+  - `baseline.txt`, `build.log`, and `run.log` are persisted,
+  - `run.log` includes `Results:`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test either_parity_harness`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Keeping `either` as a full run-stage guard gives an early, stable signal that generic parity
+  changes did not break the previously validated reference crate path.
+- This remains crate-agnostic at implementation level because the harness is now a thin wrapper
+  over `parity-test`; no crate-specific runner logic was reintroduced.
+- Avoided wrong approaches from §11:
+  - no dry-run-only control checks for `either` (§11.63),
+  - no hand-maintained crate-specific parity execution path (§11.58).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6329,3 +6370,15 @@ unit from file start into `runner.cpp`, preserving all module-local `using` dire
 - Full-file concatenation duplicates shared runtime prelude/helper definitions across targets.
 - Module-local `using` statements can be invalid once flattened into a single TU (for example
   placeholder namespace lines or `using <module>::...` forms that assume module boundaries).
+
+### 11.63 Treating `either` Control-Crate Checks as Dry-Run-Only
+
+**Rejected approach:** Validate the control crate with dry-run/parsing assertions only, without a
+real `--stop-after run` execution path in regression tests.
+
+**Why it was rejected:**
+
+- Dry-run does not exercise transpile/build/run behavior and cannot detect runtime-stage
+  regressions in the parity pipeline.
+- Phase 20 control-crate intent is to detect regressions after generic changes, which requires an
+  actual end-to-end run signal.

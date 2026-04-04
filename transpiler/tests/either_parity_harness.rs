@@ -165,6 +165,41 @@ fn test_either_parity_harness_baseline_stage_is_rerunnable() {
     );
 }
 
+#[test]
+fn test_either_parity_harness_stop_after_run_passes_as_control_crate() {
+    let script = harness_script();
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--stop-after")
+        .arg("run")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to run parity harness");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Parity Test: either"));
+    assert!(stdout.contains("Stage E: Running transpiled tests..."));
+    assert!(stdout.contains("Run: PASS"));
+
+    assert!(work_dir.path().join("baseline.txt").exists());
+    assert!(work_dir.path().join("build.log").exists());
+    assert!(work_dir.path().join("run.log").exists());
+
+    let run_log = std::fs::read_to_string(work_dir.path().join("run.log")).expect("read run.log");
+    assert!(run_log.contains("Results:"));
+}
+
 #[cfg(unix)]
 #[test]
 fn test_either_parity_harness_reports_stage_failure() {
