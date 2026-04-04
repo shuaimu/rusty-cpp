@@ -5208,6 +5208,45 @@ Design rationale:
   - no generated-C++ post-processing for one failing wrapper (§11.55),
   - no global forced byte casts for all repeat arrays (would break legitimate integer arrays) (§11.44).
 
+### 10.11 Parity Test Command (Primary Workflow)
+
+The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
+
+**Usage:**
+```bash
+# Full pipeline: cargo test → cargo expand → transpile → g++ → run
+rusty-cpp-transpiler parity-test --manifest-path path/to/Cargo.toml
+
+# Dry run (print what would be done)
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --dry-run
+
+# Stop at a specific stage
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --stop-after transpile
+
+# Skip baseline (don't run cargo test first)
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --no-baseline
+
+# Custom work directory (artifacts persist for debugging)
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --work-dir ./debug-output --keep-work-dir
+
+# With feature flags
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --features "serde"
+
+# With user type mappings for external crates
+rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --type-map types.toml
+```
+
+**Pipeline stages:**
+| Stage | What it does | Artifacts |
+|-------|-------------|-----------|
+| A. Baseline | Run `cargo test` to verify Rust tests pass | `baseline.txt` |
+| B. Expand | Run `cargo expand` per target to resolve macros | `expanded_*.rs` |
+| C. Transpile | Transpile expanded Rust to C++20 | `*.cppm` |
+| D. Build | Generate `runner.cpp`, compile with `g++ -std=c++20` | `runner.cpp`, `build.log` |
+| E. Run | Execute transpiled tests, compare with baseline | `run.log` |
+
+**Target discovery:** Uses `cargo metadata --no-deps` to discover lib/bin/test targets generically. No crate-specific hardcoding.
+
 ---
 
 ## 11. Wrong Approaches (Rejected)

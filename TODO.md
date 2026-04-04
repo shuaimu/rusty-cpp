@@ -478,10 +478,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Stage E run: execute runner binary, capture output, compare with baseline
         - [x] *done* Persist structured logs: baseline.txt, expanded_*.rs, *.cppm, runner.cpp, build.log, run.log
         - [ ] Note: test function extraction from cargo expand --lib incomplete (tests are cfg-gated, need separate extraction strategy)
-      - [ ] Leaf 4: Remove hard-coded `either` assumptions from parity execution path
-        - [ ] Replace script-embedded module imports/names with generated names from discovery
-        - [ ] Keep `tests/transpile_tests/either/run_parity_harness.sh` as thin compatibility wrapper that forwards to `parity-test` (or deprecate once CI is migrated)
-        - [ ] Update docs (`docs/rusty-cpp-transpiler.md`) to document the generic command as the primary workflow
+      - [x] *done* Leaf 4: Remove hard-coded `either` assumptions from parity execution path
+        - [x] *done* Replaced 250-line script with thin wrapper forwarding to `parity-test` subcommand
+        - [x] *done* Updated 6 harness tests to match new parity-test output format
+        - [x] *done* Added §10.11 documenting `parity-test` as the primary workflow with usage examples
       - [ ] Leaf 5: Verification tests (required)
         - [ ] Add CLI parse/unit tests for `parity-test` flags and invalid-argument handling
         - [ ] Add discovery unit tests with fixture `cargo metadata` JSON for lib/bin/integration-test target selection
