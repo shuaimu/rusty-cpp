@@ -5676,6 +5676,69 @@ Design rationale:
   - no concrete C++ emission for unresolved external imports (§11.64),
   - no unconditional prelude skipping for all non-first module units (§11.64).
 
+### 10.11.62 Phase 20 Leaf 4.3 (`cfg-if`): make Stage-A baseline resilient to warning-as-error crates and re-probe
+
+Problem:
+
+- First deterministic `cfg-if` parity failure after Phase 20 Leaf 1-3 occurred in Stage A baseline:
+  `cargo test` failed before expand/transpile/build because `cfg-if` uses:
+  - `#![cfg_attr(test, deny(warnings))]`
+  - test code that now triggers modern rustc lint diagnostics (`unexpected_cfgs`, `dead_code`).
+- This failure class is not crate-specific to `cfg-if`; any crate that denies warnings in tests can
+  hit the same parity pipeline blocker.
+
+Scope analysis:
+
+- Implemented as a small generic baseline-layer change (<1000 LOC):
+  - baseline command invocation/retry logic in `transpiler/src/main.rs`,
+  - fixture-agnostic regression in `transpiler/tests/parity_test_verification.rs`,
+  - helper-unit coverage for lint-failure detection in `transpiler/src/main.rs`.
+
+Implementation:
+
+- Kept existing Stage-A workspace-mismatch retry flow, but factored baseline execution into
+  `run_baseline_attempt(...)` so the same flow can run with optional env tweaks.
+- Added warning-as-error failure detection from stderr markers:
+  - `implied by #[deny(warnings)]`,
+  - `requested on the command line with -D warnings`.
+- When that marker is present and baseline failed, Stage A now retries generically with:
+  - `RUSTFLAGS += --cap-lints allow`
+- The retry remains crate-agnostic and still routes through workspace-aware retry logic.
+
+Regression tests:
+
+- Added parity integration fixture/test:
+  - `test_stop_after_baseline_warning_as_error_retry_passes`
+  - verifies `parity-test --stop-after baseline` succeeds for a crate that fails only because
+    warnings are denied.
+- Added helper unit tests:
+  - `test_is_warning_as_error_failure_detects_attr_based_denials`
+  - `test_is_warning_as_error_failure_ignores_non_warning_errors`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler warning_as_error`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <cfg-if>/Cargo.toml --stop-after run --work-dir <tmp>`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- Previous deterministic Stage-A blocker is removed for `cfg-if`; baseline now passes after
+  generic lint-cap retry.
+- Next deterministic `cfg-if` blocker is in Stage D build:
+  - invalid emitted paths like `using std::option::Option2 = std::option::Option;`.
+
+Design rationale:
+
+- Stage A should capture Rust runtime/test baseline, not fail permanently on lint-policy drift
+  between crate history and current rustc defaults.
+- Retrying only when warning-as-error markers are detected keeps behavior narrow and avoids
+  masking regular compile errors.
+- Avoided wrong approaches from §11:
+  - no crate-specific baseline branch for `cfg-if` or hard-coded allowlists,
+  - no unconditional `--cap-lints allow` on every baseline run regardless of failure type.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6458,3 +6521,17 @@ and skip Stage D prelude content for every non-first module unit unconditionally
 - Position-only prelude skipping can drop required runtime definitions when the first module unit
   is prelude-light and later units carry the actual runtime prelude.
 - Both behaviors reduce determinism and make multi-target parity diagnosis noisier.
+
+### 11.65 Hard-Coding Baseline Lint Workarounds Per Crate or Applying `--cap-lints` Unconditionally
+
+**Rejected approach:** Add crate-specific baseline exceptions (for example, only for `cfg-if`) or
+always run Stage A baseline with `RUSTFLAGS=--cap-lints allow` even when baseline does not fail.
+
+**Why it was rejected:**
+
+- Crate-specific exceptions are not scalable for Phase 20 multi-crate parity goals and quickly
+  become maintenance debt.
+- Unconditional lint-capping can hide legitimate baseline compile/test failures that are unrelated
+  to warning-as-error policy.
+- A marker-triggered retry keeps the behavior generic and narrow: baseline runs normally first, and
+  only warning-policy failures receive the compatibility retry.

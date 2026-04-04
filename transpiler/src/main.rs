@@ -463,6 +463,18 @@ void rusty_test_dup() {
         assert_eq!(entries[0].0, "rusty_test_dup");
         assert_eq!(entries[0].1, "dup");
     }
+
+    #[test]
+    fn test_is_warning_as_error_failure_detects_attr_based_denials() {
+        let stderr = "note: `#[deny(unexpected_cfgs)]` implied by `#[deny(warnings)]`";
+        assert!(is_warning_as_error_failure(stderr));
+    }
+
+    #[test]
+    fn test_is_warning_as_error_failure_ignores_non_warning_errors() {
+        let stderr = "error[E0425]: cannot find value `x` in this scope";
+        assert!(!is_warning_as_error_failure(stderr));
+    }
 }
 
 fn run_cargo_test(
@@ -470,6 +482,7 @@ fn run_cargo_test(
     manifest_path: Option<&Path>,
     package: Option<&str>,
     cargo_flags: &[String],
+    extra_rustflags: Option<&str>,
 ) -> Result<Output, String> {
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("test").current_dir(current_dir);
@@ -481,6 +494,17 @@ fn run_cargo_test(
     }
     for flag in cargo_flags {
         cmd.arg(flag);
+    }
+    if let Some(extra_flags) = extra_rustflags {
+        let merged = match std::env::var("RUSTFLAGS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(existing) => format!("{} {}", existing, extra_flags),
+            None => extra_flags.to_string(),
+        };
+        cmd.env("RUSTFLAGS", merged);
     }
     cmd.output()
         .map_err(|e| format!("Failed to run cargo test: {}", e))
@@ -507,6 +531,11 @@ fn is_workspace_package_miss(stderr: &str) -> bool {
     stderr.contains("did not match any packages")
         || stderr.contains("package ID specification")
         || stderr.contains("not found in workspace")
+}
+
+fn is_warning_as_error_failure(stderr: &str) -> bool {
+    stderr.contains("implied by `#[deny(warnings)]`")
+        || stderr.contains("requested on the command line with `-D warnings`")
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
@@ -542,15 +571,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_baseline_with_workspace_fallback(
+fn run_baseline_attempt(
     manifest: &Path,
     project_dir: &Path,
     package: Option<&str>,
     crate_name: &str,
     cargo_flags: &[String],
     work_dir: &Path,
+    extra_rustflags: Option<&str>,
 ) -> Result<Output, String> {
-    let initial = run_cargo_test(project_dir, None, package, cargo_flags)?;
+    let initial = run_cargo_test(project_dir, None, package, cargo_flags, extra_rustflags)?;
     if initial.status.success() {
         return Ok(initial);
     }
@@ -577,6 +607,7 @@ fn run_baseline_with_workspace_fallback(
             Some(&workspace_manifest),
             Some(selected_package),
             cargo_flags,
+            extra_rustflags,
         )?;
         if workspace_output.status.success() {
             return Ok(workspace_output);
@@ -620,6 +651,51 @@ fn run_baseline_with_workspace_fallback(
         Some(&isolated_manifest),
         package,
         cargo_flags,
+        extra_rustflags,
+    )
+}
+
+fn run_baseline_with_workspace_fallback(
+    manifest: &Path,
+    project_dir: &Path,
+    package: Option<&str>,
+    crate_name: &str,
+    cargo_flags: &[String],
+    work_dir: &Path,
+) -> Result<Output, String> {
+    const LINT_RETRY_FLAGS: &str = "--cap-lints allow";
+
+    let output = run_baseline_attempt(
+        manifest,
+        project_dir,
+        package,
+        crate_name,
+        cargo_flags,
+        work_dir,
+        None,
+    )?;
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !is_warning_as_error_failure(&stderr) {
+        return Ok(output);
+    }
+
+    println!("  Baseline retry: detected warning-as-error lint failure.");
+    println!(
+        "  Baseline retry: cargo test with RUSTFLAGS += '{}'",
+        LINT_RETRY_FLAGS
+    );
+    run_baseline_attempt(
+        manifest,
+        project_dir,
+        package,
+        crate_name,
+        cargo_flags,
+        work_dir,
+        Some(LINT_RETRY_FLAGS),
     )
 }
 

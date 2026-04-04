@@ -100,6 +100,25 @@ fn create_workspace_mismatch_fixture(dir: &std::path::Path) -> PathBuf {
     ws_root.join("orphan/Cargo.toml")
 }
 
+/// Create a fixture where tests fail only because warnings are denied.
+fn create_warning_as_error_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"warning_as_error_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "#![cfg_attr(test, deny(warnings))]\n\npub fn add(a: i32, b: i32) -> i32 { a + b }\n\n#[cfg(test)]\nfn intentionally_unused_helper() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_add() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 /// Create a fixture with both lib unit tests and integration tests.
 fn create_mixed_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     let src_dir = dir.join("src");
@@ -401,6 +420,34 @@ fn test_stop_after_baseline_workspace_mismatch_synthetic_fixture_passes() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(work_dir.path().join("baseline.txt").exists());
+}
+
+#[test]
+fn test_stop_after_baseline_warning_as_error_retry_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_warning_as_error_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("baseline")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Baseline retry: detected warning-as-error lint failure."));
     assert!(work_dir.path().join("baseline.txt").exists());
 }
 
