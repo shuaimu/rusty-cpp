@@ -510,6 +510,32 @@ fn run_cargo_test(
         .map_err(|e| format!("Failed to run cargo test: {}", e))
 }
 
+fn run_cargo_expand_command(
+    current_dir: &Path,
+    manifest_path: Option<&Path>,
+    package: Option<&str>,
+    expand_args: &[String],
+    cargo_flags: &[String],
+) -> Result<Output, String> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("expand").current_dir(current_dir);
+    if let Some(path) = manifest_path {
+        cmd.arg("--manifest-path").arg(path);
+    }
+    if let Some(pkg) = package {
+        cmd.arg("-p").arg(pkg);
+    }
+    for arg in expand_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("--theme=none");
+    for flag in cargo_flags {
+        cmd.arg(flag);
+    }
+    cmd.output()
+        .map_err(|e| format!("Failed to run cargo expand: {}", e))
+}
+
 fn is_workspace_mismatch(stderr: &str) -> bool {
     stderr.contains("current package believes it's in a workspace when it's not")
 }
@@ -570,6 +596,45 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn ensure_isolated_manifest_copy(
+    manifest: &Path,
+    project_dir: &Path,
+    work_dir: &Path,
+    stage_dir_name: &str,
+    cached_manifest: &mut Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = cached_manifest {
+        return Ok(path.clone());
+    }
+
+    let isolated_root = work_dir.join(stage_dir_name);
+    if isolated_root.exists() {
+        fs::remove_dir_all(&isolated_root).map_err(|e| {
+            format!(
+                "Failed to clean {} isolation dir {}: {}",
+                stage_dir_name,
+                isolated_root.display(),
+                e
+            )
+        })?;
+    }
+    copy_dir_recursive(project_dir, &isolated_root)?;
+
+    let manifest_rel = manifest
+        .strip_prefix(project_dir)
+        .map_err(|_| {
+            format!(
+                "Manifest {} is not under project dir {}",
+                manifest.display(),
+                project_dir.display()
+            )
+        })?
+        .to_path_buf();
+    let isolated_manifest = isolated_root.join(manifest_rel);
+    *cached_manifest = Some(isolated_manifest.clone());
+    Ok(isolated_manifest)
 }
 
 fn run_baseline_attempt(
@@ -766,6 +831,78 @@ fn discover_targets_with_workspace_fallback(
         isolated_manifest.display()
     );
     metadata::discover_targets(&isolated_manifest, package)
+}
+
+fn run_cargo_expand_with_workspace_fallback(
+    manifest: &Path,
+    project_dir: &Path,
+    package: Option<&str>,
+    crate_name: &str,
+    expand_args: &[String],
+    cargo_flags: &[String],
+    work_dir: &Path,
+    isolated_manifest_cache: &mut Option<PathBuf>,
+) -> Result<Output, String> {
+    let initial = run_cargo_expand_command(project_dir, None, None, expand_args, cargo_flags)?;
+    if initial.status.success() {
+        return Ok(initial);
+    }
+
+    let initial_stderr = String::from_utf8_lossy(&initial.stderr);
+    if !is_workspace_mismatch(&initial_stderr) {
+        return Ok(initial);
+    }
+
+    println!("  Expand retry: detected workspace mismatch from in-place cargo expand.");
+
+    let selected_package = package.unwrap_or(crate_name);
+    if let Some(workspace_manifest) = workspace_manifest_from_error(&initial_stderr) {
+        let workspace_root = workspace_manifest
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        println!(
+            "  Expand retry: cargo expand --manifest-path {} -p {}",
+            workspace_manifest.display(),
+            selected_package
+        );
+        let workspace_output = run_cargo_expand_command(
+            workspace_root,
+            Some(&workspace_manifest),
+            Some(selected_package),
+            expand_args,
+            cargo_flags,
+        )?;
+        if workspace_output.status.success() {
+            return Ok(workspace_output);
+        }
+
+        let workspace_stderr = String::from_utf8_lossy(&workspace_output.stderr);
+        if !is_workspace_package_miss(&workspace_stderr) {
+            return Ok(workspace_output);
+        }
+    }
+
+    let isolated_manifest = ensure_isolated_manifest_copy(
+        manifest,
+        project_dir,
+        work_dir,
+        "expand_source_manifest",
+        isolated_manifest_cache,
+    )?;
+    let isolated_root = isolated_manifest
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    println!(
+        "  Expand retry: cargo expand --manifest-path {}",
+        isolated_manifest.display()
+    );
+    run_cargo_expand_command(
+        isolated_root,
+        Some(&isolated_manifest),
+        package,
+        expand_args,
+        cargo_flags,
+    )
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
@@ -992,6 +1129,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // ── Stage B: Expand ─────────────────────────────────
     println!("Stage B: Running cargo expand per target...");
     let mut expanded_sources: Vec<(metadata::CrateTarget, String)> = Vec::new();
+    let mut expand_isolated_manifest: Option<PathBuf> = None;
 
     for target in &targets {
         let (expand_args, expand_desc): (Vec<String>, String) = match target.kind {
@@ -1030,22 +1168,16 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             continue;
         }
 
-        let mut cmd = std::process::Command::new("cargo");
-        cmd.arg("expand").current_dir(&project_dir);
-        for arg in &expand_args {
-            cmd.arg(arg);
-        }
-        cmd.arg("--theme=none");
-        for flag in &cargo_flags {
-            cmd.arg(flag);
-        }
-
-        let output = cmd.output().map_err(|e| {
-            format!(
-                "Failed to run cargo expand for target '{}': {}",
-                target.name, e
-            )
-        })?;
+        let output = run_cargo_expand_with_workspace_fallback(
+            &manifest,
+            &project_dir,
+            args.package.as_deref(),
+            crate_name,
+            &expand_args,
+            &cargo_flags,
+            &args.work_dir,
+            &mut expand_isolated_manifest,
+        )?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

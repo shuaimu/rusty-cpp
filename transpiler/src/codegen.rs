@@ -6837,7 +6837,7 @@ impl CodeGen {
             }
             syn::Lit::Float(f) => f.base10_digits().to_string(),
             syn::Lit::Bool(b) => if b.value { "true" } else { "false" }.to_string(),
-            syn::Lit::Str(s) => format!("\"{}\"", s.value()),
+            syn::Lit::Str(s) => format!("\"{}\"", escape_cpp_string_literal_content(&s.value())),
             syn::Lit::Char(c) => format!("U'{}'", c.value()),
             syn::Lit::Byte(b) => format!("static_cast<uint8_t>({})", b.value()),
             syn::Lit::ByteStr(bs) => {
@@ -8687,6 +8687,23 @@ fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
         }
     }
     std::option::Option::None
+}
+
+fn escape_cpp_string_literal_content(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\0' => escaped.push_str("\\0"),
+            _ if ch.is_control() => escaped.push_str(&format!("\\x{:02X}", ch as u32)),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn escape_cpp_keyword(name: &str) -> String {
@@ -13422,6 +13439,24 @@ mod tests {
     fn test_leaf433_core_panicking_panic_path_is_mapped() {
         let out = transpile_str("fn f() { core::panicking::panic(\"boom\"); }");
         assert!(out.contains("rusty::panicking::panic(\"boom\")"));
+    }
+
+    #[test]
+    fn test_leaf465_string_literals_escape_embedded_quotes() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                core::panicking::panic("assertion failed: version(\"0.0.0\") < version(\"1.2.3-alpha2\")");
+            }
+        "#,
+        );
+        assert!(
+            out.contains(
+                "rusty::panicking::panic(\"assertion failed: version(\\\"0.0.0\\\") < version(\\\"1.2.3-alpha2\\\")\")"
+            ),
+            "expected escaped quotes in panic string, output:\n{}",
+            out
+        );
     }
 
     #[test]

@@ -5868,6 +5868,73 @@ Design rationale:
 - Avoided wrong approach from §11:
   - no workspace-root-only metadata hard-coding without isolated-manifest fallback (§11.67).
 
+### 10.11.65 Phase 20 Leaf 4.6 (`semver`): make Stage-B `cargo expand` workspace-aware and fix emitted embedded-quote string literals
+
+Problem:
+
+- First deterministic `semver` blocker after prior generic fixes occurred in Stage B:
+  `cargo expand` failed for every discovered target with workspace mismatch
+  (`current package believes it's in a workspace when it's not`).
+- After removing that blocker, the next deterministic Stage D compile failure surfaced in generated
+  panic/assertion strings containing embedded quotes, emitted without C++ escaping
+  (for example `version("0.0.0")` inside a C++ string literal).
+
+Scope analysis:
+
+- Implemented as focused generic changes under 1000 LOC:
+  - Stage-B parity orchestration in `transpiler/src/main.rs`,
+  - literal emission in `transpiler/src/codegen.rs`,
+  - fixture-agnostic parity and codegen regressions.
+
+Implementation:
+
+- Stage B `cargo expand` fallback:
+  - added `run_cargo_expand_with_workspace_fallback(...)` and `run_cargo_expand_command(...)`,
+  - retry order mirrors baseline/discovery behavior:
+    - in-place expand,
+    - workspace-root expand (`--manifest-path <workspace> -p <crate>`),
+    - isolated source-manifest expand under `<work-dir>/expand_source_manifest`.
+  - added cached isolated-manifest preparation (`ensure_isolated_manifest_copy`) so multi-target
+    Stage-B retries reuse one deterministic copy path per run.
+- String literal escaping:
+  - added `escape_cpp_string_literal_content(...)`,
+  - wired `syn::Lit::Str` emission through that helper so embedded quotes/backslashes/control chars
+    are valid in generated C++ literals.
+
+Regression tests:
+
+- Parity integration:
+  - `test_stop_after_expand_workspace_mismatch_fallback_passes`
+  - verifies workspace-mismatch fixture succeeds through Stage B and materializes expanded output.
+- Codegen unit:
+  - `test_leaf465_string_literals_escape_embedded_quotes`
+  - verifies panic-path string literals with embedded quotes are escaped in generated C++.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_stop_after_expand_workspace_mismatch_fallback_passes`
+- `cargo test -p rusty-cpp-transpiler test_leaf465_string_literals_escape_embedded_quotes`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <semver>/Cargo.toml --stop-after run --work-dir <tmp>`
+
+Re-probe result:
+
+- Previous Stage-B workspace-mismatch blocker is removed for `semver`.
+- Previous embedded-quote string-literal compile blocker is removed.
+- Next deterministic blocker shifts to Stage D import/re-export lowering:
+  - invalid `using std::vec::Vec`,
+  - unresolved unqualified re-exports such as `using ::BuildMetadata`.
+
+Design rationale:
+
+- Expand stage must be as workspace-resilient as baseline/metadata; otherwise parity can still fail
+  before transpilation for out-of-workspace fixtures.
+- Literal escaping belongs in shared literal emission, not in panic/assert special cases, so all
+  generated string literal paths stay valid.
+- Avoided wrong approaches from §11:
+  - no per-target “warn and continue” Stage-B behavior that silently starves Stage C of input (§11.68),
+  - no panic-path-only quote patching while leaving general literal emission unsafe (§11.69).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6692,3 +6759,27 @@ always run Stage A baseline with `RUSTFLAGS=--cap-lints allow` even when baselin
   provided manifest path contract.
 - A two-step fallback (workspace retry, then isolated source-manifest metadata) is deterministic and
   crate-agnostic without source-manifest/workspace mutation.
+
+### 11.68 Treating Stage-B `cargo expand` Workspace-Mismatch Failures as Non-Blocking Warnings
+
+**Rejected approach:** Leave Stage-B workspace-mismatch expand failures as warnings and continue,
+accepting empty `expanded_sources` and later Stage-D failures.
+
+**Why it was rejected:**
+
+- It hides the true first blocker behind downstream “no `.cppm` generated” noise.
+- It creates unstable diagnostics (later stages fail differently depending on how many targets
+  happened to expand).
+- A deterministic fallback at expand time keeps parity stage boundaries meaningful and crate-agnostic.
+
+### 11.69 Escaping Embedded Quotes Only in Panic/Assert Call Sites
+
+**Rejected approach:** Patch only panic/assertion emission paths to escape embedded quotes, while
+keeping generic `syn::Lit::Str` emission as raw `s.value()`.
+
+**Why it was rejected:**
+
+- The same string literal bug can surface in non-panic contexts (variable initializers, helper
+  calls, formatting paths).
+- Site-specific escaping grows brittle and duplicates logic across emitters.
+- Centralized literal escaping ensures consistent, valid C++ strings for all codegen paths.

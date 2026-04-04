@@ -549,6 +549,35 @@ fn test_stop_after_expand_creates_expanded_source() {
 }
 
 #[test]
+fn test_stop_after_expand_workspace_mismatch_fallback_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("expand")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Expand retry:"));
+    assert!(expanded_artifact_path(work_dir.path(), "orphan").exists());
+}
+
+#[test]
 fn test_multi_target_stop_after_expand_stops_before_transpile_and_build_outputs() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
