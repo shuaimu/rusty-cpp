@@ -143,6 +143,37 @@ fn create_integration_only_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     dir.join("Cargo.toml")
 }
 
+/// Create a fixture with bin/test target names that collide after normalization.
+fn create_module_name_collision_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    let tests_dir = dir.join("tests");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&tests_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"module_name_collision_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"cli-tool\"\npath = \"src/main.rs\"\n\n[[test]]\nname = \"cli_tool\"\npath = \"tests/cli_tool.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("main.rs"),
+        "fn main() { let _ = module_name_collision_fixture::add(1, 2); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tests_dir.join("cli_tool.rs"),
+        "use module_name_collision_fixture::add;\n\n#[test]\nfn integ_collision_case() { assert_eq!(add(1, 2), 3); }\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 // ── CLI parse tests ────────────────────────────────────
 
 #[test]
@@ -243,6 +274,27 @@ fn test_parity_discovers_fixture_crate() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Parity Test: fixture_crate"));
     assert!(stdout.contains("Target: fixture_crate (Lib)"));
+}
+
+#[test]
+fn test_parity_discovery_disambiguates_normalized_module_name_collisions() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_module_name_collision_fixture(fixture_dir.path());
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--dry-run")
+        .arg("--stop-after")
+        .arg("expand")
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Target: cli-tool (Bin) → module cli_tool"));
+    assert!(stdout.contains("Target: cli_tool (Test) → module cli_tool_test"));
 }
 
 // ── Stop-after integration tests ───────────────────────
@@ -494,6 +546,42 @@ fn test_stop_after_transpile_collects_wrappers_for_integration_only_crate() {
     let integ_cppm = std::fs::read_to_string(work_dir.path().join("integ.cppm"))
         .expect("failed to read transpiled integration target");
     assert!(integ_cppm.contains("rusty_test_integ_add_only"));
+}
+
+#[test]
+fn test_stop_after_transpile_persists_unique_artifacts_for_normalized_collisions() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_module_name_collision_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(work_dir
+        .path()
+        .join("module_name_collision_fixture.cppm")
+        .exists());
+    assert!(work_dir.path().join("cli_tool.cppm").exists());
+    assert!(work_dir.path().join("cli_tool_test.cppm").exists());
+    assert!(work_dir
+        .path()
+        .join("expanded_module_name_collision_fixture.rs")
+        .exists());
+    assert!(work_dir.path().join("expanded_cli_tool.rs").exists());
+    assert!(work_dir.path().join("expanded_cli_tool_test.rs").exists());
 }
 
 #[test]

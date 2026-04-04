@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// A discovered crate target from `cargo metadata`.
@@ -51,6 +52,28 @@ impl TargetKind {
             _ => None,
         }
     }
+
+    fn module_collision_suffix(&self) -> &'static str {
+        match self {
+            TargetKind::Lib => "lib",
+            TargetKind::Bin => "bin",
+            TargetKind::Test => "test",
+            TargetKind::Example => "example",
+            TargetKind::Bench => "bench",
+            TargetKind::Other(_) => "target",
+        }
+    }
+
+    fn sort_rank(&self) -> u8 {
+        match self {
+            TargetKind::Lib => 0,
+            TargetKind::Bin => 1,
+            TargetKind::Test => 2,
+            TargetKind::Example => 3,
+            TargetKind::Bench => 4,
+            TargetKind::Other(_) => 5,
+        }
+    }
 }
 
 /// Raw cargo metadata JSON structures (subset).
@@ -72,6 +95,85 @@ struct Target {
     name: String,
     kind: Vec<String>,
     src_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct RawTarget {
+    name: String,
+    kind: TargetKind,
+    src_path: PathBuf,
+}
+
+fn normalize_module_base(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("target");
+    }
+
+    if out
+        .as_bytes()
+        .first()
+        .is_some_and(|first| first.is_ascii_digit())
+    {
+        out.insert(0, '_');
+    }
+
+    out
+}
+
+fn assign_module_names(mut raw_targets: Vec<RawTarget>) -> Vec<CrateTarget> {
+    // Keep target processing deterministic so module naming and downstream artifact
+    // generation are stable across reruns and environments.
+    raw_targets.sort_by(|a, b| {
+        a.kind
+            .sort_rank()
+            .cmp(&b.kind.sort_rank())
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.src_path.cmp(&b.src_path))
+    });
+
+    let mut used_module_names: HashSet<String> = HashSet::new();
+    let mut targets = Vec::with_capacity(raw_targets.len());
+
+    for raw in raw_targets {
+        let base = normalize_module_base(&raw.name);
+        let mut module_name = base.clone();
+
+        if used_module_names.contains(&module_name) {
+            module_name = format!("{}_{}", base, raw.kind.module_collision_suffix());
+        }
+
+        if used_module_names.contains(&module_name) {
+            let stem = module_name.clone();
+            let mut index = 2u32;
+            loop {
+                let candidate = format!("{}_{}", stem, index);
+                if !used_module_names.contains(&candidate) {
+                    module_name = candidate;
+                    break;
+                }
+                index += 1;
+            }
+        }
+
+        used_module_names.insert(module_name.clone());
+        targets.push(CrateTarget {
+            name: raw.name,
+            kind: raw.kind,
+            src_path: raw.src_path,
+            module_name,
+        });
+    }
+
+    targets
 }
 
 /// Discover crate targets by running `cargo metadata`.
@@ -115,24 +217,24 @@ pub fn discover_targets(
             .ok_or_else(|| "No packages found in cargo metadata".to_string())?
     };
 
-    let mut targets = Vec::new();
+    let mut raw_targets = Vec::new();
     let mut skipped = Vec::new();
 
     for target in &pkg.targets {
         let kind = TargetKind::from_cargo(&target.kind);
-        let module_name = format!("{}", target.name.replace('-', "_"));
 
         if kind.is_test_capable() {
-            targets.push(CrateTarget {
+            raw_targets.push(RawTarget {
                 name: target.name.clone(),
                 kind,
                 src_path: PathBuf::from(&target.src_path),
-                module_name,
             });
         } else {
             skipped.push((target.name.clone(), kind));
         }
     }
+
+    let targets = assign_module_names(raw_targets);
 
     // Report skipped targets
     for (name, kind) in &skipped {
@@ -194,5 +296,60 @@ mod tests {
             module_name: "my_crate".to_string(),
         };
         assert_eq!(target.module_name, "my_crate");
+    }
+
+    #[test]
+    fn test_normalize_module_base() {
+        assert_eq!(normalize_module_base("cli-tool"), "cli_tool");
+        assert_eq!(normalize_module_base("cfg.if"), "cfg_if");
+        assert_eq!(normalize_module_base("123name"), "_123name");
+    }
+
+    #[test]
+    fn test_assign_module_names_handles_normalized_collisions_deterministically() {
+        let targets = assign_module_names(vec![
+            RawTarget {
+                name: "cli-tool".to_string(),
+                kind: TargetKind::Bin,
+                src_path: PathBuf::from("src/main.rs"),
+            },
+            RawTarget {
+                name: "cli_tool".to_string(),
+                kind: TargetKind::Test,
+                src_path: PathBuf::from("tests/cli_tool.rs"),
+            },
+        ]);
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].name, "cli-tool");
+        assert_eq!(targets[0].module_name, "cli_tool");
+        assert_eq!(targets[1].name, "cli_tool");
+        assert_eq!(targets[1].module_name, "cli_tool_test");
+    }
+
+    #[test]
+    fn test_assign_module_names_prefers_lib_base_name_when_colliding() {
+        let targets = assign_module_names(vec![
+            RawTarget {
+                name: "demo-lib".to_string(),
+                kind: TargetKind::Lib,
+                src_path: PathBuf::from("src/lib.rs"),
+            },
+            RawTarget {
+                name: "demo_lib".to_string(),
+                kind: TargetKind::Test,
+                src_path: PathBuf::from("tests/demo_lib.rs"),
+            },
+            RawTarget {
+                name: "demo_lib".to_string(),
+                kind: TargetKind::Bin,
+                src_path: PathBuf::from("src/main.rs"),
+            },
+        ]);
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].module_name, "demo_lib");
+        assert_eq!(targets[1].module_name, "demo_lib_bin");
+        assert_eq!(targets[2].module_name, "demo_lib_test");
     }
 }

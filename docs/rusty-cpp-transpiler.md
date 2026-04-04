@@ -5404,6 +5404,60 @@ Design rationale:
     (§11.59),
   - no crate-specific whitelist of expected wrapper names (§11.58).
 
+### 10.11.57 Phase 20 Leaf 3.1: Deterministic module naming with normalized-name collision handling
+
+Problem:
+
+- Multi-target crates can have target names that collide after current normalization
+  (`-` -> `_`, and more generally non-identifier chars to `_`), for example:
+  - `cli-tool` and `cli_tool` both normalize to `cli_tool`.
+- Before this change, collisions could overwrite stage artifacts (`expanded_*.rs`, `*.cppm`) and
+  make target-to-module mapping ambiguous.
+
+Scope analysis:
+
+- Implemented as a focused change under 1000 LOC:
+  - target discovery/module naming in `transpiler/src/metadata.rs`,
+  - fixture-driven parity verification in `transpiler/tests/parity_test_verification.rs`.
+
+Implementation:
+
+- Added deterministic module-base normalization:
+  - non-identifier chars -> `_`,
+  - leading digit -> prefixed underscore.
+- Added deterministic target ordering before module-name assignment:
+  - sort by target kind rank (`Lib`, `Bin`, `Test`, ...), then target name, then source path.
+- Added collision-safe module naming:
+  - first target keeps normalized base,
+  - colliding targets get kind suffix (`_bin`, `_test`, ...),
+  - numeric suffix fallback if needed (`_2`, `_3`, ...).
+- This keeps module naming stable across reruns and prevents file overwrite collisions.
+
+Regression tests:
+
+- Added metadata unit tests:
+  - `test_normalize_module_base`
+  - `test_assign_module_names_handles_normalized_collisions_deterministically`
+  - `test_assign_module_names_prefers_lib_base_name_when_colliding`
+- Added parity integration coverage using a synthetic collision fixture:
+  - `test_parity_discovery_disambiguates_normalized_module_name_collisions`
+  - `test_stop_after_transpile_persists_unique_artifacts_for_normalized_collisions`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Deterministic sorting + explicit disambiguation addresses both correctness (no artifact
+  overwrite) and reproducibility (stable module-name mapping).
+- Keeping the lib target highest-priority for base-name retention preserves expected crate-core
+  naming while still disambiguating non-lib targets.
+- Avoided wrong approaches from §11:
+  - no reliance on cargo metadata emission order (§11.60),
+  - no crate-specific hand-authored module-name aliases (§11.58).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6123,3 +6177,15 @@ unit-only and integration-only verification tests.
   while integration wrappers still pass, or vice versa).
 - Phase 20 requires crate-agnostic robustness across discovered target topologies, so each topology
   must have direct regression coverage.
+
+### 11.60 Relying on Cargo Metadata Order and Last-Write-Wins Artifacts for Module Names
+
+**Rejected approach:** Keep module names as simple normalized target names without deterministic
+ordering/disambiguation, implicitly relying on cargo metadata target order and whichever colliding
+artifact is written last.
+
+**Why it was rejected:**
+
+- Metadata order is not a robust stability contract for deterministic pipeline behavior.
+- Name collisions can overwrite `expanded_*.rs` / `*.cppm` artifacts and silently drop targets.
+- This makes multi-target parity results flaky and hard to debug across environments/reruns.
