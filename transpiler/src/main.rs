@@ -513,10 +513,163 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // ── Stage D: Build ──────────────────────────────────
     println!("Stage D: Building with C++ compiler...");
+
+    // Find rusty-cpp include path (relative to the transpiler binary)
+    let include_dir = find_rusty_include_dir();
+
     if args.dry_run {
-        println!("  [dry-run] g++ -std=c++20 -I include ...");
+        println!("  [dry-run] g++ -std=c++20 -I {} -o runner ...", include_dir.display());
     } else {
-        println!("  Build: TODO — requires test harness generation (Phase 19 Leaf 3)");
+        // Generate a runner .cpp that includes all transpiled code + test main
+        let runner_path = args.work_dir.join("runner.cpp");
+        let binary_path = args.work_dir.join("runner");
+
+        // Collect all .cppm files in work dir
+        let cppm_files: Vec<PathBuf> = std::fs::read_dir(&args.work_dir)
+            .map_err(|e| format!("Failed to read work dir: {}", e))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "cppm"))
+            .collect();
+
+        if cppm_files.is_empty() {
+            return Err("No .cppm files found in work dir — Stage C may have failed".to_string());
+        }
+
+        // Generate runner: strip module syntax, add includes, add main
+        let mut runner_src = String::new();
+        runner_src.push_str("// Auto-generated parity test runner\n");
+        runner_src.push_str("#include <cstdint>\n#include <cstddef>\n");
+        runner_src.push_str("#include <variant>\n#include <string>\n#include <optional>\n");
+        runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
+        runner_src.push_str("#include <functional>\n#include <span>\n");
+        runner_src.push_str("#include <rusty/rusty.hpp>\n");
+        runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n\n");
+        runner_src.push_str("// Overloaded visitor helper\n");
+        runner_src.push_str("template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n\n");
+
+        // Collect test names and transpiled code
+        let mut test_names: Vec<String> = Vec::new();
+
+        // No TEST_CASE macro — we replace inline during code inclusion\n
+
+        for cppm_path in &cppm_files {
+            let content = std::fs::read_to_string(cppm_path)
+                .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
+
+            // Extract test names
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("TEST_CASE(\"") {
+                    if let Some(name) = rest.strip_suffix("\") {") {
+                        test_names.push(name.to_string());
+                    }
+                }
+            }
+
+            // Strip module syntax and add code
+            runner_src.push_str(&format!("// ── from {} ──\n", cppm_path.file_name().unwrap().to_string_lossy()));
+            for line in content.lines() {
+                let trimmed = line.trim();
+                // Skip module/import/include lines (we provide our own)
+                if trimmed.starts_with("export module ") || trimmed.starts_with("import ")
+                    || trimmed.starts_with("export import ") || trimmed.starts_with("#include ")
+                    || trimmed.starts_with("// Auto-generated") || trimmed.starts_with("// Do not edit")
+                    || trimmed == "module;"
+                {
+                    continue;
+                }
+                // Skip Rust-only using declarations
+                if trimmed.starts_with("// Rust-only:") || trimmed.starts_with("// extern crate") {
+                    continue;
+                }
+                // Skip using declarations for undefined namespaces
+                if trimmed.starts_with("using ") && (
+                    trimmed.contains("::Left") || trimmed.contains("::Right")
+                    || trimmed.contains("iterator::") || trimmed.contains("into_either::")
+                ) {
+                    runner_src.push_str(&format!("// skipped: {}\n", trimmed));
+                    continue;
+                }
+                // Skip redefinition of overloaded
+                if trimmed.contains("struct overloaded") && trimmed.contains("Ts...") {
+                    continue;
+                }
+                // Strip 'export ' prefix from declarations
+                let line = if let Some(rest) = line.strip_prefix("export ") {
+                    rest
+                } else {
+                    line
+                };
+                // Replace TEST_CASE("name") { → static void rusty_test_name() {
+                if let Some(rest) = trimmed.strip_prefix("TEST_CASE(\"") {
+                    if let Some(name) = rest.strip_suffix("\") {") {
+                        runner_src.push_str(&format!("static void rusty_test_{}() {{\n", name));
+                        continue;
+                    }
+                }
+                runner_src.push_str(line);
+                runner_src.push('\n');
+            }
+            runner_src.push('\n');
+        }
+
+        // Generate main() that runs all tests
+        runner_src.push_str("\n// ── Test runner ──\n");
+        runner_src.push_str("int main() {\n");
+        runner_src.push_str("    int pass = 0, fail = 0;\n");
+        for name in &test_names {
+            runner_src.push_str(&format!(
+                "    try {{ rusty_test_{}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                name, name
+            ));
+            runner_src.push_str(&format!(
+                "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
+                name
+            ));
+            runner_src.push_str(&format!(
+                "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
+                name
+            ));
+        }
+        runner_src.push_str("    std::cout << std::endl;\n");
+        runner_src.push_str("    std::cout << \"Results: \" << pass << \" passed, \" << fail << \" failed\" << std::endl;\n");
+        runner_src.push_str("    return fail > 0 ? 1 : 0;\n");
+        runner_src.push_str("}\n");
+
+        std::fs::write(&runner_path, &runner_src)
+            .map_err(|e| format!("Failed to write runner: {}", e))?;
+
+        // Save runner log
+        let build_log_path = args.work_dir.join("build.log");
+
+        println!("  Generated runner: {} ({} tests discovered)", runner_path.display(), test_names.len());
+
+        // Compile with g++
+        let compile_output = std::process::Command::new("g++")
+            .arg("-std=c++20")
+            .arg("-Wall")
+            .arg("-Wno-unused-variable")
+            .arg("-Wno-unused-but-set-variable")
+            .arg(format!("-I{}", include_dir.display()))
+            .arg("-o")
+            .arg(&binary_path)
+            .arg(&runner_path)
+            .output()
+            .map_err(|e| format!("Failed to run g++: {}", e))?;
+
+        let compile_stderr = String::from_utf8_lossy(&compile_output.stderr);
+        std::fs::write(&build_log_path, compile_stderr.as_ref())
+            .map_err(|e| format!("Failed to write build log: {}", e))?;
+
+        if !compile_output.status.success() {
+            println!("  Build FAILED — see {}", build_log_path.display());
+            // Print first 20 errors
+            for line in compile_stderr.lines().take(20) {
+                println!("    {}", line);
+            }
+            return Err("C++ compilation failed".to_string());
+        }
+        println!("  Build: PASS → {}", binary_path.display());
     }
     if should_stop("build") {
         println!("\nStopped after build stage.");
@@ -525,21 +678,61 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // ── Stage E: Run ────────────────────────────────────
     println!("Stage E: Running transpiled tests...");
+    let binary_path = args.work_dir.join("runner");
+    let run_log_path = args.work_dir.join("run.log");
+
     if args.dry_run {
-        println!("  [dry-run] ./transpiled_test");
+        println!("  [dry-run] {}", binary_path.display());
     } else {
-        println!("  Run: TODO — requires test harness generation (Phase 19 Leaf 3)");
+        let run_output = std::process::Command::new(&binary_path)
+            .output()
+            .map_err(|e| format!("Failed to run transpiled tests: {}", e))?;
+
+        let run_stdout = String::from_utf8_lossy(&run_output.stdout);
+        let run_stderr = String::from_utf8_lossy(&run_output.stderr);
+        std::fs::write(&run_log_path, format!("{}\n{}", run_stdout, run_stderr))
+            .map_err(|e| format!("Failed to write run log: {}", e))?;
+
+        // Print test output
+        for line in run_stdout.lines() {
+            println!("  {}", line);
+        }
+        for line in run_stderr.lines() {
+            println!("  {}", line);
+        }
+
+        if !run_output.status.success() {
+            return Err("Some transpiled tests FAILED".to_string());
+        }
+        println!("  Run: PASS");
     }
 
     println!();
     println!("Parity test pipeline complete for '{}'.", crate_name);
-
-    // Cleanup work dir unless --keep-work-dir
-    if !args.keep_work_dir && !args.dry_run {
-        // Keep for now — user can delete manually
-    }
+    println!("Artifacts saved in: {}", args.work_dir.display());
 
     Ok(())
+}
+
+/// Find the rusty-cpp include directory.
+/// Tries: adjacent to binary, then repo root include/.
+fn find_rusty_include_dir() -> PathBuf {
+    // Try adjacent to this binary (for installed builds)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let adjacent = dir.join("../include");
+            if adjacent.join("rusty/rusty.hpp").exists() {
+                return std::fs::canonicalize(&adjacent).unwrap_or(adjacent);
+            }
+        }
+    }
+    // Try relative to current dir (for development)
+    let dev_include = PathBuf::from("include");
+    if dev_include.join("rusty/rusty.hpp").exists() {
+        return std::fs::canonicalize(dev_include).unwrap_or_else(|_| PathBuf::from("include"));
+    }
+    // Fallback
+    PathBuf::from("include")
 }
 
 fn main() {
