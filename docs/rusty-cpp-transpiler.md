@@ -5307,6 +5307,103 @@ Design rationale:
   - no hard-coded mapping for specific module names like `tests::` only (§11.57),
   - no direct patching of generated `.cppm` wrapper blocks (§11.55).
 
+### 10.11.55 Phase 20 Leaf 2.2: Generate parity runner entries from discovered `rusty_test_*` wrappers only
+
+Problem:
+
+- Stage D runner generation still contained legacy `TEST_CASE("...")` entry extraction/rewrite
+  fallback paths.
+- Phase 20 Leaf 2 requires crate-agnostic runnable generation from discovered wrappers emitted by
+  expanded-target transpilation (`export void rusty_test_*()`), with no symbol-shape assumptions.
+
+Scope analysis:
+
+- Implemented as a narrow change (<1000 LOC):
+  - wrapper-entry collection and runner emission in `transpiler/src/main.rs`,
+  - focused regressions in `transpiler/src/main.rs` and
+    `transpiler/tests/parity_test_verification.rs`.
+
+Implementation:
+
+- Added helper `collect_rusty_test_entries_from_cppm(...)` to discover runnable tests exclusively
+  from exported/transpiled `rusty_test_*` wrappers.
+- Updated Stage D runner generation to:
+  - use only wrapper discovery for `test_entries` (removed `TEST_CASE` entry extraction),
+  - remove inline `TEST_CASE` rewrite fallback in code inclusion path,
+  - sort discovered `.cppm` inputs and final wrapper entries for deterministic run order.
+- Kept existing dedup behavior by wrapper symbol name.
+
+Regression tests:
+
+- Added helper-level unit regressions in `transpiler/src/main.rs`:
+  - `test_collect_rusty_test_entries_from_cppm_uses_wrapper_exports_only`
+  - `test_collect_rusty_test_entries_from_cppm_deduplicates_wrappers`
+- Added parity integration regression:
+  - `test_stop_after_build_generates_runner_entries_from_discovered_wrappers`
+  - verifies generated `runner.cpp` invokes discovered mixed-target wrappers
+    (`rusty_test_integ_add`, `rusty_test_tests_unit_add`) with deterministic ordering.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Wrapper-driven discovery aligns Stage D with Stage B/C expanded-target semantics and avoids
+  fallback coupling to non-expanded `TEST_CASE` surface forms.
+- Deterministic ordering reduces flaky baseline/run diff behavior across filesystems.
+- Avoided wrong approaches from §11:
+  - no crate-specific hard-coded wrapper invocation list (§11.58),
+  - no per-crate runner scripts to compensate for generic parity flow gaps (§11.53).
+
+### 10.11.56 Phase 20 Leaf 2.3: Verification coverage for unit-only, integration-only, and mixed-target wrapper extraction
+
+Problem:
+
+- Phase 20 Leaf 2 required explicit verification coverage across all crate test-target shapes:
+  - unit-only (`#[cfg(test)]` in lib),
+  - integration-only (`tests/*.rs`),
+  - mixed-target (both).
+- Existing parity verification covered mixed-target behavior, but did not explicitly lock both
+  unit-only and integration-only extraction paths.
+
+Scope analysis:
+
+- Implemented as small test-only additions (<1000 LOC), no production code changes needed.
+
+Implementation:
+
+- Added fixture builders in `transpiler/tests/parity_test_verification.rs`:
+  - `create_unit_only_wrappers_fixture`
+  - `create_integration_only_wrappers_fixture`
+- Added integration verification tests:
+  - `test_stop_after_transpile_collects_wrappers_for_unit_only_crate`
+    - asserts `unit_only_wrappers.cppm` includes
+      `rusty_test_tests_unit_add_only` and `tests::unit_add_only();`
+  - `test_stop_after_transpile_collects_wrappers_for_integration_only_crate`
+    - asserts lib target has no wrapper exports for integration-only fixture,
+    - asserts integration target (`integ.cppm`) includes `rusty_test_integ_add_only`
+- Kept mixed-target verification coverage in place:
+  - wrapper extraction from both lib + integration targets (`test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets`)
+  - build-stage runner generation from discovered wrappers (`test_stop_after_build_generates_runner_entries_from_discovered_wrappers`)
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Coverage is fixture-agnostic and validates extraction behavior by target topology, not by crate
+  identity.
+- This closes the lingering Phase 19 open-note about cfg-gated lib test extraction by proving both
+  sides of generic target discovery and wrapper generation.
+- Avoided wrong approaches from §11:
+  - no assumption that mixed-target coverage alone implies unit-only/integration-only correctness
+    (§11.59),
+  - no crate-specific whitelist of expected wrapper names (§11.58).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6000,3 +6097,29 @@ marker resolution unsupported.
   semantics.
 - A generic scoped marker-to-function resolver with deterministic fallback keeps wrapper generation
   crate-agnostic and future-proof across mixed target layouts.
+
+### 11.58 Hard-Coding Runner Invocation Lists Per Crate Instead of Discovering `rusty_test_*` Wrappers
+
+**Rejected approach:** Maintain crate-specific runner invocation lists (for example, manually
+calling `basic/macros/deref/...` for `either`) or derive entries from legacy `TEST_CASE` text
+shapes instead of discovering generated `rusty_test_*` wrappers.
+
+**Why it was rejected:**
+
+- It is not crate-agnostic and breaks Phase 20 multi-crate parity goals.
+- It creates maintenance drift as expanded test output changes (new wrappers, renamed wrappers,
+  new target sets).
+- Wrapper-symbol discovery is already the canonical transpiler output contract for runnable test
+  bodies, so bypassing it duplicates logic and causes divergence.
+
+### 11.59 Declaring Wrapper Extraction “Done” from Mixed-Target Evidence Only
+
+**Rejected approach:** Treat mixed-target fixture coverage as sufficient and skip dedicated
+unit-only and integration-only verification tests.
+
+**Why it was rejected:**
+
+- Mixed-target fixtures can hide one-sided regressions (for example, lib cfg-test extraction broken
+  while integration wrappers still pass, or vice versa).
+- Phase 20 requires crate-agnostic robustness across discovered target topologies, so each topology
+  must have direct regression coverage.

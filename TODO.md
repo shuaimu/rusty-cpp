@@ -477,7 +477,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Stage D build: generate runner.cpp from transpiled .cppm, compile with g++ -std=c++20
         - [x] *done* Stage E run: execute runner binary, capture output, compare with baseline
         - [x] *done* Persist structured logs: baseline.txt, expanded_*.rs, *.cppm, runner.cpp, build.log, run.log
-        - [ ] Note: test function extraction from cargo expand --lib incomplete (tests are cfg-gated, need separate extraction strategy)
+        - [x] *done* Note: test function extraction from cargo expand --lib incomplete (tests are cfg-gated, need separate extraction strategy) — closed by Phase 20 Leaf 2 (wrapper extraction/runnable generation now validated across unit-only, integration-only, and mixed-target fixtures)
       - [x] *done* Leaf 4: Remove hard-coded `either` assumptions from parity execution path
         - [x] *done* Replaced 250-line script with thin wrapper forwarding to `parity-test` subcommand
         - [x] *done* Updated 6 harness tests to match new parity-test output format
@@ -494,12 +494,16 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Reproduced deterministic Stage A failure with `tap` and captured invocation path: baseline ran `cargo test` with `current_dir=/home/shuai/git/rusty-cpp/tests/transpile_tests/tap`, which triggered `current package believes it's in a workspace when it's not`
         - [x] *done* Made Stage A baseline workspace-aware without crate-specific scripts: retry order is in-place baseline → workspace-root (`cargo test --manifest-path <workspace>/Cargo.toml -p <crate>`) → isolated source-manifest copy under `<work-dir>/baseline_source_manifest`
         - [x] *done* Added regressions: workspace-mismatch baseline pass (`tap` + synthetic fixture) and malformed-manifest baseline fail in `transpiler/tests/parity_test_verification.rs`
-      - [ ] Leaf 2: Finish crate-agnostic test extraction/runnable generation (close Phase 19 Leaf 3 open note)
+      - [x] *done* Leaf 2: Finish crate-agnostic test extraction/runnable generation (close Phase 19 Leaf 3 open note)
         - [x] *done* Remove `--lib` cfg-gated blind spot by collecting wrappers from expanded test-enabled targets (`--lib --tests` and discovered `--test <target>` entries)
           - [x] *done* Fixed scoped rustc marker resolution (`tests::unit_add`, nested paths) in expanded libtest wrapper emission so unit tests in `#[cfg(test)] mod tests` generate runnable `rusty_test_*` wrappers instead of `marker without emitted function`
           - [x] *done* Added regressions: codegen scoped-marker wrapper emission tests + parity integration test that verifies mixed fixture output includes wrappers from both lib unit tests (`--lib --tests`) and integration test targets (`--test integ`)
-        - [ ] Generate runner entries from discovered `rusty_test_*` wrappers only (no crate-specific symbol assumptions)
-        - [ ] Add verification tests for unit-only, integration-only, and mixed-target crates
+        - [x] *done* Generate runner entries from discovered `rusty_test_*` wrappers only (no crate-specific symbol assumptions)
+          - [x] *done* Updated Stage D runner generation to discover entries only from exported `rusty_test_*` wrappers (removed `TEST_CASE` entry extraction/rewrite fallback) and made wrapper execution ordering deterministic
+          - [x] *done* Added regressions: helper-level wrapper discovery tests in `transpiler/src/main.rs` plus parity integration assertion on generated `runner.cpp` wrapper invocations for mixed lib+integration fixture
+        - [x] *done* Add verification tests for unit-only, integration-only, and mixed-target crates
+          - [x] *done* Added parity verification fixtures/tests for unit-only and integration-only target shapes and asserted transpiled `rusty_test_*` wrapper discovery per target kind
+          - [x] *done* Kept and extended mixed-target verification (both transpile wrapper presence and build-stage `runner.cpp` wrapper-invocation generation)
       - [ ] Leaf 3: Harden generic transpile/build/run pipeline for multi-target crates
         - [ ] Ensure deterministic module naming/import wiring across lib/bin/test targets (including collision handling after name normalization)
         - [ ] Keep per-target artifacts/logs isolated and deterministic across reruns with `--keep-work-dir`

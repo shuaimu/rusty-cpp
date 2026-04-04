@@ -98,6 +98,51 @@ fn create_mixed_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     dir.join("Cargo.toml")
 }
 
+/// Create a fixture with only lib unit tests (`#[cfg(test)]` in lib target).
+fn create_unit_only_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"unit_only_wrappers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn unit_add_only() { assert_eq!(add(1, 2), 3); }\n}\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
+/// Create a fixture with only integration tests (`tests/*.rs`).
+fn create_integration_only_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    let tests_dir = dir.join("tests");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&tests_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"integration_only_wrappers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tests_dir.join("integ.rs"),
+        "use integration_only_wrappers::add;\n\n#[test]\nfn integ_add_only() { assert_eq!(add(2, 3), 5); }\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 // ── CLI parse tests ────────────────────────────────────
 
 #[test]
@@ -385,6 +430,110 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
     let integ_cppm = std::fs::read_to_string(work_dir.path().join("integ.cppm"))
         .expect("failed to read transpiled integration target");
     assert!(integ_cppm.contains("rusty_test_integ_add"));
+}
+
+#[test]
+fn test_stop_after_transpile_collects_wrappers_for_unit_only_crate() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_unit_only_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lib_cppm = std::fs::read_to_string(work_dir.path().join("unit_only_wrappers.cppm"))
+        .expect("failed to read transpiled lib target");
+    assert!(lib_cppm.contains("rusty_test_tests_unit_add_only"));
+    assert!(lib_cppm.contains("tests::unit_add_only();"));
+}
+
+#[test]
+fn test_stop_after_transpile_collects_wrappers_for_integration_only_crate() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_integration_only_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lib_cppm = std::fs::read_to_string(work_dir.path().join("integration_only_wrappers.cppm"))
+        .expect("failed to read transpiled lib target");
+    assert!(
+        !lib_cppm.contains("rusty_test_"),
+        "lib target should not contribute wrappers for integration-only fixture"
+    );
+
+    let integ_cppm = std::fs::read_to_string(work_dir.path().join("integ.cppm"))
+        .expect("failed to read transpiled integration target");
+    assert!(integ_cppm.contains("rusty_test_integ_add_only"));
+}
+
+#[test]
+fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("build")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Generated runner:"),
+        "expected runner generation in stdout, got:\n{}",
+        stdout
+    );
+
+    let runner_cpp =
+        std::fs::read_to_string(work_dir.path().join("runner.cpp")).expect("failed to read runner");
+    let integ_pos = runner_cpp
+        .find("rusty_test_integ_add();")
+        .expect("runner should invoke integration wrapper");
+    let unit_pos = runner_cpp
+        .find("rusty_test_tests_unit_add();")
+        .expect("runner should invoke unit-test wrapper");
+
+    assert!(
+        integ_pos < unit_pos,
+        "wrapper invocation order should be deterministic by wrapper name"
+    );
+    assert!(!runner_cpp.contains("TEST_CASE(\""));
 }
 
 // ── Rerun determinism ──────────────────────────────────

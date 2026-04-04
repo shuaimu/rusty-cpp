@@ -399,11 +399,70 @@ fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
     Some(format!("rusty_test_{}", &rest[..end]))
 }
 
+fn collect_rusty_test_entries_from_cppm(
+    content: &str,
+    seen_test_fns: &mut HashSet<String>,
+    test_entries: &mut Vec<(String, String)>,
+) {
+    for line in content.lines() {
+        if let Some(fn_name) = extract_rusty_test_wrapper_name(line.trim()) {
+            if seen_test_fns.insert(fn_name.clone()) {
+                test_entries.push((fn_name.clone(), test_label_from_fn_name(&fn_name)));
+            }
+        }
+    }
+}
+
 fn test_label_from_fn_name(fn_name: &str) -> String {
     fn_name
         .strip_prefix("rusty_test_")
         .unwrap_or(fn_name)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collect_rusty_test_entries_from_cppm_uses_wrapper_exports_only() {
+        let content = r#"
+export void rusty_test_alpha() {
+}
+TEST_CASE("legacy_style") {
+}
+void rusty_test_beta() {
+}
+"#;
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        collect_rusty_test_entries_from_cppm(content, &mut seen, &mut entries);
+
+        assert_eq!(
+            entries,
+            vec![
+                ("rusty_test_alpha".to_string(), "alpha".to_string()),
+                ("rusty_test_beta".to_string(), "beta".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_rusty_test_entries_from_cppm_deduplicates_wrappers() {
+        let content = r#"
+export void rusty_test_dup() {
+}
+void rusty_test_dup() {
+}
+"#;
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        collect_rusty_test_entries_from_cppm(content, &mut seen, &mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "rusty_test_dup");
+        assert_eq!(entries[0].1, "dup");
+    }
 }
 
 fn run_cargo_test(
@@ -685,13 +744,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 format!("--test {}", target.name),
             ),
             _ => (
-                vec![
-                    target
-                        .kind
-                        .cargo_expand_flag()
-                        .unwrap_or("--lib")
-                        .to_string(),
-                ],
+                vec![target
+                    .kind
+                    .cargo_expand_flag()
+                    .unwrap_or("--lib")
+                    .to_string()],
                 target
                     .kind
                     .cargo_expand_flag()
@@ -812,12 +869,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let binary_path = args.work_dir.join("runner");
 
         // Collect all .cppm files in work dir
-        let cppm_files: Vec<PathBuf> = std::fs::read_dir(&args.work_dir)
+        let mut cppm_files: Vec<PathBuf> = std::fs::read_dir(&args.work_dir)
             .map_err(|e| format!("Failed to read work dir: {}", e))?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "cppm"))
             .collect();
+        cppm_files.sort();
 
         if cppm_files.is_empty() {
             return Err("No .cppm files found in work dir — Stage C may have failed".to_string());
@@ -843,30 +901,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let mut test_entries: Vec<(String, String)> = Vec::new();
         let mut seen_test_fns: HashSet<String> = HashSet::new();
 
-        // No TEST_CASE macro — we replace inline during code inclusion\n
-
         for cppm_path in &cppm_files {
             let content = std::fs::read_to_string(cppm_path)
                 .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
 
             let mut pending_overloaded_template = false;
-
-            // Extract test names
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("TEST_CASE(\"") {
-                    if let Some(name) = rest.strip_suffix("\") {") {
-                        let fn_name = format!("rusty_test_{}", name);
-                        if seen_test_fns.insert(fn_name.clone()) {
-                            test_entries.push((fn_name, name.to_string()));
-                        }
-                    }
-                }
-                if let Some(fn_name) = extract_rusty_test_wrapper_name(line.trim()) {
-                    if seen_test_fns.insert(fn_name.clone()) {
-                        test_entries.push((fn_name.clone(), test_label_from_fn_name(&fn_name)));
-                    }
-                }
-            }
+            collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
 
             // Strip module syntax and add code
             runner_src.push_str(&format!(
@@ -922,13 +962,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 } else {
                     line
                 };
-                // Replace TEST_CASE("name") { → static void rusty_test_name() {
-                if let Some(rest) = trimmed.strip_prefix("TEST_CASE(\"") {
-                    if let Some(name) = rest.strip_suffix("\") {") {
-                        runner_src.push_str(&format!("static void rusty_test_{}() {{\n", name));
-                        continue;
-                    }
-                }
                 runner_src.push_str(line);
                 runner_src.push('\n');
             }
@@ -939,11 +972,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
 
         if test_entries.is_empty() {
-            return Err(
-                "No transpiled tests discovered. Expected TEST_CASE or rusty_test_* wrappers."
-                    .to_string(),
-            );
+            return Err("No transpiled test wrappers discovered (expected exported rusty_test_* functions).".to_string());
         }
+        test_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Generate main() that runs all tests
         runner_src.push_str("\n// ── Test runner ──\n");
