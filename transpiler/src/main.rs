@@ -4,6 +4,7 @@ use std::process;
 
 mod cmake;
 mod codegen;
+mod metadata;
 mod transpile;
 mod types;
 
@@ -348,12 +349,10 @@ fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
 
 /// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
 fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
-    let manifest = &args.manifest_path;
-    if !manifest.exists() {
-        return Err(format!("Manifest not found: {}", manifest.display()));
-    }
+    let manifest = std::fs::canonicalize(&args.manifest_path)
+        .map_err(|_| format!("Manifest not found: {}", args.manifest_path.display()))?;
 
-    let cargo = cmake::parse_cargo_toml(manifest)?;
+    let cargo = cmake::parse_cargo_toml(&manifest)?;
     let crate_name = &cargo.package.name;
 
     // Validate stop_after if provided
@@ -374,7 +373,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     std::fs::create_dir_all(&args.work_dir)
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
 
-    let project_dir = manifest.parent().unwrap_or(Path::new("."));
+    let project_dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     // Build cargo feature flags
     let mut cargo_flags: Vec<String> = Vec::new();
@@ -401,7 +400,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             println!("  [dry-run] cargo test {} in {}", cargo_flags.join(" "), project_dir.display());
         } else {
             let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("test").current_dir(project_dir);
+            cmd.arg("test").current_dir(&project_dir);
             for flag in &cargo_flags {
                 cmd.arg(flag);
             }
@@ -426,33 +425,61 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     }
 
+    // ── Target Discovery ─────────────────────────────────
+    println!("Discovering targets...");
+    let (pkg_name, targets) = metadata::discover_targets(&manifest, args.package.as_deref())?;
+    println!("  Package: {}", pkg_name);
+    for t in &targets {
+        println!("  Target: {} ({:?}) → module {}", t.name, t.kind, t.module_name);
+    }
+    if targets.is_empty() {
+        return Err("No test-capable targets found".to_string());
+    }
+    println!();
+
     // ── Stage B: Expand ─────────────────────────────────
-    println!("Stage B: Running cargo expand...");
-    let expanded_source = if args.dry_run {
-        println!("  [dry-run] cargo expand --lib --theme=none in {}", project_dir.display());
-        String::new()
-    } else {
-        let output = std::process::Command::new("cargo")
-            .arg("expand")
-            .arg("--lib")
+    println!("Stage B: Running cargo expand per target...");
+    let mut expanded_sources: Vec<(metadata::CrateTarget, String)> = Vec::new();
+
+    for target in &targets {
+        let expand_flag = target.kind.cargo_expand_flag().unwrap_or("--lib");
+
+        if args.dry_run {
+            println!("  [dry-run] cargo expand {} --theme=none in {}", expand_flag, project_dir.display());
+            continue;
+        }
+
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("expand")
+            .arg(expand_flag)
             .arg("--theme=none")
-            .current_dir(project_dir)
-            .output()
-            .map_err(|e| format!("Failed to run cargo expand: {}", e))?;
+            .current_dir(&project_dir);
+
+        // For --bin and --test, need to pass the target name
+        if matches!(target.kind, metadata::TargetKind::Bin | metadata::TargetKind::Test) {
+            cmd.arg(&target.name);
+        }
+
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to run cargo expand for target '{}': {}", target.name, e))?;
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("cargo expand failed:\n{}", stderr));
+            eprintln!("  Warning: cargo expand failed for target '{}': {}", target.name, stderr.lines().next().unwrap_or(""));
+            continue;
         }
+
         let source = String::from_utf8(output.stdout)
             .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
 
         // Save expanded source
-        let expanded_path = args.work_dir.join("expanded.rs");
+        let expanded_path = args.work_dir.join(format!("expanded_{}.rs", target.module_name));
         std::fs::write(&expanded_path, &source)
             .map_err(|e| format!("Failed to write expanded source: {}", e))?;
-        println!("  Expanded: {} lines (saved to {})", source.lines().count(), expanded_path.display());
-        source
-    };
+        println!("  {} ({}): {} lines → {}", target.name, expand_flag, source.lines().count(), expanded_path.display());
+
+        expanded_sources.push((target.clone(), source));
+    }
     if should_stop("expand") {
         println!("\nStopped after expand stage.");
         return Ok(());
@@ -466,18 +493,19 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         types::UserTypeMap::default()
     };
 
-    let cpp_output = if args.dry_run {
-        println!("  [dry-run] transpile expanded source as module '{}'", crate_name);
-        String::new()
+    if args.dry_run {
+        for (target, _) in &expanded_sources {
+            println!("  [dry-run] transpile {} as module '{}'", target.name, target.module_name);
+        }
     } else {
-        let cpp = transpile::transpile_with_type_map(&expanded_source, Some(crate_name), &type_map)?;
-        let cppm_path = args.work_dir.join(format!("{}.cppm", crate_name));
-        std::fs::write(&cppm_path, &cpp)
-            .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
-        println!("  Transpiled: {} lines (saved to {})", cpp.lines().count(), cppm_path.display());
-        cpp
-    };
-    let _ = cpp_output; // suppress unused warning in dry-run
+        for (target, source) in &expanded_sources {
+            let cpp = transpile::transpile_with_type_map(source, Some(&target.module_name), &type_map)?;
+            let cppm_path = args.work_dir.join(format!("{}.cppm", target.module_name));
+            std::fs::write(&cppm_path, &cpp)
+                .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
+            println!("  {}: {} lines → {}", target.module_name, cpp.lines().count(), cppm_path.display());
+        }
+    }
     if should_stop("transpile") {
         println!("\nStopped after transpile stage.");
         return Ok(());

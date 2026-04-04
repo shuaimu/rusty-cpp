@@ -466,10 +466,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Add baseline toggle: `--no-baseline` opt-out
         - [x] *done* Implement stages A-C (baseline, expand, transpile) with artifact persistence
         - [x] *done* Add 4 e2e tests: dry-run, missing manifest, invalid stage, help output
-      - [ ] Leaf 2: Implement crate target discovery from `cargo metadata`
-        - [ ] Discover lib/bin/test targets and select test-capable targets generically
-        - [ ] Resolve deterministic module naming for generated expanded test modules
-        - [ ] Skip unsupported targets with explicit diagnostics (do not hard-fail whole run)
+      - [x] *done* Leaf 2: Implement crate target discovery from `cargo metadata`
+        - [x] *done* Discover lib/bin/test targets via `cargo metadata --no-deps` + serde_json parsing
+        - [x] *done* Deterministic module naming: target name with `-` → `_` replacement
+        - [x] *done* Skip unsupported targets (example, bench) with diagnostic message
+        - [x] *done* Per-target cargo expand with correct flags (--lib, --bin name, --test name)
+        - [x] *done* Per-target transpilation with correct module name
       - [ ] Leaf 3: Implement generic transpile/build/run orchestration in Rust
         - [ ] Stage A baseline: run `cargo test` with selected package/features and log output
         - [ ] Stage B expand: run `cargo expand` per selected target (`--lib`, `--bin <name>`, `--test <name>`)
