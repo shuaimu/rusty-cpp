@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn transpiler_bin() -> Command {
@@ -16,8 +16,20 @@ fn either_manifest() -> PathBuf {
     repo_root().join("tests/transpile_tests/either/Cargo.toml")
 }
 
-fn tap_manifest() -> PathBuf {
-    repo_root().join("tests/transpile_tests/tap/Cargo.toml")
+fn target_artifacts_root(work_dir: &Path) -> PathBuf {
+    work_dir.join("targets")
+}
+
+fn target_artifact_dir(work_dir: &Path, module_name: &str) -> PathBuf {
+    target_artifacts_root(work_dir).join(module_name)
+}
+
+fn expanded_artifact_path(work_dir: &Path, module_name: &str) -> PathBuf {
+    target_artifact_dir(work_dir, module_name).join("expanded.rs")
+}
+
+fn cppm_artifact_path(work_dir: &Path, module_name: &str) -> PathBuf {
+    target_artifact_dir(work_dir, module_name).join(format!("{}.cppm", module_name))
 }
 
 /// Create a minimal fixture crate for testing (not either).
@@ -324,12 +336,14 @@ fn test_stop_after_baseline_creates_baseline_log() {
 
 #[test]
 fn test_stop_after_baseline_workspace_mismatch_fallback_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
     let work_dir = tempfile::tempdir().unwrap();
 
     let output = transpiler_bin()
         .arg("parity-test")
         .arg("--manifest-path")
-        .arg(tap_manifest())
+        .arg(&manifest)
         .arg("--stop-after")
         .arg("baseline")
         .arg("--work-dir")
@@ -419,7 +433,7 @@ fn test_stop_after_expand_creates_expanded_source() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(work_dir.path().join("expanded_either.rs").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "either").exists());
 }
 
 #[test]
@@ -442,7 +456,7 @@ fn test_stop_after_transpile_creates_cppm() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let cppm_path = work_dir.path().join("either.cppm");
+    let cppm_path = cppm_artifact_path(work_dir.path(), "either");
     assert!(cppm_path.exists());
     let cppm = std::fs::read_to_string(cppm_path).expect("failed to read transpiled cppm");
     assert!(cppm.contains("export void rusty_test_basic()"));
@@ -471,7 +485,7 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let lib_cppm = std::fs::read_to_string(work_dir.path().join("mixed_wrappers.cppm"))
+    let lib_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "mixed_wrappers"))
         .expect("failed to read transpiled lib target");
     assert!(lib_cppm.contains("rusty_test_tests_unit_add"));
     assert!(lib_cppm.contains("tests::unit_add();"));
@@ -479,7 +493,7 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
         !lib_cppm.contains("Rust-only libtest marker without emitted function: tests::unit_add")
     );
 
-    let integ_cppm = std::fs::read_to_string(work_dir.path().join("integ.cppm"))
+    let integ_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "integ"))
         .expect("failed to read transpiled integration target");
     assert!(integ_cppm.contains("rusty_test_integ_add"));
 }
@@ -507,8 +521,9 @@ fn test_stop_after_transpile_collects_wrappers_for_unit_only_crate() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let lib_cppm = std::fs::read_to_string(work_dir.path().join("unit_only_wrappers.cppm"))
-        .expect("failed to read transpiled lib target");
+    let lib_cppm =
+        std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "unit_only_wrappers"))
+            .expect("failed to read transpiled lib target");
     assert!(lib_cppm.contains("rusty_test_tests_unit_add_only"));
     assert!(lib_cppm.contains("tests::unit_add_only();"));
 }
@@ -536,14 +551,17 @@ fn test_stop_after_transpile_collects_wrappers_for_integration_only_crate() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let lib_cppm = std::fs::read_to_string(work_dir.path().join("integration_only_wrappers.cppm"))
-        .expect("failed to read transpiled lib target");
+    let lib_cppm = std::fs::read_to_string(cppm_artifact_path(
+        work_dir.path(),
+        "integration_only_wrappers",
+    ))
+    .expect("failed to read transpiled lib target");
     assert!(
         !lib_cppm.contains("rusty_test_"),
         "lib target should not contribute wrappers for integration-only fixture"
     );
 
-    let integ_cppm = std::fs::read_to_string(work_dir.path().join("integ.cppm"))
+    let integ_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "integ"))
         .expect("failed to read transpiled integration target");
     assert!(integ_cppm.contains("rusty_test_integ_add_only"));
 }
@@ -570,18 +588,12 @@ fn test_stop_after_transpile_persists_unique_artifacts_for_normalized_collisions
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(work_dir
-        .path()
-        .join("module_name_collision_fixture.cppm")
-        .exists());
-    assert!(work_dir.path().join("cli_tool.cppm").exists());
-    assert!(work_dir.path().join("cli_tool_test.cppm").exists());
-    assert!(work_dir
-        .path()
-        .join("expanded_module_name_collision_fixture.rs")
-        .exists());
-    assert!(work_dir.path().join("expanded_cli_tool.rs").exists());
-    assert!(work_dir.path().join("expanded_cli_tool_test.rs").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "module_name_collision_fixture").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "cli_tool").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "cli_tool_test").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "module_name_collision_fixture").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "cli_tool").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "cli_tool_test").exists());
 }
 
 #[test]
@@ -646,28 +658,116 @@ fn test_rerun_same_workdir_does_not_append_stale_artifacts() {
         assert!(output.status.success());
     }
 
-    // Should have exactly one baseline.txt, one expanded_either.rs, one either.cppm
-    let files: Vec<String> = std::fs::read_dir(work_dir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    assert!(work_dir.path().join("baseline.txt").exists());
+    assert!(target_artifacts_root(work_dir.path()).exists());
+    assert!(expanded_artifact_path(work_dir.path(), "either").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "either").exists());
+}
 
-    let baseline_count = files.iter().filter(|f| f.starts_with("baseline")).count();
-    let expanded_count = files.iter().filter(|f| f.starts_with("expanded_")).count();
-    let cppm_count = files.iter().filter(|f| f.ends_with(".cppm")).count();
+#[test]
+fn test_keep_work_dir_prunes_stale_target_dirs_between_reruns() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
 
-    assert_eq!(
-        baseline_count, 1,
-        "expected 1 baseline file, got {}",
-        baseline_count
+    let first_output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .arg("--keep-work-dir")
+        .output()
+        .expect("failed to run");
+    assert!(
+        first_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first_output.stderr)
     );
-    assert_eq!(
-        expanded_count, 1,
-        "expected 1 expanded file, got {}",
-        expanded_count
+    assert!(target_artifact_dir(work_dir.path(), "mixed_wrappers").exists());
+    assert!(target_artifact_dir(work_dir.path(), "integ").exists());
+
+    std::fs::remove_file(fixture_dir.path().join("tests/integ.rs")).unwrap();
+
+    let second_output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .arg("--keep-work-dir")
+        .output()
+        .expect("failed to run");
+    assert!(
+        second_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second_output.stderr)
     );
-    assert_eq!(cppm_count, 1, "expected 1 cppm file, got {}", cppm_count);
+    assert!(target_artifact_dir(work_dir.path(), "mixed_wrappers").exists());
+    assert!(
+        !target_artifact_dir(work_dir.path(), "integ").exists(),
+        "stale integration-target directory should be pruned on rerun"
+    );
+}
+
+#[test]
+fn test_build_stage_ignores_stale_root_cppm_when_reusing_work_dir() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let first_output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .arg("--keep-work-dir")
+        .output()
+        .expect("failed to run");
+    assert!(
+        first_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+
+    std::fs::write(
+        work_dir.path().join("stale.cppm"),
+        "this is not valid c++\n",
+    )
+    .unwrap();
+
+    let build_output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("build")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .arg("--keep-work-dir")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&build_output.stdout);
+    assert!(
+        stdout.contains("Generated runner:"),
+        "expected runner generation, stdout:\n{}",
+        stdout
+    );
+
+    let runner_cpp =
+        std::fs::read_to_string(work_dir.path().join("runner.cpp")).expect("failed to read runner");
+    assert!(
+        !runner_cpp.contains("stale.cppm"),
+        "runner should ignore stale root-level .cppm files, runner:\n{}",
+        runner_cpp
+    );
 }
 
 // ── Non-either fixture crate ───────────────────────────

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
@@ -623,6 +623,111 @@ fn run_baseline_with_workspace_fallback(
     )
 }
 
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path)
+        .map_err(|e| format!("Failed to remove stale file {}: {}", path.display(), e))
+}
+
+fn clear_stage_outputs(work_dir: &Path) -> Result<(), String> {
+    for file_name in [
+        "baseline.txt",
+        "runner.cpp",
+        "runner",
+        "build.log",
+        "run.log",
+    ] {
+        remove_file_if_exists(&work_dir.join(file_name))?;
+    }
+    Ok(())
+}
+
+fn target_artifacts_root(work_dir: &Path) -> PathBuf {
+    work_dir.join("targets")
+}
+
+fn target_artifact_dir(work_dir: &Path, module_name: &str) -> PathBuf {
+    target_artifacts_root(work_dir).join(module_name)
+}
+
+fn expanded_artifact_path(target_dir: &Path) -> PathBuf {
+    target_dir.join("expanded.rs")
+}
+
+fn cppm_artifact_path(target_dir: &Path, module_name: &str) -> PathBuf {
+    target_dir.join(format!("{}.cppm", module_name))
+}
+
+fn reset_target_artifacts(
+    work_dir: &Path,
+    targets: &[metadata::CrateTarget],
+) -> Result<HashMap<String, PathBuf>, String> {
+    let artifacts_root = target_artifacts_root(work_dir);
+    fs::create_dir_all(&artifacts_root).map_err(|e| {
+        format!(
+            "Failed to create target artifacts directory {}: {}",
+            artifacts_root.display(),
+            e
+        )
+    })?;
+
+    let expected_modules: HashSet<&str> = targets.iter().map(|t| t.module_name.as_str()).collect();
+
+    for entry in fs::read_dir(&artifacts_root)
+        .map_err(|e| format!("Failed to read {}: {}", artifacts_root.display(), e))?
+    {
+        let entry = entry.map_err(|e| {
+            format!(
+                "Failed to inspect {} entry: {}",
+                artifacts_root.display(),
+                e
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+
+        if file_type.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !expected_modules.contains(name.as_str()) {
+                fs::remove_dir_all(&path).map_err(|e| {
+                    format!(
+                        "Failed to remove stale target dir {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+            }
+        } else {
+            fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove stale file {}: {}", path.display(), e))?;
+        }
+    }
+
+    let mut target_dirs = HashMap::new();
+    for target in targets {
+        let target_dir = target_artifact_dir(work_dir, &target.module_name);
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir).map_err(|e| {
+                format!("Failed to reset target dir {}: {}", target_dir.display(), e)
+            })?;
+        }
+        fs::create_dir_all(&target_dir).map_err(|e| {
+            format!(
+                "Failed to create target dir {}: {}",
+                target_dir.display(),
+                e
+            )
+        })?;
+        target_dirs.insert(target.module_name.clone(), target_dir);
+    }
+
+    Ok(target_dirs)
+}
+
 /// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
 fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let manifest = std::fs::canonicalize(&args.manifest_path)
@@ -649,6 +754,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // Create work directory
     std::fs::create_dir_all(&args.work_dir)
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
+    if !args.dry_run {
+        clear_stage_outputs(&args.work_dir)?;
+    }
 
     let project_dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
 
@@ -723,6 +831,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     if targets.is_empty() {
         return Err("No test-capable targets found".to_string());
     }
+    let target_dirs = if args.dry_run {
+        HashMap::new()
+    } else {
+        reset_target_artifacts(&args.work_dir, &targets)?
+    };
     println!();
 
     // ── Stage B: Expand ─────────────────────────────────
@@ -797,9 +910,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
 
         // Save expanded source
-        let expanded_path = args
-            .work_dir
-            .join(format!("expanded_{}.rs", target.module_name));
+        let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
+            format!(
+                "Missing target artifact directory for module '{}'",
+                target.module_name
+            )
+        })?;
+        let expanded_path = expanded_artifact_path(target_dir);
         std::fs::write(&expanded_path, &source)
             .map_err(|e| format!("Failed to write expanded source: {}", e))?;
         println!(
@@ -825,6 +942,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         types::UserTypeMap::default()
     };
 
+    let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
     if args.dry_run {
         for (target, _) in &expanded_sources {
             println!(
@@ -836,7 +954,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         for (target, source) in &expanded_sources {
             let cpp =
                 transpile::transpile_with_type_map(source, Some(&target.module_name), &type_map)?;
-            let cppm_path = args.work_dir.join(format!("{}.cppm", target.module_name));
+            let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
+                format!(
+                    "Missing target artifact directory for module '{}'",
+                    target.module_name
+                )
+            })?;
+            let cppm_path = cppm_artifact_path(target_dir, &target.module_name);
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
             println!(
@@ -845,6 +969,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 cpp.lines().count(),
                 cppm_path.display()
             );
+            generated_cppm_files.push(cppm_path);
         }
     }
     if should_stop("transpile") {
@@ -868,17 +993,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let runner_path = args.work_dir.join("runner.cpp");
         let binary_path = args.work_dir.join("runner");
 
-        // Collect all .cppm files in work dir
-        let mut cppm_files: Vec<PathBuf> = std::fs::read_dir(&args.work_dir)
-            .map_err(|e| format!("Failed to read work dir: {}", e))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "cppm"))
-            .collect();
+        // Compile only artifacts generated in this run to avoid stale file bleed
+        // when reusing --work-dir with --keep-work-dir.
+        let mut cppm_files = generated_cppm_files.clone();
         cppm_files.sort();
 
         if cppm_files.is_empty() {
-            return Err("No .cppm files found in work dir — Stage C may have failed".to_string());
+            return Err(
+                "No .cppm files generated in this run — Stage C may have failed".to_string(),
+            );
         }
 
         // Generate runner: strip module syntax, add includes, add main

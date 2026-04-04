@@ -508,7 +508,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Ensure deterministic module naming/import wiring across lib/bin/test targets (including collision handling after name normalization)
           - [x] *done* Added deterministic target ordering and collision-safe module-name assignment in `transpiler/src/metadata.rs` (`normalize_module_base` + kind-suffix/numeric disambiguation)
           - [x] *done* Added regressions for normalized-name collision behavior (`cli-tool` vs `cli_tool`) at both metadata unit-test level and parity integration level (`dry-run` discovery + `stop-after transpile` artifact uniqueness)
-        - [ ] Keep per-target artifacts/logs isolated and deterministic across reruns with `--keep-work-dir`
+        - [x] *done* Keep per-target artifacts/logs isolated and deterministic across reruns with `--keep-work-dir`
+          - [x] *done* Switched parity target artifacts to deterministic per-target directories (`<work-dir>/targets/<module>/expanded.rs` + `<work-dir>/targets/<module>/<module>.cppm`) and prune/reset target dirs each run to prevent stale cross-target bleed
+          - [x] *done* Updated Stage D build input to compile only `.cppm` files generated in the current run (no global `work-dir` scan), eliminating stale root-level `.cppm` interference when reusing `--work-dir`
+          - [x] *done* Added parity regressions for rerun isolation: stale target-dir pruning after target-shape change and root-level stale `.cppm` exclusion from generated runner inputs
         - [ ] Add regression tests for stop-after behavior on multi-target crates (`expand`, `transpile`, `build`, `run`)
       - [ ] Leaf 4: Project-specific parity closure via generic fixes only (no per-project custom scripts)
         - [ ] `either`: keep as control crate; re-run parity after every generic change to prevent regressions

@@ -5458,6 +5458,60 @@ Design rationale:
   - no reliance on cargo metadata emission order (§11.60),
   - no crate-specific hand-authored module-name aliases (§11.58).
 
+### 10.11.58 Phase 20 Leaf 3.2: Keep-work-dir artifact isolation for deterministic multi-target reruns
+
+Problem:
+
+- Reusing `--work-dir` across parity reruns could allow stale target artifacts to bleed into later
+  stages:
+  - old target outputs remained in a shared flat directory,
+  - Stage D previously scanned all `*.cppm` in `work-dir`, so unrelated leftovers could be pulled
+    into runner generation/compilation.
+- This risks non-deterministic behavior when target shape changes between reruns or when extra
+  debugging files exist in the same directory.
+
+Scope analysis:
+
+- Implemented as a focused change under 1000 LOC:
+  - parity pipeline orchestration in `transpiler/src/main.rs`,
+  - parity integration regressions in `transpiler/tests/parity_test_verification.rs`.
+
+Implementation:
+
+- Moved per-target stage artifacts to deterministic target-local directories:
+  - expand output: `<work-dir>/targets/<module>/expanded.rs`
+  - transpiled module: `<work-dir>/targets/<module>/<module>.cppm`
+- Added deterministic rerun reset/prune behavior for target artifacts:
+  - remove stale target directories no longer discovered in current run,
+  - fully reset discovered target directories before writing new stage outputs.
+- Added stage-output reset at run start for shared logs/build products:
+  - clear stale `baseline.txt`, `runner.cpp`, `runner`, `build.log`, `run.log`.
+- Updated Stage D input selection:
+  - compile only `.cppm` artifacts generated in the current run (tracked paths),
+  - no global `work-dir` `*.cppm` scan.
+
+Regression tests:
+
+- Updated existing stop-after assertions to the per-target artifact layout.
+- Added rerun-isolation regressions:
+  - `test_keep_work_dir_prunes_stale_target_dirs_between_reruns`
+  - `test_build_stage_ignores_stale_root_cppm_when_reusing_work_dir`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Target-local artifact directories make ownership boundaries explicit and avoid accidental
+  cross-target overwrite/bleed.
+- Stage D using current-run artifact paths is the strongest deterministic boundary for
+  `--keep-work-dir` reuse.
+- Avoided wrong approaches from §11:
+  - no build-stage dependence on whole-directory `*.cppm` scans (§11.61),
+  - no partial cleanup that leaves stale removed-target directories behind (§11.61).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -5490,8 +5544,8 @@ rusty-cpp-transpiler parity-test --manifest-path Cargo.toml --type-map types.tom
 | Stage | What it does | Artifacts |
 |-------|-------------|-----------|
 | A. Baseline | Run `cargo test` to verify Rust tests pass | `baseline.txt` |
-| B. Expand | Run `cargo expand` per target to resolve macros | `expanded_*.rs` |
-| C. Transpile | Transpile expanded Rust to C++20 | `*.cppm` |
+| B. Expand | Run `cargo expand` per target to resolve macros | `targets/<module>/expanded.rs` |
+| C. Transpile | Transpile expanded Rust to C++20 | `targets/<module>/<module>.cppm` |
 | D. Build | Generate `runner.cpp`, compile with `g++ -std=c++20` | `runner.cpp`, `build.log` |
 | E. Run | Execute transpiled tests, compare with baseline | `run.log` |
 
@@ -6189,3 +6243,16 @@ artifact is written last.
 - Metadata order is not a robust stability contract for deterministic pipeline behavior.
 - Name collisions can overwrite `expanded_*.rs` / `*.cppm` artifacts and silently drop targets.
 - This makes multi-target parity results flaky and hard to debug across environments/reruns.
+
+### 11.61 Scanning Entire Work Directory for `*.cppm` in Build Stage
+
+**Rejected approach:** During Stage D, discover compile inputs by scanning all `*.cppm` files in
+`--work-dir`, while keeping per-target expand/transpile outputs in a shared flat directory.
+
+**Why it was rejected:**
+
+- Reused `--work-dir` runs can pull stale modules from previous target sets into the new build.
+- Unrelated root-level debug/transient `.cppm` files can perturb runner generation/compile
+  determinism.
+- A current-run artifact list plus target-local directories gives deterministic, target-scoped
+  inputs and avoids cross-run bleed.
