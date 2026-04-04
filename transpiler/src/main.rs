@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::{self, Output};
 
 mod cmake;
 mod codegen;
@@ -405,6 +406,164 @@ fn test_label_from_fn_name(fn_name: &str) -> String {
         .to_string()
 }
 
+fn run_cargo_test(
+    current_dir: &Path,
+    manifest_path: Option<&Path>,
+    package: Option<&str>,
+    cargo_flags: &[String],
+) -> Result<Output, String> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("test").current_dir(current_dir);
+    if let Some(path) = manifest_path {
+        cmd.arg("--manifest-path").arg(path);
+    }
+    if let Some(pkg) = package {
+        cmd.arg("-p").arg(pkg);
+    }
+    for flag in cargo_flags {
+        cmd.arg(flag);
+    }
+    cmd.output()
+        .map_err(|e| format!("Failed to run cargo test: {}", e))
+}
+
+fn is_workspace_mismatch(stderr: &str) -> bool {
+    stderr.contains("current package believes it's in a workspace when it's not")
+}
+
+fn workspace_manifest_from_error(stderr: &str) -> Option<PathBuf> {
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if let Some(path) = trimmed.strip_prefix("workspace:") {
+            let candidate = path.trim();
+            if !candidate.is_empty() {
+                return Some(PathBuf::from(candidate));
+            }
+        }
+    }
+    None
+}
+
+fn is_workspace_package_miss(stderr: &str) -> bool {
+    stderr.contains("did not match any packages")
+        || stderr.contains("package ID specification")
+        || stderr.contains("not found in workspace")
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create directory {}: {}", dst.display(), e))?;
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let dest_path = dst.join(&name);
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to stat {}: {}", path.display(), e))?;
+
+        if file_type.is_dir() {
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            copy_dir_recursive(&path, &dest_path)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            fs::copy(&path, &dest_path).map_err(|e| {
+                format!(
+                    "Failed to copy {} -> {}: {}",
+                    path.display(),
+                    dest_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn run_baseline_with_workspace_fallback(
+    manifest: &Path,
+    project_dir: &Path,
+    package: Option<&str>,
+    crate_name: &str,
+    cargo_flags: &[String],
+    work_dir: &Path,
+) -> Result<Output, String> {
+    let initial = run_cargo_test(project_dir, None, package, cargo_flags)?;
+    if initial.status.success() {
+        return Ok(initial);
+    }
+
+    let initial_stderr = String::from_utf8_lossy(&initial.stderr);
+    if !is_workspace_mismatch(&initial_stderr) {
+        return Ok(initial);
+    }
+
+    println!("  Baseline retry: detected workspace mismatch from in-place cargo test.");
+
+    let selected_package = package.unwrap_or(crate_name);
+    if let Some(workspace_manifest) = workspace_manifest_from_error(&initial_stderr) {
+        let workspace_root = workspace_manifest
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        println!(
+            "  Baseline retry: cargo test --manifest-path {} -p {}",
+            workspace_manifest.display(),
+            selected_package
+        );
+        let workspace_output = run_cargo_test(
+            workspace_root,
+            Some(&workspace_manifest),
+            Some(selected_package),
+            cargo_flags,
+        )?;
+        if workspace_output.status.success() {
+            return Ok(workspace_output);
+        }
+        let workspace_stderr = String::from_utf8_lossy(&workspace_output.stderr);
+        if !is_workspace_package_miss(&workspace_stderr) {
+            return Ok(workspace_output);
+        }
+    }
+
+    let isolated_root = work_dir.join("baseline_source_manifest");
+    if isolated_root.exists() {
+        fs::remove_dir_all(&isolated_root).map_err(|e| {
+            format!(
+                "Failed to clean baseline isolation dir {}: {}",
+                isolated_root.display(),
+                e
+            )
+        })?;
+    }
+    copy_dir_recursive(project_dir, &isolated_root)?;
+
+    let manifest_rel = manifest
+        .strip_prefix(project_dir)
+        .map_err(|_| {
+            format!(
+                "Manifest {} is not under project dir {}",
+                manifest.display(),
+                project_dir.display()
+            )
+        })?
+        .to_path_buf();
+    let isolated_manifest = isolated_root.join(&manifest_rel);
+
+    println!(
+        "  Baseline retry: cargo test --manifest-path {}",
+        isolated_manifest.display()
+    );
+    run_cargo_test(
+        &isolated_root,
+        Some(&isolated_manifest),
+        package,
+        cargo_flags,
+    )
+}
+
 /// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
 fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let manifest = std::fs::canonicalize(&args.manifest_path)
@@ -462,14 +621,14 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 project_dir.display()
             );
         } else {
-            let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("test").current_dir(&project_dir);
-            for flag in &cargo_flags {
-                cmd.arg(flag);
-            }
-            let output = cmd
-                .output()
-                .map_err(|e| format!("Failed to run cargo test: {}", e))?;
+            let output = run_baseline_with_workspace_fallback(
+                &manifest,
+                &project_dir,
+                args.package.as_deref(),
+                crate_name,
+                &cargo_flags,
+                &args.work_dir,
+            )?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 

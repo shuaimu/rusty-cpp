@@ -489,3 +489,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Rerun determinism: same work-dir twice produces no duplicate artifacts
         - [x] *done* Non-either fixture: dry-run on fixture_crate validates crate-agnostic behavior
         - [x] *done* 10 new verification tests in parity_test_verification.rs
+    - [ ] Phase 20: Multi-crate generic parity completion (`either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`)
+      - [x] *done* Leaf 1: Fix generic baseline execution for workspace-member crates (current blocker for non-`either` fixtures)
+        - [x] *done* Reproduced deterministic Stage A failure with `tap` and captured invocation path: baseline ran `cargo test` with `current_dir=/home/shuai/git/rusty-cpp/tests/transpile_tests/tap`, which triggered `current package believes it's in a workspace when it's not`
+        - [x] *done* Made Stage A baseline workspace-aware without crate-specific scripts: retry order is in-place baseline → workspace-root (`cargo test --manifest-path <workspace>/Cargo.toml -p <crate>`) → isolated source-manifest copy under `<work-dir>/baseline_source_manifest`
+        - [x] *done* Added regressions: workspace-mismatch baseline pass (`tap` + synthetic fixture) and malformed-manifest baseline fail in `transpiler/tests/parity_test_verification.rs`
+      - [ ] Leaf 2: Finish crate-agnostic test extraction/runnable generation (close Phase 19 Leaf 3 open note)
+        - [ ] Remove `--lib` cfg-gated blind spot by collecting wrappers from expanded test-enabled targets (`--lib --tests` and discovered `--test <target>` entries)
+        - [ ] Generate runner entries from discovered `rusty_test_*` wrappers only (no crate-specific symbol assumptions)
+        - [ ] Add verification tests for unit-only, integration-only, and mixed-target crates
+      - [ ] Leaf 3: Harden generic transpile/build/run pipeline for multi-target crates
+        - [ ] Ensure deterministic module naming/import wiring across lib/bin/test targets (including collision handling after name normalization)
+        - [ ] Keep per-target artifacts/logs isolated and deterministic across reruns with `--keep-work-dir`
+        - [ ] Add regression tests for stop-after behavior on multi-target crates (`expand`, `transpile`, `build`, `run`)
+      - [ ] Leaf 4: Project-specific parity closure via generic fixes only (no per-project custom scripts)
+        - [ ] `either`: keep as control crate; re-run parity after every generic change to prevent regressions
+        - [ ] `tap`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [ ] `cfg-if`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [ ] `take_mut`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [ ] `arrayvec`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [ ] `semver`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+        - [ ] `bitflags`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity
+      - [ ] Leaf 5: Verification matrix (required)
+        - [ ] Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
+        - [ ] Enforce failure diagnostics: matrix output must identify first failing crate and print paths to `baseline.txt`, `build.log`, and `run.log`
+        - [ ] Add CI target/job to run the matrix and archive per-crate artifacts on failure

@@ -5204,6 +5204,55 @@ Design rationale:
   - no generated-C++ post-processing for one failing wrapper (§11.55),
   - no global forced byte casts for all repeat arrays (would break legitimate integer arrays) (§11.44).
 
+### 10.11.53 Phase 20 Leaf 1: Workspace-aware Stage-A baseline execution for workspace-mismatch crates
+
+Problem:
+
+- Deterministic Stage-A failure reproduced with `tap`:
+  - baseline invocation path was `cargo test` with
+    `current_dir=/home/shuai/git/rusty-cpp/tests/transpile_tests/tap`
+  - Cargo failed with: `current package believes it's in a workspace when it's not`.
+- This blocked non-`either` fixtures before expand/transpile stages.
+
+Scope analysis:
+
+- Implemented as a small, localized change (<1000 LOC):
+  - Stage-A baseline invocation logic in `transpiler/src/main.rs`
+  - focused verification tests in `transpiler/tests/parity_test_verification.rs`
+
+Implementation:
+
+- Added Stage-A baseline helper/fallback flow:
+  - first run in-place baseline (`cargo test` in crate directory),
+  - if workspace-mismatch is detected, retry preserving workspace context:
+    - `cargo test --manifest-path <workspace-root>/Cargo.toml -p <crate>`
+  - if that still fails, retry with isolated source-manifest copy:
+    - copy crate tree to `<work-dir>/baseline_source_manifest`
+    - run `cargo test --manifest-path <isolated>/Cargo.toml`
+- Kept behavior crate-agnostic and generic (no fixture-specific script logic).
+
+Regression tests:
+
+- Added workspace-mismatch baseline pass tests:
+  - `test_stop_after_baseline_workspace_mismatch_fallback_passes` (`tap` fixture)
+  - `test_stop_after_baseline_workspace_mismatch_synthetic_fixture_passes`
+- Added malformed-manifest failure regression:
+  - `test_parity_test_malformed_manifest_fails`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_test_verification`
+  - all tests pass, including new Stage-A regressions.
+
+Design rationale:
+
+- Retrying with workspace-root first preserves correct behavior for real workspace packages.
+- Isolated-manifest retry keeps standalone fixtures runnable even when nested under unrelated
+  workspaces.
+- Avoided wrong approaches from §11:
+  - no fixture-specific `Cargo.toml` patching or script forks (§11.56),
+  - no workspace-membership churn in repository root just to satisfy baseline execution (§11.56).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -5867,3 +5916,18 @@ an optional flag/path.
   wrappers/crates.
 - It risks semantic regressions by changing repeat-array element types in contexts where integer
   arrays are valid and intended.
+
+### 11.56 Fixing Workspace-Mismatch Baseline Failures by Editing Fixture Manifests or Root Workspace
+
+**Rejected approach:** Solve `current package believes it's in a workspace when it's not` by
+hard-editing fixture manifests (for example, injecting `[workspace]`) or repeatedly changing the
+repository root `workspace.members`/`workspace.exclude` lists for each fixture.
+
+**Why it was rejected:**
+
+- It is not crate-agnostic and creates per-fixture maintenance churn.
+- It mutates source fixtures/repo workspace shape to fit tooling behavior, instead of fixing
+  parity pipeline invocation strategy.
+- It can mask real workspace-context requirements for legitimate workspace packages.
+- A generic Stage-A retry flow (workspace-root retry + isolated-manifest fallback) keeps behavior
+  deterministic without fixture-specific patches.

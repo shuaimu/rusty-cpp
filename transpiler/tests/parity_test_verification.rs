@@ -16,6 +16,10 @@ fn either_manifest() -> PathBuf {
     repo_root().join("tests/transpile_tests/either/Cargo.toml")
 }
 
+fn tap_manifest() -> PathBuf {
+    repo_root().join("tests/transpile_tests/tap/Cargo.toml")
+}
+
 /// Create a minimal fixture crate for testing (not either).
 fn create_fixture_crate(dir: &std::path::Path) -> PathBuf {
     let src_dir = dir.join("src");
@@ -31,6 +35,41 @@ fn create_fixture_crate(dir: &std::path::Path) -> PathBuf {
     )
     .unwrap();
     dir.join("Cargo.toml")
+}
+
+/// Create a crate nested under a workspace root but not listed as a member.
+fn create_workspace_mismatch_fixture(dir: &std::path::Path) -> PathBuf {
+    let ws_root = dir.join("ws");
+    let member_src = ws_root.join("member").join("src");
+    let orphan_src = ws_root.join("orphan").join("src");
+    std::fs::create_dir_all(&member_src).unwrap();
+    std::fs::create_dir_all(&orphan_src).unwrap();
+
+    std::fs::write(
+        ws_root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        ws_root.join("member/Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(member_src.join("lib.rs"), "pub fn member() {}\n").unwrap();
+
+    std::fs::write(
+        ws_root.join("orphan/Cargo.toml"),
+        "[package]\nname = \"orphan\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        orphan_src.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n#[test]\nfn test_add() { assert_eq!(add(1, 2), 3); }\n",
+    )
+    .unwrap();
+
+    ws_root.join("orphan/Cargo.toml")
 }
 
 // ── CLI parse tests ────────────────────────────────────
@@ -158,6 +197,83 @@ fn test_stop_after_baseline_creates_baseline_log() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(work_dir.path().join("baseline.txt").exists());
+}
+
+#[test]
+fn test_stop_after_baseline_workspace_mismatch_fallback_passes() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(tap_manifest())
+        .arg("--stop-after")
+        .arg("baseline")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stage A:"));
+    assert!(stdout.contains("Baseline retry:"));
+    assert!(work_dir.path().join("baseline.txt").exists());
+}
+
+#[test]
+fn test_stop_after_baseline_workspace_mismatch_synthetic_fixture_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("baseline")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(work_dir.path().join("baseline.txt").exists());
+}
+
+#[test]
+fn test_parity_test_malformed_manifest_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package\nname = \"broken\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml"))
+        .arg("--stop-after")
+        .arg("baseline")
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to parse Cargo.toml"));
 }
 
 #[test]
