@@ -504,7 +504,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Add verification tests for unit-only, integration-only, and mixed-target crates
           - [x] *done* Added parity verification fixtures/tests for unit-only and integration-only target shapes and asserted transpiled `rusty_test_*` wrapper discovery per target kind
           - [x] *done* Kept and extended mixed-target verification (both transpile wrapper presence and build-stage `runner.cpp` wrapper-invocation generation)
-      - [ ] Leaf 3: Harden generic transpile/build/run pipeline for multi-target crates
+      - [x] *done* Leaf 3: Harden generic transpile/build/run pipeline for multi-target crates
         - [x] *done* Ensure deterministic module naming/import wiring across lib/bin/test targets (including collision handling after name normalization)
           - [x] *done* Added deterministic target ordering and collision-safe module-name assignment in `transpiler/src/metadata.rs` (`normalize_module_base` + kind-suffix/numeric disambiguation)
           - [x] *done* Added regressions for normalized-name collision behavior (`cli-tool` vs `cli_tool`) at both metadata unit-test level and parity integration level (`dry-run` discovery + `stop-after transpile` artifact uniqueness)
@@ -512,7 +512,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Switched parity target artifacts to deterministic per-target directories (`<work-dir>/targets/<module>/expanded.rs` + `<work-dir>/targets/<module>/<module>.cppm`) and prune/reset target dirs each run to prevent stale cross-target bleed
           - [x] *done* Updated Stage D build input to compile only `.cppm` files generated in the current run (no global `work-dir` scan), eliminating stale root-level `.cppm` interference when reusing `--work-dir`
           - [x] *done* Added parity regressions for rerun isolation: stale target-dir pruning after target-shape change and root-level stale `.cppm` exclusion from generated runner inputs
-        - [ ] Add regression tests for stop-after behavior on multi-target crates (`expand`, `transpile`, `build`, `run`)
+        - [x] *done* Add regression tests for stop-after behavior on multi-target crates (`expand`, `transpile`, `build`, `run`)
+          - [x] *done* Added parity verification coverage for mixed-target crates at each stop stage: `expand` (no transpile/build artifacts), `transpile` (no build/run artifacts), `build` (runner + build.log present, run.log absent), and `run` (run.log persisted)
+          - [x] *done* Fixed multi-target build/run parity path uncovered by new regressions: preserve discovered target order for Stage D inputs, skip duplicated runtime prelude when flattening additional module units, and ignore invalid per-module `using` lines in flattened runner
       - [ ] Leaf 4: Project-specific parity closure via generic fixes only (no per-project custom scripts)
         - [ ] `either`: keep as control crate; re-run parity after every generic change to prevent regressions
         - [ ] `tap`: capture first deterministic parity blocker after Leaf 1-3, implement generic fix, add fixture-agnostic regression, re-run parity

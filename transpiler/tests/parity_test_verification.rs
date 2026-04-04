@@ -32,6 +32,22 @@ fn cppm_artifact_path(work_dir: &Path, module_name: &str) -> PathBuf {
     target_artifact_dir(work_dir, module_name).join(format!("{}.cppm", module_name))
 }
 
+fn runner_cpp_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("runner.cpp")
+}
+
+fn runner_binary_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("runner")
+}
+
+fn build_log_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("build.log")
+}
+
+fn run_log_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("run.log")
+}
+
 /// Create a minimal fixture crate for testing (not either).
 fn create_fixture_crate(dir: &std::path::Path) -> PathBuf {
     let src_dir = dir.join("src");
@@ -437,6 +453,40 @@ fn test_stop_after_expand_creates_expanded_source() {
 }
 
 #[test]
+fn test_multi_target_stop_after_expand_stops_before_transpile_and_build_outputs() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("expand")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stopped after expand stage."));
+
+    assert!(expanded_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "integ").exists());
+    assert!(!cppm_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(!cppm_artifact_path(work_dir.path(), "integ").exists());
+    assert!(!runner_cpp_path(work_dir.path()).exists());
+    assert!(!build_log_path(work_dir.path()).exists());
+    assert!(!run_log_path(work_dir.path()).exists());
+}
+
+#[test]
 fn test_stop_after_transpile_creates_cppm() {
     let work_dir = tempfile::tempdir().unwrap();
 
@@ -496,6 +546,40 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
     let integ_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "integ"))
         .expect("failed to read transpiled integration target");
     assert!(integ_cppm.contains("rusty_test_integ_add"));
+}
+
+#[test]
+fn test_multi_target_stop_after_transpile_stops_before_build_and_run_outputs() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stopped after transpile stage."));
+
+    assert!(expanded_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "integ").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "integ").exists());
+    assert!(!runner_cpp_path(work_dir.path()).exists());
+    assert!(!build_log_path(work_dir.path()).exists());
+    assert!(!run_log_path(work_dir.path()).exists());
 }
 
 #[test]
@@ -613,12 +697,21 @@ fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
         .output()
         .expect("failed to run");
 
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Generated runner:"),
         "expected runner generation in stdout, got:\n{}",
         stdout
     );
+    assert!(stdout.contains("Stopped after build stage."));
+    assert!(runner_binary_path(work_dir.path()).exists());
+    assert!(build_log_path(work_dir.path()).exists());
+    assert!(!run_log_path(work_dir.path()).exists());
 
     let runner_cpp =
         std::fs::read_to_string(work_dir.path().join("runner.cpp")).expect("failed to read runner");
@@ -634,6 +727,45 @@ fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
         "wrapper invocation order should be deterministic by wrapper name"
     );
     assert!(!runner_cpp.contains("TEST_CASE(\""));
+}
+
+#[test]
+fn test_multi_target_stop_after_run_executes_and_persists_run_log() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_mixed_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("run")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stage E: Running transpiled tests..."));
+    assert!(stdout.contains("Run: PASS"));
+
+    assert!(expanded_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(expanded_artifact_path(work_dir.path(), "integ").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "mixed_wrappers").exists());
+    assert!(cppm_artifact_path(work_dir.path(), "integ").exists());
+    assert!(runner_cpp_path(work_dir.path()).exists());
+    assert!(runner_binary_path(work_dir.path()).exists());
+    assert!(build_log_path(work_dir.path()).exists());
+    assert!(run_log_path(work_dir.path()).exists());
+
+    let run_log = std::fs::read_to_string(run_log_path(work_dir.path())).expect("read run.log");
+    assert!(run_log.contains("Results:"));
 }
 
 // ── Rerun determinism ──────────────────────────────────

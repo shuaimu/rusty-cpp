@@ -995,8 +995,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
         // Compile only artifacts generated in this run to avoid stale file bleed
         // when reusing --work-dir with --keep-work-dir.
-        let mut cppm_files = generated_cppm_files.clone();
-        cppm_files.sort();
+        let cppm_files = generated_cppm_files.clone();
 
         if cppm_files.is_empty() {
             return Err(
@@ -1023,12 +1022,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Collect test names and transpiled code
         let mut test_entries: Vec<(String, String)> = Vec::new();
         let mut seen_test_fns: HashSet<String> = HashSet::new();
+        let module_namespace_markers: Vec<String> = targets
+            .iter()
+            .map(|target| format!("{}::", target.module_name))
+            .collect();
 
-        for cppm_path in &cppm_files {
+        for (cppm_index, cppm_path) in cppm_files.iter().enumerate() {
             let content = std::fs::read_to_string(cppm_path)
                 .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
 
             let mut pending_overloaded_template = false;
+            let mut skip_shared_prelude = cppm_index > 0;
             collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
 
             // Strip module syntax and add code
@@ -1038,6 +1042,19 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             ));
             for line in content.lines() {
                 let trimmed = line.trim();
+                if skip_shared_prelude {
+                    // For additional module units, skip the duplicated runtime prelude and
+                    // resume at crate/test payloads (extern crate/use/export item region).
+                    if trimmed.starts_with("// extern crate")
+                        || trimmed.starts_with("// Rust-only:")
+                        || (trimmed.starts_with("export ")
+                            && !trimmed.starts_with("export module "))
+                    {
+                        skip_shared_prelude = false;
+                    } else {
+                        continue;
+                    }
+                }
                 if pending_overloaded_template {
                     if is_overloaded_struct_line(trimmed) || is_overloaded_deduction_line(trimmed) {
                         pending_overloaded_template = false;
@@ -1066,7 +1083,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     && (trimmed.contains("::Left")
                         || trimmed.contains("::Right")
                         || trimmed.contains("iterator::")
-                        || trimmed.contains("into_either::"))
+                        || trimmed.contains("into_either::")
+                        || trimmed == "using namespace ;"
+                        || module_namespace_markers
+                            .iter()
+                            .any(|module_prefix| trimmed.contains(module_prefix)))
                 {
                     runner_src.push_str(&format!("// skipped: {}\n", trimmed));
                     continue;
@@ -1216,11 +1237,28 @@ fn find_rusty_include_dir() -> PathBuf {
             }
         }
     }
+
+    // Try workspace include relative to the transpiler crate.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent() {
+        let workspace_include = workspace_root.join("include");
+        if workspace_include.join("rusty/rusty.hpp").exists() {
+            return std::fs::canonicalize(&workspace_include).unwrap_or(workspace_include);
+        }
+    }
+
     // Try relative to current dir (for development)
     let dev_include = PathBuf::from("include");
     if dev_include.join("rusty/rusty.hpp").exists() {
         return std::fs::canonicalize(dev_include).unwrap_or_else(|_| PathBuf::from("include"));
     }
+
+    // Also try one level up from current dir (common when running from ./transpiler).
+    let parent_include = PathBuf::from("../include");
+    if parent_include.join("rusty/rusty.hpp").exists() {
+        return std::fs::canonicalize(&parent_include).unwrap_or(parent_include);
+    }
+
     // Fallback
     PathBuf::from("include")
 }

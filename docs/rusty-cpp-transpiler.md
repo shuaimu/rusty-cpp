@@ -5512,6 +5512,66 @@ Design rationale:
   - no build-stage dependence on whole-directory `*.cppm` scans (§11.61),
   - no partial cleanup that leaves stale removed-target directories behind (§11.61).
 
+### 10.11.59 Phase 20 Leaf 3.3: Multi-target stop-after stage-matrix regressions and Stage D flattening hardening
+
+Problem:
+
+- Phase 20 Leaf 3 required explicit stop-after regression coverage for multi-target crates at
+  `expand`, `transpile`, `build`, and `run`.
+- While adding that coverage, mixed-target `build`/`run` exposed Stage D flattening issues:
+  - lexicographic `.cppm` reordering could place integration target content before lib content,
+    breaking symbol availability,
+  - concatenating every module unit from file start duplicated shared runtime prelude definitions,
+  - module-local `using` lines produced invalid flat-runner statements (for example
+    `using namespace ;` and `using <module>::...`).
+
+Scope analysis:
+
+- Kept as a focused change under 1000 LOC:
+  - parity integration regressions in `transpiler/tests/parity_test_verification.rs`,
+  - Stage D runner assembly/include-dir hardening in `transpiler/src/main.rs`.
+
+Implementation:
+
+- Added multi-target stop-after regressions:
+  - `test_multi_target_stop_after_expand_stops_before_transpile_and_build_outputs`
+  - `test_multi_target_stop_after_transpile_stops_before_build_and_run_outputs`
+  - `test_multi_target_stop_after_run_executes_and_persists_run_log`
+- Strengthened existing build-stage mixed-target coverage:
+  - `test_stop_after_build_generates_runner_entries_from_discovered_wrappers` now asserts build
+    success, stop-after message, runner/build artifacts present, and run log absent.
+- Hardened Stage D runner flattening:
+  - preserve generated target order (no `.cppm` sort) so discovered lib-first ordering remains
+    stable for dependent targets,
+  - skip duplicated shared prelude when flattening additional module units,
+  - skip invalid module-local `using` lines that are not valid in flattened single-TU runner form.
+- Hardened include-dir discovery for integration test invocation contexts:
+  - probe workspace-root `include/` via `CARGO_MANIFEST_DIR` parent,
+  - probe `../include` when running from `./transpiler`.
+
+Regression tests:
+
+- New stop-after matrix tests validate stage boundaries and artifact expectations across
+  `expand`/`transpile`/`build`/`run` for a mixed lib+integration fixture.
+- Existing rerun-isolation and wrapper-discovery tests remain intact and pass.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_test_verification`
+- `cargo test -p rusty-cpp-transpiler`
+- `cargo test --workspace`
+
+Design rationale:
+
+- Stage-boundary regressions are fixture-agnostic and directly validate pipeline semantics instead
+  of relying on one happy-path stop-after value.
+- Keeping discovered target order plus guarded flattening removes deterministic multi-target
+  build/run blockers without introducing crate-specific special cases.
+- Avoided wrong approaches from §11:
+  - no arbitrary `.cppm` reorder during Stage D flattening (§11.62),
+  - no blind module-unit concatenation that duplicates shared prelude or preserves invalid
+    module-scoped `using` lines in runner context (§11.62).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6256,3 +6316,16 @@ artifact is written last.
   determinism.
 - A current-run artifact list plus target-local directories gives deterministic, target-scoped
   inputs and avoids cross-run bleed.
+
+### 11.62 Flattening Multi-Target `*.cppm` Inputs with Reordered Files and Full-Preamble Concatenation
+
+**Rejected approach:** Sort Stage D `*.cppm` inputs lexicographically and concatenate each module
+unit from file start into `runner.cpp`, preserving all module-local `using` directives.
+
+**Why it was rejected:**
+
+- Reordering can invert dependency expectations (integration target code before lib payload),
+  creating avoidable symbol-resolution failures.
+- Full-file concatenation duplicates shared runtime prelude/helper definitions across targets.
+- Module-local `using` statements can be invalid once flattened into a single TU (for example
+  placeholder namespace lines or `using <module>::...` forms that assume module boundaries).
