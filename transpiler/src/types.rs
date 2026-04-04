@@ -67,6 +67,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
+        "PhantomData" | "std::marker::PhantomData" | "core::marker::PhantomData" => {
+            Some(("rusty::PhantomData", true))
+        }
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
         "std::path::Path" => Some(("rusty::path::Path", false)),
         "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
@@ -115,6 +118,14 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
+        "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
+        "std::panic::resume_unwind" | "panic::resume_unwind" => {
+            Some("rusty::panic::resume_unwind")
+        }
+        "std::panic::AssertUnwindSafe" | "panic::AssertUnwindSafe" => {
+            Some("rusty::panic::AssertUnwindSafe")
+        }
+        "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
             Some("rusty::str_runtime::from_utf8")
@@ -227,6 +238,10 @@ mod tests {
         assert_eq!(map_std_type("String"), Some(("rusty::String", false)));
         assert_eq!(map_std_type("Option"), Some(("rusty::Option", true)));
         assert_eq!(map_std_type("Result"), Some(("rusty::Result", true)));
+        assert_eq!(
+            map_std_type("std::marker::PhantomData"),
+            Some(("rusty::PhantomData", true))
+        );
         assert_eq!(map_std_type("HashMap"), Some(("rusty::HashMap", true)));
         assert_eq!(map_std_type("Mutex"), Some(("rusty::Mutex", true)));
         assert_eq!(map_std_type("UnknownType"), None);
@@ -365,6 +380,18 @@ mod tests {
         assert_eq!(
             map_function_path("Pin::get_unchecked_mut"),
             Some("rusty::pin::get_unchecked_mut")
+        );
+        assert_eq!(
+            map_function_path("std::panic::catch_unwind"),
+            Some("rusty::panic::catch_unwind")
+        );
+        assert_eq!(
+            map_function_path("panic::resume_unwind"),
+            Some("rusty::panic::resume_unwind")
+        );
+        assert_eq!(
+            map_function_path("std::process::abort"),
+            Some("std::abort")
         );
     }
 

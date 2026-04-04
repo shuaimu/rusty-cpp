@@ -5739,6 +5739,77 @@ Design rationale:
   - no crate-specific baseline branch for `cfg-if` or hard-coded allowlists,
   - no unconditional `--cap-lints allow` on every baseline run regardless of failure type.
 
+### 10.11.63 Phase 20 Leaf 4.4 (`take_mut`): rewrite unsupported std module imports and add runtime support shims
+
+Problem:
+
+- First deterministic `take_mut` parity failure after Phase 20 Leaf 1-3 occurred in Stage D build.
+- Expanded output imported Rust std modules with no direct C++ namespace equivalents:
+  - `using std::panic;`
+  - `using std::cell::Cell;`
+  - (plus `std::marker::PhantomData` paths in the same family)
+- Those invalid imports failed compilation before reaching deeper semantic parity blockers.
+
+Scope analysis:
+
+- Implemented as a focused generic fix under 1000 LOC:
+  - `use` import classification rewrites in `transpiler/src/codegen.rs`,
+  - path/type mapping extension in `transpiler/src/types.rs`,
+  - runtime support headers in `include/rusty/` and umbrella include wiring.
+
+Implementation:
+
+- Added generic `use` rewrites:
+  - `use std::panic;` → `namespace panic = rusty::panic;`
+  - `use std::cell::{Cell, RefCell, UnsafeCell};` → `using rusty::{...};`
+  - `use std::marker::PhantomData;` → `using rusty::PhantomData;`
+- Added generic type/path mappings:
+  - `std/core::marker::PhantomData` → `rusty::PhantomData`
+  - `std::panic::{catch_unwind,resume_unwind,AssertUnwindSafe}` → `rusty::panic::{...}`
+  - `std::process::abort` → `std::abort`
+- Added runtime support headers:
+  - `include/rusty/marker.hpp` (`rusty::PhantomData`)
+  - `include/rusty/panic.hpp` (`AssertUnwindSafe`, `catch_unwind`, `resume_unwind`)
+  - included both via `include/rusty/rusty.hpp` (also added `rusty/fn.hpp` to keep `rusty::SafeFn` available from umbrella include).
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_std_panic_module_import_emits_rusty_alias`
+  - `test_std_cell_import_remapped_to_rusty_cell`
+  - `test_std_marker_phantom_data_import_remapped`
+- `transpiler/src/types.rs`:
+  - extended `test_std_types` and `test_leaf42_runtime_function_path_mappings` for new mappings.
+- `transpiler/tests/parity_test_verification.rs`:
+  - `test_stop_after_transpile_rewrites_std_runtime_import_fixture` to validate transpile-stage parity artifacts on a synthetic fixture using panic/cell/marker imports.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler std_panic_module_import_emits_rusty_alias`
+- `cargo test -p rusty-cpp-transpiler std_cell_import_remapped_to_rusty_cell`
+- `cargo test -p rusty-cpp-transpiler std_marker_phantom_data_import_remapped`
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings`
+- `cargo test -p rusty-cpp-transpiler test_stop_after_transpile_rewrites_std_runtime_import_fixture`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <take_mut>/Cargo.toml --stop-after run --work-dir <tmp>`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- Previous deterministic `take_mut` blocker family (`using std::panic;`, `using std::cell::Cell;`) is removed.
+- Next deterministic blocker is deeper type/lifetime lowering:
+  - `rusty::PhantomData<rusty::Cell<void&>>` invalid `void&` emission,
+  - downstream forward-declaration fallout (`Hole<...>` unresolved in `Scope` signatures).
+
+Design rationale:
+
+- `use` lowering should preserve compile progress by rewriting known Rust module families to
+  explicit runtime equivalents, not emitting invalid C++ namespace imports.
+- Minimal runtime shims in rusty headers keep this crate-agnostic and avoid per-crate parity scripts.
+- Avoided wrong approaches from §11:
+  - no crate-specific patching for `take_mut`,
+  - no blanket “comment out all std::* imports” behavior that would hide valid/std-mappable imports.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6535,3 +6606,17 @@ always run Stage A baseline with `RUSTFLAGS=--cap-lints allow` even when baselin
   to warning-as-error policy.
 - A marker-triggered retry keeps the behavior generic and narrow: baseline runs normally first, and
   only warning-policy failures receive the compatibility retry.
+
+### 11.66 Emitting Unsupported Rust std Module Imports As-Is (or Blanket-Skipping All std Imports)
+
+**Rejected approach:** Keep emitting unsupported module imports verbatim (`using std::panic;`,
+`using std::cell::Cell;`) or swing to the opposite extreme and skip all `std::*` imports globally.
+
+**Why it was rejected:**
+
+- Verbatim emission creates immediate hard compile failures for Rust module families that have no
+  direct C++ namespace equivalents.
+- Blanket skipping hides valid import lowerings (`std::io` remaps, `std::string::String`, etc.)
+  and regresses already-working paths.
+- Targeted rewrite rules for known module families are auditable, crate-agnostic, and keep parity
+  diagnostics focused on the next true blocker.

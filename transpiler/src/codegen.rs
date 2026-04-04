@@ -8505,6 +8505,15 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if is_either_variant_reexport(normalized) {
         return UseImportAction::RustOnly;
     }
+    if let Some(action) = rewrite_std_panic_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_cell_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_marker_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_io_import(normalized) {
         return action;
     }
@@ -8585,6 +8594,41 @@ fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
         _ => UseImportAction::RustOnly,
     };
     Some(action)
+}
+
+fn rewrite_std_panic_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::panic" {
+        return Some(UseImportAction::Raw(
+            "namespace panic = rusty::panic;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::panic::")?;
+    let action = match item {
+        "AssertUnwindSafe" | "catch_unwind" | "resume_unwind" => {
+            UseImportAction::Using(format!("rusty::panic::{}", item))
+        }
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_cell_import(path: &str) -> Option<UseImportAction> {
+    let item = path.strip_prefix("std::cell::")?;
+    let action = match item {
+        "Cell" | "RefCell" | "UnsafeCell" => {
+            UseImportAction::Using(format!("rusty::{}", item))
+        }
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_marker_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::marker::PhantomData" {
+        return Some(UseImportAction::Using("rusty::PhantomData".to_string()));
+    }
+    None
 }
 
 fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
@@ -12390,6 +12434,27 @@ mod tests {
         let out = transpile_str("use std::io::Read;");
         assert!(out.contains("// Rust-only: using std::io::Read;"));
         assert!(!out.contains("\nusing std::io::Read;"));
+    }
+
+    #[test]
+    fn test_std_panic_module_import_emits_rusty_alias() {
+        let out = transpile_str("use std::panic;");
+        assert!(out.contains("namespace panic = rusty::panic;"));
+        assert!(!out.contains("using std::panic;"));
+    }
+
+    #[test]
+    fn test_std_cell_import_remapped_to_rusty_cell() {
+        let out = transpile_str("use std::cell::Cell;");
+        assert!(out.contains("using rusty::Cell;"));
+        assert!(!out.contains("using std::cell::Cell;"));
+    }
+
+    #[test]
+    fn test_std_marker_phantom_data_import_remapped() {
+        let out = transpile_str("use std::marker::PhantomData;");
+        assert!(out.contains("using rusty::PhantomData;"));
+        assert!(!out.contains("using std::marker::PhantomData;"));
     }
 
     #[test]

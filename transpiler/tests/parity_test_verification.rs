@@ -221,6 +221,25 @@ fn create_module_name_collision_fixture(dir: &std::path::Path) -> PathBuf {
     dir.join("Cargo.toml")
 }
 
+/// Create a fixture that exercises std panic/cell/marker imports through parity build.
+fn create_std_runtime_import_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"std_runtime_import_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "use std::cell::Cell;\nuse std::marker::PhantomData;\nuse std::panic;\n\npub fn run() -> i32 {\n    let flag = Cell::new(0i32);\n    let marker: PhantomData<&mut i32> = PhantomData;\n    let _ = marker;\n\n    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {\n        flag.set(7);\n        7i32\n    }));\n\n    match result {\n        Ok(value) => value,\n        Err(payload) => panic::resume_unwind(payload),\n    }\n}\n\n#[test]\nfn test_run() {\n    assert_eq!(run(), 7);\n}\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 // ── CLI parse tests ────────────────────────────────────
 
 #[test]
@@ -730,6 +749,41 @@ fn test_stop_after_build_succeeds_for_integration_only_crate() {
     let runner_cpp =
         std::fs::read_to_string(runner_cpp_path(work_dir.path())).expect("failed to read runner");
     assert!(runner_cpp.contains("rusty_test_integ_add_only();"));
+}
+
+#[test]
+fn test_stop_after_transpile_rewrites_std_runtime_import_fixture() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_std_runtime_import_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cppm = std::fs::read_to_string(cppm_artifact_path(
+        work_dir.path(),
+        "std_runtime_import_fixture",
+    ))
+    .expect("failed to read transpiled std runtime fixture");
+    assert!(cppm.contains("namespace panic = rusty::panic;"));
+    assert!(cppm.contains("using rusty::Cell;"));
+    assert!(cppm.contains("using rusty::PhantomData;"));
+    assert!(!cppm.contains("using std::panic;"));
+    assert!(!cppm.contains("using std::cell::Cell;"));
+    assert!(!cppm.contains("using std::marker::PhantomData;"));
 }
 
 #[test]
