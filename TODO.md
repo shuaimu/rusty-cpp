@@ -457,3 +457,37 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Stage-aware tool requirements: `g++` is only required when build/run stages are requested (baseline/transpile CI checks work without C++ toolchain)
           - [x] *done* Add integration test that runs baseline stage twice with same work dir and verifies logs are reset (no stale append behavior)
           - [x] *done* Add integration test that injects failing `cargo` shim and verifies harness exits non-zero (regression/failure propagation)
+    - [ ] Phase 19: Generic crate-agnostic test transpilation/parity pipeline (`parity-test` subcommand)
+      - [x] *done* Leaf 1: Add CLI surface for generic parity workflow
+        - [x] *done* Add `parity-test` subcommand via clap::Subcommand (backward-compatible)
+        - [x] *done* Add common flags: `--manifest-path`, `--package`, `--work-dir`, `--keep-work-dir`, `--dry-run`
+        - [x] *done* Add cargo feature flags passthrough: `--features`, `--all-features`, `--no-default-features`
+        - [x] *done* Add stage control: `--stop-after baseline|expand|transpile|build|run`
+        - [x] *done* Add baseline toggle: `--no-baseline` opt-out
+        - [x] *done* Implement stages A-C (baseline, expand, transpile) with artifact persistence
+        - [x] *done* Add 4 e2e tests: dry-run, missing manifest, invalid stage, help output
+      - [ ] Leaf 2: Implement crate target discovery from `cargo metadata`
+        - [ ] Discover lib/bin/test targets and select test-capable targets generically
+        - [ ] Resolve deterministic module naming for generated expanded test modules
+        - [ ] Skip unsupported targets with explicit diagnostics (do not hard-fail whole run)
+      - [ ] Leaf 3: Implement generic transpile/build/run orchestration in Rust
+        - [ ] Stage A baseline: run `cargo test` with selected package/features and log output
+        - [ ] Stage B expand: run `cargo expand` per selected target (`--lib`, `--bin <name>`, `--test <name>`)
+        - [ ] Stage C transpile: transpile crate/module output + expanded tests output
+        - [ ] Stage D build: compile generated `.cppm` modules with configurable C++ compiler/flags
+        - [ ] Stage E run: auto-generate runner TU that imports transpiled test modules and executes discovered `rusty_test_*` wrappers
+        - [ ] Persist structured logs/artifacts per stage under work dir for reproducibility
+      - [ ] Leaf 4: Remove hard-coded `either` assumptions from parity execution path
+        - [ ] Replace script-embedded module imports/names with generated names from discovery
+        - [ ] Keep `tests/transpile_tests/either/run_parity_harness.sh` as thin compatibility wrapper that forwards to `parity-test` (or deprecate once CI is migrated)
+        - [ ] Update docs (`docs/rusty-cpp-transpiler.md`) to document the generic command as the primary workflow
+      - [ ] Leaf 5: Verification tests (required)
+        - [ ] Add CLI parse/unit tests for `parity-test` flags and invalid-argument handling
+        - [ ] Add discovery unit tests with fixture `cargo metadata` JSON for lib/bin/integration-test target selection
+        - [ ] Add runner-generation unit tests: wrapper discovery (`rusty_test_*`) and deterministic runner source ordering
+        - [ ] Add dry-run integration test asserting stage command plan for a non-`either` fixture crate
+        - [ ] Add stop-after integration tests for each stage boundary (`baseline`, `expand`, `transpile`, `build`)
+        - [ ] Add failure-propagation integration tests (expand failure, compile failure, runner failure) with clear stage error messages
+        - [ ] Add rerun-determinism integration test: same `--work-dir` run twice does not append stale artifacts/logs
+        - [ ] Add end-to-end parity integration test invoking `parity-test --manifest-path tests/transpile_tests/either/Cargo.toml` and verifying all wrappers execute
+        - [ ] Add second end-to-end smoke fixture (small local crate distinct from `either`) to validate crate-agnostic behavior

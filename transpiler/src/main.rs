@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -11,7 +11,7 @@ mod types;
 #[command(name = "rusty-cpp-transpiler")]
 #[command(about = "Transpile Rust source code to C++ using rusty-cpp types")]
 struct Cli {
-    /// Input Rust source file (.rs) — not needed with --crate
+    /// Input Rust source file (.rs) — not needed with --crate or subcommands
     input: Option<PathBuf>,
 
     /// Output C++ module file (.cppm)
@@ -43,6 +43,62 @@ struct Cli {
     verify: bool,
 
     /// User-provided type mapping file for external crate types (TOML format)
+    #[arg(long)]
+    type_map: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run parity test: transpile a Rust crate's tests to C++ and verify same results
+    ParityTest(ParityTestArgs),
+}
+
+#[derive(Parser)]
+struct ParityTestArgs {
+    /// Path to Cargo.toml of the crate to test
+    #[arg(long, default_value = "Cargo.toml")]
+    manifest_path: PathBuf,
+
+    /// Package name (for workspace crates)
+    #[arg(long, short)]
+    package: Option<String>,
+
+    /// Working directory for intermediate files
+    #[arg(long, default_value = ".rusty-parity")]
+    work_dir: PathBuf,
+
+    /// Keep working directory after test (don't clean up)
+    #[arg(long)]
+    keep_work_dir: bool,
+
+    /// Print what would be done without executing
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Cargo feature flags to pass through
+    #[arg(long)]
+    features: Option<String>,
+
+    /// Enable all features
+    #[arg(long)]
+    all_features: bool,
+
+    /// Disable default features
+    #[arg(long)]
+    no_default_features: bool,
+
+    /// Stop after a specific stage: baseline, expand, transpile, build, run
+    #[arg(long)]
+    stop_after: Option<String>,
+
+    /// Skip running cargo test baseline
+    #[arg(long)]
+    no_baseline: bool,
+
+    /// User-provided type mapping file
     #[arg(long)]
     type_map: Option<PathBuf>,
 }
@@ -290,8 +346,192 @@ fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
+fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
+    let manifest = &args.manifest_path;
+    if !manifest.exists() {
+        return Err(format!("Manifest not found: {}", manifest.display()));
+    }
+
+    let cargo = cmake::parse_cargo_toml(manifest)?;
+    let crate_name = &cargo.package.name;
+
+    // Validate stop_after if provided
+    if let Some(ref stage) = args.stop_after {
+        if !matches!(stage.as_str(), "baseline" | "expand" | "transpile" | "build" | "run") {
+            return Err(format!(
+                "Invalid --stop-after stage '{}'. Valid: baseline, expand, transpile, build, run",
+                stage
+            ));
+        }
+    }
+
+    let should_stop = |stage: &str| -> bool {
+        args.stop_after.as_deref() == Some(stage)
+    };
+
+    // Create work directory
+    std::fs::create_dir_all(&args.work_dir)
+        .map_err(|e| format!("Failed to create work dir: {}", e))?;
+
+    let project_dir = manifest.parent().unwrap_or(Path::new("."));
+
+    // Build cargo feature flags
+    let mut cargo_flags: Vec<String> = Vec::new();
+    if let Some(ref features) = args.features {
+        cargo_flags.push("--features".to_string());
+        cargo_flags.push(features.clone());
+    }
+    if args.all_features {
+        cargo_flags.push("--all-features".to_string());
+    }
+    if args.no_default_features {
+        cargo_flags.push("--no-default-features".to_string());
+    }
+
+    println!("╔═══════════════════════════════════════════════════╗");
+    println!("║  Parity Test: {}",  crate_name);
+    println!("╚═══════════════════════════════════════════════════╝");
+    println!();
+
+    // ── Stage A: Baseline (cargo test) ──────────────────
+    if !args.no_baseline {
+        println!("Stage A: Running cargo test (baseline)...");
+        if args.dry_run {
+            println!("  [dry-run] cargo test {} in {}", cargo_flags.join(" "), project_dir.display());
+        } else {
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg("test").current_dir(project_dir);
+            for flag in &cargo_flags {
+                cmd.arg(flag);
+            }
+            let output = cmd.output()
+                .map_err(|e| format!("Failed to run cargo test: {}", e))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Save baseline output
+            let baseline_path = args.work_dir.join("baseline.txt");
+            std::fs::write(&baseline_path, format!("{}\n{}", stdout, stderr))
+                .map_err(|e| format!("Failed to write baseline: {}", e))?;
+
+            if !output.status.success() {
+                return Err(format!("Baseline cargo test failed. See {}", baseline_path.display()));
+            }
+            println!("  Baseline: PASS (saved to {})", baseline_path.display());
+        }
+        if should_stop("baseline") {
+            println!("\nStopped after baseline stage.");
+            return Ok(());
+        }
+    }
+
+    // ── Stage B: Expand ─────────────────────────────────
+    println!("Stage B: Running cargo expand...");
+    let expanded_source = if args.dry_run {
+        println!("  [dry-run] cargo expand --lib --theme=none in {}", project_dir.display());
+        String::new()
+    } else {
+        let output = std::process::Command::new("cargo")
+            .arg("expand")
+            .arg("--lib")
+            .arg("--theme=none")
+            .current_dir(project_dir)
+            .output()
+            .map_err(|e| format!("Failed to run cargo expand: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("cargo expand failed:\n{}", stderr));
+        }
+        let source = String::from_utf8(output.stdout)
+            .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
+
+        // Save expanded source
+        let expanded_path = args.work_dir.join("expanded.rs");
+        std::fs::write(&expanded_path, &source)
+            .map_err(|e| format!("Failed to write expanded source: {}", e))?;
+        println!("  Expanded: {} lines (saved to {})", source.lines().count(), expanded_path.display());
+        source
+    };
+    if should_stop("expand") {
+        println!("\nStopped after expand stage.");
+        return Ok(());
+    }
+
+    // ── Stage C: Transpile ──────────────────────────────
+    println!("Stage C: Transpiling to C++...");
+    let type_map = if let Some(ref tm_path) = args.type_map {
+        types::UserTypeMap::load(tm_path)?
+    } else {
+        types::UserTypeMap::default()
+    };
+
+    let cpp_output = if args.dry_run {
+        println!("  [dry-run] transpile expanded source as module '{}'", crate_name);
+        String::new()
+    } else {
+        let cpp = transpile::transpile_with_type_map(&expanded_source, Some(crate_name), &type_map)?;
+        let cppm_path = args.work_dir.join(format!("{}.cppm", crate_name));
+        std::fs::write(&cppm_path, &cpp)
+            .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
+        println!("  Transpiled: {} lines (saved to {})", cpp.lines().count(), cppm_path.display());
+        cpp
+    };
+    let _ = cpp_output; // suppress unused warning in dry-run
+    if should_stop("transpile") {
+        println!("\nStopped after transpile stage.");
+        return Ok(());
+    }
+
+    // ── Stage D: Build ──────────────────────────────────
+    println!("Stage D: Building with C++ compiler...");
+    if args.dry_run {
+        println!("  [dry-run] g++ -std=c++20 -I include ...");
+    } else {
+        println!("  Build: TODO — requires test harness generation (Phase 19 Leaf 3)");
+    }
+    if should_stop("build") {
+        println!("\nStopped after build stage.");
+        return Ok(());
+    }
+
+    // ── Stage E: Run ────────────────────────────────────
+    println!("Stage E: Running transpiled tests...");
+    if args.dry_run {
+        println!("  [dry-run] ./transpiled_test");
+    } else {
+        println!("  Run: TODO — requires test harness generation (Phase 19 Leaf 3)");
+    }
+
+    println!();
+    println!("Parity test pipeline complete for '{}'.", crate_name);
+
+    // Cleanup work dir unless --keep-work-dir
+    if !args.keep_work_dir && !args.dry_run {
+        // Keep for now — user can delete manually
+    }
+
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(ref command) = cli.command {
+        match command {
+            Commands::ParityTest(args) => {
+                match run_parity_test(args) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Parity test error: {}", e);
+                        process::exit(1);
+                    }
+                }
+                return;
+            }
+        }
+    }
 
     // Load user type map if provided
     let type_map = if let Some(ref type_map_path) = cli.type_map {

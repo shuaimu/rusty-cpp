@@ -442,3 +442,84 @@ fn test_crate_mode_with_path_dependency() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("will transpile recursively"));
 }
+
+// ── parity-test subcommand tests ────────────────────────
+
+#[test]
+fn test_parity_test_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--dry-run")
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Parity Test: test_crate"));
+    assert!(stdout.contains("[dry-run]"));
+    assert!(stdout.contains("Stage A"));
+    assert!(stdout.contains("Stage B"));
+}
+
+#[test]
+fn test_parity_test_missing_manifest() {
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg("nonexistent.toml")
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Manifest not found"));
+}
+
+#[test]
+fn test_parity_test_invalid_stop_after() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--stop-after")
+        .arg("invalid")
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Invalid --stop-after"));
+}
+
+#[test]
+fn test_parity_test_help() {
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--help")
+        .output()
+        .expect("failed to run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--manifest-path"));
+    assert!(stdout.contains("--stop-after"));
+    assert!(stdout.contains("--dry-run"));
+    assert!(stdout.contains("--no-baseline"));
+}
