@@ -603,16 +603,16 @@ impl CodeGen {
             if !seen.insert(marker.clone()) {
                 continue;
             }
-            if !self.emitted_top_level_functions.contains(&marker) {
+            let Some(call_target) = self.resolve_expanded_test_marker_target(&marker) else {
                 self.writeln(&format!(
                     "// Rust-only libtest marker without emitted function: {}",
                     marker
                 ));
                 continue;
-            }
+            };
 
-            let fn_name = escape_cpp_keyword(&marker);
-            let wrapper_name = format!("rusty_test_{}", fn_name);
+            let call_name = Self::escape_cpp_qualified_name(&call_target);
+            let wrapper_name = format!("rusty_test_{}", Self::marker_wrapper_suffix(&marker));
             let export_prefix = if self.module_name.is_some() {
                 "export "
             } else {
@@ -620,10 +620,53 @@ impl CodeGen {
             };
             self.writeln(&format!("{}void {}() {{", export_prefix, wrapper_name));
             self.indent += 1;
-            self.writeln(&format!("{}();", fn_name));
+            self.writeln(&format!("{}();", call_name));
             self.indent -= 1;
             self.writeln("}");
         }
+    }
+
+    fn resolve_expanded_test_marker_target(&self, marker: &str) -> Option<String> {
+        if self.emitted_top_level_functions.contains(marker) {
+            return Some(marker.to_string());
+        }
+
+        let tail = marker.rsplit("::").next().unwrap_or(marker);
+        let mut matches: Vec<String> = self
+            .emitted_top_level_functions
+            .iter()
+            .filter(|name| name.as_str() == tail || name.ends_with(&format!("::{}", tail)))
+            .cloned()
+            .collect();
+        matches.sort();
+        matches.dedup();
+
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn marker_wrapper_suffix(marker: &str) -> String {
+        marker
+            .replace("::", "_")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    fn escape_cpp_qualified_name(path: &str) -> String {
+        path.split("::")
+            .map(escape_cpp_keyword)
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     fn has_rustc_test_marker_attr(attrs: &[syn::Attribute]) -> bool {
@@ -701,10 +744,13 @@ impl CodeGen {
             return;
         }
 
-        if self.module_stack.is_empty() {
-            self.emitted_top_level_functions
-                .insert(f.sig.ident.to_string());
-        }
+        let fn_name = f.sig.ident.to_string();
+        let scoped_name = if self.module_stack.is_empty() {
+            fn_name
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), fn_name)
+        };
+        self.emitted_top_level_functions.insert(scoped_name);
 
         let is_test = Self::has_test_attr(&f.attrs);
 
@@ -10998,6 +11044,46 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf452_scoped_libtest_marker_emits_wrapper_for_nested_test_fn() {
+        let out = transpile_str_module(
+            r#"
+            mod tests {
+                fn unit_add() {}
+            }
+            #[rustc_test_marker = "tests::unit_add"]
+            pub const unit_add: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+        "#,
+            "fixture",
+        );
+
+        assert!(out.contains("namespace tests {"));
+        assert!(out.contains("void unit_add() {"));
+        assert!(out.contains("export void rusty_test_tests_unit_add() {"));
+        assert!(out.contains("tests::unit_add();"));
+        assert!(!out.contains("marker without emitted function: tests::unit_add"));
+    }
+
+    #[test]
+    fn test_leaf452_deep_scoped_libtest_marker_emits_wrapper() {
+        let out = transpile_str_module(
+            r#"
+            mod tests {
+                mod nested {
+                    fn deep_case() {}
+                }
+            }
+            #[rustc_test_marker = "tests::nested::deep_case"]
+            pub const deep_case: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+        "#,
+            "fixture",
+        );
+
+        assert!(out.contains("export void rusty_test_tests_nested_deep_case() {"));
+        assert!(out.contains("tests::nested::deep_case();"));
+        assert!(!out.contains("marker without emitted function: tests::nested::deep_case"));
+    }
+
+    #[test]
     fn test_inline_mod_impl_methods_merged_into_struct() {
         let out = transpile_str(
             r#"
@@ -12826,9 +12912,7 @@ mod tests {
         "#,
         );
         assert!(!out.contains("std::visit(overloaded {"));
-        assert!(
-            out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));")
-        );
+        assert!(out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"));
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("auto&& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("auto&& right_val = std::get<1>(_m_tuple);"));
@@ -13060,11 +13144,8 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto buf = rusty::array_repeat(static_cast<uint8_t>(0), 4);"));
-        assert!(
-            out.contains(
-                "const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"
-            )
-        );
+        assert!(out
+            .contains("const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"));
         assert!(out.contains("const auto _y = rusty::len(buf_shadow1);"));
     }
 
@@ -13165,9 +13246,7 @@ mod tests {
             }
         "#,
         );
-        assert!(
-            out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));")
-        );
+        assert!(out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));"));
         assert!(
             out.contains("return Either<const L&, const R&>(Right<const L&, const R&>(inner));")
         );

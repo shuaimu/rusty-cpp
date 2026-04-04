@@ -495,7 +495,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Made Stage A baseline workspace-aware without crate-specific scripts: retry order is in-place baseline → workspace-root (`cargo test --manifest-path <workspace>/Cargo.toml -p <crate>`) → isolated source-manifest copy under `<work-dir>/baseline_source_manifest`
         - [x] *done* Added regressions: workspace-mismatch baseline pass (`tap` + synthetic fixture) and malformed-manifest baseline fail in `transpiler/tests/parity_test_verification.rs`
       - [ ] Leaf 2: Finish crate-agnostic test extraction/runnable generation (close Phase 19 Leaf 3 open note)
-        - [ ] Remove `--lib` cfg-gated blind spot by collecting wrappers from expanded test-enabled targets (`--lib --tests` and discovered `--test <target>` entries)
+        - [x] *done* Remove `--lib` cfg-gated blind spot by collecting wrappers from expanded test-enabled targets (`--lib --tests` and discovered `--test <target>` entries)
+          - [x] *done* Fixed scoped rustc marker resolution (`tests::unit_add`, nested paths) in expanded libtest wrapper emission so unit tests in `#[cfg(test)] mod tests` generate runnable `rusty_test_*` wrappers instead of `marker without emitted function`
+          - [x] *done* Added regressions: codegen scoped-marker wrapper emission tests + parity integration test that verifies mixed fixture output includes wrappers from both lib unit tests (`--lib --tests`) and integration test targets (`--test integ`)
         - [ ] Generate runner entries from discovered `rusty_test_*` wrappers only (no crate-specific symbol assumptions)
         - [ ] Add verification tests for unit-only, integration-only, and mixed-target crates
       - [ ] Leaf 3: Harden generic transpile/build/run pipeline for multi-target crates

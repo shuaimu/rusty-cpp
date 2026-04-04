@@ -5253,6 +5253,60 @@ Design rationale:
   - no fixture-specific `Cargo.toml` patching or script forks (§11.56),
   - no workspace-membership churn in repository root just to satisfy baseline execution (§11.56).
 
+### 10.11.54 Phase 20 Leaf 2.1: Remove `--lib` cfg-gated wrapper blind spot for mixed test targets
+
+Problem:
+
+- Mixed crates (lib unit tests under `#[cfg(test)]` + integration `tests/*.rs`) were only
+  partially runnable after transpilation.
+- Repro on a minimal mixed fixture:
+  - `cargo expand --lib --tests` produced a marker path like `tests::unit_add`,
+  - transpiled output contained:
+    - `// Rust-only libtest marker without emitted function: tests::unit_add`
+  - no `rusty_test_*` wrapper was emitted for the lib unit test,
+  - while the integration target (`--test integ`) still emitted wrappers.
+
+Root cause:
+
+- Expanded-libtest wrapper emission tracked only a narrow function-name set for marker lookup.
+- Scoped markers (`tests::...`, deeper nested paths) were not resolved to emitted callable names.
+
+Implementation:
+
+- In `transpiler/src/codegen.rs`, expanded-libtest wrapper emission now:
+  - tracks emitted function names with module scope (`a::b::test_fn`) instead of only flat names,
+  - resolves marker targets via:
+    - exact match first,
+    - unique scoped tail match fallback (e.g., `tests::unit_add` -> `tests::unit_add`),
+  - emits wrapper function names with normalized marker suffixes (`::` -> `_`), e.g.:
+    - `tests::unit_add` -> `rusty_test_tests_unit_add`,
+  - emits qualified calls (`tests::unit_add();`) with segment-wise C++ keyword escaping.
+
+Regression tests:
+
+- Added codegen regressions:
+  - `test_leaf452_scoped_libtest_marker_emits_wrapper_for_nested_test_fn`
+  - `test_leaf452_deep_scoped_libtest_marker_emits_wrapper`
+- Added parity integration regression:
+  - `test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets`
+  - verifies mixed fixture transpilation includes wrappers from both
+    - `--lib --tests` unit-test path and
+    - discovered `--test <target>` integration path.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_leaf452 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler --test parity_test_verification test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets -- --nocapture`
+
+Design rationale:
+
+- The fix is generic and crate-agnostic: no fixture-specific naming rules.
+- It resolves the concrete cfg-gated unit-test blind spot while preserving existing integration-test
+  wrapper behavior.
+- Avoided wrong approaches from §11:
+  - no hard-coded mapping for specific module names like `tests::` only (§11.57),
+  - no direct patching of generated `.cppm` wrapper blocks (§11.55).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -5931,3 +5985,18 @@ repository root `workspace.members`/`workspace.exclude` lists for each fixture.
 - It can mask real workspace-context requirements for legitimate workspace packages.
 - A generic Stage-A retry flow (workspace-root retry + isolated-manifest fallback) keeps behavior
   deterministic without fixture-specific patches.
+
+### 11.57 Hard-Coding Wrapper Recovery for a Single Marker Prefix (`tests::`)
+
+**Rejected approach:** Patch expanded-libtest wrapper emission with a special-case rewrite only for
+`tests::...` markers (for example, blindly stripping `tests::`), while leaving general scoped
+marker resolution unsupported.
+
+**Why it was rejected:**
+
+- It only fixes one shape and fails again for deeper/nested marker paths
+  (`tests::nested::...`, other module hierarchies).
+- It introduces brittle naming assumptions tied to one fixture style instead of Rust expansion
+  semantics.
+- A generic scoped marker-to-function resolver with deterministic fallback keeps wrapper generation
+  crate-agnostic and future-proof across mixed target layouts.
