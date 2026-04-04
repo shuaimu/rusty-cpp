@@ -5810,6 +5810,64 @@ Design rationale:
   - no crate-specific patching for `take_mut`,
   - no blanket “comment out all std::* imports” behavior that would hide valid/std-mappable imports.
 
+### 10.11.64 Phase 20 Leaf 4.5 (`arrayvec`): make parity target discovery workspace-aware for `cargo metadata`
+
+Problem:
+
+- First deterministic `arrayvec` blocker after prior generic fixes appeared immediately after Stage A:
+  baseline passed, but target discovery failed at `cargo metadata` with workspace mismatch:
+  - `current package believes it's in a workspace when it's not`
+- This blocked parity before expand/transpile/build and was not specific to `arrayvec`; it applies to
+  any crate checked out under an unrelated workspace root.
+
+Scope analysis:
+
+- Implemented as a focused generic change under 1000 LOC:
+  - parity discovery fallback orchestration in `transpiler/src/main.rs`,
+  - one fixture-agnostic parity integration regression in
+    `transpiler/tests/parity_test_verification.rs`.
+
+Implementation:
+
+- Added `discover_targets_with_workspace_fallback(...)` in parity pipeline:
+  - first try in-place `cargo metadata` (existing behavior),
+  - on workspace mismatch, retry from workspace root with package selection
+    (`cargo metadata --manifest-path <workspace> -p <crate>`),
+  - if package lookup still misses, copy the source tree to
+    `<work-dir>/metadata_source_manifest` and retry metadata against the isolated manifest path.
+- Extended generic package-miss detection to include metadata-level miss diagnostics
+  (`Package '<name>' not found in metadata`) so fallback logic is consistent between baseline and
+  discovery stages.
+
+Regression tests:
+
+- Added parity integration regression:
+  - `test_parity_discovery_workspace_mismatch_fallback_passes`
+  - runs `parity-test --no-baseline --dry-run --stop-after expand` on a synthetic
+    workspace-mismatch fixture and asserts metadata retry + successful target discovery.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_parity_discovery_workspace_mismatch_fallback_passes`
+- `cargo test -p rusty-cpp-transpiler workspace_mismatch`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <arrayvec>/Cargo.toml --stop-after run --work-dir <tmp>`
+
+Re-probe result:
+
+- Previous deterministic target-discovery blocker is removed for `arrayvec`.
+- Next deterministic blocker shifts to Stage B:
+  - `cargo expand` for each discovered target still fails with workspace mismatch in the same fixture
+    layout, so Stage C has no generated `.cppm` files.
+
+Design rationale:
+
+- Baseline and discovery stages must share the same workspace-resilience strategy; otherwise parity
+  can pass baseline and still fail before any transpilation signal.
+- The fallback remains crate-agnostic and avoids mutating fixture manifests/workspace membership.
+- Avoided wrong approach from §11:
+  - no workspace-root-only metadata hard-coding without isolated-manifest fallback (§11.67).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6620,3 +6678,17 @@ always run Stage A baseline with `RUSTFLAGS=--cap-lints allow` even when baselin
   and regresses already-working paths.
 - Targeted rewrite rules for known module families are auditable, crate-agnostic, and keep parity
   diagnostics focused on the next true blocker.
+
+### 11.67 Hard-Coding Metadata Discovery to Workspace Root Without Isolated Fallback
+
+**Rejected approach:** On workspace-mismatch metadata failures, always rerun
+`cargo metadata --manifest-path <workspace> -p <crate>` and stop there.
+
+**Why it was rejected:**
+
+- It fails for crates that are not actual members of the parent workspace (`package ... not found`),
+  which is exactly the fixture shape parity must support.
+- It couples discovery behavior to workspace topology and package naming assumptions instead of the
+  provided manifest path contract.
+- A two-step fallback (workspace retry, then isolated source-manifest metadata) is deterministic and
+  crate-agnostic without source-manifest/workspace mutation.

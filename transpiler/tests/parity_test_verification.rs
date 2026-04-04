@@ -343,6 +343,36 @@ fn test_parity_discovers_fixture_crate() {
 }
 
 #[test]
+fn test_parity_discovery_workspace_mismatch_fallback_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--no-baseline")
+        .arg("--dry-run")
+        .arg("--stop-after")
+        .arg("expand")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Metadata retry:"));
+    assert!(stdout.contains("Target: orphan (Lib)"));
+}
+
+#[test]
 fn test_parity_discovery_disambiguates_normalized_module_name_collisions() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let manifest = create_module_name_collision_fixture(fixture_dir.path());

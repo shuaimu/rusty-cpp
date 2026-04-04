@@ -531,6 +531,7 @@ fn is_workspace_package_miss(stderr: &str) -> bool {
     stderr.contains("did not match any packages")
         || stderr.contains("package ID specification")
         || stderr.contains("not found in workspace")
+        || stderr.contains("not found in metadata")
 }
 
 fn is_warning_as_error_failure(stderr: &str) -> bool {
@@ -697,6 +698,74 @@ fn run_baseline_with_workspace_fallback(
         work_dir,
         Some(LINT_RETRY_FLAGS),
     )
+}
+
+fn discover_targets_with_workspace_fallback(
+    manifest: &Path,
+    project_dir: &Path,
+    package: Option<&str>,
+    crate_name: &str,
+    work_dir: &Path,
+) -> Result<(String, Vec<metadata::CrateTarget>), String> {
+    let initial = metadata::discover_targets(manifest, package);
+    if initial.is_ok() {
+        return initial;
+    }
+
+    let initial_err = initial.err().unwrap_or_default();
+    if !is_workspace_mismatch(&initial_err) {
+        return Err(initial_err);
+    }
+
+    println!("  Metadata retry: detected workspace mismatch from in-place cargo metadata.");
+
+    let selected_package = package.unwrap_or(crate_name);
+    if let Some(workspace_manifest) = workspace_manifest_from_error(&initial_err) {
+        println!(
+            "  Metadata retry: cargo metadata --manifest-path {} -p {}",
+            workspace_manifest.display(),
+            selected_package
+        );
+        let workspace_attempt =
+            metadata::discover_targets(&workspace_manifest, Some(selected_package));
+        if workspace_attempt.is_ok() {
+            return workspace_attempt;
+        }
+
+        let workspace_err = workspace_attempt.err().unwrap_or_default();
+        if !is_workspace_package_miss(&workspace_err) {
+            return Err(workspace_err);
+        }
+    }
+
+    let isolated_root = work_dir.join("metadata_source_manifest");
+    if isolated_root.exists() {
+        fs::remove_dir_all(&isolated_root).map_err(|e| {
+            format!(
+                "Failed to clean metadata isolation dir {}: {}",
+                isolated_root.display(),
+                e
+            )
+        })?;
+    }
+    copy_dir_recursive(project_dir, &isolated_root)?;
+
+    let manifest_rel = manifest
+        .strip_prefix(project_dir)
+        .map_err(|_| {
+            format!(
+                "Manifest {} is not under project dir {}",
+                manifest.display(),
+                project_dir.display()
+            )
+        })?
+        .to_path_buf();
+    let isolated_manifest = isolated_root.join(&manifest_rel);
+    println!(
+        "  Metadata retry: cargo metadata --manifest-path {}",
+        isolated_manifest.display()
+    );
+    metadata::discover_targets(&isolated_manifest, package)
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
@@ -896,7 +965,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // ── Target Discovery ─────────────────────────────────
     println!("Discovering targets...");
-    let (pkg_name, targets) = metadata::discover_targets(&manifest, args.package.as_deref())?;
+    let (pkg_name, targets) = discover_targets_with_workspace_fallback(
+        &manifest,
+        &project_dir,
+        args.package.as_deref(),
+        crate_name,
+        &args.work_dir,
+    )?;
     println!("  Package: {}", pkg_name);
     for t in &targets {
         println!(
