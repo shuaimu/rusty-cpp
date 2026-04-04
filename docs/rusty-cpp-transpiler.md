@@ -1617,17 +1617,13 @@ Total estimated: ~205 LOC to fix all gaps.
 
 ### 10.8 Compile Test Results
 
-The transpiled Either core types were compiled and tested with both GCC 14 and Clang 19:
+The transpiled Either path is validated through the automated parity pipeline
+(`cargo test` baseline + `cargo expand --lib --tests` + transpile + C++ build/run):
 
 ```bash
-$ g++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
-test_basic PASSED
-test_visit PASSED
-test_generic PASSED
-All either compile tests PASSED
-
-$ clang++ -std=c++20 -Wall compile_test_full.cpp -o test && ./test
-# Same output — all tests pass
+$ tests/transpile_tests/either/run_parity_harness.sh --work-dir /tmp/either-parity-check
+# ... Stage A-E ...
+Results: 7 passed, 0 failed
 ```
 
 **What compiles and runs correctly:**
@@ -1820,7 +1816,7 @@ All 5 steps completed:
 1. ✅ `cargo expand` on either — all methods transpiled
 2. ✅ UFCS types, auto-derived attrs handled
 3. ✅ Variant constructors return `auto` for implicit conversion
-4. ✅ All 7 test functions pass in C++ (test_either_parity.cpp)
+4. ✅ All 7 test functions pass in C++ via the automated parity harness
 5. ✅ Side-by-side: Rust 7/7 pass, C++ 7/7 pass
 
 #### Additional Fixes (from transpiled test compilation)

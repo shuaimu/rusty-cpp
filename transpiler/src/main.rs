@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -116,9 +117,7 @@ fn transpile_crate(
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
-    let project_dir = cargo_toml_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let crate_name = &cargo.package.name;
     let sources = cmake::collect_source_files(project_dir);
 
@@ -139,7 +138,10 @@ fn transpile_crate(
         for dep in &deps {
             if dep.is_local {
                 let dep_path = dep.path.as_deref().unwrap_or("?");
-                println!("  {} (local: {}) — will transpile recursively", dep.name, dep_path);
+                println!(
+                    "  {} (local: {}) — will transpile recursively",
+                    dep.name, dep_path
+                );
 
                 // Recursively transpile local path dependencies
                 let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
@@ -150,15 +152,25 @@ fn transpile_crate(
                             local_dep_dirs.push(dep.name.clone());
                         }
                         Err(e) => {
-                            eprintln!("  Warning: failed to transpile dependency '{}': {}", dep.name, e);
+                            eprintln!(
+                                "  Warning: failed to transpile dependency '{}': {}",
+                                dep.name, e
+                            );
                         }
                     }
                 } else {
-                    eprintln!("  Warning: Cargo.toml not found for local dep '{}' at {}", dep.name, dep_cargo_toml.display());
+                    eprintln!(
+                        "  Warning: Cargo.toml not found for local dep '{}' at {}",
+                        dep.name,
+                        dep_cargo_toml.display()
+                    );
                 }
             } else {
-                println!("  {} = \"{}\" (external — types may need manual mapping)",
-                    dep.name, dep.version.as_deref().unwrap_or("*"));
+                println!(
+                    "  {} = \"{}\" (external — types may need manual mapping)",
+                    dep.name,
+                    dep.version.as_deref().unwrap_or("*")
+                );
             }
         }
         println!();
@@ -170,13 +182,19 @@ fn transpile_crate(
         match run_cargo_expand(cargo_toml_path) {
             Ok(expanded_source) => {
                 let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
-                match transpile::transpile_with_type_map(&expanded_source, Some(crate_name), type_map) {
+                match transpile::transpile_with_type_map(
+                    &expanded_source,
+                    Some(crate_name),
+                    type_map,
+                ) {
                     Ok(cpp_output) => {
                         std::fs::write(&cppm_path, &cpp_output)
                             .map_err(|e| format!("Failed to write: {}", e))?;
                         println!("  Expanded and transpiled → {}", cppm_path.display());
                     }
-                    Err(e) => return Err(format!("Transpilation of expanded source failed: {}", e)),
+                    Err(e) => {
+                        return Err(format!("Transpilation of expanded source failed: {}", e));
+                    }
                 }
 
                 // Generate CMakeLists.txt
@@ -188,12 +206,19 @@ fn transpile_crate(
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("Warning: cargo expand failed ({}), falling back to per-file mode", e);
+                eprintln!(
+                    "Warning: cargo expand failed ({}), falling back to per-file mode",
+                    e
+                );
             }
         }
     }
 
-    println!("Transpiling crate '{}' ({} source files)", crate_name, sources.len());
+    println!(
+        "Transpiling crate '{}' ({} source files)",
+        crate_name,
+        sources.len()
+    );
 
     // Step 2: Transpile each file with correct module name
     let mut success_count = 0;
@@ -220,7 +245,12 @@ fn transpile_crate(
                     error_count += 1;
                     continue;
                 }
-                println!("  {} → {} (module: {})", rs_path.display(), cppm_path.display(), module_name);
+                println!(
+                    "  {} → {} (module: {})",
+                    rs_path.display(),
+                    cppm_path.display(),
+                    module_name
+                );
                 success_count += 1;
 
                 // Optional verification
@@ -252,7 +282,9 @@ fn transpile_crate(
         cmake_content.push('\n');
 
         // Link dependencies to the main target
-        let target_name = cargo.lib.as_ref()
+        let target_name = cargo
+            .lib
+            .as_ref()
             .and_then(|l| l.name.clone())
             .unwrap_or_else(|| crate_name.replace('-', "_"));
         for dep_name in &local_dep_dirs {
@@ -284,10 +316,7 @@ fn transpile_crate(
 
 /// Run `cargo expand` on the input file's crate to get macro-expanded source.
 fn run_cargo_expand(input_path: &Path) -> Result<String, String> {
-    let mut dir = input_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let mut dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     loop {
         if dir.join("Cargo.toml").exists() {
@@ -322,9 +351,7 @@ fn run_cargo_expand(input_path: &Path) -> Result<String, String> {
 
 fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
-    let project_dir = cargo_toml_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let project_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
     let sources = cmake::collect_source_files(project_dir);
 
     if sources.is_empty() {
@@ -341,10 +368,41 @@ fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     println!("\nFile mapping:");
     for source in &sources {
         let (cppm, module) = cmake::map_rs_to_cppm(source, &cargo.package.name);
-        println!("  {} → {} (module: {})", source.display(), cppm.display(), module);
+        println!(
+            "  {} → {} (module: {})",
+            source.display(),
+            cppm.display(),
+            module
+        );
     }
 
     Ok(())
+}
+
+fn is_overloaded_template_line(trimmed: &str) -> bool {
+    trimmed == "template<class... Ts>" || trimmed == "template <class... Ts>"
+}
+
+fn is_overloaded_struct_line(trimmed: &str) -> bool {
+    trimmed.contains("struct overloaded : Ts... { using Ts::operator()...; };")
+}
+
+fn is_overloaded_deduction_line(trimmed: &str) -> bool {
+    trimmed.contains("overloaded(Ts...) -> overloaded<Ts...>;")
+}
+
+fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
+    let line = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let rest = line.strip_prefix("void rusty_test_")?;
+    let end = rest.find('(')?;
+    Some(format!("rusty_test_{}", &rest[..end]))
+}
+
+fn test_label_from_fn_name(fn_name: &str) -> String {
+    fn_name
+        .strip_prefix("rusty_test_")
+        .unwrap_or(fn_name)
+        .to_string()
 }
 
 /// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
@@ -357,7 +415,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // Validate stop_after if provided
     if let Some(ref stage) = args.stop_after {
-        if !matches!(stage.as_str(), "baseline" | "expand" | "transpile" | "build" | "run") {
+        if !matches!(
+            stage.as_str(),
+            "baseline" | "expand" | "transpile" | "build" | "run"
+        ) {
             return Err(format!(
                 "Invalid --stop-after stage '{}'. Valid: baseline, expand, transpile, build, run",
                 stage
@@ -365,9 +426,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     }
 
-    let should_stop = |stage: &str| -> bool {
-        args.stop_after.as_deref() == Some(stage)
-    };
+    let should_stop = |stage: &str| -> bool { args.stop_after.as_deref() == Some(stage) };
 
     // Create work directory
     std::fs::create_dir_all(&args.work_dir)
@@ -389,7 +448,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     }
 
     println!("╔═══════════════════════════════════════════════════╗");
-    println!("║  Parity Test: {}",  crate_name);
+    println!("║  Parity Test: {}", crate_name);
     println!("╚═══════════════════════════════════════════════════╝");
     println!();
 
@@ -397,14 +456,19 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     if !args.no_baseline {
         println!("Stage A: Running cargo test (baseline)...");
         if args.dry_run {
-            println!("  [dry-run] cargo test {} in {}", cargo_flags.join(" "), project_dir.display());
+            println!(
+                "  [dry-run] cargo test {} in {}",
+                cargo_flags.join(" "),
+                project_dir.display()
+            );
         } else {
             let mut cmd = std::process::Command::new("cargo");
             cmd.arg("test").current_dir(&project_dir);
             for flag in &cargo_flags {
                 cmd.arg(flag);
             }
-            let output = cmd.output()
+            let output = cmd
+                .output()
                 .map_err(|e| format!("Failed to run cargo test: {}", e))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -415,7 +479,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 .map_err(|e| format!("Failed to write baseline: {}", e))?;
 
             if !output.status.success() {
-                return Err(format!("Baseline cargo test failed. See {}", baseline_path.display()));
+                return Err(format!(
+                    "Baseline cargo test failed. See {}",
+                    baseline_path.display()
+                ));
             }
             println!("  Baseline: PASS (saved to {})", baseline_path.display());
         }
@@ -430,7 +497,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let (pkg_name, targets) = metadata::discover_targets(&manifest, args.package.as_deref())?;
     println!("  Package: {}", pkg_name);
     for t in &targets {
-        println!("  Target: {} ({:?}) → module {}", t.name, t.kind, t.module_name);
+        println!(
+            "  Target: {} ({:?}) → module {}",
+            t.name, t.kind, t.module_name
+        );
     }
     if targets.is_empty() {
         return Err("No test-capable targets found".to_string());
@@ -442,30 +512,68 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let mut expanded_sources: Vec<(metadata::CrateTarget, String)> = Vec::new();
 
     for target in &targets {
-        let expand_flag = target.kind.cargo_expand_flag().unwrap_or("--lib");
+        let (expand_args, expand_desc): (Vec<String>, String) = match target.kind {
+            metadata::TargetKind::Lib => (
+                vec!["--lib".to_string(), "--tests".to_string()],
+                "--lib --tests".to_string(),
+            ),
+            metadata::TargetKind::Bin => (
+                vec!["--bin".to_string(), target.name.clone()],
+                format!("--bin {}", target.name),
+            ),
+            metadata::TargetKind::Test => (
+                vec!["--test".to_string(), target.name.clone()],
+                format!("--test {}", target.name),
+            ),
+            _ => (
+                vec![
+                    target
+                        .kind
+                        .cargo_expand_flag()
+                        .unwrap_or("--lib")
+                        .to_string(),
+                ],
+                target
+                    .kind
+                    .cargo_expand_flag()
+                    .unwrap_or("--lib")
+                    .to_string(),
+            ),
+        };
 
         if args.dry_run {
-            println!("  [dry-run] cargo expand {} --theme=none in {}", expand_flag, project_dir.display());
+            println!(
+                "  [dry-run] cargo expand {} --theme=none in {}",
+                expand_desc,
+                project_dir.display()
+            );
             continue;
         }
 
         let mut cmd = std::process::Command::new("cargo");
-        cmd.arg("expand")
-            .arg(expand_flag)
-            .arg("--theme=none")
-            .current_dir(&project_dir);
-
-        // For --bin and --test, need to pass the target name
-        if matches!(target.kind, metadata::TargetKind::Bin | metadata::TargetKind::Test) {
-            cmd.arg(&target.name);
+        cmd.arg("expand").current_dir(&project_dir);
+        for arg in &expand_args {
+            cmd.arg(arg);
+        }
+        cmd.arg("--theme=none");
+        for flag in &cargo_flags {
+            cmd.arg(flag);
         }
 
-        let output = cmd.output()
-            .map_err(|e| format!("Failed to run cargo expand for target '{}': {}", target.name, e))?;
+        let output = cmd.output().map_err(|e| {
+            format!(
+                "Failed to run cargo expand for target '{}': {}",
+                target.name, e
+            )
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("  Warning: cargo expand failed for target '{}': {}", target.name, stderr.lines().next().unwrap_or(""));
+            eprintln!(
+                "  Warning: cargo expand failed for target '{}': {}",
+                target.name,
+                stderr.lines().next().unwrap_or("")
+            );
             continue;
         }
 
@@ -473,10 +581,18 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
 
         // Save expanded source
-        let expanded_path = args.work_dir.join(format!("expanded_{}.rs", target.module_name));
+        let expanded_path = args
+            .work_dir
+            .join(format!("expanded_{}.rs", target.module_name));
         std::fs::write(&expanded_path, &source)
             .map_err(|e| format!("Failed to write expanded source: {}", e))?;
-        println!("  {} ({}): {} lines → {}", target.name, expand_flag, source.lines().count(), expanded_path.display());
+        println!(
+            "  {} ({}): {} lines → {}",
+            target.name,
+            expand_desc,
+            source.lines().count(),
+            expanded_path.display()
+        );
 
         expanded_sources.push((target.clone(), source));
     }
@@ -495,15 +611,24 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     if args.dry_run {
         for (target, _) in &expanded_sources {
-            println!("  [dry-run] transpile {} as module '{}'", target.name, target.module_name);
+            println!(
+                "  [dry-run] transpile {} as module '{}'",
+                target.name, target.module_name
+            );
         }
     } else {
         for (target, source) in &expanded_sources {
-            let cpp = transpile::transpile_with_type_map(source, Some(&target.module_name), &type_map)?;
+            let cpp =
+                transpile::transpile_with_type_map(source, Some(&target.module_name), &type_map)?;
             let cppm_path = args.work_dir.join(format!("{}.cppm", target.module_name));
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
-            println!("  {}: {} lines → {}", target.module_name, cpp.lines().count(), cppm_path.display());
+            println!(
+                "  {}: {} lines → {}",
+                target.module_name,
+                cpp.lines().count(),
+                cppm_path.display()
+            );
         }
     }
     if should_stop("transpile") {
@@ -518,7 +643,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let include_dir = find_rusty_include_dir();
 
     if args.dry_run {
-        println!("  [dry-run] g++ -std=c++20 -I {} -o runner ...", include_dir.display());
+        println!(
+            "  [dry-run] g++ -std=c++20 -I {} -o runner ...",
+            include_dir.display()
+        );
     } else {
         // Generate a runner .cpp that includes all transpiled code + test main
         let runner_path = args.work_dir.join("runner.cpp");
@@ -546,10 +674,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         runner_src.push_str("#include <rusty/rusty.hpp>\n");
         runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n\n");
         runner_src.push_str("// Overloaded visitor helper\n");
-        runner_src.push_str("template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n\n");
+        runner_src.push_str(
+            "template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n",
+        );
+        runner_src.push_str("template<class... Ts>\n");
+        runner_src.push_str("overloaded(Ts...) -> overloaded<Ts...>;\n\n");
 
         // Collect test names and transpiled code
-        let mut test_names: Vec<String> = Vec::new();
+        let mut test_entries: Vec<(String, String)> = Vec::new();
+        let mut seen_test_fns: HashSet<String> = HashSet::new();
 
         // No TEST_CASE macro — we replace inline during code inclusion\n
 
@@ -557,23 +690,47 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             let content = std::fs::read_to_string(cppm_path)
                 .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
 
+            let mut pending_overloaded_template = false;
+
             // Extract test names
             for line in content.lines() {
                 if let Some(rest) = line.strip_prefix("TEST_CASE(\"") {
                     if let Some(name) = rest.strip_suffix("\") {") {
-                        test_names.push(name.to_string());
+                        let fn_name = format!("rusty_test_{}", name);
+                        if seen_test_fns.insert(fn_name.clone()) {
+                            test_entries.push((fn_name, name.to_string()));
+                        }
+                    }
+                }
+                if let Some(fn_name) = extract_rusty_test_wrapper_name(line.trim()) {
+                    if seen_test_fns.insert(fn_name.clone()) {
+                        test_entries.push((fn_name.clone(), test_label_from_fn_name(&fn_name)));
                     }
                 }
             }
 
             // Strip module syntax and add code
-            runner_src.push_str(&format!("// ── from {} ──\n", cppm_path.file_name().unwrap().to_string_lossy()));
+            runner_src.push_str(&format!(
+                "// ── from {} ──\n",
+                cppm_path.file_name().unwrap().to_string_lossy()
+            ));
             for line in content.lines() {
                 let trimmed = line.trim();
+                if pending_overloaded_template {
+                    if is_overloaded_struct_line(trimmed) || is_overloaded_deduction_line(trimmed) {
+                        pending_overloaded_template = false;
+                        continue;
+                    }
+                    runner_src.push_str("template<class... Ts>\n");
+                    pending_overloaded_template = false;
+                }
                 // Skip module/import/include lines (we provide our own)
-                if trimmed.starts_with("export module ") || trimmed.starts_with("import ")
-                    || trimmed.starts_with("export import ") || trimmed.starts_with("#include ")
-                    || trimmed.starts_with("// Auto-generated") || trimmed.starts_with("// Do not edit")
+                if trimmed.starts_with("export module ")
+                    || trimmed.starts_with("import ")
+                    || trimmed.starts_with("export import ")
+                    || trimmed.starts_with("#include ")
+                    || trimmed.starts_with("// Auto-generated")
+                    || trimmed.starts_with("// Do not edit")
                     || trimmed == "module;"
                 {
                     continue;
@@ -583,15 +740,21 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     continue;
                 }
                 // Skip using declarations for undefined namespaces
-                if trimmed.starts_with("using ") && (
-                    trimmed.contains("::Left") || trimmed.contains("::Right")
-                    || trimmed.contains("iterator::") || trimmed.contains("into_either::")
-                ) {
+                if trimmed.starts_with("using ")
+                    && (trimmed.contains("::Left")
+                        || trimmed.contains("::Right")
+                        || trimmed.contains("iterator::")
+                        || trimmed.contains("into_either::"))
+                {
                     runner_src.push_str(&format!("// skipped: {}\n", trimmed));
                     continue;
                 }
-                // Skip redefinition of overloaded
-                if trimmed.contains("struct overloaded") && trimmed.contains("Ts...") {
+                // Skip redefinitions of overloaded helper from transpiled modules.
+                if is_overloaded_template_line(trimmed) {
+                    pending_overloaded_template = true;
+                    continue;
+                }
+                if is_overloaded_struct_line(trimmed) || is_overloaded_deduction_line(trimmed) {
                     continue;
                 }
                 // Strip 'export ' prefix from declarations
@@ -610,25 +773,35 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 runner_src.push_str(line);
                 runner_src.push('\n');
             }
+            if pending_overloaded_template {
+                runner_src.push_str("template<class... Ts>\n");
+            }
             runner_src.push('\n');
+        }
+
+        if test_entries.is_empty() {
+            return Err(
+                "No transpiled tests discovered. Expected TEST_CASE or rusty_test_* wrappers."
+                    .to_string(),
+            );
         }
 
         // Generate main() that runs all tests
         runner_src.push_str("\n// ── Test runner ──\n");
         runner_src.push_str("int main() {\n");
         runner_src.push_str("    int pass = 0, fail = 0;\n");
-        for name in &test_names {
+        for (fn_name, label) in &test_entries {
             runner_src.push_str(&format!(
-                "    try {{ rusty_test_{}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                name, name
+                "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                fn_name, label
             ));
             runner_src.push_str(&format!(
                 "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
-                name
+                label
             ));
             runner_src.push_str(&format!(
                 "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
-                name
+                label
             ));
         }
         runner_src.push_str("    std::cout << std::endl;\n");
@@ -642,7 +815,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Save runner log
         let build_log_path = args.work_dir.join("build.log");
 
-        println!("  Generated runner: {} ({} tests discovered)", runner_path.display(), test_names.len());
+        println!(
+            "  Generated runner: {} ({} tests discovered)",
+            runner_path.display(),
+            test_entries.len()
+        );
 
         // Compile with g++
         let compile_output = std::process::Command::new("g++")
@@ -758,7 +935,11 @@ fn main() {
     let type_map = if let Some(ref type_map_path) = cli.type_map {
         match types::UserTypeMap::load(type_map_path) {
             Ok(tm) => {
-                println!("Loaded {} type mappings from {}", tm.mappings.len(), type_map_path.display());
+                println!(
+                    "Loaded {} type mappings from {}",
+                    tm.mappings.len(),
+                    type_map_path.display()
+                );
                 tm
             }
             Err(e) => {
@@ -772,7 +953,13 @@ fn main() {
 
     // Handle --crate: transpile entire crate
     if let Some(ref cargo_toml_path) = cli.crate_ {
-        match transpile_crate(cargo_toml_path, &cli.output_dir, &type_map, cli.expand, cli.verify) {
+        match transpile_crate(
+            cargo_toml_path,
+            &cli.output_dir,
+            &type_map,
+            cli.expand,
+            cli.verify,
+        ) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -832,13 +1019,14 @@ fn main() {
         }
     };
 
-    let cpp_output = match transpile::transpile_with_type_map(&source, cli.module_name.as_deref(), &type_map) {
-        Ok(output) => output,
-        Err(e) => {
-            eprintln!("Transpilation error: {}", e);
-            process::exit(1);
-        }
-    };
+    let cpp_output =
+        match transpile::transpile_with_type_map(&source, cli.module_name.as_deref(), &type_map) {
+            Ok(output) => output,
+            Err(e) => {
+                eprintln!("Transpilation error: {}", e);
+                process::exit(1);
+            }
+        };
 
     match std::fs::write(&output_path, &cpp_output) {
         Ok(()) => {

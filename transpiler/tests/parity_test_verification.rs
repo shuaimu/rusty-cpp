@@ -111,6 +111,7 @@ fn test_parity_discovers_either_lib_target() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Target: either (Lib)"));
     assert!(stdout.contains("module either"));
+    assert!(stdout.contains("cargo expand --lib --tests"));
 }
 
 #[test]
@@ -151,7 +152,11 @@ fn test_stop_after_baseline_creates_baseline_log() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(work_dir.path().join("baseline.txt").exists());
 }
 
@@ -170,7 +175,11 @@ fn test_stop_after_expand_creates_expanded_source() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(work_dir.path().join("expanded_either.rs").exists());
 }
 
@@ -189,8 +198,15 @@ fn test_stop_after_transpile_creates_cppm() {
         .output()
         .expect("failed to run");
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(work_dir.path().join("either.cppm").exists());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cppm_path = work_dir.path().join("either.cppm");
+    assert!(cppm_path.exists());
+    let cppm = std::fs::read_to_string(cppm_path).expect("failed to read transpiled cppm");
+    assert!(cppm.contains("export void rusty_test_basic()"));
 }
 
 // ── Rerun determinism ──────────────────────────────────
@@ -226,8 +242,16 @@ fn test_rerun_same_workdir_does_not_append_stale_artifacts() {
     let expanded_count = files.iter().filter(|f| f.starts_with("expanded_")).count();
     let cppm_count = files.iter().filter(|f| f.ends_with(".cppm")).count();
 
-    assert_eq!(baseline_count, 1, "expected 1 baseline file, got {}", baseline_count);
-    assert_eq!(expanded_count, 1, "expected 1 expanded file, got {}", expanded_count);
+    assert_eq!(
+        baseline_count, 1,
+        "expected 1 baseline file, got {}",
+        baseline_count
+    );
+    assert_eq!(
+        expanded_count, 1,
+        "expected 1 expanded file, got {}",
+        expanded_count
+    );
     assert_eq!(cppm_count, 1, "expected 1 cppm file, got {}", cppm_count);
 }
 
