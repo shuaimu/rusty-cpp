@@ -6124,6 +6124,68 @@ Design rationale:
 - Avoided wrong approach from §11:
   - no unconditional artifact uploads for every successful matrix run (§11.74).
 
+### 10.11.70 Phase 20 Leaf 4.8 (`tap`): remove `&rusty::intrinsics::unreachable()` lvalue fallback for typed slice-reference array literals
+
+Problem:
+
+- Re-probing `tap` parity after prior Phase 20 generic fixes showed Stage D build failure from
+  emitted address-of-unreachable fallback in a typed slice-reference initializer:
+  - `const std::span<const rusty::Result<...>> values = &rusty::intrinsics::unreachable();`
+- This shape is invalid C++ (`&` requires an lvalue) and blocked parity before reaching the next
+  deterministic blocker family.
+
+Scope analysis:
+
+- Implemented as a focused generic codegen change under 1000 LOC:
+  - reference-expression lowering in `transpiler/src/codegen.rs`,
+  - targeted codegen regressions in existing unit tests.
+
+Implementation:
+
+- Added `try_emit_reference_array_literal_with_expected_span(...)` in
+  `transpiler/src/codegen.rs`.
+- The helper activates when all conditions hold:
+  - source expression is `&[ ... ]` or `&mut [ ... ]` (reference to array literal),
+  - expected Rust type is a slice reference (`&[T]` or `&mut [T]`).
+- Emission now uses a typed IIFE with stable backing storage:
+  - materializes `static const std::array<T, N>` (or mutable `static std::array<T, N>`),
+  - returns `std::span<const T>` / `std::span<T>` from that static array.
+- Hooked this helper into `emit_expr_to_string_with_expected(...)` before generic reference
+  fallback logic so unsupported array-reference paths no longer degrade to address-of-unreachable.
+
+Regression tests:
+
+- Added codegen tests in `transpiler/src/codegen.rs`:
+  - `test_leaf48_typed_slice_array_reference_materializes_static_span_backing`
+  - `test_leaf48_typed_mut_slice_array_reference_materializes_mutable_span_backing`
+- Assertions cover:
+  - typed `std::span` initializer emission,
+  - static `std::array` backing generation,
+  - `Result::Ok/Err` typed element lowering in array literals,
+  - absence of `= &rusty::intrinsics::unreachable()` for this family.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf48_typed_ -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate tap --work-root <tmp>`
+
+Re-probe result:
+
+- Previous deterministic `tap` blocker (`&rusty::intrinsics::unreachable()` lvalue misuse) is
+  removed.
+- Next deterministic blocker is now the extension-method call shape:
+  - `10.tap(...)` parsed by C++ as a numeric-literal suffix (`operator""tap`).
+
+Design rationale:
+
+- Rust `&[ ... ]` literals in typed slice-reference contexts require stable backing storage; a
+  static array-backed span keeps emission valid and deterministic for parity runs.
+- This remains fully generic and avoids any crate-specific `tap` lowering path.
+- Avoided wrong approaches from §11:
+  - no placeholder-address fallbacks such as `&unreachable()` / `nullptr` for typed slices (§11.75),
+  - no crate-specific source rewrite for `tap` tests.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7033,3 +7095,17 @@ runs.
   diagnosis.
 - It obscures true signal by producing large routine artifacts that are rarely consumed.
 - Failure-only archival preserves actionable data when needed while keeping normal CI runs lean.
+
+### 11.75 Using Address-of-Placeholder Fallbacks for Typed Slice References
+
+**Rejected approach:** Keep lowering typed `&[ ... ]`/`&mut [ ... ]` array-literal references to
+placeholder-address forms such as `&rusty::intrinsics::unreachable()` (or `nullptr`) when full
+array lowering is missing.
+
+**Why it was rejected:**
+
+- It produces invalid C++ for common paths (`&rusty::intrinsics::unreachable()` is not a valid
+  lvalue address expression), causing immediate build failure.
+- It discards type/element information needed for deterministic parity signal in later stages.
+- A typed static-array-backed `std::span` emission is a small, generic fix that preserves compile
+  progress without crate-specific special casing.

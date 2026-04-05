@@ -5285,6 +5285,11 @@ impl CodeGen {
                 self.emit_binary_expr_to_string_with_expected(bin, expected_ty)
             }
             syn::Expr::Reference(r) => {
+                if let Some(span_expr) =
+                    self.try_emit_reference_array_literal_with_expected_span(r, expected_ty)
+                {
+                    return span_expr;
+                }
                 let ref_inner = self.peel_paren_group_expr(&r.expr);
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
                     return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
@@ -5348,6 +5353,51 @@ impl CodeGen {
             }
             _ => self.emit_expr_to_string(expr),
         }
+    }
+
+    fn try_emit_reference_array_literal_with_expected_span(
+        &self,
+        reference: &syn::ExprReference,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let expected_ty = expected_ty?;
+        let syn::Type::Reference(expected_ref) = expected_ty else {
+            return None;
+        };
+        let syn::Type::Slice(slice_ty) = expected_ref.elem.as_ref() else {
+            return None;
+        };
+        let ref_inner = self.peel_paren_group_expr(&reference.expr);
+        let syn::Expr::Array(array_expr) = ref_inner else {
+            return None;
+        };
+
+        let elem_ty = slice_ty.elem.as_ref();
+        let elem_cpp = self.map_type(elem_ty);
+        let is_mut = reference.mutability.is_some() || expected_ref.mutability.is_some();
+        let span_cpp = if is_mut {
+            format!("std::span<{}>", elem_cpp)
+        } else {
+            format!("std::span<const {}>", elem_cpp)
+        };
+        let array_cpp = format!("std::array<{}, {}>", elem_cpp, array_expr.elems.len());
+        let storage_decl = if is_mut {
+            format!("{} _slice_ref_tmp", array_cpp)
+        } else {
+            format!("const {} _slice_ref_tmp", array_cpp)
+        };
+        let elems: Vec<String> = array_expr
+            .elems
+            .iter()
+            .map(|elem| self.emit_expr_to_string_with_expected(elem, Some(elem_ty)))
+            .collect();
+        Some(format!(
+            "[&]() -> {} {{ static {} = {{{}}}; return {}(_slice_ref_tmp); }}()",
+            span_cpp,
+            storage_decl,
+            elems.join(", "),
+            span_cpp
+        ))
     }
 
     fn emit_binary_expr_to_string_with_expected(
@@ -12322,6 +12372,39 @@ mod tests {
         assert!(out.contains("const auto& s = rusty::slice_to(v, n);"));
         assert!(!out.contains("v[rusty::range_to(n)]"));
         assert!(!out.contains("= &rusty::slice_to(v, n)"));
+    }
+
+    #[test]
+    fn test_leaf48_typed_slice_array_reference_materializes_static_span_backing() {
+        let out = transpile_str(
+            r#"
+            fn filter_map() {
+                let values: &[Result<i32, &str>] = &[Ok(3), Err("foo"), Err("bar"), Ok(8)];
+            }
+            "#,
+        );
+        assert!(out.contains("const std::span<const rusty::Result<int32_t, std::string_view>> values ="));
+        assert!(out.contains(
+            "static const std::array<rusty::Result<int32_t, std::string_view>, 4> _slice_ref_tmp = {"
+        ));
+        assert!(out.contains("rusty::Result<int32_t, std::string_view>::Ok(3)"));
+        assert!(out.contains("rusty::Result<int32_t, std::string_view>::Err(\"foo\")"));
+        assert!(!out.contains("= &rusty::intrinsics::unreachable()"));
+    }
+
+    #[test]
+    fn test_leaf48_typed_mut_slice_array_reference_materializes_mutable_span_backing() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let values: &mut [i32] = &mut [1, 2, 3];
+                values[0] = 9;
+            }
+            "#,
+        );
+        assert!(out.contains("std::span<int32_t> values ="));
+        assert!(out.contains("static std::array<int32_t, 3> _slice_ref_tmp = {1, 2, 3};"));
+        assert!(!out.contains("= &rusty::intrinsics::unreachable()"));
     }
 
     #[test]

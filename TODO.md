@@ -547,6 +547,20 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added fixture-agnostic regression: shim-driven parity baseline test proving fallback succeeds when workspace-root retry returns the non-member dev-dependency diagnostic
           - [x] *done* Re-probed `bitflags` after baseline fix: Stage A/B/C now proceed; fixed next deterministic build blocker by normalizing multiline single-attribute doc comments so every emitted line is prefixed as `///` (no raw text leakage into C++)
           - [x] *done* Added focused codegen regression for embedded-newline single `#[doc = \"...\"]` attributes; re-probed `bitflags`: previous Stage-A and doc-text blockers are removed, next deterministic blocker is Stage D unresolved re-export/type-order family (`using ::Flag/::Flags` and dependent `IterNames` type declarations)
+        - [x] *done* Leaf 4.8: `tap` Stage D blocker family A — remove `&rusty::intrinsics::unreachable()` lvalue emission in reference/slice contexts
+          - [x] *done* Reproduced failing generated shape from parity workflow (`const std::span<...> values = &rusty::intrinsics::unreachable();`) via `tests/transpile_tests/run_parity_matrix.sh --crate tap`
+          - [x] *done* Implemented generic expression/reference lowering fix (no crate-specific scripts): typed `&[ ... ]` array literals now emit stable static `std::array` backing with typed `std::span` return instead of address-of-unreachable fallback
+          - [x] *done* Added focused codegen regressions covering typed immutable/mutable slice-array references, including `&[Ok(...), Err(...)]`, and verified no `&rusty::intrinsics::unreachable()` remains in emitted output for this family
+          - [x] *done* Re-ran `tap` parity and captured next deterministic blocker after this family was removed: extension-method call shape (`10.tap(...)`) still fails in Stage D (`operator\"\"tap`)
+        - [ ] Leaf 4.9: `tap` Stage D blocker family B — extension-method call shape (`10.tap(...)`) lowering
+          - [ ] Add generic method-call lowering for primitive receivers that avoids C++ numeric-literal-suffix parse failures
+          - [ ] Add fixture-agnostic regression(s) for numeric literal receiver method calls
+          - [ ] Re-probe `tap` and record next deterministic blocker
+        - [ ] Leaf 4.10: `cfg-if` Stage D path lowering family (`std::option::Option` invalid C++ path)
+        - [ ] Leaf 4.11: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
+        - [ ] Leaf 4.12: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
+        - [ ] Leaf 4.13: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
+        - [ ] Leaf 4.14: Re-run full seven-crate parity matrix to confirm Leaf 4 closure and mark complete
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
