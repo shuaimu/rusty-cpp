@@ -6038,6 +6038,50 @@ Design rationale:
 - Avoided wrong approach from §11:
   - no mandatory network-heavy all-crate parity execution inside default non-ignored cargo test runs (§11.72).
 
+### 10.11.68 Phase 20 Leaf 5.2: deterministic first-failure diagnostics in parity matrix output
+
+Problem:
+
+- The matrix harness needed explicit, stable failure diagnostics identifying the first failing crate
+  and showing where parity artifacts can be inspected (`baseline.txt`, `build.log`, `run.log`).
+- Prior behavior printed failure details inline, but did not guarantee a canonical first-failure
+  summary line at matrix exit, and clone/setup failures could bypass parity-oriented diagnostics.
+
+Scope analysis:
+
+- Implemented as a focused shell-harness/test update (<1000 LOC):
+  - enhance failure bookkeeping + summary output in matrix harness,
+  - add regression coverage for failure-path diagnostics.
+
+Implementation:
+
+- Updated `tests/transpile_tests/run_parity_matrix.sh`:
+  - records first failing crate/work-dir/log path (`FIRST_FAIL_*` state),
+  - emits canonical diagnostics on failure:
+    - `first failing crate: <crate>`,
+    - `baseline.txt: <path>`,
+    - `build.log: <path>`,
+    - `run.log: <path>`,
+    - `Failure log: <path>` when available,
+  - routes clone/setup failures through the same diagnostic flow so matrix failures remain
+    parity-artifact-centric instead of terminating with raw clone errors only.
+- Added parity-matrix regression in `transpiler/tests/parity_matrix_harness.rs`:
+  - failing `cargo` shim forces deterministic matrix failure for `--crate either`,
+  - verifies stderr contains first-failing-crate identity and expected artifact paths.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+
+Design rationale:
+
+- First-failure reporting should be canonical and emitted at matrix exit, not inferred from
+  incidental mid-stream logs.
+- Failure diagnostics should always include artifact paths even when files were not created, so the
+  operator has deterministic locations to inspect/create during debugging.
+- Avoided wrong approach from §11:
+  - no ad-hoc tail-only diagnostics that omit first-failure identity and artifact paths (§11.73).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6922,3 +6966,16 @@ return that failure immediately and skip isolated-manifest retry.
 - It obscures fast deterministic regressions behind expensive external setup.
 - A dedicated matrix harness with explicit invocation keeps parity-matrix coverage reproducible
   without destabilizing the standard test suite.
+
+### 11.73 Tail-Only Matrix Failure Output Without Canonical First-Failure Identity
+
+**Rejected approach:** On matrix failure, print only recent command output (or only `matrix.log`)
+without an explicit first-failing crate line and normalized artifact-path diagnostics.
+
+**Why it was rejected:**
+
+- Operators cannot reliably determine the first failing crate from tail logs alone when output is
+  noisy or partially buffered.
+- Artifact discovery becomes manual and error-prone without canonical `baseline.txt`/`build.log`/
+  `run.log` path lines.
+- Standardized first-failure diagnostics keep matrix triage deterministic across local and CI runs.

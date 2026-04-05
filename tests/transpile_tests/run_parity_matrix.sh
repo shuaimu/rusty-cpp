@@ -38,6 +38,9 @@ TARGET_CRATE=""
 WORK_ROOT="${REPO_ROOT}/.rusty-parity-matrix"
 DRY_RUN=0
 KEEP_WORK_DIRS=0
+FIRST_FAIL_CRATE=""
+FIRST_FAIL_WORK_DIR=""
+FIRST_FAIL_LOG=""
 
 print_usage() {
     cat <<EOF
@@ -69,6 +72,37 @@ is_known_crate() {
 join_crates() {
     local IFS=", "
     echo "$*"
+}
+
+record_first_failure() {
+    local crate="$1"
+    local work_dir="$2"
+    local matrix_log="$3"
+
+    if [[ -n "${FIRST_FAIL_CRATE}" ]]; then
+        return 0
+    fi
+
+    FIRST_FAIL_CRATE="${crate}"
+    FIRST_FAIL_WORK_DIR="${work_dir}"
+    FIRST_FAIL_LOG="${matrix_log}"
+}
+
+print_failure_diagnostics() {
+    local crate="$1"
+    local work_dir="$2"
+    local matrix_log="$3"
+
+    record_first_failure "${crate}" "${work_dir}" "${matrix_log}"
+
+    echo "  FAIL: ${crate}" >&2
+    echo "  first failing crate: ${crate}" >&2
+    if [[ -n "${matrix_log}" ]]; then
+        echo "  matrix log: ${matrix_log}" >&2
+    fi
+    echo "  baseline artifact: ${work_dir}/baseline.txt" >&2
+    echo "  build artifact: ${work_dir}/build.log" >&2
+    echo "  run artifact: ${work_dir}/run.log" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -128,6 +162,7 @@ ensure_crate_checkout() {
     local crate_dir="${SCRIPT_DIR}/${crate}"
     local repo="${CRATE_REPO[${crate}]}"
     local ref="${CRATE_REF[${crate}]}"
+    local work_dir="${WORK_ROOT}/${crate}"
 
     if [[ -f "${crate_dir}/Cargo.toml" ]]; then
         return 0
@@ -143,7 +178,10 @@ ensure_crate_checkout() {
     fi
 
     echo "  Cloning ${crate} (${ref})..."
-    git clone --depth 1 --branch "${ref}" "${repo}" "${crate_dir}"
+    if ! git clone --depth 1 --branch "${ref}" "${repo}" "${crate_dir}"; then
+        print_failure_diagnostics "${crate}" "${work_dir}" ""
+        return 1
+    fi
 }
 
 run_parity_for_crate() {
@@ -161,7 +199,8 @@ run_parity_for_crate() {
     fi
 
     if [[ ! -f "${manifest}" ]]; then
-        echo "  FAIL: missing manifest: ${manifest}" >&2
+        print_failure_diagnostics "${crate}" "${work_dir}" "${matrix_log}"
+        echo "  missing manifest: ${manifest}" >&2
         return 1
     fi
 
@@ -197,11 +236,7 @@ run_parity_for_crate() {
         return 0
     fi
 
-    echo "  FAIL: ${crate}" >&2
-    echo "  matrix log: ${matrix_log}" >&2
-    echo "  baseline artifact: ${work_dir}/baseline.txt" >&2
-    echo "  build artifact: ${work_dir}/build.log" >&2
-    echo "  run artifact: ${work_dir}/run.log" >&2
+    print_failure_diagnostics "${crate}" "${work_dir}" "${matrix_log}"
     echo "  tail of matrix log:" >&2
     tail -n 50 "${matrix_log}" >&2 || true
     return 1
@@ -225,7 +260,10 @@ for crate in "${CRATES_TO_RUN[@]}"; do
     echo ""
     echo "━━ ${crate} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    ensure_crate_checkout "${crate}"
+    if ! ensure_crate_checkout "${crate}"; then
+        FAIL=$((FAIL + 1))
+        break
+    fi
     if run_parity_for_crate "${crate}"; then
         PASS=$((PASS + 1))
     else
@@ -240,5 +278,14 @@ printf "Summary: total=%d pass=%d fail=%d\n" "${TOTAL}" "${PASS}" "${FAIL}"
 echo "═══════════════════════════════════════════════════════════════════════"
 
 if [[ "${FAIL}" -gt 0 ]]; then
+    if [[ -n "${FIRST_FAIL_CRATE}" ]]; then
+        echo "First failing crate: ${FIRST_FAIL_CRATE}" >&2
+        if [[ -n "${FIRST_FAIL_LOG}" ]]; then
+            echo "Failure log: ${FIRST_FAIL_LOG}" >&2
+        fi
+        echo "baseline.txt: ${FIRST_FAIL_WORK_DIR}/baseline.txt" >&2
+        echo "build.log: ${FIRST_FAIL_WORK_DIR}/build.log" >&2
+        echo "run.log: ${FIRST_FAIL_WORK_DIR}/run.log" >&2
+    fi
     exit 1
 fi

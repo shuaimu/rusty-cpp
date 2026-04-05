@@ -552,5 +552,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
           - [x] *done* Added matrix harness options for practical integration execution (`--crate <name>`, `--work-root <dir>`, `--keep-work-dirs`, `--dry-run`) without introducing crate-specific parity scripts
           - [x] *done* Added integration tests in `transpiler/tests/parity_matrix_harness.rs` validating dry-run matrix coverage for all seven crates, unknown-crate filter failure handling, and live single-crate control-path execution (`either`) with expected parity artifacts (`baseline.txt`, `build.log`, `run.log`)
-        - [ ] Enforce failure diagnostics: matrix output must identify first failing crate and print paths to `baseline.txt`, `build.log`, and `run.log`
+        - [x] *done* Enforce failure diagnostics: matrix output must identify first failing crate and print paths to `baseline.txt`, `build.log`, and `run.log`
+          - [x] *done* Updated `tests/transpile_tests/run_parity_matrix.sh` failure handling to record the first failing crate and emit canonical diagnostics (`first failing crate`, `baseline.txt`, `build.log`, `run.log`, and failure log path) on matrix failure
+          - [x] *done* Hardened matrix checkout failure path so clone/setup failures are reported through the same first-failure diagnostics path (instead of exiting without matrix artifact context)
+          - [x] *done* Added regression in `transpiler/tests/parity_matrix_harness.rs` using a failing `cargo` shim to verify matrix stderr includes first-failing crate identity and expected artifact paths
         - [ ] Add CI target/job to run the matrix and archive per-crate artifacts on failure

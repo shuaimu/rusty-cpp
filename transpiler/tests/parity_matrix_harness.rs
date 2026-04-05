@@ -97,3 +97,55 @@ fn test_parity_matrix_single_crate_run_passes_for_either_control() {
     assert!(work_root.path().join("either/build.log").exists());
     assert!(work_root.path().join("either/run.log").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
+    let script = matrix_script();
+    let work_root = tempfile::tempdir().unwrap();
+    let shim_dir = tempfile::tempdir().unwrap();
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let cargo_shim = shim_dir.path().join("cargo");
+    fs::write(&cargo_shim, "#!/usr/bin/env bash\nexit 99\n").expect("failed to write cargo shim");
+    let mut perms = fs::metadata(&cargo_shim).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cargo_shim, perms).unwrap();
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let shimmed_path = format!("{}:{}", shim_dir.path().display(), current_path);
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--crate")
+        .arg("either")
+        .arg("--work-root")
+        .arg(work_root.path())
+        .current_dir(repo_root())
+        .env("PATH", shimmed_path)
+        .output()
+        .expect("failed to run parity matrix script");
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_work_dir = work_root.path().join("either");
+    assert!(stderr.contains("first failing crate: either"), "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains(&format!("baseline.txt: {}/baseline.txt", expected_work_dir.display())),
+        "stderr:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("build.log: {}/build.log", expected_work_dir.display())),
+        "stderr:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!("run.log: {}/run.log", expected_work_dir.display())),
+        "stderr:\n{}",
+        stderr
+    );
+}
