@@ -74,6 +74,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
+        "std::str::Utf8Error" | "core::str::Utf8Error" => {
+            Some(("rusty::str_runtime::Utf8Error", false))
+        }
         "PhantomData" | "std::marker::PhantomData" | "core::marker::PhantomData" => {
             Some(("rusty::PhantomData", true))
         }
@@ -161,6 +164,15 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::cmp::max" | "std::cmp::max" => Some("core::cmp::max"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
             Some("rusty::str_runtime::from_utf8")
+        }
+        "std::str::from_utf8_unchecked"
+        | "core::str::from_utf8_unchecked"
+        | "str::from_utf8_unchecked" => Some("rusty::str_runtime::from_utf8_unchecked"),
+        "std::str::from_utf8_unchecked_mut"
+        | "core::str::from_utf8_unchecked_mut"
+        | "str::from_utf8_unchecked_mut" => Some("rusty::str_runtime::from_utf8_unchecked_mut"),
+        "std::char::from_u32" | "core::char::from_u32" | "char::from_u32" => {
+            Some("rusty::char_runtime::from_u32")
         }
         "core::fmt::Formatter::debug_tuple_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
@@ -386,6 +398,10 @@ mod tests {
     #[test]
     fn test_str_type() {
         assert_eq!(map_std_type("str"), Some(("std::string_view", false)));
+        assert_eq!(
+            map_std_type("std::str::Utf8Error"),
+            Some(("rusty::str_runtime::Utf8Error", false))
+        );
     }
 
     #[test]
@@ -434,6 +450,18 @@ mod tests {
         assert_eq!(
             map_function_path("core::str::from_utf8"),
             Some("rusty::str_runtime::from_utf8")
+        );
+        assert_eq!(
+            map_function_path("str::from_utf8_unchecked"),
+            Some("rusty::str_runtime::from_utf8_unchecked")
+        );
+        assert_eq!(
+            map_function_path("core::str::from_utf8_unchecked_mut"),
+            Some("rusty::str_runtime::from_utf8_unchecked_mut")
+        );
+        assert_eq!(
+            map_function_path("std::char::from_u32"),
+            Some("rusty::char_runtime::from_u32")
         );
         assert_eq!(
             map_function_path("Pin::new_unchecked"),

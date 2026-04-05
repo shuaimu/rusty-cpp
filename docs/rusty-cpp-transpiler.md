@@ -7732,6 +7732,92 @@ Design rationale:
   - no blanket suppression/removal of unreachable or return emission globally without scope context,
   - no broad disabling of forward declarations (kept declaration-order benefit with cfg-test guard).
 
+### 10.11.94 Phase 20 Leaf 4.15.4.3.3.3.3.3.4 (`arrayvec` Stage D): import/runtime-path blocker family (`std::path` / `std::str` / `char_::encode_utf8` / `Utf8Error`)
+
+Problem:
+
+- After 10.11.93, first deterministic `arrayvec` Stage D failures began with unresolved import/runtime
+  paths:
+  - `using std::path::Path;`
+  - `using std::str;`, `using std::str::Utf8Error;`
+  - unresolved `char_::encode_utf8` import order
+  - downstream `str::from_utf8_unchecked{,_mut}` and `std::char::from_u32` path fallout.
+
+Scope analysis:
+
+- Implemented as focused generic transpiler/runtime-path hardening within the <1000 LOC target.
+- Kept fixes fixture-agnostic and avoided crate-specific generated-output edits.
+
+Implementation:
+
+- `transpiler/src/codegen.rs`:
+  - Added generic `use` import rewrites:
+    - `std::path::{Path}` → `rusty::path::Path` / `namespace path = rusty::path;`
+    - `std::str` family → `namespace str = rusty::str_runtime;`, `Utf8Error` and unchecked helpers
+      mapped to `rusty::str_runtime::*`
+    - `std::char::from_u32` import mapping → `rusty::char_runtime::from_u32`
+  - Added runtime fallback helpers:
+    - `rusty::str_runtime::Utf8Error` alias,
+    - `from_utf8_unchecked(...)`,
+    - `from_utf8_unchecked_mut(...)`,
+    - `rusty::char_runtime::from_u32(...)`.
+  - Kept declaration-order fix generic while avoiding alias-order regressions:
+    - module forward declarations now emit non-unit function signatures only in module scope and
+      only when return types are alias-safe (do not depend on `use ... as ...` aliases).
+    - This resolves cross-module `using char_::encode_utf8;` ordering without reintroducing the
+      earlier `Option2`/`Option3` alias-order failure mode.
+- `transpiler/src/types.rs`:
+  - Added type mapping: `std::str::Utf8Error` / `core::str::Utf8Error`
+    → `rusty::str_runtime::Utf8Error`.
+  - Added function path mappings:
+    - `std/core/str::from_utf8_unchecked{,_mut}`
+      → `rusty::str_runtime::from_utf8_unchecked{,_mut}`
+    - `std/core/char::from_u32` → `rusty::char_runtime::from_u32`.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154333333334_std_path_import_rewritten`
+  - `test_leaf4154333333334_std_str_imports_rewritten`
+  - `test_leaf4154333333334_std_char_from_u32_path_rewritten`
+  - `test_leaf4154333333334_from_utf8_unchecked_paths_rewritten`
+  - `test_leaf4154333333334_runtime_fallback_includes_str_and_char_helpers`
+  - `test_leaf4154333333334_module_non_unit_forward_decl_emitted_before_cross_module_using`
+- `transpiler/src/types.rs`:
+  - extended runtime mapping assertions for `Utf8Error`, unchecked UTF-8 helpers, and
+    `std::char::from_u32`.
+
+Verification:
+
+- Focused transpiler regressions:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333334 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_str_type -- --nocapture`
+- Full parity probes:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+  - `tests/transpile_tests/run_parity_matrix.sh`
+- Full repo suite:
+  - `cargo test`
+
+Re-probe result:
+
+- Previous deterministic `arrayvec` Stage D import/runtime-path blockers
+  (`std::path`, `std::str`, `char_::encode_utf8`, `Utf8Error`) are removed from first-failure output.
+- Full matrix ordering remains stable: `either`, `tap`, `cfg-if`, and `take_mut` pass before
+  first failure at `arrayvec`.
+- Next deterministic `arrayvec` Stage D blocker family now starts at downstream template/value-shape
+  issues (for example `CapacityError<CAP>` type/value mismatch and `MakeMaybeUninit::ARRAY`
+  template-arg recovery), which is deferred to the next leaf.
+
+Design rationale:
+
+- Kept fixes in shared import/path classification and shared runtime fallback shims so behavior is
+  reusable across crates.
+- Avoided wrong approaches from §11:
+  - no crate-specific output patching for `arrayvec`,
+  - no unconditional non-unit forward declarations (preserved alias-order safety from §11.92),
+  - no broad/global `std::*` alias rewrites outside the failing families.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
