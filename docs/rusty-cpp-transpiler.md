@@ -7339,6 +7339,69 @@ Design rationale:
   - no crate-specific rewrite path just for `arrayvec::drain`,
   - no fallback that erases variant-arm typing into catch-all lambdas/unreachable stubs.
 
+### 10.11.88 Phase 20 Leaf 4.15.4.3.3.3.2 (`arrayvec` Stage D): integer `saturating_*` method lowering + runtime helpers
+
+Problem:
+
+- After 10.11.87, the first deterministic `arrayvec` Stage D blocker family moved to integer
+  method-shape/runtime gaps, led by unresolved `saturating_add` on plain integer bindings
+  (`i.saturating_add(1)` / `j.saturating_add(1)` in `drain`-path output).
+- The fix needed to be generic and must not rewrite non-numeric custom methods that happen to use
+  the same method names.
+
+Scope analysis:
+
+- Completed as a focused generic change set under the 1000-LOC target for a single leaf.
+- No crate-specific scripts or generated C++ patching were introduced.
+
+Implementation:
+
+- Integer saturating-method lowering (`transpiler/src/codegen.rs`):
+  - added `is_known_integer_like_type` to classify inferred receiver types as integer-like
+    (primitive integer types plus numeric aliases),
+  - added `should_lower_saturating_method_call` to gate rewrites using receiver-type inference,
+  - lowered `.saturating_add(arg)` and `.saturating_sub(arg)` method calls to
+    `rusty::saturating_add(receiver, arg)` / `rusty::saturating_sub(receiver, arg)` for eligible
+    receivers.
+- Non-numeric rewrite guard (`transpiler/src/codegen.rs`):
+  - preserved member-call emission for known custom receiver types, preventing false rewrites for
+    user-defined `saturating_add` methods.
+- Runtime support (`include/rusty/array.hpp`):
+  - added generic `rusty::saturating_add` and `rusty::saturating_sub` helpers for integral types,
+    with correct signed/unsigned saturation semantics.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415433332_saturating_add_on_integer_lowers_to_runtime_helper`
+  - `test_leaf415433332_saturating_add_on_known_custom_type_is_not_rewritten`
+- `tests/rusty_array_test.cpp`:
+  - added `test_saturating_math_helpers_shape` for signed/unsigned helper behavior and saturation
+    edge cases.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf415433332 -- --nocapture`
+- `g++ -std=c++20 -Iinclude tests/rusty_array_test.cpp -o /tmp/rusty_array_test && /tmp/rusty_array_test`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- The deterministic integer `saturating_add` blocker family is removed from `arrayvec` Stage D.
+- The next deterministic blockers advance to downstream pointer/type-emission issues in
+  `drain_range` (for example duplicate `const` qualifier emission and invalid
+  `static_cast<auto*>` shape).
+
+Design rationale:
+
+- Centralized saturating arithmetic semantics in runtime helpers so lowering stays consistent and
+  reusable across expanded crates.
+- Avoided wrong approaches from §11:
+  - no crate-specific post-processing of generated parity artifacts,
+  - no blanket rewrite of all `saturating_*` calls regardless of receiver type,
+  - no ad-hoc per-call-site arithmetic expansion duplicated across emitted code.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

@@ -130,6 +130,55 @@ size_t len(const Container& container) {
     }
 }
 
+template<typename T, typename U>
+constexpr auto saturating_add(T lhs, U rhs) {
+    using R = std::common_type_t<T, U>;
+    static_assert(std::is_integral_v<R>, "rusty::saturating_add requires integral operands");
+    const R a = static_cast<R>(lhs);
+    const R b = static_cast<R>(rhs);
+    if constexpr (std::is_unsigned_v<R>) {
+        const R max = std::numeric_limits<R>::max();
+        if (a > max - b) {
+            return max;
+        }
+        return static_cast<R>(a + b);
+    } else {
+        const R max = std::numeric_limits<R>::max();
+        const R min = std::numeric_limits<R>::min();
+        if (b > 0 && a > max - b) {
+            return max;
+        }
+        if (b < 0 && a < min - b) {
+            return min;
+        }
+        return static_cast<R>(a + b);
+    }
+}
+
+template<typename T, typename U>
+constexpr auto saturating_sub(T lhs, U rhs) {
+    using R = std::common_type_t<T, U>;
+    static_assert(std::is_integral_v<R>, "rusty::saturating_sub requires integral operands");
+    const R a = static_cast<R>(lhs);
+    const R b = static_cast<R>(rhs);
+    if constexpr (std::is_unsigned_v<R>) {
+        if (a < b) {
+            return static_cast<R>(0);
+        }
+        return static_cast<R>(a - b);
+    } else {
+        const R max = std::numeric_limits<R>::max();
+        const R min = std::numeric_limits<R>::min();
+        if (b > 0 && a < min + b) {
+            return min;
+        }
+        if (b < 0 && a > max + b) {
+            return max;
+        }
+        return static_cast<R>(a - b);
+    }
+}
+
 /// Lazy filter_map view for transpiled iterator chains (`iter().filter_map(...)`).
 /// The mapping closure is only evaluated while iterating the view.
 template<typename Range, typename Func>

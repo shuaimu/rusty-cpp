@@ -87,6 +87,23 @@ void test_range_bounds_helpers_shape() {
     printf("PASS\n");
 }
 
+void test_saturating_math_helpers_shape() {
+    printf("test_saturating_math_helpers_shape: ");
+    {
+        assert(rusty::saturating_add<size_t>(4, 3) == 7);
+        assert(rusty::saturating_add<size_t>(std::numeric_limits<size_t>::max(), 1)
+               == std::numeric_limits<size_t>::max());
+        assert(rusty::saturating_sub<size_t>(3, 5) == 0);
+
+        assert(rusty::saturating_add<int32_t>(20, 22) == 42);
+        assert(rusty::saturating_add<int32_t>(std::numeric_limits<int32_t>::max(), 1)
+               == std::numeric_limits<int32_t>::max());
+        assert(rusty::saturating_sub<int32_t>(std::numeric_limits<int32_t>::min(), 1)
+               == std::numeric_limits<int32_t>::min());
+    }
+    printf("PASS\n");
+}
+
 void test_slice_helpers_basic_shapes() {
     printf("test_slice_helpers_basic_shapes: ");
     std::vector<uint8_t> data{10, 11, 12, 13, 14};
@@ -231,6 +248,7 @@ int main() {
     test_range_next_and_count();
     test_range_from_next_and_count_shape();
     test_range_bounds_helpers_shape();
+    test_saturating_math_helpers_shape();
     test_slice_helpers_basic_shapes();
     test_len_helper_shapes();
     test_span_equality_helper_shape();

@@ -7124,6 +7124,52 @@ impl CodeGen {
         }
     }
 
+    fn is_known_integer_like_type(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
+                let name = tp.path.segments[0].ident.to_string();
+                matches!(
+                    name.as_str(),
+                    "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "i128"
+                        | "isize"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "u128"
+                        | "usize"
+                ) || self
+                    .numeric_type_aliases
+                    .keys()
+                    .any(|candidate| candidate == &name || candidate.ends_with(&format!("::{}", name)))
+            }
+            _ => {
+                let mapped = self.map_type(ty);
+                let normalized = mapped
+                    .trim_start_matches("const ")
+                    .trim_end_matches('&')
+                    .trim_end_matches('*')
+                    .trim();
+                is_numeric_cpp_scalar_type(normalized)
+            }
+        }
+    }
+
+    fn should_lower_saturating_method_call(&self, receiver: &syn::Expr) -> bool {
+        let peeled = self.peel_paren_group_expr(receiver);
+        match self.infer_simple_expr_type(peeled) {
+            Some(ty) => self.is_known_integer_like_type(&ty),
+            // Pattern-bound temporaries in match lowering often have no explicit
+            // local binding type. Rust saturating arithmetic methods are numeric
+            // intrinsics, so unknown receiver type defaults to helper lowering.
+            None => true,
+        }
+    }
+
     fn should_collapse_reborrow_of_deref_operand(&self, operand: &syn::Expr) -> bool {
         if self.is_expr_reference_like(operand) {
             return true;
@@ -7230,6 +7276,18 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::ptr::{}({}, {})", method_name, receiver, args[0]);
+        }
+        if matches!(method_name.as_str(), "saturating_add" | "saturating_sub")
+            && args.len() == 1
+            && self.should_lower_saturating_method_call(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
         }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
@@ -16589,6 +16647,36 @@ mod tests {
         );
         assert!(out.contains("s.add(1)"));
         assert!(!out.contains("rusty::ptr::add(s, 1)"));
+    }
+
+    #[test]
+    fn test_leaf415433332_saturating_add_on_integer_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(x: usize) -> usize {
+                x.saturating_add(1)
+            }
+            "#,
+        );
+        assert!(out.contains("return rusty::saturating_add(x, 1);"));
+        assert!(!out.contains("x.saturating_add(1)"));
+    }
+
+    #[test]
+    fn test_leaf415433332_saturating_add_on_known_custom_type_is_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                fn saturating_add(&self, x: i32) -> i32 { x }
+            }
+            fn f(s: S) -> i32 {
+                s.saturating_add(1)
+            }
+            "#,
+        );
+        assert!(out.contains("return s.saturating_add(1);"));
+        assert!(!out.contains("rusty::saturating_add(s, 1)"));
     }
 
     #[test]
