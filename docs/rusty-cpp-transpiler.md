@@ -8124,6 +8124,43 @@ Avoided wrong approaches from §11:
 - §11.94: no output-level `return return` text rewrite; fixed structurally in AST/codegen path.
 - §11.95: no type-only emission for Rust unit-like value paths (for `fmt::Error` value position).
 
+### 10.98 Leaf 4.15.4.3.3.3.3.3.6.3 — Full Matrix Re-Run and Next Deterministic Frontier After 6.2
+
+Scope completed in this pass:
+
+- Executed the leaf exactly as defined: re-ran the full seven-crate matrix after 6.2 and
+  recorded the next deterministic blocker frontier.
+- The leaf remained procedural/documentation scope (no new transpiler/runtime implementation),
+  so it stayed well under the 1000-LOC guideline and required no further decomposition.
+
+Execution and findings:
+
+- Ran `tests/transpile_tests/run_parity_matrix.sh` (full matrix).
+- Stable result order:
+  - pass: `either`, `tap`, `cfg-if`, `take_mut`
+  - first fail: `arrayvec` (Stage D C++ build)
+  - matrix summary at failure: `total=5`, `pass=4`, `fail=1`
+- Deterministic first hard-error frontier in `arrayvec` Stage D now starts at:
+  - unresolved `alloc::boxed::box_new` / `into_vec`,
+  - unresolved `Add::add`,
+  - missing iterator adapter surface (`.map`) on `IntoIter<...>`.
+- Immediate dependent fallout continues behind that head:
+  - `span`/addressing shape mismatches (`&std::array{...}` to `std::span<const T>`),
+  - `slice_full`/`std::data(...)` shape constraints for `ArrayVec` containers,
+  - mixed `rusty::Option<T>` vs `std::optional<U>` comparison/operator fallout.
+
+Verification:
+
+- Matrix verification:
+  - `tests/transpile_tests/run_parity_matrix.sh`
+- Full workspace regression:
+  - `cargo test`
+
+Avoided wrong approaches from §11:
+
+- §11.91/§11.92: no declaration-order hacks or output surgery to mask unresolved-name frontiers.
+- §11.82: no eager crate-specific iterator-adapter emulation in this procedural leaf.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
