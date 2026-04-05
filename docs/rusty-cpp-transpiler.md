@@ -7818,6 +7818,142 @@ Design rationale:
   - no unconditional non-unit forward declarations (preserved alias-order safety from §11.92),
   - no broad/global `std::*` alias rewrites outside the failing families.
 
+### 10.93 Leaf 4.15.4.3.3.3.3.3.5.1 — `CapacityError` / Omitted-Template Core Fallout
+
+Scope completed in this pass:
+
+- Collapsed the first sub-leaf of 4.15.4.3.3.3.3.3.5, focusing on the deterministic
+  `CapacityError<CAP>` / `CapacityError<>` / `MakeMaybeUninit::ARRAY` core fallout and declaration-order
+  coupling only.
+- Deferred the next downstream char/runtime pointer-range test-shape family to 4.15.4.3.3.3.3.3.5.2.
+
+Implementation details:
+
+- `transpiler/src/codegen.rs`:
+  - Added declared-generic metadata (kind + default tracking) for local types.
+  - Tightened associated-path omitted-template recovery so current-struct fallback only applies on
+    kind-compatible generic positions (prevents const/type mismatches like `CapacityError<CAP>`).
+  - Added default-generic recovery for omitted local type aliases (`CapacityError<T=()>`
+    now lowers to `CapacityError<std::tuple<>>` instead of `CapacityError<>`).
+  - Added expected-type propagation for `Ok(...)`/`Err(...)` payload emission.
+  - Added omitted associated static-call recovery fallback:
+    `Owner::new_(arg)` → `Owner<std::remove_cvref_t<decltype(arg)>>::new_(arg)` when owner type
+    args are omitted and recoverable.
+  - Added `map_err(CapacityError::simplify)` callable fallback lowering to a generic lambda
+    (`_err.simplify()`) to avoid unresolved omitted-template member path emission.
+  - Added inline-module emission ordering by local `use` dependencies (stable topo order) to reduce
+    declaration-order-sensitive incomplete-type fallout.
+  - Added expected-array-based associated const path recovery for omitted-owner-template shapes
+    used by `MakeMaybeUninit::ARRAY`.
+
+Regression tests:
+
+- Added `leaf415433333335` coverage in `transpiler/src/codegen.rs`:
+  - default generic recovery for omitted `CapacityError` alias,
+  - `map_err(CapacityError::simplify)` lambda lowering,
+  - omitted associated static-call `decltype` specialization,
+  - dependency-ordered inline-module emission.
+
+Verification:
+
+- Focused regressions:
+  - `cargo test -p rusty-cpp-transpiler leaf415433333335 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler test_leaf415432_local_assoc_const_template_args_recovered_with_name_mismatch -- --nocapture`
+- Parity probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous deterministic Stage D first-failure family (`CapacityError<CAP>`, `CapacityError<>`,
+  and `MakeMaybeUninit::ARRAY` emission) is removed.
+- New first deterministic Stage D failure shifts to downstream char/runtime pointer-range/test-shape
+  gaps (`ptr.add(...).write`, mixed-type `range_inclusive`, and related iterator/test-shape fallout),
+  tracked as 4.15.4.3.3.3.3.3.5.2.
+
+Avoided wrong approaches from §11:
+
+- §11.29: no blanket constructor-template forcing across all contexts.
+- §11.84: no const-generic dropping or type/value parameter conflation.
+- §11.91/§11.92: no ad-hoc crate-specific reordering or unconditional forward-decl broadening.
+
+### 10.94 Leaf 4.15.4.3.3.3.3.3.5.2 — Char/Runtime Pointer-Range Test-Shape Fallout
+
+Scope completed in this pass:
+
+- Collapsed the immediate downstream deterministic post-4.15.4.3.3.3.3.3.5.1 family
+  (char/runtime pointer/range/test-shape fallout) with generic transpiler/runtime fixes only.
+- Kept this leaf as one cohesive shared-layer slice; total churn landed near the 1000-LOC
+  guideline (including tests/docs) but did not require another task split.
+
+Implementation details:
+
+- `transpiler/src/codegen.rs`:
+  - Lowered pointer-like method calls to runtime helpers:
+    - `x.as_ptr()` → `rusty::as_ptr(x)`
+    - `x.as_mut_ptr()` → `rusty::as_mut_ptr(x)`
+    - `ptr.write(v)` (raw-pointer-like receiver) → `rusty::ptr::write(ptr, v)`
+  - Lowered iterator/string/char method paths to shared runtime helpers:
+    - `.zip(...)` → `rusty::zip(...)`
+    - `.chars()` → `rusty::str_runtime::chars(...)`
+    - `.is_char_boundary(...)` → `rusty::str_runtime::is_char_boundary(...)`
+    - `char.len_utf8()` → `rusty::char_runtime::len_utf8(...)`
+  - Normalized borrowed-shape emissions:
+    - dropped borrow shells for non-raw-pointer `for ... in &x` iterables,
+    - flattened borrowed container args for `from_utf8`-family calls.
+  - Completed expression-shape hardening for this family:
+    - explicit `Expr::Array` lowering to valid `std::array{...}`,
+    - `format_args!` lowered to a concrete expression (`std::string{}`),
+    - unary `!` emission now propagates boolean expectation to avoid invalid lambda/context
+      return-shape cascades.
+  - Added fallback helper wiring markers for new runtime helper paths.
+- Runtime fallback helpers (generated text in codegen):
+  - Added `rusty::str_runtime::{decode_utf8, Chars, chars, is_char_boundary}`.
+  - Added `rusty::char_runtime::len_utf8`.
+- `include/rusty/array.hpp`:
+  - Added generic `rusty::as_ptr(...)` / `rusty::as_mut_ptr(...)` helpers.
+  - Added generic `rusty::zip(...)` helper.
+  - Added mixed-type `range(...)` and `range_inclusive(...)` deduction guides.
+
+Regression tests:
+
+- Added `leaf4154333333352` coverage in `transpiler/src/codegen.rs` for:
+  - pointer helper lowering (`as_ptr`/`as_mut_ptr`/`write`),
+  - borrowed iterable flattening in `for` loops,
+  - `zip` lowering,
+  - string/char runtime method-path lowering,
+  - array literal expression lowering,
+  - `format_args!` expression shape,
+  - borrowed `from_utf8` argument flattening.
+- Updated related existing expectation where lowering now correctly routes through
+  `rusty::as_mut_ptr(...)` before pointer arithmetic.
+
+Verification:
+
+- Focused regressions:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333352 -- --nocapture`
+- Full transpiler suite:
+  - `cargo test -p rusty-cpp-transpiler`
+- Full repository suite:
+  - `cargo test`
+- Parity probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous deterministic char/runtime pointer/range/test-shape first-failure family is removed
+  from the `arrayvec` Stage D failure head.
+- New deterministic Stage D frontier begins at downstream families:
+  - `std::any::Any` import emission (`std::any` namespace not rewritten),
+  - missing `rusty::fmt::Formatter::write_fmt` surface,
+  - omitted-template associated-value recovery for `MaybeUninit`,
+  - then dependent unresolved-name/test-shape fallout.
+
+Avoided wrong approaches from §11:
+
+- §11.80: no direct Rust-runtime-path emission as native C++ `std::*` equivalents.
+- §11.82: no eager semantic rewrites for iterator-adapter method families.
+- §11.88: no unconditional `.add/.offset/.write` method-name rewrites without receiver-shape checks.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

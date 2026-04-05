@@ -12,6 +12,7 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <variant>
 #include <rusty/vec.hpp>
 
@@ -113,6 +114,43 @@ auto collect_range(Range&& range_like) {
     Vec<Elem> out = Vec<Elem>::new_();
     for (auto&& item : range_like) {
         out.push(std::forward<decltype(item)>(item));
+    }
+    return out;
+}
+
+template<typename T>
+decltype(auto) as_ptr(const T& value) {
+    if constexpr (requires { value.as_ptr(); }) {
+        return value.as_ptr();
+    } else if constexpr (requires { value.data(); }) {
+        return value.data();
+    } else {
+        return &value;
+    }
+}
+
+template<typename T>
+decltype(auto) as_mut_ptr(T& value) {
+    if constexpr (requires { value.as_mut_ptr(); }) {
+        return value.as_mut_ptr();
+    } else if constexpr (requires { value.data(); }) {
+        return value.data();
+    } else {
+        return &value;
+    }
+}
+
+template<typename Left, typename Right>
+auto zip(Left&& left, Right&& right) {
+    using LeftElem = std::decay_t<decltype(*std::begin(left))>;
+    using RightElem = std::decay_t<decltype(*std::begin(right))>;
+    std::vector<std::tuple<LeftElem, RightElem>> out;
+    auto left_it = std::begin(left);
+    auto left_end = std::end(left);
+    auto right_it = std::begin(right);
+    auto right_end = std::end(right);
+    for (; left_it != left_end && right_it != right_end; ++left_it, ++right_it) {
+        out.emplace_back(*left_it, *right_it);
     }
     return out;
 }
@@ -362,6 +400,9 @@ private:
     T start_, end_;
 };
 
+template<typename A, typename B>
+range(A, B) -> range<std::common_type_t<A, B>>;
+
 /// Inclusive range [start, end] — equivalent to Rust's `start..=end`.
 template<typename T>
 class range_inclusive {
@@ -386,6 +427,9 @@ public:
 private:
     T start_, end_;
 };
+
+template<typename A, typename B>
+range_inclusive(A, B) -> range_inclusive<std::common_type_t<A, B>>;
 
 /// Open range from start — equivalent to Rust's `start..`.
 template<typename T>
