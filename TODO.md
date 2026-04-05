@@ -552,10 +552,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Implemented generic expression/reference lowering fix (no crate-specific scripts): typed `&[ ... ]` array literals now emit stable static `std::array` backing with typed `std::span` return instead of address-of-unreachable fallback
           - [x] *done* Added focused codegen regressions covering typed immutable/mutable slice-array references, including `&[Ok(...), Err(...)]`, and verified no `&rusty::intrinsics::unreachable()` remains in emitted output for this family
           - [x] *done* Re-ran `tap` parity and captured next deterministic blocker after this family was removed: extension-method call shape (`10.tap(...)`) still fails in Stage D (`operator\"\"tap`)
-        - [ ] Leaf 4.9: `tap` Stage D blocker family B — extension-method call shape (`10.tap(...)`) lowering
-          - [ ] Add generic method-call lowering for primitive receivers that avoids C++ numeric-literal-suffix parse failures
-          - [ ] Add fixture-agnostic regression(s) for numeric literal receiver method calls
-          - [ ] Re-probe `tap` and record next deterministic blocker
+        - [x] *done* Leaf 4.9: `tap` Stage D blocker family B — extension-method call shape (`10.tap(...)`) lowering
+          - [x] *done* Added generic method-call lowering for primitive literal receivers: emit parenthesized receiver forms (e.g., `(10).tap(...)`) to avoid C++ numeric-literal-suffix parse failures (`operator\"\"tap`)
+          - [x] *done* Added fixture-agnostic codegen regressions for numeric literal receiver method calls (`10.method(...)` and negative-literal form) to lock parenthesized emission
+          - [x] *done* Re-probed `tap` parity and recorded next deterministic blocker: semantic extension-method dispatch gap (`request for member 'tap' in '10', which is of non-class type 'int'`) after parse-shape fix
         - [ ] Leaf 4.10: `cfg-if` Stage D path lowering family (`std::option::Option` invalid C++ path)
         - [ ] Leaf 4.11: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
         - [ ] Leaf 4.12: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)

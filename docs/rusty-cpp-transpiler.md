@@ -6186,6 +6186,62 @@ Design rationale:
   - no placeholder-address fallbacks such as `&unreachable()` / `nullptr` for typed slices (§11.75),
   - no crate-specific source rewrite for `tap` tests.
 
+### 10.11.71 Phase 20 Leaf 4.9 (`tap`): lower numeric-literal method receivers to C++-parsable call shape
+
+Problem:
+
+- Re-probing `tap` parity after Leaf 4.8 showed the first Stage D blocker moved to method-call
+  syntax shape:
+  - generated output used `10.tap(...)`,
+  - C++ parsed this as a user-defined numeric literal suffix (`operator""tap`) and failed before
+    method-dispatch semantics were even checked.
+
+Scope analysis:
+
+- Implemented as a focused generic codegen update under 1000 LOC:
+  - method-call receiver emission in `transpiler/src/codegen.rs`,
+  - fixture-agnostic codegen unit regressions.
+
+Implementation:
+
+- Added helper `method_receiver_needs_parentheses(...)` in `transpiler/src/codegen.rs`.
+- The helper detects literal-like receivers that need parenthesized dot-call shape in C++:
+  - direct literals (`10`, `1.0`, string/char literals),
+  - unary-negative literals (`-10`, `-1.0`) after paren/group peel.
+- Updated non-`self` method-call emission to use:
+  - `(<receiver>).method(args...)` only when helper says parentheses are required,
+  - existing emission unchanged for other receiver shapes.
+
+Regression tests:
+
+- Added codegen unit tests:
+  - `test_leaf49_numeric_literal_method_receiver_is_parenthesized`
+  - `test_leaf49_negative_numeric_literal_method_receiver_is_parenthesized`
+- Assertions verify numeric literal receivers are emitted with parentheses and never as
+  bare `10.method(...)` / `-10.method(...)`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf49_ -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate tap --work-root <tmp>`
+
+Re-probe result:
+
+- Previous deterministic parse-shape blocker is removed:
+  - `operator""tap` error no longer appears.
+- Next deterministic blocker is now semantic extension-method dispatch:
+  - `request for member 'tap' in '10', which is of non-class type 'int'`.
+
+Design rationale:
+
+- This leaf intentionally fixes syntax-shape correctness first so subsequent parity work can see
+  true semantic blockers instead of lexer/parser artifacts.
+- Fix is receiver-shape-based and generic; no crate-specific `tap` rewrites were added.
+- Avoided wrong approaches from §11:
+  - no global method-call rewrite to free-function form without trait-shape evidence (§11.76),
+  - no crate-specific `tap` source/output patching.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7109,3 +7165,17 @@ array lowering is missing.
 - It discards type/element information needed for deterministic parity signal in later stages.
 - A typed static-array-backed `std::span` emission is a small, generic fix that preserves compile
   progress without crate-specific special casing.
+
+### 11.76 Rewriting All Method Calls Into Free-Function Form to “Fix” Literal Receivers
+
+**Rejected approach:** Convert every method call `x.m(args...)` to `m(x, args...)` (or
+crate-specific rewrites like `tap(x, ...)`) to avoid literal-receiver parse issues.
+
+**Why it was rejected:**
+
+- It changes dispatch semantics globally and can break valid inherent/trait-method lowering paths
+  that currently rely on member-call form.
+- It conflates two distinct problems: C++ parse shape for literal receivers vs. semantic mapping
+  for extension traits.
+- A narrow receiver-shape fix (parenthesize literal receivers only) removes parser blockers without
+  introducing broad, non-local behavior changes.

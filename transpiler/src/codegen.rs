@@ -5271,6 +5271,16 @@ impl CodeGen {
         }
     }
 
+    fn method_receiver_needs_parentheses(&self, receiver: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(receiver) {
+            syn::Expr::Lit(_) => true,
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
+                matches!(self.peel_paren_group_expr(&unary.expr), syn::Expr::Lit(_))
+            }
+            _ => false,
+        }
+    }
+
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
     fn emit_expr_to_string_with_expected(
@@ -6132,7 +6142,12 @@ impl CodeGen {
                 if is_self {
                     format!("{}({})", method, args.join(", "))
                 } else {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
+                    let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                    let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                        format!("({})", raw_receiver)
+                    } else {
+                        raw_receiver
+                    };
                     format!("{}.{}({})", receiver, method, args.join(", "))
                 }
             }
@@ -9438,6 +9453,20 @@ mod tests {
     fn test_method_call() {
         let out = transpile_str("fn f() { v.push(1); }");
         assert!(out.contains("v.push(1);"));
+    }
+
+    #[test]
+    fn test_leaf49_numeric_literal_method_receiver_is_parenthesized() {
+        let out = transpile_str("fn f() { 10.tap(|v| v); }");
+        assert!(out.contains("(10).tap([&](auto v) { return v; });"));
+        assert!(!out.contains(" 10.tap("));
+    }
+
+    #[test]
+    fn test_leaf49_negative_numeric_literal_method_receiver_is_parenthesized() {
+        let out = transpile_str("fn f() { (-10).tap(|v| v); }");
+        assert!(out.contains("((-10)).tap([&](auto v) { return v; });"));
+        assert!(!out.contains("-10.tap("));
     }
 
     #[test]
