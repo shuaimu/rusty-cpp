@@ -30,6 +30,7 @@
 #define RUSTY_PTR_HPP
 
 #include <cstddef>  // for std::ptrdiff_t
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -126,6 +127,38 @@ inline T read(T* src) {
 template<typename T, typename U>
 inline void write(T* dst, U&& value) {
     *dst = std::forward<U>(value);
+}
+
+template<typename T, typename Count>
+inline void copy(const T* src, T* dst, Count count) {
+    auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
+    std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+}
+
+template<typename T, typename Count>
+inline void copy_nonoverlapping(const T* src, T* dst, Count count) {
+    auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
+    std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+}
+
+template<typename T, typename Count>
+inline const T* add(const T* ptr, Count count) {
+    return ptr + static_cast<std::size_t>(count);
+}
+
+template<typename T, typename Count>
+inline T* add(T* ptr, Count count) {
+    return ptr + static_cast<std::size_t>(count);
+}
+
+template<typename T, typename Count>
+inline const T* offset(const T* ptr, Count count) {
+    return ptr + static_cast<std::ptrdiff_t>(count);
+}
+
+template<typename T, typename Count>
+inline T* offset(T* ptr, Count count) {
+    return ptr + static_cast<std::ptrdiff_t>(count);
 }
 
 template<typename T>

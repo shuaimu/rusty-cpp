@@ -122,6 +122,10 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
+        "std::ptr::copy" | "ptr::copy" => Some("rusty::ptr::copy"),
+        "std::ptr::copy_nonoverlapping" | "ptr::copy_nonoverlapping" => {
+            Some("rusty::ptr::copy_nonoverlapping")
+        }
         "std::ptr::drop_in_place" | "ptr::drop_in_place" => Some("rusty::ptr::drop_in_place"),
         "std::slice::from_raw_parts" | "core::slice::from_raw_parts" | "slice::from_raw_parts" => {
             Some("rusty::from_raw_parts")
@@ -139,6 +143,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
             Some("rusty::panic::AssertUnwindSafe")
         }
         "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
+        "std::rt::panic_fmt" | "rt::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "core::cmp::min" | "std::cmp::min" => Some("core::cmp::min"),
@@ -412,6 +417,11 @@ mod tests {
             Some("rusty::ptr::read")
         );
         assert_eq!(map_function_path("ptr::write"), Some("rusty::ptr::write"));
+        assert_eq!(map_function_path("ptr::copy"), Some("rusty::ptr::copy"));
+        assert_eq!(
+            map_function_path("std::ptr::copy_nonoverlapping"),
+            Some("rusty::ptr::copy_nonoverlapping")
+        );
         assert_eq!(
             map_function_path("std::slice::from_raw_parts"),
             Some("rusty::from_raw_parts")
@@ -444,6 +454,10 @@ mod tests {
         assert_eq!(
             map_function_path("std::rt::begin_panic"),
             Some("rusty::panic::begin_panic")
+        );
+        assert_eq!(
+            map_function_path("rt::panic_fmt"),
+            Some("rusty::panicking::panic_fmt")
         );
         assert_eq!(map_function_path("std::process::abort"), Some("std::abort"));
         assert_eq!(

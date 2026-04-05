@@ -7189,6 +7189,82 @@ Design rationale:
   - no global rewrite of all associated trait calls to receiver-member calls,
   - no blanket re-enable of Proxy facade generation in module/expanded modes.
 
+### 10.11.86 Phase 20 Leaf 4.15.4.3.3.2 (`arrayvec` Stage D): runtime/path lowering for `std::rt::panic_fmt`, `ptr::copy{,_nonoverlapping}`, and raw-pointer `.add/.offset` method shape
+
+Problem:
+
+- After 10.11.85, the next deterministic `arrayvec` Stage D blocker family surfaced at:
+  - unresolved `std::rt::panic_fmt`,
+  - unresolved `ptr::copy` / `ptr::copy_nonoverlapping`,
+  - invalid member-call shape on raw pointers (`p.add(...)`, `p.offset(...)`).
+- These failures were deterministic and appeared before deeper `arrayvec`-specific lowering gaps.
+
+Scope analysis:
+
+- Completed as a focused generic change set under the 1000-LOC target for a single leaf.
+- No crate-specific scripts or generated-file patching were introduced.
+
+Implementation:
+
+- Runtime/path mapping completion (`transpiler/src/types.rs`):
+  - mapped `std::rt::panic_fmt` and `rt::panic_fmt` to `rusty::panicking::panic_fmt`,
+  - mapped `std::ptr::copy` / `ptr::copy` to `rusty::ptr::copy`,
+  - mapped `std::ptr::copy_nonoverlapping` / `ptr::copy_nonoverlapping` to
+    `rusty::ptr::copy_nonoverlapping`.
+- Import rewrite completion (`transpiler/src/codegen.rs`):
+  - extended `use std::ptr::{...}` lowering so `copy` and `copy_nonoverlapping` import to
+    `rusty::ptr::{copy, copy_nonoverlapping}`.
+- Raw-pointer method-call lowering (`transpiler/src/codegen.rs`):
+  - added pointer-like receiver detection (`is_expr_raw_pointer_like`),
+  - lowered pointer `.add(...)` / `.offset(...)` method calls to
+    `rusty::ptr::add(receiver, arg)` / `rusty::ptr::offset(receiver, arg)`,
+  - guarded rewrite so non-pointer `.add(...)` calls remain member calls.
+- Runtime support (`include/rusty/ptr.hpp`):
+  - added `rusty::ptr::copy`,
+  - added `rusty::ptr::copy_nonoverlapping`,
+  - added `rusty::ptr::add`,
+  - added `rusty::ptr::offset`.
+- Pointer-arg call lowering hardening (`transpiler/src/codegen.rs`):
+  - extended raw-pointer argument rewrite to handle first-two-pointer arguments for
+    `rusty::ptr::copy` and `rusty::ptr::copy_nonoverlapping`.
+
+Regression tests:
+
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` with
+    `ptr::copy`, `std::ptr::copy_nonoverlapping`, and `rt::panic_fmt`.
+- `transpiler/src/codegen.rs`:
+  - updated `test_leaf42_runtime_function_paths_lowered` with direct `ptr::copy*` and
+    `std::rt::panic_fmt` path coverage,
+  - added `test_leaf4154332_std_ptr_copy_imports_remapped`,
+  - added `test_leaf4154332_raw_pointer_add_offset_method_calls_lowered_to_runtime_helpers`,
+  - added `test_leaf4154332_as_mut_ptr_chain_add_lowers_to_runtime_helper`,
+  - added `test_leaf4154332_non_pointer_add_method_call_not_rewritten`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_paths_lowered -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf4154332 -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- The deterministic `std::rt::panic_fmt` / `ptr::copy{,_nonoverlapping}` / raw-pointer
+  `.add/.offset` blocker family is removed.
+- The next deterministic `arrayvec` Stage D blockers now move to downstream families
+  (for example local `BackshiftOnDrop` generic misuse, unqualified `DELETED`, and
+  `Bound_*` match/type-order fallout).
+
+Design rationale:
+
+- Kept fixes generic at path/import/runtime/expression layers to maximize reuse across expanded
+  crates.
+- Avoided wrong approaches from §11:
+  - no crate-specific generated C++ rewrites,
+  - no unconditional rewrite of all `.add/.offset` method calls regardless of receiver type,
+  - no fallback to invalid native `std::rt`/`std::ptr` paths.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -8283,3 +8359,16 @@ to non-equivalent namespaces that do not provide both `Ordering` and `min/max` s
   routing through the intended trait-default helper chain (`push -> try_push -> push_unchecked`).
 - The generic, correct fix is to preserve associated-call form and emit a module-safe local trait
   default-method helper surface that those calls can resolve against.
+
+### 11.88 Unconditionally Rewriting Every `.add/.offset` Method Call to Pointer Helpers
+
+**Rejected approach:** Rewrite all method calls named `add` or `offset` to
+`rusty::ptr::{add,offset}(...)` without checking receiver pointer shape.
+
+**Why it was rejected:**
+
+- It changes semantics for legitimate non-pointer APIs that define inherent/trait `add` methods.
+- It would introduce broad behavior regressions unrelated to raw-pointer lowering and make future
+  failures harder to triage.
+- The correct generic fix is a pointer-aware rewrite: only lower `.add/.offset` when the receiver
+  is inferred/recognized as raw-pointer-like, preserving non-pointer member-call behavior.

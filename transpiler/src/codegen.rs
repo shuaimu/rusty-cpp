@@ -6941,6 +6941,52 @@ impl CodeGen {
         }
     }
 
+    fn is_expr_raw_pointer_like(&self, expr: &syn::Expr) -> bool {
+        let peeled = self.peel_paren_group_expr(expr);
+        if self
+            .infer_simple_expr_type(peeled)
+            .is_some_and(|ty| matches!(ty, syn::Type::Ptr(_)))
+        {
+            return true;
+        }
+
+        match peeled {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                self.lookup_local_binding_type(&name)
+                    .is_some_and(|ty| matches!(ty, syn::Type::Ptr(_)))
+            }
+            syn::Expr::Cast(cast) => matches!(cast.ty.as_ref(), syn::Type::Ptr(_)),
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                if matches!(method.as_str(), "as_ptr" | "as_mut_ptr") {
+                    return true;
+                }
+                if matches!(method.as_str(), "add" | "offset") {
+                    return self.is_expr_raw_pointer_like(&mc.receiver);
+                }
+                false
+            }
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path) = call.func.as_ref() else {
+                    return false;
+                };
+                let joined = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                matches!(
+                    joined.as_str(),
+                    "rusty::ptr::add" | "rusty::ptr::offset" | "ptr::add" | "ptr::offset"
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn should_collapse_reborrow_of_deref_operand(&self, operand: &syn::Expr) -> bool {
         if self.is_expr_reference_like(operand) {
             return true;
@@ -7036,6 +7082,18 @@ impl CodeGen {
                 self.emit_call_arg_with_pass_style(arg, style, false)
             })
             .collect();
+        if matches!(method_name.as_str(), "add" | "offset")
+            && args.len() == 1
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::ptr::{}({}, {})", method_name, receiver, args[0]);
+        }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
         }
@@ -7667,15 +7725,25 @@ impl CodeGen {
         }
 
         let func = self.emit_expr_to_string(&call.func);
-        if matches!(func.as_str(), "rusty::ptr::read" | "rusty::ptr::write")
-            && !call.args.is_empty()
+        if matches!(
+            func.as_str(),
+            "rusty::ptr::read"
+                | "rusty::ptr::write"
+                | "rusty::ptr::copy"
+                | "rusty::ptr::copy_nonoverlapping"
+        ) && !call.args.is_empty()
         {
             let args: Vec<String> = call
                 .args
                 .iter()
                 .enumerate()
                 .map(|(idx, arg)| {
-                    if idx == 0 {
+                    let is_ptr_arg = match func.as_str() {
+                        "rusty::ptr::read" | "rusty::ptr::write" => idx == 0,
+                        "rusty::ptr::copy" | "rusty::ptr::copy_nonoverlapping" => idx <= 1,
+                        _ => false,
+                    };
+                    if is_ptr_arg {
                         if let Some(ptr_arg) = self.emit_raw_pointer_call_arg(arg) {
                             return ptr_arg;
                         }
@@ -11448,7 +11516,7 @@ fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
 
     let item = path.strip_prefix("std::ptr::")?;
     let action = match item {
-        "read" | "write" | "drop_in_place" => {
+        "read" | "write" | "copy" | "copy_nonoverlapping" | "drop_in_place" => {
             UseImportAction::Using(format!("rusty::ptr::{}", item))
         }
         _ => UseImportAction::RustOnly,
@@ -14323,7 +14391,7 @@ mod tests {
     fn test_leaf42_runtime_function_paths_lowered() {
         let out = transpile_str(
             r#"
-            fn f(x: i32, y: i32) {
+            fn f(x: i32, y: i32, src: *const i32, dst: *mut i32) {
                 core::intrinsics::discriminant_value(x);
                 core::intrinsics::unreachable();
                 core::panicking::panic_fmt();
@@ -14336,6 +14404,9 @@ mod tests {
                 Pin::get_unchecked_mut(y);
                 std::cmp::min(x, y);
                 core::cmp::max(x, y);
+                ptr::copy(src, dst, 1);
+                std::ptr::copy_nonoverlapping(src, dst, 1);
+                std::rt::panic_fmt();
                 std::io::_print();
                 let _ = core::cmp::Ordering::Equal;
             }
@@ -14353,6 +14424,8 @@ mod tests {
         assert!(out.contains("rusty::pin::get_unchecked_mut"));
         assert!(out.contains("core::cmp::min"));
         assert!(out.contains("core::cmp::max"));
+        assert!(out.contains("rusty::ptr::copy"));
+        assert!(out.contains("rusty::ptr::copy_nonoverlapping"));
         assert!(out.contains("rusty::io::_print"));
         assert!(out.contains("rusty::cmp::Ordering::Equal"));
         assert!(out.contains("std::nullopt"));
@@ -14361,6 +14434,8 @@ mod tests {
         assert!(!out.contains("core::option::Option::None"));
         assert!(!out.contains("core::hash::Hash::hash"));
         assert!(!out.contains("std::cmp::min"));
+        assert!(!out.contains("std::ptr::copy_nonoverlapping"));
+        assert!(!out.contains("std::rt::panic_fmt"));
         assert!(!out.contains("std::io::_print"));
     }
 
@@ -16254,6 +16329,46 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154332_raw_pointer_add_offset_method_calls_lowered_to_runtime_helpers() {
+        let out =
+            transpile_str("fn f(p: *mut i32, q: *const i32, n: usize, d: isize) { let _a = p.add(n); let _b = q.offset(d); }");
+        assert!(out.contains("rusty::ptr::add(p,"));
+        assert!(out.contains("rusty::ptr::offset(q,"));
+        assert!(!out.contains("p.add(n)"));
+        assert!(!out.contains("q.offset(d)"));
+    }
+
+    #[test]
+    fn test_leaf4154332_as_mut_ptr_chain_add_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            struct Buf {}
+            impl Buf {
+                fn as_mut_ptr(&mut self) -> *mut i32 { loop {} }
+            }
+            fn f(b: &mut Buf, n: usize) { let _ = b.as_mut_ptr().add(n); }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::add(b.as_mut_ptr(),"));
+        assert!(!out.contains("b.as_mut_ptr().add(n)"));
+    }
+
+    #[test]
+    fn test_leaf4154332_non_pointer_add_method_call_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                fn add(&self, x: i32) -> i32 { x }
+            }
+            fn f(s: S) { s.add(1); }
+            "#,
+        );
+        assert!(out.contains("s.add(1)"));
+        assert!(!out.contains("rusty::ptr::add(s, 1)"));
+    }
+
+    #[test]
     fn test_leaf48_typed_slice_array_reference_materializes_static_span_backing() {
         let out = transpile_str(
             r#"
@@ -16470,6 +16585,15 @@ mod tests {
         assert!(out.contains("using rusty::ptr::write;"));
         assert!(!out.contains("using std::ptr::read;"));
         assert!(!out.contains("using std::ptr::write;"));
+    }
+
+    #[test]
+    fn test_leaf4154332_std_ptr_copy_imports_remapped() {
+        let out = transpile_str("use std::ptr::{copy, copy_nonoverlapping};");
+        assert!(out.contains("using rusty::ptr::copy;"));
+        assert!(out.contains("using rusty::ptr::copy_nonoverlapping;"));
+        assert!(!out.contains("using std::ptr::copy;"));
+        assert!(!out.contains("using std::ptr::copy_nonoverlapping;"));
     }
 
     #[test]
