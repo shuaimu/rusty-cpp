@@ -11,6 +11,12 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 # Run a specific test
 ./run_tests.sh either
 ./run_tests.sh semver
+
+# Run parity matrix (baseline + expand + transpile + build + run)
+./run_parity_matrix.sh
+
+# Run parity matrix for one crate
+./run_parity_matrix.sh --crate either
 ```
 
 ## Test Crates
@@ -46,3 +52,4 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 - Crate sources are downloaded via `git clone --depth 1` on first run
 - Downloaded sources are gitignored (only the test script is tracked)
 - Transpiled output goes to `<crate>/cpp_out/` (also gitignored)
+- Parity matrix outputs go to `.rusty-parity-matrix/<crate>/` by default

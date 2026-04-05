@@ -548,6 +548,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Re-probed `bitflags` after baseline fix: Stage A/B/C now proceed; fixed next deterministic build blocker by normalizing multiline single-attribute doc comments so every emitted line is prefixed as `///` (no raw text leakage into C++)
           - [x] *done* Added focused codegen regression for embedded-newline single `#[doc = \"...\"]` attributes; re-probed `bitflags`: previous Stage-A and doc-text blockers are removed, next deterministic blocker is Stage D unresolved re-export/type-order family (`using ::Flag/::Flags` and dependent `IterNames` type declarations)
       - [ ] Leaf 5: Verification matrix (required)
-        - [ ] Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
+        - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
+          - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
+          - [x] *done* Added matrix harness options for practical integration execution (`--crate <name>`, `--work-root <dir>`, `--keep-work-dirs`, `--dry-run`) without introducing crate-specific parity scripts
+          - [x] *done* Added integration tests in `transpiler/tests/parity_matrix_harness.rs` validating dry-run matrix coverage for all seven crates, unknown-crate filter failure handling, and live single-crate control-path execution (`either`) with expected parity artifacts (`baseline.txt`, `build.log`, `run.log`)
         - [ ] Enforce failure diagnostics: matrix output must identify first failing crate and print paths to `baseline.txt`, `build.log`, and `run.log`
         - [ ] Add CI target/job to run the matrix and archive per-crate artifacts on failure

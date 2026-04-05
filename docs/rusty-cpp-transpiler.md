@@ -5999,6 +5999,45 @@ Design rationale:
   - no hard stop on workspace-root non-member dev-dependency errors (§11.70),
   - no blanket stripping of multiline docs in expanded output (§11.71).
 
+### 10.11.67 Phase 20 Leaf 5.1: parity matrix integration harness for seven-crate `--stop-after run` execution
+
+Problem:
+
+- Phase 20 needed a single integration entrypoint that runs the parity workflow end-to-end (`--stop-after run`) across the full target set:
+  - `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`.
+- Existing integration coverage had single-crate control harnesses and targeted verification tests, but no matrix runner wiring for the full crate set.
+
+Scope analysis:
+
+- Implemented with small, focused additions (<1000 LOC):
+  - one shell harness in `tests/transpile_tests/`,
+  - one dedicated integration test file in `transpiler/tests/`,
+  - README usage update.
+
+Implementation:
+
+- Added `tests/transpile_tests/run_parity_matrix.sh`:
+  - defines the seven-crate matrix with pinned refs aligned to existing integration test crate versions,
+  - ensures crate checkouts are present (clone-on-miss),
+  - runs:
+    - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <crate>/Cargo.toml --stop-after run --work-dir <work-root>/<crate>`,
+  - supports `--crate`, `--work-root`, `--keep-work-dirs`, and `--dry-run`.
+- Added integration coverage in `transpiler/tests/parity_matrix_harness.rs`:
+  - dry-run test validates all seven matrix crates are wired with `parity-test --stop-after run`,
+  - invalid crate filter test validates robust CLI failure behavior,
+  - single-crate live execution (`--crate either`) validates end-to-end harness invocation and parity artifacts.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+
+Design rationale:
+
+- Keep matrix orchestration outside crate-specific scripts while still using the generic `parity-test` subcommand as the single execution engine.
+- Validate matrix wiring in fast integration tests, and keep full multi-crate execution available through a single harness command.
+- Avoided wrong approach from §11:
+  - no mandatory network-heavy all-crate parity execution inside default non-ignored cargo test runs (§11.72).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6870,3 +6909,16 @@ return that failure immediately and skip isolated-manifest retry.
 - It hides the real emission defect (line-prefix loss after newline splitting) and allows similar
   regressions in other comment-bearing contexts.
 - Normalizing every embedded line to `///` keeps output valid and behavior consistent.
+
+### 11.72 Forcing Seven-Crate Network Parity Matrix into Default Non-Ignored Test Suite
+
+**Rejected approach:** Make default `cargo test` always clone and run the full seven-crate
+`--stop-after run` parity matrix as a non-ignored integration test.
+
+**Why it was rejected:**
+
+- It introduces unavoidable network dependency and high runtime variance into default local and CI
+  feedback loops.
+- It obscures fast deterministic regressions behind expensive external setup.
+- A dedicated matrix harness with explicit invocation keeps parity-matrix coverage reproducible
+  without destabilizing the standard test suite.
