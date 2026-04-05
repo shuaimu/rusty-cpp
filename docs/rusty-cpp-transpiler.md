@@ -6589,6 +6589,62 @@ Design rationale:
   - no blanket forcing of all struct literals to expected-type names without path matching,
   - no fallback to ad-hoc `Result_*`/`Option_*` arm qualification hacks when runtime conditional lowering applies.
 
+### 10.11.77 Phase 20 Leaf 4.13 (`semver`): import/re-export lowering for `std::vec::Vec` and unresolved bare `using ::Type`
+
+Problem:
+
+- `semver` parity Stage D failed with deterministic import/re-export lowering blockers:
+  - invalid Rust-module import emission: `using std::vec::Vec;`,
+  - unresolved early bare re-export: `using ::Op;` before `Op` was declared.
+
+Scope analysis:
+
+- Implemented as a focused generic codegen fix under 1000 LOC.
+- No crate-specific scripts or semver-only patches.
+
+Implementation:
+
+- Import rewrite fix:
+  - added `std::vec` import classification rewrite:
+    - `use std::vec::Vec` (and mapped `alloc::vec::Vec`) now lower to `using rusty::Vec;`,
+    - unsupported `std::vec::*` imports are treated as Rust-only imports instead of invalid C++ `std::vec::*`.
+- Re-export/type-order fix:
+  - generalized file/module forward-declaration emission to include C-like enums (`enum class Name;`) in addition to structs,
+  - ensures early `use super::Type`-style imports in inline modules can resolve enum names declared later in source order (for example `Op`).
+
+Regression tests:
+
+- Added/updated fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+  - `test_use_std_vec_maps_to_rusty_vec`
+  - updated `test_use_alloc_maps_to_std` expectation to `using rusty::Vec;`
+  - `test_leaf413_c_like_enum_forward_decl_precedes_super_reexport_use`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_leaf413_c_like_enum_forward_decl_precedes_super_reexport_use -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_use_alloc_maps_to_std -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_use_std_vec_maps_to_rusty_vec -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- The targeted Leaf 4.13 blocker family is removed:
+  - no `using std::vec::Vec` build error,
+  - no unresolved `using ::Op` build error.
+- Next deterministic `semver` Stage D blockers moved to formatter/runtime family:
+  - `std::move_only_function` availability/emission shape,
+  - missing `rusty::fmt::Formatter` surface (`width`/`align`),
+  - malformed `return return` fallback in `display::pad`.
+
+Design rationale:
+
+- Keeping the fix in generic import classification and generic forward declaration paths preserves parity harness behavior across crates.
+- Avoided wrong approaches from §11:
+  - no semver-specific generated-file patching,
+  - no blanket suppression of all bare re-exports,
+  - no special-casing only `Op` by name.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

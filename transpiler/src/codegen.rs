@@ -336,7 +336,7 @@ impl CodeGen {
         // We only insert the helper if code generation actually emits `std::visit(overloaded { ... })`.
         let helper_insert_pos = self.output.len();
 
-        if self.emit_struct_forward_decls(&file.items) {
+        if self.emit_item_forward_decls(&file.items) {
             self.newline();
         }
 
@@ -366,20 +366,30 @@ impl CodeGen {
         }
     }
 
-    fn emit_struct_forward_decls(&mut self, items: &[syn::Item]) -> bool {
+    fn emit_item_forward_decls(&mut self, items: &[syn::Item]) -> bool {
         let mut emitted_names = HashSet::new();
         let mut emitted_any = false;
         for item in items {
-            let syn::Item::Struct(s) = item else {
-                continue;
-            };
-            let name = s.ident.to_string();
-            if !emitted_names.insert(name.clone()) {
-                continue;
+            match item {
+                syn::Item::Struct(s) => {
+                    let name = s.ident.to_string();
+                    if !emitted_names.insert(name.clone()) {
+                        continue;
+                    }
+                    self.emit_template_prefix(&s.generics);
+                    self.writeln(&format!("struct {};", name));
+                    emitted_any = true;
+                }
+                syn::Item::Enum(e) if enum_is_c_like(e) => {
+                    let name = e.ident.to_string();
+                    if !emitted_names.insert(name.clone()) {
+                        continue;
+                    }
+                    self.writeln(&format!("enum class {};", name));
+                    emitted_any = true;
+                }
+                _ => continue,
             }
-            self.emit_template_prefix(&s.generics);
-            self.writeln(&format!("struct {};", name));
-            emitted_any = true;
         }
         emitted_any
     }
@@ -1970,7 +1980,7 @@ impl CodeGen {
             self.writeln(&format!("namespace {} {{", mod_name));
             self.indent += 1;
             self.module_stack.push(mod_name.to_string());
-            if self.emit_struct_forward_decls(items) {
+            if self.emit_item_forward_decls(items) {
                 self.newline();
             }
             for item in items {
@@ -9276,6 +9286,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_vec_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_option_import(normalized) {
         return action;
     }
@@ -9354,6 +9367,10 @@ fn is_module_linkage_sensitive_reexport(path: &str) -> bool {
         return false;
     }
     parts[parts.len() - 2] == "iterator" && parts[parts.len() - 1] == "IterEither"
+}
+
+fn enum_is_c_like(item: &syn::ItemEnum) -> bool {
+    item.generics.params.is_empty() && item.variants.iter().all(|variant| variant.fields.is_empty())
 }
 
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
@@ -9449,6 +9466,19 @@ fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
         return Some(UseImportAction::Using("rusty::String".to_string()));
     }
     None
+}
+
+fn rewrite_std_vec_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::vec" {
+        return Some(UseImportAction::RustOnly);
+    }
+
+    let item = path.strip_prefix("std::vec::")?;
+    let action = match item {
+        "Vec" => UseImportAction::Using("rusty::Vec".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
@@ -10337,6 +10367,27 @@ mod tests {
             .find("struct Scope {")
             .expect("Scope definition should be emitted");
         assert!(hole_decl < scope_def);
+    }
+
+    #[test]
+    fn test_leaf413_c_like_enum_forward_decl_precedes_super_reexport_use() {
+        let out = transpile_str(
+            r#"
+            mod display {
+                use super::Op;
+                fn is_wild(op: Op) -> bool { true }
+            }
+            enum Op { Wildcard, Exact }
+        "#,
+        );
+        let enum_fwd = out
+            .find("enum class Op;")
+            .expect("c-like enum forward declaration should be emitted");
+        let display_ns = out
+            .find("namespace display {")
+            .expect("display namespace should be emitted");
+        assert!(enum_fwd < display_ns);
+        assert!(out.contains("using ::Op;"));
     }
 
     #[test]
@@ -13200,8 +13251,15 @@ mod tests {
     #[test]
     fn test_use_alloc_maps_to_std() {
         let out = transpile_str("use alloc::vec::Vec;");
-        assert!(out.contains("using std::vec::Vec;"));
+        assert!(out.contains("using rusty::Vec;"));
         assert!(!out.contains("alloc::"));
+    }
+
+    #[test]
+    fn test_use_std_vec_maps_to_rusty_vec() {
+        let out = transpile_str("use std::vec::Vec;");
+        assert!(out.contains("using rusty::Vec;"));
+        assert!(!out.contains("using std::vec::Vec;"));
     }
 
     #[test]
