@@ -108,6 +108,10 @@ pub struct CodeGen {
     /// `macro_rules!` names discovered in the current file (including inline modules).
     /// `use` imports that target these names are macro-only and should not emit C++ `using`.
     macro_rules_names: HashSet<String>,
+    /// `use ... as ...` aliases that rename Rust `Option` path families.
+    /// Used so `Some(...)` lowering can preserve expected Option inner typing when alias names
+    /// (for example `Option2<T>`) are used instead of the literal `Option<T>`.
+    option_type_aliases: HashSet<String>,
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     declared_item_names: HashSet<String>,
@@ -160,6 +164,7 @@ impl CodeGen {
             expanded_libtest_mode: false,
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
+            option_type_aliases: HashSet::new(),
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
@@ -213,6 +218,7 @@ impl CodeGen {
         self.expanded_libtest_mode = false;
         self.emitted_top_level_functions.clear();
         self.macro_rules_names.clear();
+        self.option_type_aliases.clear();
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
         self.return_value_scopes.clear();
@@ -1626,6 +1632,7 @@ impl CodeGen {
             ""
         };
         for path in &paths {
+            self.record_option_alias_import(path);
             if is_pub
                 && self.module_name.is_some()
                 && is_module_linkage_sensitive_reexport(normalize_use_import_path(path))
@@ -1661,6 +1668,16 @@ impl CodeGen {
                     self.writeln(&format!("{}{}", export_prefix, statement));
                 }
             }
+        }
+    }
+
+    fn record_option_alias_import(&mut self, path: &str) {
+        let normalized = normalize_use_import_path(path);
+        let Some((alias, target)) = split_use_import_alias(normalized) else {
+            return;
+        };
+        if target == "std::option::Option" {
+            self.option_type_aliases.insert(alias.to_string());
         }
     }
 
@@ -1855,11 +1872,12 @@ impl CodeGen {
                 vec![full]
             }
             syn::UseTree::Rename(r) => {
-                let full = if prefix.is_empty() {
-                    format!("{} = {}", r.rename, r.ident)
+                let target = if prefix.is_empty() {
+                    r.ident.to_string()
                 } else {
-                    format!("{}::{} = {}::{}", prefix, r.rename, prefix, r.ident)
+                    format!("{}::{}", prefix, r.ident)
                 };
+                let full = format!("{} = {}", r.rename, target);
                 vec![full]
             }
             syn::UseTree::Glob(_) => {
@@ -5441,7 +5459,9 @@ impl CodeGen {
             return None;
         };
         let last = tp.path.segments.last()?;
-        if last.ident != "Option" {
+        let last_ident = last.ident.to_string();
+        let is_option_alias = last.ident != "Option" && self.option_type_aliases.contains(&last_ident);
+        if last.ident != "Option" && !is_option_alias {
             return None;
         }
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
@@ -5463,7 +5483,8 @@ impl CodeGen {
 
         let needs_explicit_ctor = matches!(inner_ty, syn::Type::Reference(_))
             || self.type_mentions_in_scope_type_param(inner_ty)
-            || is_dependent_assoc_inner;
+            || is_dependent_assoc_inner
+            || is_option_alias;
         if !needs_explicit_ctor {
             return None;
         }
@@ -7608,6 +7629,7 @@ impl CodeGen {
             expanded_libtest_mode: false,
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
+            option_type_aliases: HashSet::new(),
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
             return_value_scopes: Vec::new(),
@@ -8568,6 +8590,28 @@ enum UseImportAction {
 
 fn classify_use_import(path: &str) -> UseImportAction {
     let normalized = normalize_use_import_path(path);
+    if let Some((alias, target_path)) = split_use_import_alias(normalized) {
+        return match classify_use_import(target_path) {
+            UseImportAction::RustOnly => UseImportAction::RustOnly,
+            UseImportAction::Using(mapped_target) => {
+                if alias_target_requires_template_alias(&mapped_target) {
+                    UseImportAction::Raw(format!(
+                        "template<typename... Ts> using {} = {}<Ts...>;",
+                        alias, mapped_target
+                    ))
+                } else {
+                    UseImportAction::Using(format!("{} = {}", alias, mapped_target))
+                }
+            }
+            UseImportAction::Raw(statement) => {
+                if let Some(target) = parse_namespace_alias_target(&statement) {
+                    UseImportAction::Raw(format!("namespace {} = {};", alias, target))
+                } else {
+                    UseImportAction::RustOnly
+                }
+            }
+        };
+    }
 
     if is_either_variant_reexport(normalized) {
         return UseImportAction::RustOnly;
@@ -8587,6 +8631,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_option_import(normalized) {
+        return action;
+    }
     if is_rust_only_import(normalized) {
         return UseImportAction::RustOnly;
     }
@@ -8595,6 +8642,31 @@ fn classify_use_import(path: &str) -> UseImportAction {
 
 fn normalize_use_import_path(path: &str) -> &str {
     path.strip_prefix("namespace ").unwrap_or(path)
+}
+
+fn split_use_import_alias(path: &str) -> Option<(&str, &str)> {
+    let (alias, target) = path.split_once('=')?;
+    let alias = alias.trim();
+    let target = target.trim();
+    if alias.is_empty() || target.is_empty() {
+        return None;
+    }
+    Some((alias, target))
+}
+
+fn parse_namespace_alias_target(statement: &str) -> Option<&str> {
+    let trimmed = statement.trim().strip_suffix(';')?;
+    let rest = trimmed.strip_prefix("namespace ")?;
+    let (_, target) = rest.split_once('=')?;
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some(target)
+}
+
+fn alias_target_requires_template_alias(target: &str) -> bool {
+    target == "rusty::Option"
 }
 
 /// C++ `using` declarations require either a nested-name-specifier (`a::b`) or alias
@@ -8701,6 +8773,13 @@ fn rewrite_std_marker_import(path: &str) -> Option<UseImportAction> {
 fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
     if path == "std::string::String" {
         return Some(UseImportAction::Using("rusty::String".to_string()));
+    }
+    None
+}
+
+fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::option::Option" {
+        return Some(UseImportAction::Using("rusty::Option".to_string()));
     }
     None
 }
@@ -12594,6 +12673,50 @@ mod tests {
         let out = transpile_str("use std::marker::PhantomData;");
         assert!(out.contains("using rusty::PhantomData;"));
         assert!(!out.contains("using std::marker::PhantomData;"));
+    }
+
+    #[test]
+    fn test_leaf410_rename_import_emits_cpp_alias_form() {
+        let out = transpile_str("use std::collections::HashMap as Map;");
+        assert!(out.contains("using Map = std::collections::HashMap;"));
+        assert!(!out.contains("using std::collections::Map ="));
+    }
+
+    #[test]
+    fn test_leaf410_core_option_alias_import_remapped_to_rusty_option() {
+        let out = transpile_str("use core::option::Option as Option2;");
+        assert!(out.contains("template<typename... Ts> using Option2 = rusty::Option<Ts...>;"));
+        assert!(!out.contains("using std::option::Option2 ="));
+        assert!(!out.contains("using Option2 = std::option::Option"));
+    }
+
+    #[test]
+    fn test_leaf410_std_option_import_remapped_to_rusty_option() {
+        let out = transpile_str("use std::option::Option;");
+        assert!(out.contains("using rusty::Option;"));
+        assert!(!out.contains("using std::option::Option;"));
+    }
+
+    #[test]
+    fn test_leaf410_some_ctor_with_option_alias_uses_typed_rusty_option_ctor() {
+        let out = transpile_str(
+            r#"
+            use core::option::Option as Option2;
+            fn make_opt() -> Option2<u32> {
+                Some(1)
+            }
+        "#,
+        );
+        assert!(out.contains("template<typename... Ts> using Option2 = rusty::Option<Ts...>;"));
+        assert!(out.contains("return rusty::Option<uint32_t>(1);"));
+        assert!(!out.contains("std::make_optional(1)"));
+    }
+
+    #[test]
+    fn test_leaf410_std_io_alias_import_emits_custom_namespace_alias() {
+        let out = transpile_str("use std::io as io2;");
+        assert!(out.contains("namespace io2 = rusty::io;"));
+        assert!(!out.contains("namespace io = rusty::io;"));
     }
 
     #[test]

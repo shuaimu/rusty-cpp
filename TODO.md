@@ -556,7 +556,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added generic method-call lowering for primitive literal receivers: emit parenthesized receiver forms (e.g., `(10).tap(...)`) to avoid C++ numeric-literal-suffix parse failures (`operator\"\"tap`)
           - [x] *done* Added fixture-agnostic codegen regressions for numeric literal receiver method calls (`10.method(...)` and negative-literal form) to lock parenthesized emission
           - [x] *done* Re-probed `tap` parity and recorded next deterministic blocker: semantic extension-method dispatch gap (`request for member 'tap' in '10', which is of non-class type 'int'`) after parse-shape fix
-        - [ ] Leaf 4.10: `cfg-if` Stage D path lowering family (`std::option::Option` invalid C++ path)
+        - [x] *done* Leaf 4.10: `cfg-if` Stage D path lowering family (`std::option::Option` invalid C++ path)
+          - [x] *done* Reproduced deterministic Stage D build failure on `cfg-if` parity run: alias-import lowering emitted invalid C++ (`using std::option::Option2 = std::option::Option;`) from `use core::option::Option as Option2;`
+          - [x] *done* Implemented generic import/alias lowering fix (no crate-specific scripts): fixed rename flattening to emit unqualified alias LHS, added alias-aware `use` classification/rewrite, remapped `std::option::Option` imports to `rusty::Option`, and emitted template-alias form for Option aliases (`template<typename... Ts> using Alias = rusty::Option<Ts...>;`)
+          - [x] *done* Added fixture-agnostic codegen regressions for rename alias shape, core/std Option import remapping, Option alias template emission, namespace-alias rewrite under `as`, and Option-alias-aware `Some(...)` constructor typing (prevents fallback `std::make_optional` mismatch)
+          - [x] *done* Re-probed `cfg-if` parity after fix: Stage A-E now PASS (`tests/transpile_tests/run_parity_matrix.sh --crate cfg-if`), removing the previous deterministic blocker and leaving the next open Phase 20 leaf at `take_mut` 4.11
         - [ ] Leaf 4.11: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
         - [ ] Leaf 4.12: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
         - [ ] Leaf 4.13: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)

@@ -6242,6 +6242,70 @@ Design rationale:
   - no global method-call rewrite to free-function form without trait-shape evidence (§11.76),
   - no crate-specific `tap` source/output patching.
 
+### 10.11.72 Phase 20 Leaf 4.10 (`cfg-if`): fix Option alias-import path lowering and alias-aware `Some(...)` typing
+
+Problem:
+
+- Re-probing `cfg-if` parity after earlier generic fixes produced a deterministic Stage D build
+  failure from invalid alias-import lowering:
+  - generated C++ emitted `using std::option::Option2 = std::option::Option;` (and similarly for
+    `Option3`) from expanded Rust imports such as:
+    - `use core::option::Option as Option2;`
+- After correcting that shape, the next deterministic error in the same family was:
+  - `using Option2 = rusty::Option;` (invalid non-template alias for template type),
+  - and fallback `Some(...)` lowering to `std::make_optional(...)`, which mismatched expected
+    `rusty::Option<T>` return types behind aliases.
+
+Scope analysis:
+
+- Implemented as a focused generic codegen update under 1000 LOC:
+  - alias `use` tree flattening and import classification in `transpiler/src/codegen.rs`,
+  - Option-alias-aware constructor typing for `Some(...)`,
+  - fixture-agnostic unit regressions in `transpiler/src/codegen.rs`.
+
+Implementation:
+
+- Fixed `UseTree::Rename` flattening to emit C++ alias form with unqualified LHS:
+  - `Alias = prefix::Target` (instead of invalid `prefix::Alias = prefix::Target`).
+- Extended `classify_use_import(...)` to handle alias imports recursively and preserve rewrite
+  behavior on aliased targets.
+- Added import rewrite for `std::option::Option` → `rusty::Option` (which also covers
+  `core::option::Option` via existing `core`→`std` normalization in use lowering).
+- Added template-alias emission for aliased Option families:
+  - `template<typename... Ts> using Option2 = rusty::Option<Ts...>;`
+- Added Option-alias tracking (`option_type_aliases`) during `use` emission so `Some(...)`
+  constructor lowering can recover expected inner typing when return/expected types use aliases
+  (e.g., `Option2<u32>`), avoiding fallback `std::make_optional(...)` mismatch.
+
+Regression tests:
+
+- Added focused codegen unit tests:
+  - `test_leaf410_rename_import_emits_cpp_alias_form`
+  - `test_leaf410_core_option_alias_import_remapped_to_rusty_option`
+  - `test_leaf410_std_option_import_remapped_to_rusty_option`
+  - `test_leaf410_std_io_alias_import_emits_custom_namespace_alias`
+  - `test_leaf410_some_ctor_with_option_alias_uses_typed_rusty_option_ctor`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf410_ -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate cfg-if --work-root <tmp>`
+
+Re-probe result:
+
+- `cfg-if` now passes parity end-to-end (Stage A-E `PASS`) for this blocker family.
+- The previous deterministic `std::option::Option`/alias shape failures are removed.
+
+Design rationale:
+
+- Kept the fix generic and syntax-driven (import/alias lowering + expected-type propagation), with
+  no crate-specific branching or post-generation patch steps.
+- Avoided wrong approaches from §11:
+  - no crate-specific rewrite branch for `cfg-if`,
+  - no string-level patching of generated runner output,
+  - no non-template alias emission for template families (see §11.77).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7179,3 +7243,18 @@ crate-specific rewrites like `tap(x, ...)`) to avoid literal-receiver parse issu
   for extension traits.
 - A narrow receiver-shape fix (parenthesize literal receivers only) removes parser blockers without
   introducing broad, non-local behavior changes.
+
+### 11.77 Emitting Rust Rename Imports as Qualified-LHS Aliases or Non-Template Template-Family Aliases
+
+**Rejected approach:** Lower `use ... as ...` imports to shapes like
+`using std::option::Option2 = std::option::Option;` or `using Option2 = rusty::Option;`.
+
+**Why it was rejected:**
+
+- Qualified-LHS alias form (`using ns::Alias = ...`) is invalid C++ syntax.
+- For template families (for example `Option`), non-template aliases cannot be used as
+  `Alias<T>` and fail immediately at call/return sites.
+- Correct lowering is:
+  - unqualified alias LHS (`Alias = target`) for non-template paths,
+  - template alias form (`template<typename... Ts> using Alias = target<Ts...>;`) for
+    template-family imports.
