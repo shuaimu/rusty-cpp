@@ -7954,6 +7954,48 @@ Avoided wrong approaches from §11:
 - §11.82: no eager semantic rewrites for iterator-adapter method families.
 - §11.88: no unconditional `.add/.offset/.write` method-name rewrites without receiver-shape checks.
 
+### 10.95 Leaf 4.15.4.3.3.3.3.3.5.3 — Full Matrix Re-Run and Next Deterministic Frontier
+
+Scope completed in this pass:
+
+- Executed the leaf exactly as defined: re-ran the full seven-crate matrix after 5.2 and
+  recorded the next deterministic blocker frontier.
+- This leaf remained procedural/documentation scope (no new transpiler/runtime implementation),
+  so it stayed well under the 1000-LOC threshold.
+
+Execution and findings:
+
+- Ran `tests/transpile_tests/run_parity_matrix.sh` (full matrix).
+- Result order remains stable:
+  - pass: `either`, `tap`, `cfg-if`, `take_mut`
+  - first fail: `arrayvec` (Stage D C++ build)
+- Deterministic first hard error frontier from `arrayvec` build log:
+  - `using std::any::Any;` emission (`std::any` namespace does not exist in C++),
+  - missing `rusty::fmt::Formatter::write_fmt`,
+  - omitted-template owner recovery gap at `MaybeUninit::uninit()` associated static call.
+- Immediate dependent fallout (same frontier chain) includes:
+  - invalid `return return ...` lambda emission shape,
+  - unresolved `fmt::Error` value path,
+  - unresolved `std::collections` / `alloc` / iterator/test-shape families.
+
+Task decomposition decision:
+
+- Leaf 5.3 itself did not require decomposition.
+- The newly identified implementation frontier was split in TODO into `4.15.4.3.3.3.3.3.6`
+  with sub-leaves (`6.1`/`6.2`/`6.3`) to keep each implementation slice under the LOC guideline.
+
+Verification:
+
+- Matrix verification:
+  - `tests/transpile_tests/run_parity_matrix.sh`
+- Full workspace regression:
+  - `cargo test`
+
+Avoided wrong approaches from §11:
+
+- §11.80: no blanket Rust-runtime path passthrough into C++ `std::*` names.
+- §11.91/§11.92: no ad-hoc ordering hacks to hide unresolved-name frontiers.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -9119,3 +9161,17 @@ as `Option2<T>`).
   surface across crates.
 - A constrained strategy (forward-declare void/unit-return functions only) preserves the intended
   non-dependent call lookup fix while avoiding alias-order fallout.
+
+### 11.93 Emitting Rust `use std::any::Any` as `using std::any::Any` in C++
+
+**Rejected approach:** Preserve Rust-style `std::any::Any` import lowering directly as
+`using std::any::Any;` in emitted C++.
+
+**Why it was rejected:**
+
+- C++ `std::any` is a type, not a namespace, so `std::any::Any` is invalid and deterministically
+  fails at compile time.
+- It masks the real intent (trait/object-like marker surface) and creates avoidable top-level
+  unresolved-name failures before deeper parity signal.
+- Correct handling must be a targeted import/path rewrite strategy for this Rust path family,
+  rather than direct passthrough of Rust module semantics.
