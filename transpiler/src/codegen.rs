@@ -2323,21 +2323,25 @@ impl CodeGen {
         }
 
         // Expanded crate output in module mode commonly lacks Proxy runtime wiring.
-        // Guard by skipping trait-facade emission there to avoid unresolved `pro::*` symbols.
-        if self.module_name.is_some() {
+        // When possible, emit a lightweight local helper for default trait methods;
+        // otherwise keep trait emission Rust-only to avoid unresolved `pro::*` symbols.
+        if self.module_name.is_some() || self.expanded_libtest_mode {
+            if self.emit_module_mode_trait_runtime_helper(t) {
+                self.skipped_module_traits.remove(&scoped);
+                return;
+            }
             self.skipped_module_traits.insert(scoped);
-            self.writeln(&format!(
-                "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
-                trait_name
-            ));
-            return;
-        }
-        if self.expanded_libtest_mode {
-            self.skipped_module_traits.insert(scoped);
-            self.writeln(&format!(
-                "// Rust-only trait {} (Proxy facade emission skipped in expanded-test mode)",
-                trait_name
-            ));
+            if self.module_name.is_some() {
+                self.writeln(&format!(
+                    "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
+                    trait_name
+                ));
+            } else {
+                self.writeln(&format!(
+                    "// Rust-only trait {} (Proxy facade emission skipped in expanded-test mode)",
+                    trait_name
+                ));
+            }
             return;
         }
 
@@ -2486,6 +2490,142 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn emit_module_mode_trait_runtime_helper(&mut self, t: &syn::ItemTrait) -> bool {
+        if !(self.module_name.is_some() || self.expanded_libtest_mode) {
+            return false;
+        }
+        if !t.generics.params.is_empty() {
+            return false;
+        }
+
+        let default_methods: Vec<&syn::TraitItemFn> = t
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let syn::TraitItem::Fn(method) = item {
+                    method.default.as_ref().map(|_| method)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if default_methods.is_empty() {
+            return false;
+        }
+        if !default_methods
+            .iter()
+            .any(|method| matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))))
+        {
+            return false;
+        }
+        let self_assoc_type_placeholders: Vec<String> = t
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let syn::TraitItem::Type(assoc) = item {
+                    Some(format!("typename Self_::{}", assoc.ident))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        self.writeln(&format!(
+            "// Module-mode trait fallback for default methods on {}",
+            t.ident
+        ));
+        self.writeln(&format!("struct {} {{", t.ident));
+        self.indent += 1;
+
+        let mut emitted_any = false;
+        for method in default_methods {
+            let Some(default_body) = &method.default else {
+                continue;
+            };
+            let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+                self.writeln(&format!(
+                    "// Rust-only trait default method skipped (no receiver): {}",
+                    method.sig.ident
+                ));
+                continue;
+            };
+
+            let receiver_param = if receiver.reference.is_some() {
+                if receiver.mutability.is_some() {
+                    "auto& self_".to_string()
+                } else {
+                    "const auto& self_".to_string()
+                }
+            } else {
+                "auto self_".to_string()
+            };
+
+            let mut params = vec![receiver_param];
+            for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+                let syn::FnArg::Typed(pat_type) = arg else {
+                    continue;
+                };
+                let name = match pat_type.pat.as_ref() {
+                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    _ => format!("_arg{}", idx),
+                };
+                params.push(format!("auto {}", name));
+            }
+
+            self.writeln(&format!(
+                "static auto {}({}) {{",
+                escape_cpp_keyword(&method.sig.ident.to_string()),
+                params.join(", ")
+            ));
+            self.indent += 1;
+            self.writeln("using Self_ = std::remove_reference_t<decltype(self_)>;");
+
+            let prev_struct = self.current_struct.clone();
+            self.current_struct = Some("Self_".to_string());
+            let mut self_scope = HashSet::new();
+            self_scope.insert("Self_".to_string());
+            self.type_param_scopes.push(self_scope);
+            let prev_self_declared_params = if self_assoc_type_placeholders.is_empty() {
+                None
+            } else {
+                Some(self.declared_type_params.insert(
+                    "Self_".to_string(),
+                    self_assoc_type_placeholders.clone(),
+                ))
+            };
+            let return_type = self.map_return_type(&method.sig.output);
+            self.push_return_value_scope(&return_type);
+            self.push_return_type_hint(&method.sig.output);
+            self.push_param_bindings(&method.sig.inputs);
+            self.push_self_receiver_ref_scope(&method.sig.inputs);
+            self.push_self_path_override(Some("self_".to_string()));
+            self.emit_block(default_body);
+            self.pop_self_path_override();
+            self.pop_self_receiver_ref_scope();
+            self.pop_param_bindings();
+            self.pop_return_type_hint();
+            self.pop_return_value_scope();
+            if let Some(prev) = prev_self_declared_params {
+                if let Some(prev_params) = prev {
+                    self.declared_type_params
+                        .insert("Self_".to_string(), prev_params);
+                } else {
+                    self.declared_type_params.remove("Self_");
+                }
+            }
+            self.type_param_scopes.pop();
+            self.current_struct = prev_struct;
+
+            self.indent -= 1;
+            self.writeln("}");
+            emitted_any = true;
+        }
+
+        self.indent -= 1;
+        self.writeln("};");
+        emitted_any
     }
 
     fn emit_extension_trait_free_functions(
@@ -11308,7 +11448,9 @@ fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
 
     let item = path.strip_prefix("std::ptr::")?;
     let action = match item {
-        "read" | "write" => UseImportAction::Using(format!("rusty::ptr::{}", item)),
+        "read" | "write" | "drop_in_place" => {
+            UseImportAction::Using(format!("rusty::ptr::{}", item))
+        }
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -13809,6 +13951,61 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415433_module_mode_trait_default_methods_emit_runtime_helper_and_keep_import() {
+        let out = transpile_str_module(
+            r#"
+            mod helper {
+                pub trait Foo {
+                    fn len(&self) -> usize;
+                    fn truncate(&mut self, new_len: usize);
+                    fn clear(&mut self) {
+                        self.truncate(0);
+                    }
+                }
+            }
+            mod use_site {
+                use super::helper::Foo;
+                pub struct Buf { len: usize }
+                impl Buf {
+                    fn clear_via_trait(&mut self) {
+                        Foo::clear(self);
+                    }
+                }
+            }
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains("struct Foo {"));
+        assert!(out.contains("static auto clear(auto& self_) {"));
+        assert!(out.contains("self_.truncate(0);"));
+        assert!(out.contains("using helper::Foo;"));
+        assert!(!out.contains("// Rust-only: using helper::Foo;"));
+        assert!(!out.contains("Proxy facade emission skipped in module mode"));
+    }
+
+    #[test]
+    fn test_leaf415433_module_mode_trait_default_method_self_const_uses_self_alias() {
+        let out = transpile_str_module(
+            r#"
+            mod helper {
+                pub trait Cap {
+                    const CAPACITY: usize;
+                    fn len(&self) -> usize;
+                    fn remaining(&self) -> usize {
+                        Self::CAPACITY - self.len()
+                    }
+                }
+            }
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains("struct Cap {"));
+        assert!(out.contains("using Self_ = std::remove_reference_t<decltype(self_)>;"));
+        assert!(out.contains("Self_::CAPACITY"));
+        assert!(out.contains("rusty::len(self_)"));
+    }
+
+    #[test]
     fn test_leaf431_trait_facade_emission_skipped_in_expanded_libtest_mode() {
         let out = transpile_str(
             r#"
@@ -15727,6 +15924,37 @@ mod tests {
         let out = transpile_str("use std::slice;");
         assert!(out.contains("// Rust-only: using std::slice;"));
         assert!(!out.contains("\nusing std::slice;"));
+    }
+
+    #[test]
+    fn test_leaf415433_std_slice_from_raw_parts_path_maps_to_rusty_slice_runtime() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *const u8, n: usize) {
+                unsafe {
+                    let _s = std::slice::from_raw_parts(p, n);
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::from_raw_parts("));
+        assert!(!out.contains("std::slice::from_raw_parts("));
+    }
+
+    #[test]
+    fn test_leaf415433_slice_alias_from_raw_parts_mut_path_maps_to_rusty_slice_runtime() {
+        let out = transpile_str(
+            r#"
+            use std::slice;
+            fn f(p: *mut u8, n: usize) {
+                unsafe {
+                    let _s = slice::from_raw_parts_mut(p, n);
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::from_raw_parts_mut("));
+        assert!(!out.contains("std::slice::from_raw_parts_mut("));
     }
 
     #[test]

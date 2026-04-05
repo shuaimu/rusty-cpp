@@ -30,6 +30,7 @@
 #define RUSTY_PTR_HPP
 
 #include <cstddef>  // for std::ptrdiff_t
+#include <memory>
 #include <utility>
 
 namespace rusty {
@@ -125,6 +126,20 @@ inline T read(T* src) {
 template<typename T, typename U>
 inline void write(T* dst, U&& value) {
     *dst = std::forward<U>(value);
+}
+
+template<typename T>
+inline void drop_in_place(T* dst) {
+    std::destroy_at(dst);
+}
+
+template<typename RangeLike>
+inline void drop_in_place(RangeLike&& range)
+requires requires(RangeLike r) { r.data(); r.size(); }
+{
+    auto* data = range.data();
+    auto count = static_cast<std::size_t>(range.size());
+    std::destroy_n(data, count);
 }
 
 } // namespace ptr

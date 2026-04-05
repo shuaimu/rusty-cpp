@@ -122,6 +122,13 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
+        "std::ptr::drop_in_place" | "ptr::drop_in_place" => Some("rusty::ptr::drop_in_place"),
+        "std::slice::from_raw_parts" | "core::slice::from_raw_parts" | "slice::from_raw_parts" => {
+            Some("rusty::from_raw_parts")
+        }
+        "std::slice::from_raw_parts_mut"
+        | "core::slice::from_raw_parts_mut"
+        | "slice::from_raw_parts_mut" => Some("rusty::from_raw_parts_mut"),
         "drop" | "std::mem::drop" | "mem::drop" => Some("rusty::mem::drop"),
         "std::mem::size_of" | "mem::size_of" => Some("rusty::mem::size_of"),
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
@@ -405,6 +412,18 @@ mod tests {
             Some("rusty::ptr::read")
         );
         assert_eq!(map_function_path("ptr::write"), Some("rusty::ptr::write"));
+        assert_eq!(
+            map_function_path("std::slice::from_raw_parts"),
+            Some("rusty::from_raw_parts")
+        );
+        assert_eq!(
+            map_function_path("slice::from_raw_parts_mut"),
+            Some("rusty::from_raw_parts_mut")
+        );
+        assert_eq!(
+            map_function_path("ptr::drop_in_place"),
+            Some("rusty::ptr::drop_in_place")
+        );
         assert_eq!(
             map_function_path("std::mem::forget"),
             Some("rusty::mem::forget")

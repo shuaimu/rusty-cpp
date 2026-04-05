@@ -7117,6 +7117,78 @@ Design rationale:
   - no blanket suppression of turbofish/template-arg emission,
   - no broad import disabling for `std::mem` families.
 
+### 10.11.85 Phase 20 Leaf 4.15.4.3.3.1 (`arrayvec` Stage D): module-mode local trait default-method fallback for unresolved `ArrayVecImpl::...` family
+
+Problem:
+
+- After 10.11.84, the first deterministic full-matrix blocker was `arrayvec` Stage D unresolved
+  `ArrayVecImpl::{push, try_push, push_unchecked, truncate, clear, ...}`.
+- Root cause: in module mode, local trait facade emission was globally skipped, but call sites still
+  lowered associated default-method calls (`ArrayVecImpl::method(self, ...)`), leaving unresolved
+  symbols.
+
+Scope analysis:
+
+- Completed as a focused generic transpiler/runtime change set (well under the 1000-LOC target for
+  one leaf), with fixture-agnostic regressions.
+- No crate-specific scripts or one-off `arrayvec` rewrites were introduced.
+
+Implementation:
+
+- Module-mode trait fallback:
+  - added a generic module/expanded-mode trait fallback path in `emit_trait` that emits a
+    lightweight helper struct for local traits with default methods,
+  - emitted default methods as `static auto` helpers with receiver-first signatures (`self_`) and a
+    scoped alias (`using Self_ = std::remove_reference_t<decltype(self_)>;`) so `Self::...` usage
+    inside default bodies resolves deterministically.
+- Import visibility correctness:
+  - when helper emission succeeds, removed the trait from module-trait skip tracking so
+    corresponding `use ...::Trait` imports are emitted instead of forced Rust-only comments.
+- Immediate dependent runtime/path fixes surfaced by this family:
+  - added `std/core/slice::from_raw_parts{,_mut}` and `slice::from_raw_parts{,_mut}` path remaps
+    to runtime helpers,
+  - added runtime raw-slice helper APIs (`rusty::from_raw_parts`, `rusty::from_raw_parts_mut`) in
+    `include/rusty/slice.hpp` (wired via `include/rusty/rusty.hpp`),
+  - added `ptr::drop_in_place` runtime support and function-path/import rewrites.
+- Helper-context generic recovery hardening:
+  - in trait-helper emission context, seeded `Self_` associated-type placeholders so omitted local
+    generic args in expressions (for example `CapacityError::new_(...)`) recover to valid dependent
+    forms.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415433_module_mode_trait_default_methods_emit_runtime_helper_and_keep_import`
+  - `test_leaf415433_module_mode_trait_default_method_self_const_uses_self_alias`
+  - `test_leaf415433_std_slice_from_raw_parts_path_maps_to_rusty_slice_runtime`
+  - `test_leaf415433_slice_alias_from_raw_parts_mut_path_maps_to_rusty_slice_runtime`
+  - import rewrite coverage updated for `std::ptr::drop_in_place`.
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` for
+    `slice::from_raw_parts{,_mut}` and `ptr::drop_in_place`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf415433 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- The previous deterministic unresolved `ArrayVecImpl::...` blocker family is removed.
+- Next deterministic `arrayvec` Stage D blockers now move to downstream runtime/value families
+  (for example raw-pointer `.add` method-shape lowering and `MaybeUninit` move/array construction
+  fallout), defining Leaf 4.15.4.3.3.2 handoff context.
+
+Design rationale:
+
+- Preserved the existing module-mode “no Proxy runtime” strategy while restoring generic execution
+  for local trait default methods.
+- Avoided wrong approaches from §11:
+  - no crate-specific `arrayvec` post-processing scripts,
+  - no global rewrite of all associated trait calls to receiver-member calls,
+  - no blanket re-enable of Proxy facade generation in module/expanded modes.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -8197,3 +8269,17 @@ to non-equivalent namespaces that do not provide both `Ordering` and `min/max` s
   API coverage and breaks one of the two required surfaces (ordering enum vs comparator helpers).
 - The correct fix is generic import/path/runtime lowering: preserve a coherent `core::cmp` target
   and provide fallback `min/max` helpers together with `Ordering`.
+
+### 11.87 Rewriting Local Trait Associated Default Calls to Receiver Member Calls
+
+**Rejected approach:** Fix unresolved module-mode local trait calls by rewriting
+`Trait::method(self, ...)` to direct receiver calls (`self.method(...)`) everywhere.
+
+**Why it was rejected:**
+
+- It can silently change dispatch semantics for legitimate associated-call paths that are not
+  equivalent to direct member dispatch in all contexts.
+- It risks self-recursive lowering in default-method bodies (`push` calling `push`) instead of
+  routing through the intended trait-default helper chain (`push -> try_push -> push_unchecked`).
+- The generic, correct fix is to preserve associated-call form and emit a module-safe local trait
+  default-method helper surface that those calls can resolve against.

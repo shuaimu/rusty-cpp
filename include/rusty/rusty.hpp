@@ -39,6 +39,7 @@
 
 // Arrays and ranges
 #include "rusty/array.hpp"
+#include "rusty/slice.hpp"
 
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
