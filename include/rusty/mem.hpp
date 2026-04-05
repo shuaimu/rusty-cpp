@@ -2,11 +2,78 @@
 #define RUSTY_MEM_HPP
 
 #include <cstddef>
+#include <new>
 #include <type_traits>
 #include <utility>
 
 namespace rusty {
 namespace mem {
+
+template<typename T>
+class ManuallyDrop {
+private:
+    struct InitTag {};
+
+    alignas(T) unsigned char storage_[sizeof(T)];
+    bool initialized_ = false;
+
+    explicit ManuallyDrop(T&& value, InitTag) : initialized_(true) {
+        new (storage_) T(std::move(value));
+    }
+
+    explicit ManuallyDrop(const T& value, InitTag) : initialized_(true) {
+        new (storage_) T(value);
+    }
+
+    T* ptr() noexcept {
+        return std::launder(reinterpret_cast<T*>(storage_));
+    }
+
+    const T* ptr() const noexcept {
+        return std::launder(reinterpret_cast<const T*>(storage_));
+    }
+
+public:
+    ManuallyDrop() noexcept = default;
+    ManuallyDrop(const ManuallyDrop&) = delete;
+    ManuallyDrop& operator=(const ManuallyDrop&) = delete;
+
+    // Intentional no-op destructor: mirrors Rust ManuallyDrop semantics.
+    ~ManuallyDrop() = default;
+
+    template<typename U = T>
+    static ManuallyDrop<T> new_(U&& value) {
+        using Value = std::remove_reference_t<U>;
+        if constexpr (std::is_same_v<Value, T>) {
+            return ManuallyDrop<T>(std::forward<U>(value), InitTag{});
+        } else {
+            return ManuallyDrop<T>(T(std::forward<U>(value)), InitTag{});
+        }
+    }
+
+    T* as_mut_ptr() noexcept {
+        return ptr();
+    }
+
+    const T* as_ptr() const noexcept {
+        return ptr();
+    }
+
+    T& operator*() noexcept {
+        return *ptr();
+    }
+
+    const T& operator*() const noexcept {
+        return *ptr();
+    }
+};
+
+template<typename T>
+inline auto manually_drop_new(T&& value)
+    -> ManuallyDrop<std::remove_cv_t<std::remove_reference_t<T>>> {
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    return ManuallyDrop<Value>::new_(std::forward<T>(value));
+}
 
 template<typename T>
 constexpr std::size_t size_of() noexcept {

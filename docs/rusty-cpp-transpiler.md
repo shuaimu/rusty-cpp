@@ -7458,6 +7458,76 @@ Design rationale:
   - no crate-specific branch logic for `arrayvec::drain_range`,
   - no fallback to permissive compiler flags (`-fpermissive`) to mask invalid output.
 
+### 10.11.90 Phase 20 Leaf 4.15.4.3.3.3.3.2 (`arrayvec` Stage D): `ManuallyDrop` runtime/lowering + immediate dependent merged-item/closure/local-shadow fixes
+
+Problem:
+
+- After 10.11.89, the first deterministic `arrayvec` Stage D blockers moved to
+  `std::mem::ManuallyDrop` lowering and immediate dependents:
+  - unresolved `ManuallyDrop`/`ManuallyDrop::new` emission shape in expanded output,
+  - missing concrete impl body selection for merged duplicate method signatures (kept
+    forwarding wrappers instead of concrete impls, surfacing `ArrayVecImpl::as_ptr` fallout),
+  - malformed closure ref-pattern parameter emission (`auto& auto&& ...`),
+  - parameter-shadowing local initializer self-reference fallout after keyword-safe rename.
+
+Scope analysis:
+
+- Completed as a focused generic change set under the 1000-LOC target.
+- No fixture-specific scripts or post-generation C++ patching were introduced.
+
+Implementation:
+
+- Runtime/lowering support for `ManuallyDrop`:
+  - Added `rusty::mem::ManuallyDrop<T>` and deduction-friendly helper
+    `rusty::mem::manually_drop_new(...)` in `include/rusty/mem.hpp`.
+  - Added `std::mem::ManuallyDrop` type/import/path remaps in transpiler mappings:
+    - `transpiler/src/types.rs` (`map_std_type`, `map_function_path`)
+    - `transpiler/src/codegen.rs` (`rewrite_std_mem_import`)
+- Merged duplicate-method resolution hardening (`transpiler/src/codegen.rs`):
+  - duplicate merged impl-method signatures now prefer non-forwarding concrete bodies over
+    trivial trait-associated forwarders, preserving real impl behavior for
+    `ArrayVecImpl::{as_ptr, as_mut_ptr}`-style families.
+- Immediate dependent emitter fixes (`transpiler/src/codegen.rs`):
+  - closure ref-pattern params (`|&x|`) now emit valid single `auto& x` parameters,
+  - local bindings that shadow parameters retain outer-name visibility while lowering the
+    initializer expression, then commit the renamed shadow binding for subsequent uses.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf41543333332_std_mem_manually_drop_new_path_remapped`
+  - `test_leaf41543333332_std_mem_manually_drop_import_remapped`
+  - `test_leaf41543333332_duplicate_forwarder_prefers_non_forwarding_impl_body`
+  - `test_leaf41543333332_closure_ref_pattern_param_emits_single_auto_ref`
+  - `test_leaf41543333332_local_binding_shadowing_param_is_renamed`
+- `transpiler/src/types.rs`:
+  - extended `test_leaf42_runtime_type_fallback_mappings`
+  - extended `test_leaf42_runtime_function_path_mappings`
+- Runtime C++ coverage:
+  - new `tests/rusty_mem_test.cpp` (added to `CMakeLists.txt`) for
+    `manually_drop_new` deduction + pointer shape and drop-suppression behavior.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf41543333332 -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous deterministic `ManuallyDrop` and `ArrayVecImpl::{as_ptr,as_mut_ptr}` blockers are
+  removed from the first-failure set.
+- The next deterministic Stage D blocker family now starts at downstream unresolved
+  declaration-order/unqualified-call/runtime gaps (for example `extend_panic`, `iter`, `Ok`).
+
+Design rationale:
+
+- Kept fixes generic and emitter-level instead of introducing crate-conditional handling.
+- Avoided wrong approaches from §11:
+  - no crate-specific transpile post-processing for `arrayvec`,
+  - no blanket trait-associated-call rewrite (`Trait::m(self, ...) -> self.m(...)`) across all
+    call sites,
+  - no broad closure parameter rewriting that ignores Rust pattern shape.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -8565,3 +8635,30 @@ to non-equivalent namespaces that do not provide both `Ordering` and `min/max` s
   failures harder to triage.
 - The correct generic fix is a pointer-aware rewrite: only lower `.add/.offset` when the receiver
   is inferred/recognized as raw-pointer-like, preserving non-pointer member-call behavior.
+
+### 11.89 Emitting `ManuallyDrop::new(...)` as a Class-Template Static Call Without Type Deduction
+
+**Rejected approach:** Lower every `ManuallyDrop::new(...)` path directly to
+`rusty::mem::ManuallyDrop::new_(...)` and rely on downstream template recovery.
+
+**Why it was rejected:**
+
+- C++ class-template static calls require explicit template arguments; direct
+  `ManuallyDrop::new_` emission deterministically fails in expanded outputs.
+- Retrofitting template arguments at every call site is brittle and context-sensitive.
+- A small runtime helper (`rusty::mem::manually_drop_new(...)`) keeps lowering generic and
+  deduction-friendly without crate-specific rewriting.
+
+### 11.90 Registering Renamed Shadow Locals Before Emitting Their Initializer Expression
+
+**Rejected approach:** When renaming `let` shadows for C++ diagnostics/safety, immediately bind the
+new local name in expression lookup before lowering the initializer.
+
+**Why it was rejected:**
+
+- It changes Rust shadow semantics (`let x = x`) by making initializer lookups resolve to the new
+  local instead of the outer binding/parameter.
+- It produces self-referential invalid emissions and cascaded compile failures.
+- Correct behavior is staged:
+  - emit initializer expression in the outer binding context,
+  - then commit the renamed shadow binding for subsequent statements.

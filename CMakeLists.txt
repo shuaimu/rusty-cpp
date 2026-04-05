@@ -17,6 +17,7 @@ set(TEST_SOURCES
     tests/rusty_rc_test.cpp
     tests/rusty_refcell_test.cpp
     tests/rusty_result_test.cpp
+    tests/rusty_mem_test.cpp
     tests/rusty_vec_test.cpp
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp

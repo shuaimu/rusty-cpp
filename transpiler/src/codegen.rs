@@ -609,6 +609,22 @@ impl CodeGen {
                             merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
+                                if let Some(existing_index) =
+                                    find_impl_method_conflict_index(entry, &key)
+                                {
+                                    let should_replace = match &entry[existing_index] {
+                                        syn::ImplItem::Fn(existing_method) => {
+                                            should_replace_conflicting_impl_method(
+                                                existing_method,
+                                                &merged,
+                                            )
+                                        }
+                                        _ => false,
+                                    };
+                                    if should_replace {
+                                        entry[existing_index] = syn::ImplItem::Fn(merged);
+                                    }
+                                }
                                 continue;
                             }
                             seen_method_keys.insert(key);
@@ -2690,10 +2706,10 @@ impl CodeGen {
             let prev_self_declared_params = if self_assoc_type_placeholders.is_empty() {
                 None
             } else {
-                Some(self.declared_type_params.insert(
-                    "Self_".to_string(),
-                    self_assoc_type_placeholders.clone(),
-                ))
+                Some(
+                    self.declared_type_params
+                        .insert("Self_".to_string(), self_assoc_type_placeholders.clone()),
+                )
             };
             let return_type = self.map_return_type(&method.sig.output);
             self.push_return_value_scope(&return_type);
@@ -5828,6 +5844,10 @@ impl CodeGen {
                 let name = &pat_ident.ident;
                 let name_str = name.to_string();
                 let cpp_name = self.allocate_local_cpp_name(&name_str);
+                let shadows_param = self
+                    .param_bindings
+                    .last()
+                    .is_some_and(|params| params.contains_key(&name_str));
                 let is_mut = pat_ident.mutability.is_some();
                 let inferred_binding_ty = local
                     .init
@@ -5854,14 +5874,18 @@ impl CodeGen {
                 };
 
                 let is_consumed = self.consuming_method_receiver_vars.contains(&name_str);
-                let qualifier = if is_mut
-                    || is_consumed
-                    || type_str.trim_start().starts_with("const ")
-                {
-                    ""
-                } else {
-                    "const "
-                };
+                let qualifier =
+                    if is_mut || is_consumed || type_str.trim_start().starts_with("const ") {
+                        ""
+                    } else {
+                        "const "
+                    };
+
+                if shadows_param {
+                    self.local_cpp_bindings
+                        .last_mut()
+                        .and_then(|scope| scope.remove(&name_str));
+                }
 
                 if let Some(init) = &local.init {
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
@@ -5936,6 +5960,11 @@ impl CodeGen {
                     // `let x: T;` can be initialized later; emit mutable storage.
                     self.writeln(&format!("{} {};", type_str, cpp_name));
                 }
+                if shadows_param {
+                    if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                        scope.insert(name_str, cpp_name);
+                    }
+                }
             }
             syn::Pat::Tuple(tuple) => {
                 // let (a, b) = expr; → auto [a, b] = expr;
@@ -5961,7 +5990,12 @@ impl CodeGen {
                 // The type annotation is on the pattern, inner pat has the name
                 if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
                     let name = &pi.ident;
-                    let cpp_name = self.allocate_local_cpp_name(&name.to_string());
+                    let name_str = name.to_string();
+                    let cpp_name = self.allocate_local_cpp_name(&name_str);
+                    let shadows_param = self
+                        .param_bindings
+                        .last()
+                        .is_some_and(|params| params.contains_key(&name_str));
                     let is_mut = pi.mutability.is_some();
                     let ty = self.map_type(&pat_type.ty);
                     let is_consumed = self
@@ -5973,6 +6007,11 @@ impl CodeGen {
                         } else {
                             "const "
                         };
+                    if shadows_param {
+                        self.local_cpp_bindings
+                            .last_mut()
+                            .and_then(|scope| scope.remove(&name_str));
+                    }
                     if let Some(init) = &local.init {
                         let expr_str =
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
@@ -5984,6 +6023,11 @@ impl CodeGen {
                             self.writeln(&format!("std::optional<{}> {};", ty, cpp_name));
                         } else {
                             self.writeln(&format!("{} {};", ty, cpp_name));
+                        }
+                    }
+                    if shadows_param {
+                        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                            scope.insert(name_str, cpp_name);
                         }
                     }
                 } else if matches!(pat_type.pat.as_ref(), syn::Pat::Wild(_)) {
@@ -6068,12 +6112,30 @@ impl CodeGen {
     }
 
     fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
+        let param_scope_has_rust_name = self
+            .param_bindings
+            .last()
+            .is_some_and(|params| params.contains_key(rust_name));
+        let param_cpp_names: HashSet<String> = self
+            .param_bindings
+            .last()
+            .map(|params| {
+                params
+                    .keys()
+                    .map(|name| escape_cpp_keyword(name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let Some(scope) = self.local_cpp_bindings.last_mut() else {
             return escape_cpp_keyword(rust_name);
         };
 
         let escaped_name = escape_cpp_keyword(rust_name);
-        if !scope.contains_key(rust_name) && !scope.values().any(|v| v == &escaped_name) {
+        if !scope.contains_key(rust_name)
+            && !scope.values().any(|v| v == &escaped_name)
+            && !param_scope_has_rust_name
+            && !param_cpp_names.contains(&escaped_name)
+        {
             let cpp_name = escaped_name;
             scope.insert(rust_name.to_string(), cpp_name.clone());
             return cpp_name;
@@ -6082,7 +6144,7 @@ impl CodeGen {
         let mut idx = 1usize;
         loop {
             let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
-            if !scope.values().any(|v| v == &candidate) {
+            if !scope.values().any(|v| v == &candidate) && !param_cpp_names.contains(&candidate) {
                 scope.insert(rust_name.to_string(), candidate.clone());
                 return candidate;
             }
@@ -7142,8 +7204,7 @@ impl CodeGen {
                 let name = tp.path.segments[0].ident.to_string();
                 matches!(
                     name.as_str(),
-                    "i8"
-                        | "i16"
+                    "i8" | "i16"
                         | "i32"
                         | "i64"
                         | "i128"
@@ -7154,10 +7215,9 @@ impl CodeGen {
                         | "u64"
                         | "u128"
                         | "usize"
-                ) || self
-                    .numeric_type_aliases
-                    .keys()
-                    .any(|candidate| candidate == &name || candidate.ends_with(&format!("::{}", name)))
+                ) || self.numeric_type_aliases.keys().any(|candidate| {
+                    candidate == &name || candidate.ends_with(&format!("::{}", name))
+                })
             }
             _ => {
                 let mapped = self.map_type(ty);
@@ -7229,8 +7289,8 @@ impl CodeGen {
         if mc.method == "assume_init" && mc.args.is_empty() {
             if let Some(expected) = expected_ty {
                 let maybe_uninit_expected: syn::Type = parse_quote!(MaybeUninit<#expected>);
-                let raw_receiver =
-                    self.emit_expr_to_string_with_expected(&mc.receiver, Some(&maybe_uninit_expected));
+                let raw_receiver = self
+                    .emit_expr_to_string_with_expected(&mc.receiver, Some(&maybe_uninit_expected));
                 let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                     format!("({})", raw_receiver)
                 } else {
@@ -9549,12 +9609,13 @@ impl CodeGen {
         // base generic type is known in this scope (for example `IterNames::new_`
         // inside `Iter<B>` should become `IterNames<B>::new_`).
         if segments.len() > 1
-            && segments
-                .get(1)
-                .is_some_and(|s| {
-                    s.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-                        || s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                })
+            && segments.get(1).is_some_and(|s| {
+                s.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                    || s.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
             && path
                 .segments
                 .first()
@@ -9576,7 +9637,10 @@ impl CodeGen {
                     self.current_struct.as_ref().and_then(|struct_name| {
                         self.declared_type_params
                             .get(struct_name)
-                            .or_else(|| self.declared_type_params.get(&self.scoped_type_key(struct_name)))
+                            .or_else(|| {
+                                self.declared_type_params
+                                    .get(&self.scoped_type_key(struct_name))
+                            })
                             .and_then(|current_params| {
                                 if current_params.len() >= type_params.len() {
                                     Some(current_params[..type_params.len()].to_vec())
@@ -10361,8 +10425,17 @@ impl CodeGen {
             syn::Pat::Wild(_) => "auto _".to_string(),
             syn::Pat::Reference(pr) => {
                 // |&x| → auto& x  or  |&mut x| → auto& x
-                let inner = self.emit_closure_param(&pr.pat);
-                format!("auto& {}", inner.trim_start_matches("auto "))
+                match pr.pat.as_ref() {
+                    syn::Pat::Ident(pi) => format!("auto& {}", pi.ident),
+                    syn::Pat::Type(pt) => {
+                        let name = match pt.pat.as_ref() {
+                            syn::Pat::Ident(pi) => pi.ident.to_string(),
+                            _ => "_".to_string(),
+                        };
+                        format!("auto& {}", name)
+                    }
+                    _ => format!("auto& {}", self.emit_pat_to_string(&pr.pat)),
+                }
             }
             _ => format!("auto {}", self.emit_pat_to_string(pat)),
         }
@@ -10664,13 +10737,13 @@ impl CodeGen {
                     syn::Pat::Type(pt) => {
                         if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
                             let ty = self.map_type(&pt.ty);
-                            let qualifier =
-                                if pi.mutability.is_some() || ty.trim_start().starts_with("const ")
-                                {
-                                    ""
-                                } else {
-                                    "const "
-                                };
+                            let qualifier = if pi.mutability.is_some()
+                                || ty.trim_start().starts_with("const ")
+                            {
+                                ""
+                            } else {
+                                "const "
+                            };
                             if let Some(init) = &local.init {
                                 let init_str = self.emit_expr_to_string(&init.expr);
                                 stmts.push(format!(
@@ -11058,7 +11131,6 @@ impl CodeGen {
             .collect();
         params.join(", ")
     }
-
 }
 
 /// Escape C++ reserved keywords by appending an underscore.
@@ -11088,6 +11160,113 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "PartialOrd" => Some("operator<=>"),
         _ => None,
     }
+}
+
+fn peel_paren_group_expr_node(mut expr: &syn::Expr) -> &syn::Expr {
+    loop {
+        match expr {
+            syn::Expr::Paren(paren) => expr = paren.expr.as_ref(),
+            syn::Expr::Group(group) => expr = group.expr.as_ref(),
+            _ => return expr,
+        }
+    }
+}
+
+fn extract_single_block_terminal_expr(block: &syn::Block) -> Option<&syn::Expr> {
+    if block.stmts.len() != 1 {
+        return None;
+    }
+    let syn::Stmt::Expr(expr, _) = block.stmts.first()? else {
+        return None;
+    };
+    let expr = peel_paren_group_expr_node(expr);
+    if let syn::Expr::Return(ret) = expr {
+        return ret.expr.as_deref().map(peel_paren_group_expr_node);
+    }
+    Some(expr)
+}
+
+fn expr_is_single_ident_path(expr: &syn::Expr, ident: &str) -> bool {
+    let expr = peel_paren_group_expr_node(expr);
+    let syn::Expr::Path(path) = expr else {
+        return false;
+    };
+    path.qself.is_none() && path.path.segments.len() == 1 && path.path.segments[0].ident == ident
+}
+
+fn is_assoc_self_forwarder_method(method: &syn::ImplItemFn) -> bool {
+    let Some(expr) = extract_single_block_terminal_expr(&method.block) else {
+        return false;
+    };
+    let syn::Expr::Call(call) = peel_paren_group_expr_node(expr) else {
+        return false;
+    };
+
+    let called = peel_paren_group_expr_node(call.func.as_ref());
+    let syn::Expr::Path(path) = called else {
+        return false;
+    };
+    if path.qself.is_some() || path.path.segments.len() < 2 {
+        return false;
+    }
+    let Some(last_segment) = path.path.segments.last() else {
+        return false;
+    };
+    if last_segment.ident != method.sig.ident {
+        return false;
+    }
+
+    let mut expected_args: Vec<Option<String>> = Vec::new();
+    for input in &method.sig.inputs {
+        match input {
+            syn::FnArg::Receiver(_) => expected_args.push(None),
+            syn::FnArg::Typed(pt) => {
+                let syn::Pat::Ident(pi) = pt.pat.as_ref() else {
+                    return false;
+                };
+                expected_args.push(Some(pi.ident.to_string()));
+            }
+        }
+    }
+
+    if call.args.len() != expected_args.len() {
+        return false;
+    }
+
+    for (arg, expected) in call.args.iter().zip(expected_args.iter()) {
+        match expected {
+            None => {
+                if !expr_is_single_ident_path(arg, "self") {
+                    return false;
+                }
+            }
+            Some(name) => {
+                if !expr_is_single_ident_path(arg, name) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+fn should_replace_conflicting_impl_method(
+    existing_method: &syn::ImplItemFn,
+    candidate_method: &syn::ImplItemFn,
+) -> bool {
+    is_assoc_self_forwarder_method(existing_method)
+        && !is_assoc_self_forwarder_method(candidate_method)
+}
+
+fn find_impl_method_conflict_index(items: &[syn::ImplItem], key: &str) -> Option<usize> {
+    items.iter().position(|item| {
+        if let syn::ImplItem::Fn(method) = item {
+            impl_method_conflict_key(method) == key
+        } else {
+            false
+        }
+    })
 }
 
 /// Build a deterministic conflict key for merged impl methods.
@@ -11772,6 +11951,7 @@ fn rewrite_std_mem_import(path: &str) -> Option<UseImportAction> {
         "size_of" => UseImportAction::Using("rusty::mem::size_of".to_string()),
         "replace" => UseImportAction::Using("rusty::mem::replace".to_string()),
         "MaybeUninit" => UseImportAction::Using("rusty::MaybeUninit".to_string()),
+        "ManuallyDrop" => UseImportAction::Using("rusty::mem::ManuallyDrop".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -11832,7 +12012,9 @@ fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
 
 fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
     if path == "std::cmp" {
-        return Some(UseImportAction::Raw("namespace cmp = core::cmp;".to_string()));
+        return Some(UseImportAction::Raw(
+            "namespace cmp = core::cmp;".to_string(),
+        ));
     }
 
     let item = path.strip_prefix("std::cmp::")?;
@@ -13114,6 +13296,19 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf41543333332_std_mem_manually_drop_new_path_remapped() {
+        let out = transpile_str(
+            r#"
+            fn f(v: i32) {
+                let _x = std::mem::ManuallyDrop::new(v);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::mem::manually_drop_new(std::move(v))"));
+        assert!(!out.contains("std::mem::ManuallyDrop::new"));
+    }
+
+    #[test]
     fn test_leaf415432_std_mem_size_of_turbofish_preserved_in_function_path() {
         let out = transpile_str(
             r#"
@@ -13620,6 +13815,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn test_leaf41543333332_duplicate_forwarder_prefers_non_forwarding_impl_body() {
+        let out = transpile_str(
+            r#"
+            trait Demo {
+                fn as_ptr(&self) -> i32;
+            }
+            struct Foo { value: i32 }
+            impl Foo {
+                fn as_ptr(&self) -> i32 {
+                    Demo::as_ptr(self)
+                }
+            }
+            impl Demo for Foo {
+                fn as_ptr(&self) -> i32 { self.value }
+            }
+        "#,
+        );
+        assert_eq!(out.matches("int32_t as_ptr() const {").count(), 1);
+        assert!(out.contains("return value;"));
+        assert!(!out.contains("return Demo::as_ptr((*this));"));
     }
 
     #[test]
@@ -14478,6 +14696,22 @@ mod tests {
     fn test_closure_typed_params() {
         let out = transpile_str("fn f() { let inc = |x: i32| x + 1; }");
         assert!(out.contains("[&](int32_t x)"));
+    }
+
+    #[test]
+    fn test_leaf41543333332_closure_ref_pattern_param_emits_single_auto_ref() {
+        let out = transpile_str(
+            r#"
+            fn f(x: &mut i32) {
+                let g = |&len, self_len| {
+                    *self_len = len;
+                };
+                g(x, x);
+            }
+            "#,
+        );
+        assert!(out.contains("[&](auto& len, auto&& self_len)"));
+        assert!(!out.contains("auto& auto&& len"));
     }
 
     #[test]
@@ -16466,11 +16700,8 @@ mod tests {
     #[test]
     fn test_nested_fn_to_lambda() {
         let out = transpile_str("fn outer() { fn inner(x: i32) -> i32 { x + 1 } inner(1); }");
-        assert!(
-            out.contains(
-                "const rusty::SafeFn<int32_t(int32_t)> inner = +[](int32_t x) -> int32_t {"
-            )
-        );
+        assert!(out
+            .contains("const rusty::SafeFn<int32_t(int32_t)> inner = +[](int32_t x) -> int32_t {"));
         assert!(out.contains("return x + 1;"));
         assert!(out.contains("inner(1);"));
     }
@@ -16640,8 +16871,9 @@ mod tests {
 
     #[test]
     fn test_leaf4154332_raw_pointer_add_offset_method_calls_lowered_to_runtime_helpers() {
-        let out =
-            transpile_str("fn f(p: *mut i32, q: *const i32, n: usize, d: isize) { let _a = p.add(n); let _b = q.offset(d); }");
+        let out = transpile_str(
+            "fn f(p: *mut i32, q: *const i32, n: usize, d: isize) { let _a = p.add(n); let _b = q.offset(d); }",
+        );
         assert!(out.contains("rusty::ptr::add(p,"));
         assert!(out.contains("rusty::ptr::offset(q,"));
         assert!(!out.contains("p.add(n)"));
@@ -16737,6 +16969,22 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf41543333332_local_binding_shadowing_param_is_renamed() {
+        let out = transpile_str(
+            r#"
+            fn f(array: [i32; 2]) {
+                let array = array;
+                let _ = array;
+            }
+            "#,
+        );
+        assert!(out.contains("array_shadow1"));
+        assert!(!out.contains("const auto array = std::move(array);"));
+        assert!(!out.contains("array_shadow1 = std::move(array_shadow1)"));
+        assert!(out.contains("array_shadow1 = std::move(array)"));
+    }
+
+    #[test]
     fn test_leaf48_typed_slice_array_reference_materializes_static_span_backing() {
         let out = transpile_str(
             r#"
@@ -16745,11 +16993,8 @@ mod tests {
             }
             "#,
         );
-        assert!(
-            out.contains(
-                "const std::span<const rusty::Result<int32_t, std::string_view>> values ="
-            )
-        );
+        assert!(out
+            .contains("const std::span<const rusty::Result<int32_t, std::string_view>> values ="));
         assert!(out.contains(
             "static const std::array<rusty::Result<int32_t, std::string_view>, 4> _slice_ref_tmp = {"
         ));
@@ -16990,6 +17235,13 @@ mod tests {
         let out = transpile_str("use std::mem::replace;");
         assert!(out.contains("using rusty::mem::replace;"));
         assert!(!out.contains("using std::mem::replace;"));
+    }
+
+    #[test]
+    fn test_leaf41543333332_std_mem_manually_drop_import_remapped() {
+        let out = transpile_str("use std::mem::ManuallyDrop;");
+        assert!(out.contains("using rusty::mem::ManuallyDrop;"));
+        assert!(!out.contains("using std::mem::ManuallyDrop;"));
     }
 
     #[test]
@@ -17605,9 +17857,7 @@ mod tests {
         "#,
         );
         assert!(!out.contains("std::visit(overloaded {"));
-        assert!(
-            out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));")
-        );
+        assert!(out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"));
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("auto&& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("auto&& right_val = std::get<1>(_m_tuple);"));
@@ -17839,11 +18089,8 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto buf = rusty::array_repeat(static_cast<uint8_t>(0), 4);"));
-        assert!(
-            out.contains(
-                "const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"
-            )
-        );
+        assert!(out
+            .contains("const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"));
         assert!(out.contains("const auto _y = rusty::len(buf_shadow1);"));
     }
 
@@ -17944,9 +18191,7 @@ mod tests {
             }
         "#,
         );
-        assert!(
-            out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));")
-        );
+        assert!(out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));"));
         assert!(
             out.contains("return Either<const L&, const R&>(Right<const L&, const R&>(inner));")
         );

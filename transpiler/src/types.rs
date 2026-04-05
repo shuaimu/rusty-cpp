@@ -78,6 +78,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // MaybeUninit
         "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
+        "ManuallyDrop" | "std::mem::ManuallyDrop" => Some(("rusty::mem::ManuallyDrop", true)),
 
         // I/O types
         "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
@@ -137,6 +138,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::mem::size_of" | "mem::size_of" => Some("rusty::mem::size_of"),
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
+        "ManuallyDrop::new" | "std::mem::ManuallyDrop::new" | "mem::ManuallyDrop::new" => {
+            Some("rusty::mem::manually_drop_new")
+        }
         "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
         "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
         "std::panic::AssertUnwindSafe" | "panic::AssertUnwindSafe" => {
@@ -299,6 +303,10 @@ mod tests {
             map_std_type("std::ffi::CStr"),
             Some(("rusty::ffi::CStr", false))
         );
+        assert_eq!(
+            map_std_type("std::mem::ManuallyDrop"),
+            Some(("rusty::mem::ManuallyDrop", true))
+        );
     }
 
     #[test]
@@ -446,6 +454,14 @@ mod tests {
         assert_eq!(
             map_function_path("mem::replace"),
             Some("rusty::mem::replace")
+        );
+        assert_eq!(
+            map_function_path("std::mem::ManuallyDrop::new"),
+            Some("rusty::mem::manually_drop_new")
+        );
+        assert_eq!(
+            map_function_path("ManuallyDrop::new"),
+            Some("rusty::mem::manually_drop_new")
         );
         assert_eq!(
             map_function_path("panic::resume_unwind"),
