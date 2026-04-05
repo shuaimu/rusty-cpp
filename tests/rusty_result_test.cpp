@@ -259,6 +259,55 @@ void test_result_void() {
     printf("PASS\n");
 }
 
+void test_result_as_ref_as_mut() {
+    printf("test_result_as_ref_as_mut: ");
+    {
+        auto ok = Result<int, int>::Ok(7);
+        auto ok_ref = ok.as_ref();
+        assert(ok_ref.is_ok());
+        assert(*ok_ref.unwrap() == 7);
+
+        auto ok_mut = ok.as_mut();
+        assert(ok_mut.is_ok());
+        auto* ok_ptr = ok_mut.unwrap();
+        *ok_ptr = 11;
+        auto ok_after = ok.as_ref();
+        assert(*ok_after.unwrap() == 11);
+
+        auto err = Result<int, int>::Err(9);
+        auto err_ref = err.as_ref();
+        assert(err_ref.is_err());
+        assert(*err_ref.unwrap_err() == 9);
+
+        auto err_mut = err.as_mut();
+        assert(err_mut.is_err());
+        auto* err_ptr = err_mut.unwrap_err();
+        *err_ptr = 15;
+        auto err_after = err.as_ref();
+        assert(*err_after.unwrap_err() == 15);
+
+        using VoidResult = Result<void, int>;
+        auto void_err = VoidResult::Err(3);
+        auto void_err_ref = void_err.as_ref();
+        assert(void_err_ref.is_err());
+        assert(*void_err_ref.unwrap_err() == 3);
+
+        auto void_err_mut = void_err.as_mut();
+        assert(void_err_mut.is_err());
+        auto* void_err_ptr = void_err_mut.unwrap_err();
+        *void_err_ptr = 8;
+        auto void_err_after = void_err.as_ref();
+        assert(*void_err_after.unwrap_err() == 8);
+
+        auto void_ok = VoidResult::Ok();
+        auto void_ok_ref = void_ok.as_ref();
+        assert(void_ok_ref.is_ok());
+        auto void_ok_mut = void_ok.as_mut();
+        assert(void_ok_mut.is_ok());
+    }
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty::Result<T, E> ===\n");
     
@@ -275,6 +324,7 @@ int main() {
     test_result_bool();
     test_result_complex_chain();
     test_result_void();
+    test_result_as_ref_as_mut();
     
     printf("\nAll Result tests passed!\n");
     return 0;

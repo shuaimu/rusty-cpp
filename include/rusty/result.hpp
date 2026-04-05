@@ -125,6 +125,25 @@ public:
     
     // Check if Result is Err
     bool is_err() const { return !is_ok_value; }
+
+    // Borrow payload by pointer without moving the Result value.
+    Result<const T*, const E*> as_ref() const & {
+        if (is_ok_value) {
+            return Result<const T*, const E*>::Ok(&ok_ref());
+        }
+        return Result<const T*, const E*>::Err(&err_ref());
+    }
+
+    Result<T*, E*> as_mut() & {
+        if (is_ok_value) {
+            return Result<T*, E*>::Ok(&ok_ref());
+        }
+        return Result<T*, E*>::Err(&err_ref());
+    }
+
+    Result<const T*, const E*> as_ref() && = delete;
+    Result<const T*, const E*> as_ref() const && = delete;
+    Result<T*, E*> as_mut() && = delete;
     
     // Unwrap Ok value (panics if Err)
     T unwrap() {
@@ -264,6 +283,24 @@ public:
     
     // Check if Result is Err
     bool is_err() const { return !is_ok_value; }
+
+    Result<void, const E*> as_ref() const & {
+        if (is_ok_value) {
+            return Result<void, const E*>::Ok();
+        }
+        return Result<void, const E*>::Err(&err_ref());
+    }
+
+    Result<void, E*> as_mut() & {
+        if (is_ok_value) {
+            return Result<void, E*>::Ok();
+        }
+        return Result<void, E*>::Err(&err_ref());
+    }
+
+    Result<void, const E*> as_ref() && = delete;
+    Result<void, const E*> as_ref() const && = delete;
+    Result<void, E*> as_mut() && = delete;
     
     // Unwrap Err value (panics if Ok)
     E unwrap_err() {

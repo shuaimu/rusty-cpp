@@ -6306,6 +6306,96 @@ Design rationale:
   - no string-level patching of generated runner output,
   - no non-template alias emission for template families (see §11.77).
 
+### 10.11.73 Phase 20 Leaf 4.11 (`tap`): generic extension-trait free-function lowering for blanket impl methods
+
+Problem:
+
+- After Leaf 4.9 fixed numeric-literal method-call parse shape, `tap` parity still failed in Stage D
+  with semantic extension-method dispatch errors such as:
+  - `request for member 'tap' in '10', which is of non-class type 'int'`.
+- Root cause: Rust extension traits (for example `impl<T> TapOps for T`) attach methods to any
+  receiver type, including primitives and runtime wrappers, but C++ member-call lowering assumes
+  receiver-owned methods.
+
+Scope analysis:
+
+- Implemented as a focused generic change set under ~1000 LOC total (transpiler/runtime/tests),
+  without crate-specific handling for `tap`.
+- Main touchpoints:
+  - extension-impl collection and trait/method-call lowering in `transpiler/src/codegen.rs`,
+  - cross-target hint propagation in `transpiler/src/transpile.rs` and
+    `transpiler/src/main.rs`,
+  - minimal runtime support in `include/rusty/result.hpp` for emitted `tap_err`-style patterns.
+
+Implementation:
+
+- Added extension-impl collection pass in codegen:
+  - tracks locally declared types per source unit,
+  - records trait impl methods whose `self` type is not locally declared (extension-style impls).
+- Updated trait emission:
+  - extension traits emit `rusty::` namespaced free-function templates,
+  - Proxy facade emission is skipped for extension traits only,
+  - non-extension trait behavior is unchanged.
+- Added method-call rewrite path for extension methods:
+  - rewrites only known extension method names:
+    - `receiver.method(args...)` → `rusty::method(receiver, args...)`,
+  - leaves non-extension methods on existing member-call lowering path.
+- Added scoped `self` path override while emitting free-function bodies so `self` maps to function
+  receiver parameter (`self_`) instead of member context-only forms.
+- Added extension free-function template generic pruning:
+  - drops method type parameters that are not used in function signature types,
+  - avoids undeduced template parameter failures in emitted C++.
+- Preserved wildcard let-binding side effects:
+  - `let _ = expr;` / `let _: T = expr;` now lower to `static_cast<void>(expr);`.
+- Added cross-target extension-method hints:
+  - collect extension method names from all expanded targets,
+  - pass hint set into each transpile invocation so integration targets can rewrite method calls
+    even when impl blocks are in sibling targets.
+- Added runtime borrow-view APIs used by emitted extension-method bodies:
+  - `Result<T,E>::as_ref/as_mut`,
+  - `Result<void,E>::as_ref/as_mut`.
+
+Regression tests:
+
+- Added codegen tests for:
+  - extension free-function emission + method-call rewrite,
+  - preserving local-method member calls (no false extension rewrite),
+  - wildcard `let _ = expr` side-effect lowering,
+  - typed `Option::None` receiver compatibility in extension-call contexts.
+- Added transpile-layer tests for:
+  - extension method hint collection from impl blocks,
+  - rewrite behavior when hints are supplied.
+- Added runtime tests for `Result::as_ref/as_mut` on both `Result<T,E>` and `Result<void,E>`.
+
+Verification:
+
+- Focused tests:
+  - `cargo test -p rusty-cpp-transpiler leaf411 -- --nocapture`
+  - `cargo test -p rusty-cpp-transpiler collect_extension_method_hints -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate tap --work-root <tmp> --keep-work-dirs`
+- Full suite:
+  - `cargo test --workspace`
+
+Re-probe result:
+
+- The deterministic extension-method blocker is removed (`int.tap(...)` no longer emitted as member
+  dispatch in C++).
+- `tap` now proceeds to later Stage D blockers in other families:
+  - iterator lowering on spans (`values.iter()`),
+  - unresolved `std::io::_print` path lowering.
+
+Design rationale:
+
+- Blanket extension-trait methods are semantically customization-point style APIs; lowering them as
+  `rusty::` free functions matches the C++ pattern used by `std::ranges` and avoids invalid member
+  dispatch on primitive/foreign receiver types.
+- Narrow method-rewrite gating (extension names only) preserves existing inherent-method behavior.
+- Avoided wrong approaches from §11:
+  - no global rewrite of all method calls into free-function form (§11.76),
+  - no per-crate `tap` special cases,
+  - no per-target-local-only rewrite detection that misses sibling-target impls (§11.78).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7258,3 +7348,17 @@ crate-specific rewrites like `tap(x, ...)`) to avoid literal-receiver parse issu
   - unqualified alias LHS (`Alias = target`) for non-template paths,
   - template alias form (`template<typename... Ts> using Alias = target<Ts...>;`) for
     template-family imports.
+
+### 11.78 Limiting Extension-Method Rewrite Detection to Local-Target Impl Blocks Only
+
+**Rejected approach:** Rewrite extension-method calls only when the same transpiled source unit
+contains the corresponding trait impl block.
+
+**Why it was rejected:**
+
+- In parity workflows, integration targets are transpiled separately from library targets and often
+  contain extension-method call sites without local impl definitions.
+- Local-only detection leaves those call sites as member dispatch, reproducing deterministic Stage D
+  failures (`request for member 'tap' ... non-class type`).
+- Cross-target hint propagation keeps behavior generic and deterministic without crate-specific
+  branching.

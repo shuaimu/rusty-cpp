@@ -561,10 +561,17 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Implemented generic import/alias lowering fix (no crate-specific scripts): fixed rename flattening to emit unqualified alias LHS, added alias-aware `use` classification/rewrite, remapped `std::option::Option` imports to `rusty::Option`, and emitted template-alias form for Option aliases (`template<typename... Ts> using Alias = rusty::Option<Ts...>;`)
           - [x] *done* Added fixture-agnostic codegen regressions for rename alias shape, core/std Option import remapping, Option alias template emission, namespace-alias rewrite under `as`, and Option-alias-aware `Some(...)` constructor typing (prevents fallback `std::make_optional` mismatch)
           - [x] *done* Re-probed `cfg-if` parity after fix: Stage A-E now PASS (`tests/transpile_tests/run_parity_matrix.sh --crate cfg-if`), removing the previous deterministic blocker and leaving the next open Phase 20 leaf at `take_mut` 4.11
-        - [ ] Leaf 4.11: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
-        - [ ] Leaf 4.12: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
-        - [ ] Leaf 4.13: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
-        - [ ] Leaf 4.14: Re-run full seven-crate parity matrix to confirm Leaf 4 closure and mark complete
+        - [x] *done* Leaf 4.11: generic extension-trait free-function lowering (blocks `tap` parity and any crate with blanket-impl traits)
+          - [x] *done* Implemented generic extension-trait method collection from trait impls whose `self` type is not locally declared in the current transpiled source unit, and emitted these methods as `rusty::` free-function templates.
+          - [x] *done* Updated trait emission to skip Proxy facade generation for extension traits and emit free functions instead, preserving existing Proxy behavior for non-extension traits.
+          - [x] *done* Added method-call lowering that rewrites only known extension methods from `receiver.method(args...)` to `rusty::method(receiver, args...)` and keeps non-extension member-call lowering unchanged.
+          - [x] *done* Added cross-target extension-method hint propagation in crate/parity transpilation so integration targets rewrite extension calls even when impls are defined in sibling expanded targets.
+          - [x] *done* Added focused regressions for extension free-function emission/rewrite, local method non-rewrite, wildcard `let _ = expr` side-effect preservation, and typed `Option::None` receiver lowering.
+          - [x] *done* Re-probed `tap` parity: the deterministic extension-method blocker (`request for member 'tap' in non-class type`) is removed; next Stage D blockers are in iterator/io lowering families (`values.iter()` on spans and `std::io::_print` unresolved path).
+        - [ ] Leaf 4.12: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
+        - [ ] Leaf 4.13: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
+        - [ ] Leaf 4.14: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
+        - [ ] Leaf 4.15: Re-run full seven-crate parity matrix to confirm Leaf 4 closure and mark complete
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs

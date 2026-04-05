@@ -183,10 +183,13 @@ fn transpile_crate(
         match run_cargo_expand(cargo_toml_path) {
             Ok(expanded_source) => {
                 let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
-                match transpile::transpile_with_type_map(
+                let extension_method_hints =
+                    transpile::collect_extension_method_hints(&expanded_source);
+                match transpile::transpile_with_type_map_and_extension_hints(
                     &expanded_source,
                     Some(crate_name),
                     type_map,
+                    &extension_method_hints,
                 ) {
                     Ok(cpp_output) => {
                         std::fs::write(&cppm_path, &cpp_output)
@@ -224,6 +227,13 @@ fn transpile_crate(
     // Step 2: Transpile each file with correct module name
     let mut success_count = 0;
     let mut error_count = 0;
+    let mut extension_method_hints = HashSet::new();
+    for rs_path in &sources {
+        let full_rs_path = project_dir.join(rs_path);
+        if let Ok(source) = std::fs::read_to_string(&full_rs_path) {
+            extension_method_hints.extend(transpile::collect_extension_method_hints(&source));
+        }
+    }
 
     for rs_path in &sources {
         let (cppm_path, module_name) = cmake::map_rs_to_cppm(rs_path, crate_name);
@@ -239,7 +249,12 @@ fn transpile_crate(
             }
         };
 
-        match transpile::transpile_with_type_map(&source, Some(&module_name), type_map) {
+        match transpile::transpile_with_type_map_and_extension_hints(
+            &source,
+            Some(&module_name),
+            type_map,
+            &extension_method_hints,
+        ) {
             Ok(cpp_output) => {
                 if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
                     eprintln!("  Error writing {}: {}", full_cppm_path.display(), e);
@@ -1236,6 +1251,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     };
 
     let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
+    let mut extension_method_hints = HashSet::new();
+    for (_, source) in &expanded_sources {
+        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
+    }
     if args.dry_run {
         for (target, _) in &expanded_sources {
             println!(
@@ -1245,8 +1264,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     } else {
         for (target, source) in &expanded_sources {
-            let cpp =
-                transpile::transpile_with_type_map(source, Some(&target.module_name), &type_map)?;
+            let cpp = transpile::transpile_with_type_map_and_extension_hints(
+                source,
+                Some(&target.module_name),
+                &type_map,
+                &extension_method_hints,
+            )?;
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
                     "Missing target artifact directory for module '{}'",
@@ -1403,7 +1426,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 };
                 runner_src.push_str(line);
                 runner_src.push('\n');
-                if trimmed == "namespace rusty {" {
+                if trimmed == "namespace rusty {"
+                    && (content.contains("namespace panicking {")
+                        || content.contains("namespace intrinsics {")
+                        || content.contains("struct Discriminant"))
+                {
                     unit_emitted_runtime_prelude = true;
                 }
             }

@@ -21,6 +21,12 @@ struct VariantTypeContext {
     template_args: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ExtensionImplMethod {
+    self_ty: syn::Type,
+    method: syn::ImplItemFn,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeMatchEnumKind {
     Option,
@@ -49,6 +55,18 @@ pub struct CodeGen {
     /// Generic type parameters declared by enum name.
     /// Used to recover variant template arguments in pattern lowering.
     enum_type_params: HashMap<String, Vec<String>>,
+    /// Local type names declared in this file (scoped and unscoped).
+    /// Used to distinguish true extension impls from local-type impls.
+    local_declared_types: HashSet<String>,
+    /// Extension-style trait impl methods keyed by scoped trait name.
+    /// Methods in these impls are emitted as `rusty::` free functions.
+    extension_trait_impl_methods: HashMap<String, Vec<ExtensionImplMethod>>,
+    /// Method names emitted/recognized as extension free functions.
+    /// Used to rewrite method calls as `rusty::method(receiver, args...)`.
+    extension_method_names: HashSet<String>,
+    /// Cross-source extension method names supplied by higher-level orchestrators
+    /// (for example parity multi-target transpilation).
+    external_extension_method_hints: HashSet<String>,
     /// Enum names that lower to `std::variant` wrappers (enums with data).
     /// Used to decide when match-path patterns require `std::visit` rather than `switch`.
     data_enum_types: HashSet<String>,
@@ -86,6 +104,10 @@ pub struct CodeGen {
     deref_method_scopes: Vec<bool>,
     /// Scope stack marking emission inside a DerefMut trait method (`deref_mut`).
     deref_mut_method_scopes: Vec<bool>,
+    /// Optional scoped replacement for Rust `self` path lowering.
+    /// Default `self` lowering is `(*this)` for member methods; extension free
+    /// function emission overrides it to a local receiver parameter (for example `self_`).
+    self_path_overrides: Vec<Option<String>>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
     /// Current inline module nesting path while emitting items.
@@ -145,6 +167,10 @@ impl CodeGen {
             current_struct: None,
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
+            local_declared_types: HashSet::new(),
+            extension_trait_impl_methods: HashMap::new(),
+            extension_method_names: HashSet::new(),
+            external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
@@ -157,6 +183,7 @@ impl CodeGen {
             pattern_ref_bindings: Vec::new(),
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
+            self_path_overrides: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -179,6 +206,17 @@ impl CodeGen {
     pub fn with_type_map(type_map: types::UserTypeMap) -> Self {
         Self {
             user_type_map: type_map,
+            ..Self::new()
+        }
+    }
+
+    pub fn with_type_map_and_extension_hints(
+        type_map: types::UserTypeMap,
+        extension_method_hints: HashSet<String>,
+    ) -> Self {
+        Self {
+            user_type_map: type_map,
+            external_extension_method_hints: extension_method_hints,
             ..Self::new()
         }
     }
@@ -225,6 +263,9 @@ impl CodeGen {
         self.return_type_hints.clear();
         self.constructor_template_hints.clear();
         self.enum_type_params.clear();
+        self.local_declared_types.clear();
+        self.extension_trait_impl_methods.clear();
+        self.extension_method_names.clear();
         self.data_enum_types.clear();
         self.struct_field_types.clear();
         self.reassigned_vars.clear();
@@ -237,6 +278,7 @@ impl CodeGen {
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
+        self.self_path_overrides.clear();
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -245,10 +287,16 @@ impl CodeGen {
         // Pass 1a: collect globally declared item names for unresolved bare-import
         // filtering and impl target disambiguation.
         self.collect_top_level_item_names(&file.items);
-        // Pass 1b: collect all impl blocks (including inline-module nested ones)
+        // Pass 1b: collect local declared type names for extension-impl detection.
+        self.collect_local_declared_types(&file.items, &[]);
+        // Pass 1c: collect extension-style trait impl methods.
+        self.collect_extension_trait_impl_methods(&file.items, &[]);
+        self.extension_method_names
+            .extend(self.external_extension_method_hints.iter().cloned());
+        // Pass 1d: collect all impl blocks (including inline-module nested ones)
         // by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
-        // Pass 1c: collect macro_rules! names so macro-only imports can be skipped.
+        // Pass 1e: collect macro_rules! names so macro-only imports can be skipped.
         self.collect_macro_rules_names(&file.items);
 
         // Pass 2: emit all items
@@ -467,6 +515,122 @@ impl CodeGen {
                 }
                 syn::Item::Mod(m) => {
                     self.declared_item_names.insert(m.ident.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_local_declared_types(&mut self, items: &[syn::Item], module_path: &[String]) {
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    self.record_local_declared_type(module_path, &s.ident.to_string());
+                }
+                syn::Item::Enum(e) => {
+                    self.record_local_declared_type(module_path, &e.ident.to_string());
+                }
+                syn::Item::Type(t) => {
+                    self.record_local_declared_type(module_path, &t.ident.to_string());
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_local_declared_types(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_local_declared_type(&mut self, module_path: &[String], type_name: &str) {
+        self.local_declared_types.insert(type_name.to_string());
+        if !module_path.is_empty() {
+            self.local_declared_types
+                .insert(format!("{}::{}", module_path.join("::"), type_name));
+        }
+    }
+
+    fn resolve_trait_scoped_key_for_impl(
+        &self,
+        trait_path: &syn::Path,
+        module_path: &[String],
+    ) -> String {
+        let raw = trait_path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        qualify_impl_type_name(&raw, module_path, &self.declared_item_names)
+    }
+
+    fn collect_extension_trait_impl_methods(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Impl(impl_block) => {
+                    let Some((_, trait_path, _)) = &impl_block.trait_ else {
+                        continue;
+                    };
+
+                    let Some(tp) = (match impl_block.self_ty.as_ref() {
+                        syn::Type::Path(tp) => Some(tp),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+
+                    let raw_self_name = tp
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    let scoped_self_name = qualify_impl_type_name(
+                        &raw_self_name,
+                        module_path,
+                        &self.declared_item_names,
+                    );
+                    if self.local_declared_types.contains(&raw_self_name)
+                        || self.local_declared_types.contains(&scoped_self_name)
+                    {
+                        continue;
+                    }
+
+                    let trait_scoped_key =
+                        self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+                    let entry = self
+                        .extension_trait_impl_methods
+                        .entry(trait_scoped_key)
+                        .or_default();
+
+                    for impl_item in &impl_block.items {
+                        let syn::ImplItem::Fn(method) = impl_item else {
+                            continue;
+                        };
+                        let mut merged = method.clone();
+                        merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                        self.extension_method_names
+                            .insert(merged.sig.ident.to_string());
+                        entry.push(ExtensionImplMethod {
+                            self_ty: (*impl_block.self_ty).clone(),
+                            method: merged,
+                        });
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_extension_trait_impl_methods(nested_items, &nested_path);
+                    }
                 }
                 _ => {}
             }
@@ -1394,6 +1558,14 @@ impl CodeGen {
         let trait_name = &t.ident;
         let scoped = self.scoped_type_key(&trait_name.to_string());
 
+        if let Some(methods) = self.extension_trait_impl_methods.get(&scoped).cloned() {
+            self.emit_extension_trait_free_functions(trait_name, &methods);
+            if self.module_name.is_some() || self.expanded_libtest_mode {
+                self.skipped_module_traits.insert(scoped);
+            }
+            return;
+        }
+
         // Expanded crate output in module mode commonly lacks Proxy runtime wiring.
         // Guard by skipping trait-facade emission there to avoid unresolved `pro::*` symbols.
         if self.module_name.is_some() {
@@ -1558,6 +1730,192 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn emit_extension_trait_free_functions(
+        &mut self,
+        trait_name: &syn::Ident,
+        methods: &[ExtensionImplMethod],
+    ) {
+        self.writeln(&format!(
+            "// Extension trait {} lowered to rusty:: free functions",
+            trait_name
+        ));
+        self.writeln("namespace rusty {");
+        self.indent += 1;
+
+        let mut seen = HashSet::new();
+        for method in methods {
+            let key = format!(
+                "{}|{}|{}",
+                method.method.sig.ident,
+                method.self_ty.to_token_stream(),
+                method.method.sig.to_token_stream()
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            self.emit_extension_trait_free_function(method);
+            self.newline();
+        }
+
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
+    fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
+        let method = &method_spec.method;
+        let method_name = method.sig.ident.to_string();
+        let escaped_method_name = escape_cpp_keyword(&method_name);
+
+        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            self.writeln(&format!(
+                "// Rust-only extension method skipped (no receiver): {}",
+                method_name
+            ));
+            return;
+        };
+
+        let free_generics = self.extension_free_function_generics(method, &method_spec.self_ty);
+        self.emit_template_prefix(&free_generics);
+        self.push_type_param_scope(&free_generics);
+
+        let self_cpp_ty = self.map_type(&method_spec.self_ty);
+        let receiver_param = if receiver.reference.is_some() {
+            if receiver.mutability.is_some() {
+                format!("{}& self_", self_cpp_ty)
+            } else {
+                format!("const {}& self_", self_cpp_ty)
+            }
+        } else {
+            format!("{} self_", self_cpp_ty)
+        };
+
+        let mut params = vec![receiver_param];
+        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            let ty = self.map_type(&pat_type.ty);
+            let param_name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                _ => format!("_arg{}", idx),
+            };
+            params.push(format!("{} {}", ty, param_name));
+        }
+
+        let return_type = self.map_extension_impl_return_type(&method.sig.output, &method_spec.self_ty);
+        self.writeln(&format!(
+            "{} {}({}) {{",
+            return_type,
+            escaped_method_name,
+            params.join(", ")
+        ));
+        self.indent += 1;
+        self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&method.sig.output);
+        self.push_param_bindings(&method.sig.inputs);
+        self.push_self_receiver_ref_scope(&method.sig.inputs);
+        self.push_self_path_override(Some("self_".to_string()));
+        self.emit_block(&method.block);
+        self.pop_self_path_override();
+        self.pop_self_receiver_ref_scope();
+        self.pop_param_bindings();
+        self.pop_return_type_hint();
+        self.pop_return_value_scope();
+        self.indent -= 1;
+        self.writeln("}");
+        self.pop_type_param_scope();
+    }
+
+    fn extension_free_function_generics(
+        &self,
+        method: &syn::ImplItemFn,
+        self_ty: &syn::Type,
+    ) -> syn::Generics {
+        let mut generics = method.sig.generics.clone();
+        let used_type_params: HashSet<String> = generics
+            .params
+            .iter()
+            .filter_map(|param| {
+                if let syn::GenericParam::Type(tp) = param {
+                    Some(tp.ident.to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|name| self.extension_method_type_param_is_used(method, self_ty, name))
+            .collect();
+
+        generics.params = generics
+            .params
+            .into_iter()
+            .filter(|param| match param {
+                syn::GenericParam::Type(tp) => used_type_params.contains(&tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => used_type_params.contains(&cp.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => false,
+            })
+            .collect();
+
+        for param in generics.params.iter_mut() {
+            if let syn::GenericParam::Type(tp) = param {
+                tp.bounds.clear();
+                tp.default = None;
+            }
+        }
+        generics.where_clause = None;
+        generics
+    }
+
+    fn extension_method_type_param_is_used(
+        &self,
+        method: &syn::ImplItemFn,
+        self_ty: &syn::Type,
+        type_param_name: &str,
+    ) -> bool {
+        if self.type_references_name(self_ty, type_param_name) {
+            return true;
+        }
+
+        match &method.sig.output {
+            syn::ReturnType::Default => {}
+            syn::ReturnType::Type(_, ty) => {
+                if !Self::is_plain_self_type(ty) && self.type_references_name(ty, type_param_name) {
+                    return true;
+                }
+            }
+        }
+
+        method
+            .sig
+            .inputs
+            .iter()
+            .skip(1)
+            .any(|arg| match arg {
+                syn::FnArg::Typed(pt) => self.type_references_name(&pt.ty, type_param_name),
+                syn::FnArg::Receiver(_) => false,
+            })
+    }
+
+    fn map_extension_impl_return_type(
+        &self,
+        output: &syn::ReturnType,
+        self_ty: &syn::Type,
+    ) -> String {
+        match output {
+            syn::ReturnType::Default => "void".to_string(),
+            syn::ReturnType::Type(_, ty) => {
+                if Self::is_plain_self_type(ty) {
+                    self.map_type(self_ty)
+                } else {
+                    self.map_type(ty)
+                }
+            }
+        }
+    }
+
+    fn is_plain_self_type(ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Self")
     }
 
     fn emit_mod(&mut self, m: &syn::ItemMod) {
@@ -3978,10 +4336,21 @@ impl CodeGen {
 
         // Emit bindings
         if bindings.len() == 1 && bindings[0] != "_" {
-            self.writeln(&format!(
-                "auto {} = {}.{}();",
-                bindings[0], scrutinee, unwrap_method
-            ));
+            // `if let ... = <option_or_result>.as_mut()` binds `&mut T` / `&mut E`.
+            // Those are represented as pointer-like unwrap values in C++ runtime types;
+            // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
+            // call arguments (avoid producing pointer-to-pointer by accident).
+            if scrutinee.ends_with(".as_mut()") {
+                self.writeln(&format!(
+                    "auto& {} = *{}.{}();",
+                    bindings[0], scrutinee, unwrap_method
+                ));
+            } else {
+                self.writeln(&format!(
+                    "auto {} = {}.{}();",
+                    bindings[0], scrutinee, unwrap_method
+                ));
+            }
         }
 
         self.emit_block(then_branch);
@@ -4236,6 +4605,13 @@ impl CodeGen {
                     self.writeln(&format!("auto [{}] = {};", names.join(", "), expr_str));
                 }
             }
+            syn::Pat::Wild(_) => {
+                // `let _ = expr;` keeps side effects while discarding the value.
+                if let Some(init) = &local.init {
+                    let expr_str = self.emit_expr_maybe_move(&init.expr);
+                    self.writeln(&format!("static_cast<void>({});", expr_str));
+                }
+            }
             syn::Pat::Type(pat_type) => {
                 // let x: Type = expr;
                 // The type annotation is on the pattern, inner pat has the name
@@ -4254,6 +4630,12 @@ impl CodeGen {
                         self.writeln(&format!("{}{} {} = {};", qualifier, ty, cpp_name, expr_str));
                     } else {
                         self.writeln(&format!("{}{} {};", qualifier, ty, cpp_name));
+                    }
+                } else if matches!(pat_type.pat.as_ref(), syn::Pat::Wild(_)) {
+                    if let Some(init) = &local.init {
+                        let expr_str =
+                            self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
+                        self.writeln(&format!("static_cast<void>({});", expr_str));
                     }
                 } else {
                     self.writeln("// TODO: complex typed pattern binding");
@@ -5154,6 +5536,20 @@ impl CodeGen {
             .unwrap_or(false)
     }
 
+    fn push_self_path_override(&mut self, name: Option<String>) {
+        self.self_path_overrides.push(name);
+    }
+
+    fn pop_self_path_override(&mut self) {
+        self.self_path_overrides.pop();
+    }
+
+    fn current_self_path_override(&self) -> Option<&str> {
+        self.self_path_overrides
+            .last()
+            .and_then(|opt| opt.as_deref())
+    }
+
     fn push_deref_method_scope(&mut self, enabled: bool) {
         self.deref_method_scopes.push(enabled);
     }
@@ -5299,6 +5695,108 @@ impl CodeGen {
         }
     }
 
+    fn emit_method_call_expr_to_string(
+        &self,
+        mc: &syn::ExprMethodCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        if mc.method == "len" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::len({})", receiver);
+        }
+        if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
+            return description_call;
+        }
+        if mc.method == "parse" && mc.args.is_empty() {
+            if let Some(parsed_ty) = self.method_call_single_turbofish_type(mc) {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                return format!(
+                    "rusty::str_runtime::parse<{}>({})",
+                    self.map_type(parsed_ty),
+                    receiver
+                );
+            }
+        }
+        if mc.method == "collect" && mc.args.is_empty() && Self::is_range_expression(&mc.receiver) {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::collect_range({})", receiver);
+        }
+        if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
+            return io_call;
+        }
+
+        let method_name = mc.method.to_string();
+        let args: Vec<String> = mc
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+        if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
+            return ext_call;
+        }
+
+        let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
+            if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
+        if is_self {
+            if let Some(self_name) = self.current_self_path_override() {
+                format!(
+                    "{}.{}({})",
+                    self_name,
+                    escape_cpp_keyword(&method_name),
+                    args.join(", ")
+                )
+            } else {
+                format!("{}({})", escape_cpp_keyword(&method_name), args.join(", "))
+            }
+        } else {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            format!(
+                "{}.{}({})",
+                receiver,
+                escape_cpp_keyword(&method_name),
+                args.join(", ")
+            )
+        }
+    }
+
+    fn try_emit_extension_method_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        args: &[String],
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let method_name = mc.method.to_string();
+        if !self.extension_method_names.contains(&method_name) {
+            return None;
+        }
+
+        let is_self_receiver = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
+            if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
+        if is_self_receiver && self.current_self_path_override().is_none() {
+            return None;
+        }
+
+        let receiver = if is_self_receiver {
+            self.current_self_path_override()?.to_string()
+        } else {
+            self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty)
+        };
+
+        let mut all_args = Vec::with_capacity(args.len() + 1);
+        all_args.push(receiver);
+        all_args.extend(args.iter().cloned());
+        Some(format!(
+            "rusty::{}({})",
+            escape_cpp_keyword(&method_name),
+            all_args.join(", ")
+        ))
+    }
+
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
     fn emit_expr_to_string_with_expected(
@@ -5308,6 +5806,7 @@ impl CodeGen {
     ) -> String {
         match expr {
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
+            syn::Expr::MethodCall(mc) => self.emit_method_call_expr_to_string(mc, expected_ty),
             syn::Expr::Match(match_expr) => self.emit_match_expr_to_string(match_expr, expected_ty),
             syn::Expr::Binary(bin) => {
                 self.emit_binary_expr_to_string_with_expected(bin, expected_ty)
@@ -5350,9 +5849,10 @@ impl CodeGen {
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
-            syn::Expr::Path(path)
-                if path.path.segments.len() == 1 && path.path.segments[0].ident == "None" =>
-            {
+            syn::Expr::Path(path) if self.is_option_none_path(&path.path) => {
+                if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty) {
+                    return format!("{}(rusty::None)", expected_cpp);
+                }
                 if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
                     return format!("rusty::Option<{}>(rusty::None)", inner_cpp);
                 }
@@ -5489,6 +5989,55 @@ impl CodeGen {
             return None;
         }
         Some(self.map_type(inner_ty))
+    }
+
+    fn expected_option_cpp_type_for_none(
+        &self,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let ty = expected_ty?;
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Option" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let inner_ty = args.args.iter().find_map(|arg| match arg {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })?;
+
+        if self.should_soften_dependent_assoc_mode() && self.type_contains_dependent_assoc(inner_ty)
+        {
+            return None;
+        }
+
+        let expected_cpp = self.map_type(ty);
+        if expected_cpp.starts_with("rusty::Option<") {
+            Some(expected_cpp)
+        } else {
+            None
+        }
+    }
+
+    fn is_option_none_path(&self, path: &syn::Path) -> bool {
+        if path.segments.len() == 1 && path.segments[0].ident == "None" {
+            return true;
+        }
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "core::option::Option::None" | "std::option::Option::None"
+        )
     }
 
     /// Emit a call expression, optionally using expected type context from parent.
@@ -6123,63 +6672,24 @@ impl CodeGen {
                 format!("&{}", inner)
             }
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, None),
-            syn::Expr::MethodCall(mc) => {
-                if mc.method == "len" && mc.args.is_empty() {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
-                    return format!("rusty::len({})", receiver);
-                }
-                if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
-                    return description_call;
-                }
-                if mc.method == "parse" && mc.args.is_empty() {
-                    if let Some(parsed_ty) = self.method_call_single_turbofish_type(mc) {
-                        let receiver = self.emit_expr_to_string(&mc.receiver);
-                        return format!(
-                            "rusty::str_runtime::parse<{}>({})",
-                            self.map_type(parsed_ty),
-                            receiver
-                        );
-                    }
-                }
-                if mc.method == "collect"
-                    && mc.args.is_empty()
-                    && Self::is_range_expression(&mc.receiver)
-                {
-                    let receiver = self.emit_expr_to_string(&mc.receiver);
-                    return format!("rusty::collect_range({})", receiver);
-                }
-                if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
-                    return io_call;
-                }
-                let method = &mc.method;
-                let args: Vec<String> = mc
-                    .args
-                    .iter()
-                    .map(|a| self.emit_expr_maybe_move(a))
-                    .collect();
-                // Check if receiver is `self` — in C++ methods, call directly
-                let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
-                    if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
-                if is_self {
-                    format!("{}({})", method, args.join(", "))
-                } else {
-                    let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                    let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                        format!("({})", raw_receiver)
-                    } else {
-                        raw_receiver
-                    };
-                    format!("{}.{}({})", receiver, method, args.join(", "))
-                }
-            }
+            syn::Expr::MethodCall(mc) => self.emit_method_call_expr_to_string(mc, None),
             syn::Expr::Field(f) => {
                 // Check if base is `self` — in C++ methods, fields are directly accessible
                 let is_self = matches!(f.base.as_ref(), syn::Expr::Path(p)
                     if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
                 if is_self {
-                    match &f.member {
-                        syn::Member::Named(ident) => ident.to_string(),
-                        syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                    if let Some(self_name) = self.current_self_path_override() {
+                        match &f.member {
+                            syn::Member::Named(ident) => format!("{}.{}", self_name, ident),
+                            syn::Member::Unnamed(idx) => {
+                                format!("{}._{}", self_name, idx.index)
+                            }
+                        }
+                    } else {
+                        match &f.member {
+                            syn::Member::Named(ident) => ident.to_string(),
+                            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                        }
                     }
                 } else {
                     let base = self.emit_expr_to_string(&f.base);
@@ -7003,6 +7513,9 @@ impl CodeGen {
 
         // Resolve `self` to `(*this)` — for field access, `self.x` becomes `this->x`
         if segments.len() == 1 && segments[0] == "self" {
+            if let Some(override_name) = self.current_self_path_override() {
+                return override_name.to_string();
+            }
             return "(*this)".to_string();
         }
 
@@ -7610,6 +8123,10 @@ impl CodeGen {
             current_struct: None,
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
+            local_declared_types: HashSet::new(),
+            extension_trait_impl_methods: HashMap::new(),
+            extension_method_names: HashSet::new(),
+            external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             struct_field_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
@@ -7622,6 +8139,7 @@ impl CodeGen {
             pattern_ref_bindings: Vec::new(),
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
+            self_path_overrides: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
@@ -9546,6 +10064,82 @@ mod tests {
         let out = transpile_str("fn f() { (-10).tap(|v| v); }");
         assert!(out.contains("((-10)).tap([&](auto v) { return v; });"));
         assert!(!out.contains("-10.tap("));
+    }
+
+    #[test]
+    fn test_leaf411_extension_impl_emits_free_function_and_rewrites_call() {
+        let out = transpile_str(
+            r#"
+            trait TapOps { fn tap(self) -> Self; }
+            impl<T> TapOps for T { fn tap(self) -> Self { self } }
+            fn f() { let _ = 10.tap(); }
+        "#,
+        );
+        assert!(out.contains("namespace rusty {"));
+        assert!(out.contains("T tap(T self_) {"));
+        assert!(out.contains("static_cast<void>(rusty::tap(10));"));
+    }
+
+    #[test]
+    fn test_leaf411_local_method_name_is_not_rewritten_to_extension_free_function() {
+        let out = transpile_str(
+            r#"
+            struct Foo {}
+            impl Foo { fn tap(self) -> Self { self } }
+            fn f(foo: Foo) { foo.tap(); }
+        "#,
+        );
+        assert!(out.contains("foo.tap();"));
+        assert!(!out.contains("rusty::tap(foo"));
+    }
+
+    #[test]
+    fn test_leaf411_wildcard_let_bindings_preserve_expression_side_effects() {
+        let out = transpile_str(
+            r#"
+            fn g() -> i32 { 1 }
+            fn h() -> i32 { 2 }
+            fn f() {
+                let _ = g();
+                let _: i32 = h();
+            }
+        "#,
+        );
+        assert!(out.contains("static_cast<void>(g());"));
+        assert!(out.contains("static_cast<void>(h());"));
+    }
+
+    #[test]
+    fn test_leaf411_option_none_extension_call_uses_typed_option_receiver() {
+        let out = transpile_str(
+            r#"
+            trait TapOptionOps<T> { fn tap_none<F>(self, f: F) -> Self; }
+            impl<T> TapOptionOps<T> for Option<T> { fn tap_none<F>(self, f: F) -> Self { self } }
+            fn f() {
+                let _: Option<i32> = None.tap_none(|| 0);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::tap_none(rusty::Option<int32_t>(rusty::None),"));
+    }
+
+    #[test]
+    fn test_leaf411_result_as_mut_if_let_binds_referenced_inner_value() {
+        let out = transpile_str(
+            r#"
+            trait TapResultOps<T, E> { fn tap_err<R, F: FnOnce(&mut E) -> R>(self, f: F) -> Self; }
+            impl<T, E> TapResultOps<T, E> for Result<T, E> {
+                fn tap_err<R, F: FnOnce(&mut E) -> R>(mut self, f: F) -> Self {
+                    if let Err(mut val) = self.as_mut() {
+                        let _ = f(&mut val);
+                    }
+                    self
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto& val = *self_.as_mut().unwrap_err();"));
+        assert!(!out.contains("auto val = self_.as_mut().unwrap_err();"));
     }
 
     #[test]
