@@ -508,10 +508,12 @@ impl CodeGen {
                     if let syn::Expr::Lit(lit) = &nv.value {
                         if let syn::Lit::Str(s) = &lit.lit {
                             let text = s.value();
-                            if text.is_empty() {
-                                self.writeln("///");
-                            } else {
-                                self.writeln(&format!("///{}", text));
+                            for line in text.split('\n') {
+                                if line.is_empty() {
+                                    self.writeln("///");
+                                } else {
+                                    self.writeln(&format!("///{}", line));
+                                }
                             }
                         }
                     }
@@ -11713,6 +11715,14 @@ mod tests {
         let out = transpile_str("/// Line 1.\n/// Line 2.\nfn f() {}");
         assert!(out.contains("/// Line 1."));
         assert!(out.contains("/// Line 2."));
+    }
+
+    #[test]
+    fn test_doc_comment_single_attr_with_embedded_newlines() {
+        let out = transpile_str("#[doc = \"Line 1.\\n\\nLine 3.\"]\nfn f() {}");
+        assert!(out.contains("///Line 1."));
+        assert!(out.contains("///\n///Line 3."));
+        assert!(!out.contains("\nLine 3.\n"));
     }
 
     #[test]

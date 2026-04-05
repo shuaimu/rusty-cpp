@@ -500,6 +500,106 @@ fn test_stop_after_baseline_warning_as_error_retry_passes() {
     assert!(work_dir.path().join("baseline.txt").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn test_stop_after_baseline_workspace_non_member_dev_dependency_retry_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+    let shim_dir = tempfile::tempdir().unwrap();
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let project_dir = manifest.parent().expect("manifest has parent").to_path_buf();
+    let workspace_manifest = project_dir
+        .parent()
+        .expect("workspace fixture has parent")
+        .join("Cargo.toml");
+
+    let cargo_shim = shim_dir.path().join("cargo");
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+set -euo pipefail\n\
+subcmd=\"\"\n\
+manifest=\"\"\n\
+pkg=\"\"\n\
+if [[ $# -gt 0 ]]; then\n\
+  subcmd=\"$1\"\n\
+  shift\n\
+fi\n\
+while [[ $# -gt 0 ]]; do\n\
+  case \"$1\" in\n\
+    --manifest-path)\n\
+      manifest=\"$2\"\n\
+      shift 2\n\
+      ;;\n\
+    -p)\n\
+      pkg=\"$2\"\n\
+      shift 2\n\
+      ;;\n\
+    *)\n\
+      shift\n\
+      ;;\n\
+  esac\n\
+done\n\
+if [[ \"$subcmd\" != \"test\" ]]; then\n\
+  echo \"unexpected cargo subcommand: $subcmd\" >&2\n\
+  exit 99\n\
+fi\n\
+if [[ -z \"$manifest\" ]]; then\n\
+  cat >&2 <<'EOF'\n\
+error: current package believes it's in a workspace when it's not:\n\
+current:   {}\n\
+workspace: {}\n\
+EOF\n\
+  exit 101\n\
+fi\n\
+if [[ \"$manifest\" == \"{}\" ]]; then\n\
+  cat >&2 <<'EOF'\n\
+error: package `orphan` cannot be tested because it requires dev-dependencies and is not a member of the workspace\n\
+EOF\n\
+  exit 101\n\
+fi\n\
+echo \"simulated baseline success for $pkg\"\n\
+",
+        project_dir.display(),
+        workspace_manifest.display(),
+        workspace_manifest.display()
+    );
+    fs::write(&cargo_shim, script).expect("failed to write cargo shim");
+    let mut perms = fs::metadata(&cargo_shim).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cargo_shim, perms).unwrap();
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let shimmed_path = format!("{}:{}", shim_dir.path().display(), current_path);
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("baseline")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .env("PATH", shimmed_path)
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Baseline retry:"));
+    assert!(stdout.contains("baseline_source_manifest"));
+    assert!(work_dir.path().join("baseline.txt").exists());
+}
+
 #[test]
 fn test_parity_test_malformed_manifest_fails() {
     let dir = tempfile::tempdir().unwrap();

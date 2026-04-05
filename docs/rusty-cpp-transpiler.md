@@ -5935,6 +5935,70 @@ Design rationale:
   - no per-target “warn and continue” Stage-B behavior that silently starves Stage C of input (§11.68),
   - no panic-path-only quote patching while leaving general literal emission unsafe (§11.69).
 
+### 10.11.66 Phase 20 Leaf 4.7 (`bitflags`): baseline fallback for non-member dev-dependency packages and multiline single-attribute doc-comment normalization
+
+Problem:
+
+- First deterministic `bitflags` blocker after prior generic fixes occurred in Stage A baseline:
+  workspace-root retry failed with:
+  - `package 'bitflags' cannot be tested because it requires dev-dependencies and is not a member of the workspace`
+  and parity stopped before isolated-manifest retry.
+- After removing that blocker, the next deterministic Stage D compile failure came from emitted
+  multiline doc-comment text leaking as raw code lines (from single `#[doc = \"...\"]` attributes
+  containing embedded newlines), which broke C++ parsing.
+
+Scope analysis:
+
+- Implemented as focused generic changes under 1000 LOC:
+  - baseline retry classification in `transpiler/src/main.rs`,
+  - doc-comment emission normalization in `transpiler/src/codegen.rs`,
+  - fixture-agnostic parity + codegen regressions.
+
+Implementation:
+
+- Baseline fallback classification:
+  - extended workspace-retry continuation detection to include:
+    - `cannot be tested because it requires dev-dependencies and is not a member of the workspace`.
+  - this keeps retry flow generic: in-place baseline → workspace-root retry → isolated-manifest retry.
+- Doc comment emission:
+  - updated `emit_doc_comments(...)` so `#[doc = \"...\"]` values are split on embedded newlines and
+    every emitted line is prefixed with `///` (including blank lines).
+  - prevents raw prose lines with apostrophes/backticks from escaping comment context.
+
+Regression tests:
+
+- Baseline fallback:
+  - unit test: `test_is_workspace_package_miss_detects_non_member_dev_dependency_error`
+  - parity integration test: `test_stop_after_baseline_workspace_non_member_dev_dependency_retry_passes`
+    (shim-driven, fixture-agnostic).
+- Doc-comment normalization:
+  - codegen unit test: `test_doc_comment_single_attr_with_embedded_newlines`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_is_workspace_package_miss_detects_non_member_dev_dependency_error`
+- `cargo test -p rusty-cpp-transpiler test_stop_after_baseline_workspace_non_member_dev_dependency_retry_passes`
+- `cargo test -p rusty-cpp-transpiler test_doc_comment_single_attr_with_embedded_newlines`
+- Re-probe:
+  - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path <bitflags>/Cargo.toml --stop-after run --work-dir <tmp>`
+
+Re-probe result:
+
+- Previous Stage-A non-member dev-dependency baseline blocker is removed.
+- Previous multiline doc-text leakage blocker is removed.
+- Next deterministic blocker shifts to Stage D unresolved re-export/type-order family:
+  - `using ::Flag` / `using ::Flags`,
+  - dependent type fallout around `IterNames`.
+
+Design rationale:
+
+- Workspace-root baseline retry can fail for reasons other than package-ID miss; retry continuation
+  should key on “non-member package” failure families, not just one cargo wording.
+- Multiline-doc normalization belongs in shared doc emission, not in per-crate text sanitizers.
+- Avoided wrong approaches from §11:
+  - no hard stop on workspace-root non-member dev-dependency errors (§11.70),
+  - no blanket stripping of multiline docs in expanded output (§11.71).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6783,3 +6847,26 @@ keeping generic `syn::Lit::Str` emission as raw `s.value()`.
   calls, formatting paths).
 - Site-specific escaping grows brittle and duplicates logic across emitters.
 - Centralized literal escaping ensures consistent, valid C++ strings for all codegen paths.
+
+### 11.70 Treating Workspace-Root `cargo test -p` Non-Member Dev-Dependency Errors as Terminal
+
+**Rejected approach:** If workspace-root retry fails with
+`cannot be tested because it requires dev-dependencies and is not a member of the workspace`,
+return that failure immediately and skip isolated-manifest retry.
+
+**Why it was rejected:**
+
+- The error reflects workspace topology, not correctness of the target crate under its own manifest.
+- It blocks parity for valid out-of-workspace fixtures that baseline successfully in isolation.
+- Continuing to isolated-manifest retry preserves generic behavior without mutating workspace membership.
+
+### 11.71 Stripping Multiline `#[doc = \"...\"]` Attributes Instead of Normalizing Emission
+
+**Rejected approach:** Drop multiline doc attributes from generated output to avoid parser errors.
+
+**Why it was rejected:**
+
+- It silently discards user-facing documentation already preserved in other doc-comment paths.
+- It hides the real emission defect (line-prefix loss after newline splitting) and allows similar
+  regressions in other comment-bearing contexts.
+- Normalizing every embedded line to `///` keeps output valid and behavior consistent.

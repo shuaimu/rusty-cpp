@@ -475,6 +475,13 @@ void rusty_test_dup() {
         let stderr = "error[E0425]: cannot find value `x` in this scope";
         assert!(!is_warning_as_error_failure(stderr));
     }
+
+    #[test]
+    fn test_is_workspace_package_miss_detects_non_member_dev_dependency_error() {
+        let stderr =
+            "error: package `bitflags` cannot be tested because it requires dev-dependencies and is not a member of the workspace";
+        assert!(is_workspace_package_miss(stderr));
+    }
 }
 
 fn run_cargo_test(
@@ -558,6 +565,9 @@ fn is_workspace_package_miss(stderr: &str) -> bool {
         || stderr.contains("package ID specification")
         || stderr.contains("not found in workspace")
         || stderr.contains("not found in metadata")
+        || stderr.contains(
+            "cannot be tested because it requires dev-dependencies and is not a member of the workspace",
+        )
 }
 
 fn is_warning_as_error_failure(stderr: &str) -> bool {
