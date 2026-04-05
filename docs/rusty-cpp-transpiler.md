@@ -6645,6 +6645,64 @@ Design rationale:
   - no blanket suppression of all bare re-exports,
   - no special-casing only `Op` by name.
 
+### 10.11.78 Phase 20 Leaf 4.14 (`bitflags`): unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
+
+Problem:
+
+- `bitflags` parity Stage D failed with deterministic re-export/type-order errors:
+  - local inline-module re-exports were treated as external crate imports (`traits`) and emitted unresolved bare imports downstream (`using ::Flag;`, `using ::Flags;`),
+  - dependent generic associated paths in `iter` omitted template args (`IterNames::new_` instead of `IterNames<B>::new_`), amplifying type-order failures.
+
+Scope analysis:
+
+- Implemented as a focused generic fix under 1000 LOC.
+- No crate-specific script, no generated-output patching.
+
+Implementation:
+
+- Import-root classification:
+  - `emit_use` now treats lowercase roots that are declared top-level items in the same file (for example inline module `traits`) as internal, not external crates.
+- Module forward declarations:
+  - generalized forward-declaration emission to recurse through inline modules and emit namespace-scoped declarations (for example `namespace traits { template<typename B> struct Flag; }`) ahead of early `using` re-exports.
+- Trait import skipping ordering:
+  - pre-collected module-mode trait names before item emission so trait `use` imports are skipped even if the `use` appears before the trait definition in source order.
+  - bare imports are also skipped when they only resolve to pre-collected skipped traits and do not shadow a declared top-level item.
+- Generic associated-path recovery:
+  - added local declared-type generic tracking (scoped/unscoped) and expression-path recovery for omitted template args when a local associated path base has matching in-scope type params:
+    - `IterNames::new_(...)` → `IterNames<B>::new_(...)`.
+  - kept `IterEither` special namespace remapping intact in this recovery path so `IterEither::new_(...)` still lowers to `iterator::IterEither<...>::new_(...)` in control-crate parity paths.
+
+Regression tests:
+
+- Added fixture-agnostic codegen tests in `transpiler/src/codegen.rs`:
+  - `test_leaf414_local_lowercase_module_reexport_is_not_external`
+  - `test_leaf414_bare_import_of_skipped_trait_is_rust_only`
+  - `test_leaf414_local_generic_assoc_path_recovers_template_args`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf414 -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate bitflags --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- The targeted Leaf 4.14 family is removed:
+  - no unresolved `using ::Flag` / `using ::Flags` first-failure blocker,
+  - `IterNames::new_` now emits `IterNames<B>::new_`.
+- Next deterministic Stage D blockers move to expression/body lowering in `iter::IterNames::next`:
+  - member/method name collision on `remaining`,
+  - `while (rusty::intrinsics::unreachable())` boolean misuse,
+  - missing loop-local `flag` binding.
+
+Design rationale:
+
+- Fixes were kept generic in pre-pass metadata, forward declarations, and expression path recovery so they apply across crates with similar Rust source-order/re-export patterns.
+- Avoided wrong approaches from §11:
+  - no bitflags-specific generated-file edits,
+  - no blanket dropping of all `use crate::...` imports,
+  - no ad-hoc string replacement for `IterNames` paths.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
