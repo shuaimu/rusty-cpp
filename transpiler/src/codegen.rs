@@ -133,6 +133,10 @@ pub struct CodeGen {
     /// Used so nested fn lowering can detect sibling nested-fn references and
     /// only capture those callables when needed.
     local_function_bindings: Vec<HashSet<String>>,
+    /// Scoped function-local type names (`struct`/`enum`/`type`) declared in
+    /// block scope. C++ does not support local class templates, so local type
+    /// references must not recover/emit template arguments.
+    local_type_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
@@ -237,6 +241,7 @@ impl CodeGen {
             local_cpp_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
+            local_type_bindings: Vec::new(),
             param_bindings: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -346,6 +351,7 @@ impl CodeGen {
         self.local_cpp_bindings.clear();
         self.delayed_init_locals.clear();
         self.local_function_bindings.clear();
+        self.local_type_bindings.clear();
         self.self_receiver_ref_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
@@ -1456,6 +1462,80 @@ impl CodeGen {
             .any(|scope| scope.contains(name))
     }
 
+    fn is_local_type_name_in_scope(&self, name: &str) -> bool {
+        self.local_type_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn nested_fn_const_generic_params(&self, generics: &syn::Generics) -> Vec<(String, String)> {
+        generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Const(cp) => {
+                    let name = cp.ident.to_string();
+                    if self.is_type_param_in_scope(&name) {
+                        return None;
+                    }
+                    Some((escape_cpp_keyword(&name), self.map_type(&cp.ty)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn push_const_generic_param_bindings(&mut self, generics: &syn::Generics) {
+        let mut scope = HashMap::new();
+        for param in &generics.params {
+            if let syn::GenericParam::Const(cp) = param {
+                if self.is_type_param_in_scope(&cp.ident.to_string()) {
+                    continue;
+                }
+                scope.insert(cp.ident.to_string(), cp.ty.clone());
+            }
+        }
+        self.param_bindings.push(scope);
+    }
+
+    fn pop_const_generic_param_bindings(&mut self) {
+        self.param_bindings.pop();
+    }
+
+    fn local_function_const_generic_call_args(&self, call: &syn::ExprCall) -> Vec<String> {
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return Vec::new();
+        };
+        if path.path.segments.len() != 1 {
+            return Vec::new();
+        }
+        let seg = &path.path.segments[0];
+        let fn_name = seg.ident.to_string();
+        if !self.is_local_function_name_in_scope(&fn_name) {
+            return Vec::new();
+        }
+        let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+            return Vec::new();
+        };
+        args.args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Const(c) => {
+                    if let syn::Expr::Path(p) = self.peel_paren_group_expr(c) {
+                        if p.path.segments.len() == 1
+                            && self.is_type_param_in_scope(&p.path.segments[0].ident.to_string())
+                        {
+                            return None;
+                        }
+                    }
+                    Some(self.emit_expr_to_string(c))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Emit a nested function definition as a local callable.
     /// Rust nested `fn` items cannot capture non-item locals, so emit
     /// captureless callables by default. If a nested function references a
@@ -1464,8 +1544,24 @@ impl CodeGen {
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
-        let params = self.map_fn_params(&f.sig.inputs);
-        let param_types = self.map_fn_param_types(&f.sig.inputs);
+        let mut params_vec: Vec<String> = Vec::new();
+        let mut param_types: Vec<String> = Vec::new();
+        for (const_name, const_ty) in self.nested_fn_const_generic_params(&f.sig.generics) {
+            params_vec.push(format!("{} {}", const_ty, const_name));
+            param_types.push(const_ty);
+        }
+        for arg in &f.sig.inputs {
+            if let syn::FnArg::Typed(pat_type) = arg {
+                let ty = self.map_type(&pat_type.ty);
+                let name = match pat_type.pat.as_ref() {
+                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                    _ => "_".to_string(),
+                };
+                params_vec.push(format!("{} {}", ty, name));
+                param_types.push(ty);
+            }
+        }
+        let params = params_vec.join(", ");
         let needs_sibling_capture = self.nested_function_needs_sibling_capture(f);
 
         let ret_annotation = if return_type == "void" {
@@ -1496,7 +1592,11 @@ impl CodeGen {
         self.indent += 1;
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&f.sig.output);
+        self.push_param_bindings(&f.sig.inputs);
+        self.push_const_generic_param_bindings(&f.sig.generics);
         self.emit_block(&f.block);
+        self.pop_const_generic_param_bindings();
+        self.pop_param_bindings();
         self.pop_return_type_hint();
         self.pop_return_value_scope();
         self.indent -= 1;
@@ -3503,7 +3603,18 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        let local_types: HashSet<String> = block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Struct(s)) => Some(s.ident.to_string()),
+                syn::Stmt::Item(syn::Item::Enum(e)) => Some(e.ident.to_string()),
+                syn::Stmt::Item(syn::Item::Type(t)) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
         self.local_function_bindings.push(local_functions);
+        self.local_type_bindings.push(local_types);
         self.block_depth += 1;
 
         let stmts = &block.stmts;
@@ -3519,6 +3630,7 @@ impl CodeGen {
         self.local_cpp_bindings.pop();
         self.delayed_init_locals.pop();
         self.local_function_bindings.pop();
+        self.local_type_bindings.pop();
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
         self.repeat_elem_type_hints = prev_repeat_hints;
@@ -5147,7 +5259,7 @@ impl CodeGen {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_uppercase());
-        let base = if stripped.contains('_') {
+        let mut base = if stripped.contains('_') {
             stripped
         } else if looks_like_variant_name {
             if let Some(ctx) = variant_ctx {
@@ -5168,6 +5280,25 @@ impl CodeGen {
         let enum_name = self
             .extract_variant_pattern_enum_name(path, &base)
             .or_else(|| variant_ctx.map(|ctx| ctx.enum_name.clone()));
+        // `std::ops::Bound` patterns are lowered against runtime range helpers.
+        // Always target the canonical runtime variant structs regardless of
+        // import style (`Bound::Included` vs `std::ops::Bound::Included`).
+        let is_runtime_bound_pattern = matches!(
+            (
+                enum_name.as_deref(),
+                path.segments.last().map(|seg| seg.ident.to_string())
+            ),
+            (
+                Some("Bound"),
+                Some(ref variant)
+            ) if matches!(variant.as_str(), "Unbounded" | "Included" | "Excluded")
+                && !self.data_enum_types.contains("Bound")
+        );
+        if is_runtime_bound_pattern {
+            if let Some(variant) = path.segments.last() {
+                base = format!("rusty::Bound_{}", variant.ident);
+            }
+        }
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
         if template_args.is_empty() {
@@ -5234,6 +5365,12 @@ impl CodeGen {
                 if !params.is_empty() && params.iter().all(|p| self.is_type_param_in_scope(p)) {
                     return params.clone();
                 }
+            }
+            // `std::ops::Bound` variant patterns commonly appear without explicit
+            // type arguments (`Bound::Included(&i)`). Default to `usize` shape so
+            // emitted visitor arm types remain concrete and compilable.
+            if name == "Bound" && !self.data_enum_types.contains(name) {
+                return vec!["size_t".to_string()];
             }
         }
         Vec::new()
@@ -7843,7 +7980,7 @@ impl CodeGen {
         }
 
         let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
-        let args: Vec<String> = call
+        let mut args: Vec<String> = call
             .args
             .iter()
             .enumerate()
@@ -7852,6 +7989,12 @@ impl CodeGen {
                 self.emit_call_arg_with_pass_style(arg, style, callable_type_param_fallback)
             })
             .collect();
+        let const_generic_args = self.local_function_const_generic_call_args(call);
+        if !const_generic_args.is_empty() {
+            let mut merged = const_generic_args;
+            merged.extend(args);
+            args = merged;
+        }
         format!("{}({})", func, args.join(", "))
     }
 
@@ -9563,6 +9706,9 @@ impl CodeGen {
         };
         if path.segments.len() == 1 {
             let local_name = last.ident.to_string();
+            if self.is_local_type_name_in_scope(&local_name) {
+                return None;
+            }
             if self.is_local_function_name_in_scope(&local_name) {
                 return None;
             }
@@ -9742,6 +9888,19 @@ impl CodeGen {
                 let mut path_str = self.emit_path_to_string(&tp.path);
                 if self.current_struct.is_some() && path_str.starts_with("Self::") {
                     path_str = path_str.trim_start_matches("Self::").to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Bound"
+                    && !self.is_local_type_name_in_scope("Bound")
+                    && !self.local_declared_types.contains("Bound")
+                {
+                    path_str = "rusty::Bound".to_string();
+                }
+                if tp.path.segments.len() == 1 {
+                    let local_name = tp.path.segments[0].ident.to_string();
+                    if self.is_local_type_name_in_scope(&local_name) {
+                        return path_str;
+                    }
                 }
 
                 // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or std::move_only_function for Fn traits
@@ -10818,18 +10977,6 @@ impl CodeGen {
         params.join(", ")
     }
 
-    fn map_fn_param_types(
-        &self,
-        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
-    ) -> Vec<String> {
-        inputs
-            .iter()
-            .filter_map(|arg| match arg {
-                syn::FnArg::Typed(pat_type) => Some(self.map_type(&pat_type.ty)),
-                syn::FnArg::Receiver(_) => None,
-            })
-            .collect()
-    }
 }
 
 /// Escape C++ reserved keywords by appending an underscore.
@@ -16274,6 +16421,49 @@ mod tests {
         assert!(!out.contains("const auto top_level"));
     }
 
+    #[test]
+    fn test_leaf41543331_nested_fn_const_generic_args_forwarded_as_value_params() {
+        let out = transpile_str(
+            r#"
+            fn outer() {
+                fn pick<const FLAG: bool>(x: i32) -> i32 {
+                    if FLAG { x } else { x + 1 }
+                }
+                let _a = pick::<false>(1);
+                let _b = pick::<true>(2);
+            }
+            "#,
+        );
+        assert!(out.contains("bool FLAG"));
+        assert!(out.contains("if (FLAG)"));
+        assert!(out.contains("pick(false, 1)"));
+        assert!(out.contains("pick(true, 2)"));
+        assert!(!out.contains("pick<false>("));
+        assert!(!out.contains("pick<true>("));
+    }
+
+    #[test]
+    fn test_leaf41543331_function_local_generic_type_refs_do_not_emit_local_template_args() {
+        let out = transpile_str(
+            r#"
+            fn outer(x: &mut i32) {
+                struct Local<'a, T> { v: &'a mut T }
+                fn use_local<'a, const FLAG: bool>(l: &mut Local<'a, i32>) -> bool {
+                    if FLAG { true } else { false }
+                }
+                let mut l = Local { v: x };
+                let _ = use_local::<false>(&mut l);
+                let _ = use_local::<true>(&mut l);
+            }
+            "#,
+        );
+        assert!(out.contains("struct Local {"));
+        assert!(out.contains("Local& l"));
+        assert!(out.contains("use_local(false,"));
+        assert!(out.contains("use_local(true,"));
+        assert!(!out.contains("Local<int32_t>"));
+    }
+
     // ── Phase 15 Gap 6: Range syntax variants ───────────────────
 
     #[test]
@@ -16310,6 +16500,39 @@ mod tests {
     fn test_range_to_inclusive() {
         let out = transpile_str("fn f() { let r = ..=10; }");
         assert!(out.contains("rusty::range_to_inclusive(10)"));
+    }
+
+    #[test]
+    fn test_leaf41543333_bound_match_patterns_lower_to_runtime_bound_variants() {
+        let out = transpile_str(
+            r#"
+            use std::ops::{Bound, RangeBounds};
+            fn start_index<R: RangeBounds<usize>>(range: R) -> usize {
+                match range.start_bound() {
+                    Bound::Unbounded => 0,
+                    Bound::Included(&i) => i,
+                    Bound::Excluded(&i) => i + 1,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::Bound_Unbounded<size_t>"));
+        assert!(out.contains("rusty::Bound_Included<size_t>"));
+        assert!(out.contains("rusty::Bound_Excluded<size_t>"));
+        assert!(!out.contains("const Bound_Unbounded&"));
+        assert!(!out.contains("const Bound_Included&"));
+        assert!(!out.contains("const Bound_Excluded&"));
+    }
+
+    #[test]
+    fn test_leaf41543333_bound_type_path_maps_to_runtime_bound_type() {
+        let out = transpile_str(
+            r#"
+            use std::ops::Bound;
+            fn passthrough(b: Bound<usize>) -> Bound<usize> { b }
+            "#,
+        );
+        assert!(out.contains("rusty::Bound<size_t> passthrough(rusty::Bound<size_t> b)"));
     }
 
     #[test]

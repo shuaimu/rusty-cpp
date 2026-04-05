@@ -7265,6 +7265,80 @@ Design rationale:
   - no unconditional rewrite of all `.add/.offset` method calls regardless of receiver type,
   - no fallback to invalid native `std::rt`/`std::ptr` paths.
 
+### 10.11.87 Phase 20 Leaf 4.15.4.3.3.3.1 (`arrayvec` Stage D): local nested-item generic recovery + `Bound` variant/runtime lowering
+
+Problem:
+
+- After 10.11.86, the first deterministic `arrayvec` Stage D blocker family was:
+  - local block-type generic misuse (`BackshiftOnDrop<T, CAP>` emitted while the lowered C++ local
+    type is non-template),
+  - nested local fn const-generic call-arg loss (`DELETED` unresolved in local helper calls),
+  - downstream `Bound_*` pattern/type fallout in `RangeBounds`-style matches.
+
+Scope analysis:
+
+- Completed as a focused generic change set under the 1000-LOC target for a single leaf.
+- No fixture-specific scripts or post-generation edits were introduced.
+
+Implementation:
+
+- Local nested-item generic recovery hardening (`transpiler/src/codegen.rs`):
+  - added function-local type scope tracking (`local_type_bindings`) and detection helpers,
+  - suppressed omitted-template recovery and explicit template-arg emission for block-local type
+    names so local struct/enum/type items are lowered to valid non-template C++ references.
+- Nested local fn const-generic forwarding (`transpiler/src/codegen.rs`):
+  - lowered nested const generics to runtime value parameters for local lambdas/helpers,
+  - threaded turbofish const args through call sites for local nested functions,
+  - guarded against emitting/forwarding const generic names already present in outer generic scope
+    (prevents `CAP` shadowing while keeping `DELETED` forwarding).
+- `Bound` match/type lowering completion (`transpiler/src/codegen.rs`):
+  - canonicalized `Bound::Unbounded|Included|Excluded` pattern arm types to runtime
+    `rusty::Bound_*` variant structs (independent of import style),
+  - added fallback template-arg recovery for omitted `Bound` pattern args (`size_t` default),
+  - mapped single-segment `Bound<T>` type positions to `rusty::Bound<T>` when not locally declared.
+- Runtime range-bound API support (`include/rusty/array.hpp`):
+  - added `rusty::Bound_Unbounded<T>`, `rusty::Bound_Included<T>`, `rusty::Bound_Excluded<T>`,
+    and `rusty::Bound<T>` (`std::variant`) definitions,
+  - added `start_bound()` / `end_bound()` on `rusty::range`, `range_inclusive`, `range_from`,
+    `range_to`, `range_to_inclusive`, and `range_full`.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf41543331_nested_fn_const_generic_args_forwarded_as_value_params`
+  - `test_leaf41543331_function_local_generic_type_refs_do_not_emit_local_template_args`
+  - `test_leaf41543333_bound_match_patterns_lower_to_runtime_bound_variants`
+  - `test_leaf41543333_bound_type_path_maps_to_runtime_bound_type`
+- `tests/rusty_array_test.cpp`:
+  - added `test_range_bounds_helpers_shape` validating runtime `Bound` variant shapes and
+    `range*::start_bound/end_bound` helpers.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler test_leaf41543331_nested_fn_const_generic_args_forwarded_as_value_params -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf41543331_function_local_generic_type_refs_do_not_emit_local_template_args -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf41543333_bound_match_patterns_lower_to_runtime_bound_variants -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf41543333_bound_type_path_maps_to_runtime_bound_type -- --nocapture`
+- `g++ -std=c++20 -Iinclude tests/rusty_array_test.cpp -o /tmp/rusty_array_test && /tmp/rusty_array_test`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- The deterministic local nested-item blocker family (`BackshiftOnDrop` template misuse,
+  unresolved `DELETED`, unresolved `Bound_*`) is removed.
+- Next deterministic `arrayvec` Stage D blockers advance to downstream integer/runtime method-shape
+  gaps, led by `saturating_add` on plain integer bindings and immediate dependents.
+
+Design rationale:
+
+- Kept fixes at generic lowering/runtime layers so behavior scales across expanded crates and
+  future `RangeBounds`-style code.
+- Avoided wrong approaches from §11:
+  - no manual patching of generated `runner.cpp` artifacts,
+  - no crate-specific rewrite path just for `arrayvec::drain`,
+  - no fallback that erases variant-arm typing into catch-all lambdas/unreachable stubs.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

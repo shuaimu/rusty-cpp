@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <type_traits>
 
 void test_range_next_and_count() {
@@ -49,6 +50,39 @@ void test_range_from_next_and_count_shape() {
         assert(*n1 == 6);
 
         assert(r.count() == std::numeric_limits<size_t>::max());
+    }
+    printf("PASS\n");
+}
+
+void test_range_bounds_helpers_shape() {
+    printf("test_range_bounds_helpers_shape: ");
+    {
+        auto closed = rusty::range<size_t>(2, 5);
+        auto closed_start = closed.start_bound();
+        auto closed_end = closed.end_bound();
+        assert(std::holds_alternative<rusty::Bound_Included<size_t>>(closed_start));
+        assert(std::get<rusty::Bound_Included<size_t>>(closed_start)._0 == 2);
+        assert(std::holds_alternative<rusty::Bound_Excluded<size_t>>(closed_end));
+        assert(std::get<rusty::Bound_Excluded<size_t>>(closed_end)._0 == 5);
+
+        auto inclusive = rusty::range_inclusive<size_t>(7, 9);
+        auto inclusive_end = inclusive.end_bound();
+        assert(std::holds_alternative<rusty::Bound_Included<size_t>>(inclusive_end));
+        assert(std::get<rusty::Bound_Included<size_t>>(inclusive_end)._0 == 9);
+
+        auto from = rusty::range_from<size_t>{10};
+        auto from_end = from.end_bound();
+        assert(std::holds_alternative<rusty::Bound_Unbounded<size_t>>(from_end));
+
+        auto to = rusty::range_to<size_t>{4};
+        auto to_start = to.start_bound();
+        assert(std::holds_alternative<rusty::Bound_Unbounded<size_t>>(to_start));
+
+        auto full = rusty::range_full{};
+        auto full_start = full.start_bound<>();
+        auto full_end = full.end_bound<>();
+        assert(std::holds_alternative<rusty::Bound_Unbounded<size_t>>(full_start));
+        assert(std::holds_alternative<rusty::Bound_Unbounded<size_t>>(full_end));
     }
     printf("PASS\n");
 }
@@ -138,15 +172,72 @@ void test_cursor_new_helper_shape() {
     printf("PASS\n");
 }
 
+void test_filter_map_lazy_shape() {
+    printf("test_filter_map_lazy_shape: ");
+    std::array<int, 4> values{1, 2, 3, 4};
+    int calls = 0;
+    auto view = rusty::filter_map(values, [&](int value) -> std::optional<int> {
+        ++calls;
+        if (value % 2 == 0) {
+            return value * 10;
+        }
+        return std::nullopt;
+    });
+
+    assert(calls == 0);
+    std::vector<int> out;
+    for (int value : view) {
+        out.push_back(value);
+    }
+    assert(calls == 4);
+    assert(out.size() == 2);
+    assert(out[0] == 20);
+    assert(out[1] == 40);
+    printf("PASS\n");
+}
+
+void test_filter_map_span_shape() {
+    printf("test_filter_map_span_shape: ");
+    const std::array<int, 3> values{3, 4, 5};
+    std::span<const int> span(values);
+
+    auto view = rusty::filter_map(span, [](int value) -> std::optional<int> {
+        if (value > 3) {
+            return value;
+        }
+        return std::nullopt;
+    });
+
+    std::vector<int> out;
+    for (int value : view) {
+        out.push_back(value);
+    }
+    assert(out.size() == 2);
+    assert(out[0] == 4);
+    assert(out[1] == 5);
+    printf("PASS\n");
+}
+
+void test_io_print_shim_shape() {
+    printf("test_io_print_shim_shape: ");
+    rusty::io::_print();
+    rusty::io::_print(123, "abc");
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty range helpers ===\n");
 
     test_range_next_and_count();
     test_range_from_next_and_count_shape();
+    test_range_bounds_helpers_shape();
     test_slice_helpers_basic_shapes();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
     test_cursor_new_helper_shape();
+    test_filter_map_lazy_shape();
+    test_filter_map_span_shape();
+    test_io_print_shim_shape();
 
     printf("\nAll rusty range tests passed!\n");
     return 0;

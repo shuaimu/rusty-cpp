@@ -12,6 +12,7 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <variant>
 #include <rusty/vec.hpp>
 
 // GCC/libstdc++ C++23 does not provide span equality operators.
@@ -40,6 +41,61 @@ void validate_slice_bounds(const SpanLike& span, size_t start, size_t end) {
         throw std::out_of_range("slice range out of bounds");
     }
 }
+
+template<typename T, typename = void>
+struct has_is_some : std::false_type {};
+
+template<typename T>
+struct has_is_some<T, std::void_t<decltype(std::declval<const T&>().is_some())>> : std::true_type {};
+
+template<typename T, typename = void>
+struct has_unwrap : std::false_type {};
+
+template<typename T>
+struct has_unwrap<T, std::void_t<decltype(std::declval<T&>().unwrap())>> : std::true_type {};
+
+template<typename T, typename = void>
+struct has_has_value : std::false_type {};
+
+template<typename T>
+struct has_has_value<T, std::void_t<decltype(std::declval<const T&>().has_value())>> : std::true_type {};
+
+template<typename T, typename = void>
+struct has_reset : std::false_type {};
+
+template<typename T>
+struct has_reset<T, std::void_t<decltype(std::declval<T&>().reset())>> : std::true_type {};
+
+template<typename Opt>
+bool option_has_value(const Opt& opt) {
+    if constexpr (has_is_some<Opt>::value) {
+        return opt.is_some();
+    } else if constexpr (has_has_value<Opt>::value) {
+        return opt.has_value();
+    } else {
+        return static_cast<bool>(opt);
+    }
+}
+
+template<typename Opt>
+auto option_take_value(Opt& opt) {
+    if constexpr (has_unwrap<Opt>::value) {
+        return opt.unwrap();
+    } else if constexpr (has_has_value<Opt>::value && has_reset<Opt>::value) {
+        auto value = std::move(*opt);
+        opt.reset();
+        return value;
+    } else {
+        return std::move(*opt);
+    }
+}
+
+template<typename Opt>
+using option_value_t = std::decay_t<decltype(option_take_value(std::declval<Opt&>()))>;
+
+template<typename Range>
+using range_storage_t =
+    std::conditional_t<std::is_lvalue_reference_v<Range>, Range, std::decay_t<Range>>;
 } // namespace detail
 
 /// Create a vector filled with `count` copies of `value`.
@@ -72,6 +128,81 @@ size_t len(const Container& container) {
     } else {
         return static_cast<size_t>(std::size(container));
     }
+}
+
+/// Lazy filter_map view for transpiled iterator chains (`iter().filter_map(...)`).
+/// The mapping closure is only evaluated while iterating the view.
+template<typename Range, typename Func>
+class filter_map_view {
+    using base_iterator = decltype(std::begin(std::declval<Range&>()));
+    using option_type = std::decay_t<decltype(std::declval<Func&>()(*std::declval<base_iterator&>()))>;
+    using value_type = detail::option_value_t<option_type>;
+
+public:
+    template<typename R, typename F>
+    filter_map_view(R&& range, F&& func)
+        : range_(std::forward<R>(range)), func_(std::forward<F>(func)) {}
+
+    class iterator {
+    public:
+        iterator(base_iterator current, base_iterator end, Func* func, bool at_end = false)
+            : current_(current), end_(end), func_(func), at_end_(at_end) {
+            if (!at_end_) {
+                advance();
+            }
+        }
+
+        const value_type& operator*() const { return *cached_; }
+
+        iterator& operator++() {
+            advance();
+            return *this;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return current_ != other.current_ || at_end_ != other.at_end_;
+        }
+
+    private:
+        void advance() {
+            cached_.reset();
+            while (current_ != end_) {
+                auto mapped = (*func_)(*current_);
+                ++current_;
+                if (detail::option_has_value(mapped)) {
+                    cached_.emplace(detail::option_take_value(mapped));
+                    at_end_ = false;
+                    return;
+                }
+            }
+            at_end_ = true;
+        }
+
+        base_iterator current_;
+        base_iterator end_;
+        Func* func_;
+        std::optional<value_type> cached_;
+        bool at_end_;
+    };
+
+    iterator begin() { return iterator(std::begin(range_), std::end(range_), &func_); }
+    iterator end() { return iterator(std::end(range_), std::end(range_), &func_, true); }
+    iterator begin() const { return iterator(std::begin(range_), std::end(range_), &func_); }
+    iterator end() const { return iterator(std::end(range_), std::end(range_), &func_, true); }
+
+private:
+    Range range_;
+    mutable Func func_;
+};
+
+template<typename Range, typename Func>
+auto filter_map(Range&& range, Func&& func) {
+    using StoredRange = detail::range_storage_t<Range&&>;
+    using StoredFunc = std::decay_t<Func>;
+    return filter_map_view<StoredRange, StoredFunc>(
+        std::forward<Range>(range),
+        std::forward<Func>(func)
+    );
 }
 
 /// Slice helpers used by transpiled Rust range-index expressions.
@@ -124,6 +255,22 @@ auto slice_inclusive(Container& container, Start start, End end) {
 
 /// Iterable range [start, end) — equivalent to Rust's `start..end`.
 template<typename T>
+struct Bound_Unbounded {};
+
+template<typename T>
+struct Bound_Included {
+    T _0;
+};
+
+template<typename T>
+struct Bound_Excluded {
+    T _0;
+};
+
+template<typename T>
+using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>;
+
+template<typename T>
 class range {
 public:
     range(T start, T end) : start_(start), end_(end) {}
@@ -137,6 +284,9 @@ public:
 
     iterator begin() const { return {start_}; }
     iterator end() const { return {end_}; }
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start_}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     std::optional<T> next() {
@@ -181,6 +331,9 @@ public:
     iterator begin() const { return {start_, end_, false}; }
     iterator end() const { return {end_, end_, true}; }
 
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start_}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
+
 private:
     T start_, end_;
 };
@@ -189,6 +342,9 @@ private:
 template<typename T>
 struct range_from {
     T start;
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     std::optional<T> next() {
@@ -208,15 +364,26 @@ struct range_from {
 template<typename T>
 struct range_to {
     T end;
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
 };
 
 /// Full range — equivalent to Rust's `..`.
-struct range_full {};
+struct range_full {
+    template<typename T = size_t>
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    template<typename T = size_t>
+    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+};
 
 /// Range to inclusive — equivalent to Rust's `..=end`.
 template<typename T>
 struct range_to_inclusive {
     T end;
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }
 };
 
 } // namespace rusty
