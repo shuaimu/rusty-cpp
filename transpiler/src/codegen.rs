@@ -441,6 +441,8 @@ impl CodeGen {
         self.writeln("#include <optional>");
         self.writeln("#include <utility>");
         self.writeln("#include <type_traits>");
+        self.writeln("#include <typeindex>");
+        self.writeln("#include <any>");
         self.writeln("#include <string>");
         self.writeln("#include <string_view>");
         self.writeln("#include <charconv>");
@@ -2794,7 +2796,7 @@ impl CodeGen {
         }
         let name = &c.ident;
         let ty = self.map_type(&c.ty);
-        let expr = self.emit_expr_to_string(&c.expr);
+        let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
         self.writeln(&format!("constexpr {} {} = {};", ty, name, expr));
     }
 
@@ -2808,7 +2810,7 @@ impl CodeGen {
         }
         let name = &s.ident;
         let ty = self.map_type(&s.ty);
-        let expr = self.emit_expr_to_string(&s.expr);
+        let expr = self.emit_expr_to_string_with_expected(&s.expr, Some(&s.ty));
         self.writeln(&format!("static {} {} = {};", ty, name, expr));
     }
 
@@ -3810,7 +3812,7 @@ impl CodeGen {
                     return;
                 }
                 let ty = self.map_type(&c.ty);
-                let expr = self.emit_expr_to_string(&c.expr);
+                let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
                 self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
             }
             syn::ImplItem::Type(t) => {
@@ -12356,6 +12358,8 @@ struct Formatter {\n\
     static Result debug_tuple_field1_finish(Args&&...) { return true; }\n\
     template<typename... Args>\n\
     static Result debug_struct_field1_finish(Args&&...) { return true; }\n\
+    template<typename... Args>\n\
+    Result write_fmt(Args&&...) const { return true; }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
 };\n\
 }\n\
@@ -12808,6 +12812,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_any_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_path_import(normalized) {
         return action;
     }
@@ -13032,6 +13039,26 @@ fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
         return Some(UseImportAction::Using("rusty::String".to_string()));
     }
     None
+}
+
+fn rewrite_std_any_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::any" || path == "core::any" {
+        // Rust `std::any` is a trait/module surface with no direct namespace twin
+        // in C++; keep it Rust-only unless a concrete item mapping exists.
+        return Some(UseImportAction::RustOnly);
+    }
+
+    let item = path
+        .strip_prefix("std::any::")
+        .or_else(|| path.strip_prefix("core::any::"))?;
+    let action = match item {
+        // `Any` is a Rust trait; no direct C++ import equivalent.
+        "Any" => UseImportAction::RustOnly,
+        // Keep TypeId-shaped imports concrete and compile-safe.
+        "TypeId" => UseImportAction::Using("std::type_index".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 fn rewrite_std_path_import(path: &str) -> Option<UseImportAction> {
@@ -14519,6 +14546,26 @@ mod tests {
         );
         assert!(out.contains("MakeMaybeUninit<T, CAP>::ARRAY"));
         assert!(!out.contains("MakeMaybeUninit::ARRAY"));
+    }
+
+    #[test]
+    fn test_leaf4154333333361_impl_const_maybeuninit_uninit_uses_expected_owner_type() {
+        let out = transpile_str(
+            r#"
+            mod utils {
+                use std::marker::PhantomData;
+                use std::mem::MaybeUninit;
+                struct MakeMaybeUninit<T, const N: usize>(PhantomData<fn() -> T>);
+                impl<T, const N: usize> MakeMaybeUninit<T, N> {
+                    const VALUE: MaybeUninit<T> = MaybeUninit::uninit();
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "static constexpr rusty::MaybeUninit<T> VALUE = rusty::MaybeUninit<T>::uninit();"
+        ));
+        assert!(!out.contains("static constexpr rusty::MaybeUninit<T> VALUE = MaybeUninit::uninit();"));
     }
 
     #[test]
@@ -16139,6 +16186,20 @@ mod tests {
         let out = transpile_str("fn f(x: u32) { let _ = std::char::from_u32(x); }");
         assert!(out.contains("rusty::char_runtime::from_u32("));
         assert!(!out.contains("std::char::from_u32"));
+    }
+
+    #[test]
+    fn test_leaf4154333333361_std_any_any_import_is_treated_as_rust_only() {
+        let out = transpile_str("use std::any::Any;");
+        assert!(out.contains("// Rust-only: using std::any::Any;"));
+        assert!(!out.contains("\nusing std::any::Any;"));
+    }
+
+    #[test]
+    fn test_leaf4154333333361_std_any_typeid_import_maps_to_std_type_index() {
+        let out = transpile_str("use std::any::TypeId;");
+        assert!(out.contains("using std::type_index;"));
+        assert!(!out.contains("using std::any::TypeId;"));
     }
 
     #[test]
@@ -18330,6 +18391,12 @@ mod tests {
         assert!(helpers.contains("DebugList& entries(Args&&...)"));
         assert!(helpers.contains("Result finish() { return true; }"));
         assert!(helpers.contains("DebugList debug_list() const { return DebugList{}; }"));
+    }
+
+    #[test]
+    fn test_leaf4154333333361_runtime_fallback_formatter_supports_write_fmt() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("Result write_fmt(Args&&...) const { return true; }"));
     }
 
     #[test]

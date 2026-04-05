@@ -65,6 +65,10 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Runtime compatibility fallbacks for expanded Rust paths.
         "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
         "std::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
+        "Any" | "std::any::Any" | "core::any::Any" => Some(("std::any", false)),
+        "TypeId" | "std::any::TypeId" | "core::any::TypeId" => {
+            Some(("std::type_index", false))
+        }
         "slice::Iter" | "core::slice::Iter" | "std::slice::Iter" => {
             Some(("rusty::slice_iter::Iter", true))
         }
@@ -320,6 +324,11 @@ mod tests {
         assert_eq!(
             map_std_type("core::fmt::Formatter"),
             Some(("rusty::fmt::Formatter", false))
+        );
+        assert_eq!(map_std_type("std::any::Any"), Some(("std::any", false)));
+        assert_eq!(
+            map_std_type("core::any::TypeId"),
+            Some(("std::type_index", false))
         );
         assert_eq!(
             map_std_type("fmt::Arguments"),

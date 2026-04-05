@@ -7996,6 +7996,74 @@ Avoided wrong approaches from §11:
 - §11.80: no blanket Rust-runtime path passthrough into C++ `std::*` names.
 - §11.91/§11.92: no ad-hoc ordering hacks to hide unresolved-name frontiers.
 
+### 10.96 Leaf 4.15.4.3.3.3.3.3.6.1 — Core Trio Collapse (`std::any` / `Formatter::write_fmt` / `MaybeUninit::uninit` owner recovery)
+
+Scope completed in this pass:
+
+- Implemented Leaf `4.15.4.3.3.3.3.3.6.1` as the first deterministic post-5.3 implementation slice.
+- The change remained a focused shared-layer update and stayed comfortably under the 1000-LOC
+  guideline, so no further TODO decomposition was needed.
+
+Implementation details:
+
+- `transpiler/src/codegen.rs`:
+  - Added `#include <typeindex>` and `#include <any>` to generated module includes.
+  - Added `rewrite_std_any_import(...)` and integrated it into `classify_use_import(...)`:
+    - `std::any` / `core::any` module imports are treated as Rust-only.
+    - `std::any::Any` / `core::any::Any` are Rust-only (no invalid C++ namespace emission).
+    - `std::any::TypeId` / `core::any::TypeId` map to `using std::type_index;`.
+  - Added runtime fallback support on `rusty::fmt::Formatter`:
+    - `template<typename... Args> Result write_fmt(Args&&...) const`.
+  - Threaded expected-type context into constant/static emission:
+    - `emit_const`, `emit_static`, and impl-associated const emission now call
+      `emit_expr_to_string_with_expected(..., Some(&ty))`.
+    - This enables omitted-template associated-call owner recovery for
+      `MaybeUninit::uninit()` in typed const contexts.
+- `transpiler/src/types.rs`:
+  - Added type mappings:
+    - `Any` / `std::any::Any` / `core::any::Any` → `std::any`
+    - `TypeId` / `std::any::TypeId` / `core::any::TypeId` → `std::type_index`
+
+Regression tests added:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154333333361_std_any_any_import_is_treated_as_rust_only`
+  - `test_leaf4154333333361_std_any_typeid_import_maps_to_std_type_index`
+  - `test_leaf4154333333361_runtime_fallback_formatter_supports_write_fmt`
+  - `test_leaf4154333333361_impl_const_maybeuninit_uninit_uses_expected_owner_type`
+- `transpiler/src/types.rs`:
+  - extended `test_leaf42_runtime_type_fallback_mappings` coverage for `std::any::Any` and
+    `core::any::TypeId`.
+
+Verification:
+
+- Focused leaf tests:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333361 -- --nocapture`
+- Full transpiler suite:
+  - `cargo test -p rusty-cpp-transpiler`
+- Full workspace suite:
+  - `cargo test`
+- Parity re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- The 6.1 core trio no longer leads Stage D first-failure output:
+  - no `using std::any::Any` hard error at the frontier,
+  - no missing `Formatter::write_fmt` at the frontier,
+  - no first-position omitted-template `MaybeUninit::uninit()` owner-path error.
+- New deterministic first blockers now begin with downstream control-flow/error-shape families:
+  - invalid `return return ...` lambda emission,
+  - unresolved `fmt::Error` value-path lowering,
+  - then dependent unresolved-name/test-shape errors (`std::collections`, `alloc`, iterator
+    adapter/value-shape fallout).
+
+Avoided wrong approaches from §11:
+
+- §11.93: no direct passthrough of Rust `std::any::Any` module semantics into C++ namespaces.
+- §11.91/§11.92: no declaration-order hacks to hide downstream blockers.
+- §11.94: no string-level `return return` post-processing hacks (left for structural 6.2 fix).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -9175,3 +9243,18 @@ as `Option2<T>`).
   unresolved-name failures before deeper parity signal.
 - Correct handling must be a targeted import/path rewrite strategy for this Rust path family,
   rather than direct passthrough of Rust module semantics.
+
+### 11.94 Fixing `return return ...` by Global Text Post-Processing
+
+**Rejected approach:** After codegen, run a blanket text rewrite over generated C++ (for example,
+replace `return return` with `return`) to make Stage D compile.
+
+**Why it was rejected:**
+
+- It is syntax-level patching detached from AST/control-flow structure and can silently alter
+  unrelated output contexts.
+- It hides the real lowering bug in expression/statement return-shape generation, making future
+  regressions harder to reason about.
+- It risks semantic drift in nested lambdas/branches where one `return` may belong to a distinct
+  expression context.
+- Correct handling should be structural in codegen (Leaf 6.2 scope), not output-text surgery.
