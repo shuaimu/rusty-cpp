@@ -110,6 +110,38 @@ namespace detail {
 template<typename T>
 inline constexpr bool dependent_false_v = false;
 
+template<typename NextResult, typename = void>
+struct is_option_like_next_result : std::false_type {};
+
+template<typename NextResult>
+struct is_option_like_next_result<
+    NextResult,
+    std::void_t<
+        decltype(option_has_value(std::declval<const NextResult&>())),
+        decltype(option_take_value(std::declval<NextResult&>()))>> : std::true_type {};
+
+template<typename NextResult>
+inline constexpr bool is_option_like_next_result_v =
+    is_option_like_next_result<NextResult>::value;
+
+template<typename Iter, typename = void>
+struct has_option_like_next : std::false_type {};
+
+template<typename Iter>
+struct has_option_like_next<Iter, std::void_t<decltype(std::declval<Iter&>().next())>>
+    : std::bool_constant<
+          is_option_like_next_result_v<decltype(std::declval<Iter&>().next())>> {};
+
+template<typename Iter>
+inline constexpr bool has_option_like_next_v = has_option_like_next<Iter>::value;
+
+template<typename Iter>
+using next_result_t = decltype(std::declval<Iter&>().next());
+
+template<typename Iter>
+using next_item_t =
+    std::decay_t<decltype(option_take_value(std::declval<next_result_t<Iter>&>()))>;
+
 template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
     if constexpr (std::is_pointer_v<std::remove_reference_t<T>>) {
@@ -122,11 +154,15 @@ constexpr decltype(auto) deref_if_pointer(T&& value) {
 template<typename NextIter>
 class next_iter_range {
 public:
+    static_assert(
+        has_option_like_next_v<NextIter>,
+        "rusty::for_in requires next() to return an Option/optional-like value"
+    );
+
     explicit next_iter_range(NextIter iter) : iter_(std::move(iter)) {}
 
     class iterator {
-        using next_result_type = decltype(std::declval<NextIter&>().next());
-        using item_type = std::decay_t<decltype(option_take_value(std::declval<next_result_type&>()))>;
+        using item_type = next_item_t<NextIter>;
 
     public:
         iterator() : iter_(nullptr), at_end_(true) {}
@@ -178,12 +214,16 @@ private:
 template<typename Iter, typename Func>
 class map_next_iter {
 public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::map requires next() to return an Option/optional-like value"
+    );
+
     map_next_iter(Iter iter, Func func)
         : iter_(std::move(iter)), func_(std::move(func)) {}
 
     auto next() {
-        using next_result_type = decltype(iter_.next());
-        using item_type = decltype(option_take_value(std::declval<next_result_type&>()));
+        using item_type = next_item_t<Iter>;
         using mapped_type = std::decay_t<decltype(
             std::invoke(std::declval<Func&>(), deref_if_pointer(std::declval<item_type>())))>;
 
@@ -201,6 +241,35 @@ private:
     Func func_;
 };
 
+template<typename Iter>
+class take_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<Iter>>,
+        "rusty::take requires next() to return an Option/optional-like value"
+    );
+
+    take_next_iter(Iter iter, size_t remaining)
+        : iter_(std::forward<Iter>(iter)), remaining_(remaining) {}
+
+    auto next() {
+        using next_result = decltype(iter_.next());
+        if (remaining_ == 0) {
+            return next_result{};
+        }
+        auto item = iter_.next();
+        if (!option_has_value(item)) {
+            return item;
+        }
+        --remaining_;
+        return item;
+    }
+
+private:
+    Iter iter_;
+    size_t remaining_;
+};
+
 template<typename NextIter>
 auto make_next_iter_range(NextIter&& iter) {
     using stored_iter = std::decay_t<NextIter>;
@@ -214,6 +283,13 @@ auto make_map_next_iter(Iter&& iter, Func&& func) {
     return map_next_iter<stored_iter, stored_func>(
         std::forward<Iter>(iter),
         std::forward<Func>(func));
+}
+
+template<typename Iter>
+auto make_take_next_iter(Iter&& iter, size_t remaining) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    return take_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
 }
 } // namespace detail
 
@@ -241,8 +317,13 @@ decltype(auto) iter(Range&& range) {
 
 template<typename Range>
 decltype(auto) for_in(Range&& range) {
-    if constexpr (requires { std::forward<Range>(range).next(); }) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_next_iter_range(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::for_in requires next() to return an Option/optional-like value"
+        );
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return for_in(std::forward<Range>(range).into_iter());
     } else if constexpr (
@@ -258,10 +339,15 @@ decltype(auto) for_in(Range&& range) {
 
 template<typename Range, typename Func>
 decltype(auto) map(Range&& range, Func&& func) {
-    if constexpr (requires { std::forward<Range>(range).next(); }) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_map_next_iter(
             std::forward<Range>(range),
             std::forward<Func>(func));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::map requires next() to return an Option/optional-like value"
+        );
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return map(
             std::forward<Range>(range).into_iter(),
@@ -270,6 +356,28 @@ decltype(auto) map(Range&& range, Func&& func) {
         return detail::make_map_next_iter(
             iter(std::forward<Range>(range)),
             std::forward<Func>(func));
+    }
+}
+
+template<typename Range>
+decltype(auto) take(Range&& range, size_t remaining) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_take_next_iter(
+            std::forward<Range>(range),
+            remaining);
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::take requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return take(
+            std::forward<Range>(range).into_iter(),
+            remaining);
+    } else {
+        return take(
+            iter(std::forward<Range>(range)),
+            remaining);
     }
 }
 

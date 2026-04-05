@@ -29,6 +29,16 @@ void test_cell_basic() {
 }
 
 // @safe
+void test_cell_new_ctor_alias() {
+    std::cout << "Testing Cell::new_ constructor alias..." << std::endl;
+
+    auto cell = Cell<int>::new_(7);
+    assert(cell.get() == 7);
+
+    std::cout << "✓ Cell::new_ works" << std::endl;
+}
+
+// @safe
 void test_cell_swap() {
     std::cout << "Testing Cell swap..." << std::endl;
     
@@ -153,6 +163,7 @@ int main() {
     std::cout << "\n=== Cell<T> Test Suite ===" << std::endl;
     
     test_cell_basic();
+    test_cell_new_ctor_alias();
     test_cell_swap();
     test_cell_take();
     test_cell_update();

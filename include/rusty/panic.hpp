@@ -3,6 +3,9 @@
 
 #include <cstdlib>
 #include <exception>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -49,7 +52,17 @@ auto catch_unwind(AssertUnwindSafe<F> wrapped) {
 
 template<typename... Args>
 [[noreturn]] inline void begin_panic(Args&&...) {
-    std::abort();
+    throw std::runtime_error("panic");
+}
+
+template<typename Message, typename... Args>
+[[noreturn]] inline void begin_panic(Message&& message, Args&&...) {
+    if constexpr (std::is_convertible_v<Message, std::string_view>) {
+        throw std::runtime_error(
+            std::string(std::string_view(std::forward<Message>(message))));
+    } else {
+        throw std::runtime_error("panic");
+    }
 }
 
 } // namespace panic

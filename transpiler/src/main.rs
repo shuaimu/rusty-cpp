@@ -493,8 +493,7 @@ void rusty_test_dup() {
 
     #[test]
     fn test_is_workspace_package_miss_detects_non_member_dev_dependency_error() {
-        let stderr =
-            "error: package `bitflags` cannot be tested because it requires dev-dependencies and is not a member of the workspace";
+        let stderr = "error: package `bitflags` cannot be tested because it requires dev-dependencies and is not a member of the workspace";
         assert!(is_workspace_package_miss(stderr));
     }
 }
@@ -623,6 +622,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_manifest_workspace_isolation(manifest: &Path) -> Result<(), String> {
+    let mut content = fs::read_to_string(manifest)
+        .map_err(|e| format!("Failed to read manifest {}: {}", manifest.display(), e))?;
+    if content.lines().any(|line| line.trim() == "[workspace]") {
+        return Ok(());
+    }
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("\n[workspace]\n");
+    fs::write(manifest, content)
+        .map_err(|e| format!("Failed to update manifest {}: {}", manifest.display(), e))
+}
+
 fn ensure_isolated_manifest_copy(
     manifest: &Path,
     project_dir: &Path,
@@ -658,6 +671,7 @@ fn ensure_isolated_manifest_copy(
         })?
         .to_path_buf();
     let isolated_manifest = isolated_root.join(manifest_rel);
+    ensure_manifest_workspace_isolation(&isolated_manifest)?;
     *cached_manifest = Some(isolated_manifest.clone());
     Ok(isolated_manifest)
 }
@@ -709,36 +723,22 @@ fn run_baseline_attempt(
         }
     }
 
-    let isolated_root = work_dir.join("baseline_source_manifest");
-    if isolated_root.exists() {
-        fs::remove_dir_all(&isolated_root).map_err(|e| {
-            format!(
-                "Failed to clean baseline isolation dir {}: {}",
-                isolated_root.display(),
-                e
-            )
-        })?;
-    }
-    copy_dir_recursive(project_dir, &isolated_root)?;
-
-    let manifest_rel = manifest
-        .strip_prefix(project_dir)
-        .map_err(|_| {
-            format!(
-                "Manifest {} is not under project dir {}",
-                manifest.display(),
-                project_dir.display()
-            )
-        })?
-        .to_path_buf();
-    let isolated_manifest = isolated_root.join(&manifest_rel);
+    let mut isolated_manifest_cache = None;
+    let isolated_manifest = ensure_isolated_manifest_copy(
+        manifest,
+        project_dir,
+        work_dir,
+        "baseline_source_manifest",
+        &mut isolated_manifest_cache,
+    )?;
+    let isolated_root = isolated_manifest.parent().unwrap_or_else(|| Path::new("."));
 
     println!(
         "  Baseline retry: cargo test --manifest-path {}",
         isolated_manifest.display()
     );
     run_cargo_test(
-        &isolated_root,
+        isolated_root,
         Some(&isolated_manifest),
         package,
         cargo_flags,
@@ -828,29 +828,14 @@ fn discover_targets_with_workspace_fallback(
         }
     }
 
-    let isolated_root = work_dir.join("metadata_source_manifest");
-    if isolated_root.exists() {
-        fs::remove_dir_all(&isolated_root).map_err(|e| {
-            format!(
-                "Failed to clean metadata isolation dir {}: {}",
-                isolated_root.display(),
-                e
-            )
-        })?;
-    }
-    copy_dir_recursive(project_dir, &isolated_root)?;
-
-    let manifest_rel = manifest
-        .strip_prefix(project_dir)
-        .map_err(|_| {
-            format!(
-                "Manifest {} is not under project dir {}",
-                manifest.display(),
-                project_dir.display()
-            )
-        })?
-        .to_path_buf();
-    let isolated_manifest = isolated_root.join(&manifest_rel);
+    let mut isolated_manifest_cache = None;
+    let isolated_manifest = ensure_isolated_manifest_copy(
+        manifest,
+        project_dir,
+        work_dir,
+        "metadata_source_manifest",
+        &mut isolated_manifest_cache,
+    )?;
     println!(
         "  Metadata retry: cargo metadata --manifest-path {}",
         isolated_manifest.display()
@@ -914,9 +899,7 @@ fn run_cargo_expand_with_workspace_fallback(
         "expand_source_manifest",
         isolated_manifest_cache,
     )?;
-    let isolated_root = isolated_manifest
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let isolated_root = isolated_manifest.parent().unwrap_or_else(|| Path::new("."));
     println!(
         "  Expand retry: cargo expand --manifest-path {}",
         isolated_manifest.display()
@@ -1171,11 +1154,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 format!("--test {}", target.name),
             ),
             _ => (
-                vec![target
-                    .kind
-                    .cargo_expand_flag()
-                    .unwrap_or("--lib")
-                    .to_string()],
+                vec![
+                    target
+                        .kind
+                        .cargo_expand_flag()
+                        .unwrap_or("--lib")
+                        .to_string(),
+                ],
                 target
                     .kind
                     .cargo_expand_flag()

@@ -30,6 +30,8 @@ public:
     Cell() : value() {}
     // @safe
     explicit Cell(T val) : value(val) {}
+    // @safe - Rust-style constructor path used by transpiled code (`Cell::new(...)`)
+    static Cell new_(T val) { return Cell(val); }
 
     // @safe - Get a copy of the value
     // @lifetime: (&'a) -> T

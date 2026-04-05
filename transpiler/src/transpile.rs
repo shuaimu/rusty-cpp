@@ -14,12 +14,7 @@ pub fn transpile_with_type_map(
     module_name: Option<&str>,
     type_map: &UserTypeMap,
 ) -> Result<String, String> {
-    transpile_with_type_map_and_extension_hints(
-        rust_source,
-        module_name,
-        type_map,
-        &HashSet::new(),
-    )
+    transpile_with_type_map_and_extension_hints(rust_source, module_name, type_map, &HashSet::new())
 }
 
 /// Transpile with user-provided type mappings plus cross-source extension-method hints.
@@ -34,10 +29,7 @@ pub fn transpile_with_type_map_and_extension_hints(
     let mut codegen = if extension_method_hints.is_empty() {
         CodeGen::with_type_map(type_map.clone())
     } else {
-        CodeGen::with_type_map_and_extension_hints(
-            type_map.clone(),
-            extension_method_hints.clone(),
-        )
+        CodeGen::with_type_map_and_extension_hints(type_map.clone(), extension_method_hints.clone())
     };
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())

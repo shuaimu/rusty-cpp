@@ -136,14 +136,24 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected_work_dir = work_root.path().join("either");
-    assert!(stderr.contains("first failing crate: either"), "stderr:\n{}", stderr);
     assert!(
-        stderr.contains(&format!("baseline.txt: {}/baseline.txt", expected_work_dir.display())),
+        stderr.contains("first failing crate: either"),
         "stderr:\n{}",
         stderr
     );
     assert!(
-        stderr.contains(&format!("build.log: {}/build.log", expected_work_dir.display())),
+        stderr.contains(&format!(
+            "baseline.txt: {}/baseline.txt",
+            expected_work_dir.display()
+        )),
+        "stderr:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains(&format!(
+            "build.log: {}/build.log",
+            expected_work_dir.display()
+        )),
         "stderr:\n{}",
         stderr
     );

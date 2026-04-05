@@ -473,6 +473,40 @@ fn test_stop_after_baseline_workspace_mismatch_synthetic_fixture_passes() {
 }
 
 #[test]
+fn test_stop_after_baseline_workspace_mismatch_fallback_passes_with_in_workspace_work_dir() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let workspace_root = manifest.parent().unwrap().parent().unwrap().to_path_buf();
+    let work_dir = workspace_root.join(".parity-work-baseline");
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("baseline")
+        .arg("--work-dir")
+        .arg(&work_dir)
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(work_dir.join("baseline.txt").exists());
+
+    let isolated_manifest = work_dir.join("baseline_source_manifest/Cargo.toml");
+    let isolated_manifest_text = std::fs::read_to_string(&isolated_manifest).unwrap();
+    assert!(
+        isolated_manifest_text
+            .lines()
+            .any(|line| line.trim() == "[workspace]")
+    );
+}
+
+#[test]
 fn test_stop_after_baseline_warning_as_error_retry_passes() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let manifest = create_warning_as_error_fixture(fixture_dir.path());
@@ -511,7 +545,10 @@ fn test_stop_after_baseline_workspace_non_member_dev_dependency_retry_passes() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    let project_dir = manifest.parent().expect("manifest has parent").to_path_buf();
+    let project_dir = manifest
+        .parent()
+        .expect("manifest has parent")
+        .to_path_buf();
     let workspace_manifest = project_dir
         .parent()
         .expect("workspace fixture has parent")
@@ -675,6 +712,49 @@ fn test_stop_after_expand_workspace_mismatch_fallback_passes() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Expand retry:"));
     assert!(expanded_artifact_path(work_dir.path(), "orphan").exists());
+}
+
+#[test]
+fn test_stop_after_expand_workspace_mismatch_fallback_passes_with_in_workspace_work_dir() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_workspace_mismatch_fixture(fixture_dir.path());
+    let workspace_root = manifest.parent().unwrap().parent().unwrap().to_path_buf();
+    let work_dir = workspace_root.join(".parity-work-expand");
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("expand")
+        .arg("--work-dir")
+        .arg(&work_dir)
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(expanded_artifact_path(&work_dir, "orphan").exists());
+
+    let metadata_manifest = work_dir.join("metadata_source_manifest/Cargo.toml");
+    let metadata_manifest_text = std::fs::read_to_string(&metadata_manifest).unwrap();
+    assert!(
+        metadata_manifest_text
+            .lines()
+            .any(|line| line.trim() == "[workspace]")
+    );
+
+    let expand_manifest = work_dir.join("expand_source_manifest/Cargo.toml");
+    let expand_manifest_text = std::fs::read_to_string(&expand_manifest).unwrap();
+    assert!(
+        expand_manifest_text
+            .lines()
+            .any(|line| line.trim() == "[workspace]")
+    );
 }
 
 #[test]

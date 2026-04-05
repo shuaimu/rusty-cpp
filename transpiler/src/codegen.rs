@@ -8245,6 +8245,20 @@ impl CodeGen {
                 return format!("rusty::collect_range({})", receiver);
             }
         }
+        if mc.method == "by_ref"
+            && mc.args.is_empty()
+            && self.is_iterator_like_receiver_expr(&mc.receiver)
+        {
+            return self.emit_expr_to_string(&mc.receiver);
+        }
+        if mc.method == "take"
+            && mc.args.len() == 1
+            && self.is_iterator_like_receiver_expr(&mc.receiver)
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let count = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::take({}, {})", receiver, count);
+        }
         if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
             return io_call;
         }
@@ -9454,6 +9468,10 @@ impl CodeGen {
         }
     }
 
+    fn is_iterator_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
+        self.infer_iter_item_type_from_expr(expr).is_some()
+    }
+
     fn infer_array_capacity_arg_for_expr(&self, expr: &syn::Expr) -> Option<String> {
         let expr = self.peel_paren_group_expr(expr);
         match expr {
@@ -9926,7 +9944,7 @@ impl CodeGen {
         }
         // Map Ok(x) and Err(x) for Result
         if func == "Ok" && call.args.len() == 1 {
-            let arg = self.emit_expr_to_string_with_expected(
+            let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
                 &call.args[0],
                 self.expected_result_type_arg(expected_ty, 0),
             );
@@ -9947,7 +9965,7 @@ impl CodeGen {
             return format!("Ok({})", arg);
         }
         if func == "Err" && call.args.len() == 1 {
-            let arg = self.emit_expr_to_string_with_expected(
+            let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
                 &call.args[0],
                 self.expected_result_type_arg(expected_ty, 1),
             );
@@ -11037,14 +11055,7 @@ impl CodeGen {
         if mc.method != "map" || mc.args.len() != 1 {
             return None;
         }
-        let inner = match self.peel_paren_group_expr(&mc.receiver) {
-            syn::Expr::MethodCall(inner) => inner,
-            _ => return None,
-        };
-        if !matches!(
-            inner.method.to_string().as_str(),
-            "iter" | "iter_mut" | "into_iter" | "cloned"
-        ) {
+        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -21076,8 +21087,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("rusty::Result<R, L>::Err(l)"));
-        assert!(out.contains("rusty::Result<R, L>::Ok(r)"));
+        assert!(out.contains("rusty::Result<R, L>::Err(std::move(l))"));
+        assert!(out.contains("rusty::Result<R, L>::Ok(std::move(r))"));
         assert!(!out.contains("rusty::Result::err"));
         assert!(!out.contains("rusty::Result::ok"));
     }
@@ -21309,6 +21320,54 @@ mod tests {
         assert!(out.contains("v.push(rusty::Vec<int32_t>::new_());"));
         assert!(!out.contains("alloc::vec::Vec::new"));
         assert!(!out.contains("rusty::Vec::new_()"));
+    }
+
+    #[test]
+    fn test_leaf4154333333393_result_ok_moves_local_payload() {
+        let out = transpile_str(
+            r#"
+            fn f() -> Result<Vec<i32>, ()> {
+                let v = Vec::new();
+                Ok(v)
+            }
+        "#,
+        );
+        assert!(out.contains("::Ok(std::move(v))"));
+        assert!(!out.contains("::Ok(v)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333393_iterator_by_ref_take_map_chain_lowers_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut range = 0..10;
+                let _a: Vec<i32> = range.by_ref().take(5).collect();
+                let _b: Vec<i32> = (0..3).map(|x| x).collect();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::take(range, 5)"));
+        assert!(out.contains("rusty::map((rusty::range(0, 3)),"));
+        assert!(!out.contains("range.by_ref()"));
+        assert!(!out.contains(".take(5)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333393_non_iterator_by_ref_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn by_ref(&self) {}
+            }
+            fn f(s: S) {
+                s.by_ref();
+            }
+        "#,
+        );
+        assert!(out.contains("s.by_ref()"));
+        assert!(!out.contains("rusty::take(s,"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────

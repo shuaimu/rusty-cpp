@@ -5,6 +5,9 @@
 #include <stdexcept>
 #include <new>
 #include <type_traits>
+#include <tuple>
+#include <cstdlib>
+#include <rusty/option.hpp>
 
 // Result<T, E> - Represents either success (Ok) or failure (Err)
 // Equivalent to Rust's Result<T, E>
@@ -126,6 +129,22 @@ public:
     // Check if Result is Err
     bool is_err() const { return !is_ok_value; }
 
+    // Convert Result<T, E> into Option<T> by discarding Err.
+    Option<T> ok() {
+        if (is_ok_value) {
+            return Option<T>(std::move(ok_ref()));
+        }
+        return Option<T>(None);
+    }
+
+    // Convert Result<T, E> into Option<E> by discarding Ok.
+    Option<E> err() {
+        if (is_ok_value) {
+            return Option<E>(None);
+        }
+        return Option<E>(std::move(err_ref()));
+    }
+
     // Borrow payload by pointer without moving the Result value.
     Result<const T*, const E*> as_ref() const & {
         if (is_ok_value) {
@@ -152,6 +171,14 @@ public:
         }
         return std::move(ok_ref());
     }
+
+    // Const unwrap fallback for read-only Result values.
+    T unwrap() const {
+        if (!is_ok_value) {
+            throw std::runtime_error("Called unwrap on an Err value");
+        }
+        return ok_ref();
+    }
     
     // Unwrap Err value (panics if Ok)
     E unwrap_err() {
@@ -160,6 +187,14 @@ public:
         }
         return std::move(err_ref());
     }
+
+    // Const unwrap_err fallback for read-only Result values.
+    E unwrap_err() const {
+        if (is_ok_value) {
+            throw std::runtime_error("Called unwrap_err on an Ok value");
+        }
+        return err_ref();
+    }
     
     // Unwrap Ok value or return default
     T unwrap_or(T default_value) {
@@ -167,6 +202,20 @@ public:
             return std::move(ok_ref());
         }
         return std::move(default_value);
+    }
+
+    template<typename F>
+    T unwrap_or_else(F f) {
+        if (is_ok_value) {
+            return std::move(ok_ref());
+        }
+        using FReturn = decltype(f(std::move(err_ref())));
+        if constexpr (std::is_void_v<FReturn>) {
+            f(std::move(err_ref()));
+            std::abort();
+        } else {
+            return f(std::move(err_ref()));
+        }
     }
     
     // Map over Ok value
@@ -284,6 +333,22 @@ public:
     // Check if Result is Err
     bool is_err() const { return !is_ok_value; }
 
+    // Convert Result<(), E> into Option<()> by discarding Err.
+    Option<std::tuple<>> ok() {
+        if (is_ok_value) {
+            return Option<std::tuple<>>(std::tuple<>{});
+        }
+        return Option<std::tuple<>>(None);
+    }
+
+    // Convert Result<(), E> into Option<E> by discarding Ok.
+    Option<E> err() {
+        if (is_ok_value) {
+            return Option<E>(None);
+        }
+        return Option<E>(std::move(err_ref()));
+    }
+
     Result<void, const E*> as_ref() const & {
         if (is_ok_value) {
             return Result<void, const E*>::Ok();
@@ -303,11 +368,25 @@ public:
     Result<void, E*> as_mut() && = delete;
     
     // Unwrap Err value (panics if Ok)
+    void unwrap() const {
+        if (!is_ok_value) {
+            throw std::runtime_error("Called unwrap on an Err value");
+        }
+    }
+
+    // Unwrap Err value (panics if Ok)
     E unwrap_err() {
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
         }
         return std::move(err_ref());
+    }
+
+    E unwrap_err() const {
+        if (is_ok_value) {
+            throw std::runtime_error("Called unwrap_err on an Ok value");
+        }
+        return err_ref();
     }
     
     // Explicit bool conversion - true if Ok

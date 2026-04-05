@@ -330,6 +330,12 @@ inline Stdin stdin_() { return Stdin{}; }
 inline Stdout stdout_() { return Stdout{}; }
 inline Stderr stderr_() { return Stderr{}; }
 
+// Expanded Rust test harnesses may lower formatting calls through `std::io::_print`.
+// Keep this as a permissive shim so generated code compiles even when formatting
+// arguments are emitted as placeholder comments.
+template<typename... Args>
+inline void _print(Args&&...) {}
+
 namespace detail {
 
 template<typename T>

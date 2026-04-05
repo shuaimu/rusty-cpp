@@ -1,5 +1,6 @@
 // Tests for rusty::Result<T, E>
 #include "../include/rusty/result.hpp"
+#include "../include/rusty/panic.hpp"
 #include <cassert>
 #include <cstdio>
 #include <string>
@@ -308,6 +309,101 @@ void test_result_as_ref_as_mut() {
     printf("PASS\n");
 }
 
+void test_result_ok_err_helpers() {
+    printf("test_result_ok_err_helpers: ");
+    {
+        auto ok = Result<int, const char*>::Ok(12);
+        auto ok_value = ok.ok();
+        assert(ok_value.is_some());
+        assert(ok_value.unwrap() == 12);
+
+        auto ok_err = ok.err();
+        assert(ok_err.is_none());
+
+        auto err = Result<int, const char*>::Err("oops");
+        auto err_value = err.err();
+        assert(err_value.is_some());
+        assert(std::string(err_value.unwrap()) == "oops");
+
+        auto err_ok = err.ok();
+        assert(err_ok.is_none());
+
+        using VoidResult = Result<void, int>;
+        auto void_ok = VoidResult::Ok();
+        auto void_ok_value = void_ok.ok();
+        assert(void_ok_value.is_some());
+        assert(void_ok_value.unwrap() == std::tuple<>{});
+
+        auto void_err = VoidResult::Err(9);
+        auto void_err_value = void_err.err();
+        assert(void_err_value.is_some());
+        assert(void_err_value.unwrap() == 9);
+
+        auto void_err_ok = void_err.ok();
+        assert(void_err_ok.is_none());
+    }
+    printf("PASS\n");
+}
+
+void test_result_const_unwrap_helpers() {
+    printf("test_result_const_unwrap_helpers: ");
+    {
+        const auto ok = Result<int, int>::Ok(21);
+        assert(ok.unwrap() == 21);
+
+        const auto err = Result<int, int>::Err(34);
+        assert(err.unwrap_err() == 34);
+
+        using VoidResult = Result<void, int>;
+        const auto void_ok = VoidResult::Ok();
+        void_ok.unwrap();
+
+        const auto void_err = VoidResult::Err(55);
+        assert(void_err.unwrap_err() == 55);
+    }
+    printf("PASS\n");
+}
+
+void test_result_unwrap_or_else_void_callable_compiles() {
+    printf("test_result_unwrap_or_else_void_callable_compiles: ");
+    {
+        auto ok = Result<int, int>::Ok(9);
+        int v = ok.unwrap_or_else([](int) { std::abort(); });
+        assert(v == 9);
+    }
+    printf("PASS\n");
+}
+
+void test_panic_catch_unwind_handles_begin_panic() {
+    printf("test_panic_catch_unwind_handles_begin_panic: ");
+    {
+        auto result = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([]() {
+            rusty::panic::begin_panic("boom");
+        }));
+        assert(result.is_err());
+    }
+    printf("PASS\n");
+}
+
+void test_panic_resume_unwind_rethrows_payload() {
+    printf("test_panic_resume_unwind_rethrows_payload: ");
+    {
+        auto result = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([]() {
+            rusty::panic::begin_panic("boom");
+        }));
+        assert(result.is_err());
+        bool rethrown = false;
+        try {
+            rusty::panic::resume_unwind(result.unwrap_err());
+        } catch (const std::runtime_error& e) {
+            rethrown = true;
+            assert(std::string(e.what()) == "boom");
+        }
+        assert(rethrown);
+    }
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty::Result<T, E> ===\n");
     
@@ -325,6 +421,11 @@ int main() {
     test_result_complex_chain();
     test_result_void();
     test_result_as_ref_as_mut();
+    test_result_ok_err_helpers();
+    test_result_const_unwrap_helpers();
+    test_result_unwrap_or_else_void_callable_compiles();
+    test_panic_catch_unwind_handles_begin_panic();
+    test_panic_resume_unwind_rethrows_payload();
     
     printf("\nAll Result tests passed!\n");
     return 0;

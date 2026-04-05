@@ -2039,16 +2039,17 @@ From the active TODO frontier, the currently active leaf work is in the `arrayve
 
 Active work items:
 
-1. `Leaf 4.15.4.3.3.3.3.3.9.1` is complete.
-   - method-form `try_into` lowering now prefers target `::try_from(receiver)` and avoids `&rvalue` receiver call shapes
-   - associated constructor owner-template recovery now handles omitted/placeholder paths for `ArrayVec`/`Cell`/`Vec` in test-shaped contexts (expected-type, in-scope generic/default, and local placeholder-hint paths)
-   - omitted default generic recovery now prefers declared defaults (`CapacityError<T=()>` remains `CapacityError<std::tuple<>>`, not accidental capture of in-scope `T`)
-2. Arrayvec Stage D repro after 9.1 moved the deterministic head off the template-placeholder family.
-   - previous 9.1 lead shapes (`Result<ArrayVec<auto, ...>>`, `(&std::array{...}).try_into()`, and immediate `ArrayVec`/`Cell`/`Vec` constructor cascades) are no longer first-failure diagnostics
-   - current first deterministic family is downstream import/runtime path lowering (`slice::from_raw_parts*` namespace lowering, `core::panicking` path lowering)
-3. Current active next leaf remains `Leaf 4.15.4.3.3.3.3.3.9` (parent).
-   - rerun the full seven-crate matrix after 9.1 stabilization
-   - capture the new first deterministic failure from matrix order and continue with generic (non crate-specific) fixes
+1. `Leaf 4.15.4.3.3.3.3.3.9.3.1` is complete.
+   - `Ok/Err` constructor lowering now uses move-aware expected-type emission for local by-value payloads, so move-only payloads lower with `std::move(...)` where required.
+   - iterator-like `.by_ref()` lowering now preserves iterator adapter chains by lowering to the receiver expression.
+   - iterator-like `.take(...)` lowering now maps to shared runtime `rusty::take(...)`; iterator-like `.map(...)` lowering now accepts iterator-chain receivers (not only direct `.iter*()` forms).
+   - runtime `include/rusty/slice.hpp` includes a shared `take` next-adapter integrated with existing `for_in`/`map`/`fold` option-like iterator adaptation.
+2. `Leaf 4.15.4.3.3.3.3.3.9.3.2` is complete.
+   - full matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-9-3-2-1775431204 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-9-3-2-1775431204/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+3. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.10` (parent).
+   - first deterministic Stage D hard errors now start at `rusty::MaybeUninit<const T&>` reference-storage shape (`pointer to reference` form) and immediate mixed optional-interface fallout (`std::optional` receiving runtime-`Option` API calls like `is_some`).
+   - first-order dependent fallout includes `array_repeat`/`std::array` shape mismatches and `Result` visit/constructor emission mismatch families.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2136,12 +2137,14 @@ Rejected pattern:
 - globally rewriting all method calls as free functions
 - globally forcing constructor template args
 - globally injecting expected-type numeric literal casts across unrelated expressions
+- globally treating adapter-style methods (for example `.by_ref()`/`.take(...)`) as universal rewrites without receiver-shape/type checks
 
 Required approach:
 
 - apply rewrites only when a recognized shape and type context is present
 - keep generic literal emission stable; perform conversions only in targeted coercion sites
 - when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
+- for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
