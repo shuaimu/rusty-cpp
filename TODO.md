@@ -556,4 +556,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Updated `tests/transpile_tests/run_parity_matrix.sh` failure handling to record the first failing crate and emit canonical diagnostics (`first failing crate`, `baseline.txt`, `build.log`, `run.log`, and failure log path) on matrix failure
           - [x] *done* Hardened matrix checkout failure path so clone/setup failures are reported through the same first-failure diagnostics path (instead of exiting without matrix artifact context)
           - [x] *done* Added regression in `transpiler/tests/parity_matrix_harness.rs` using a failing `cargo` shim to verify matrix stderr includes first-failing crate identity and expected artifact paths
-        - [ ] Add CI target/job to run the matrix and archive per-crate artifacts on failure
+        - [x] *done* Add CI target/job to run the matrix and archive per-crate artifacts on failure
+          - [x] *done* Added dedicated `parity-matrix` CI job in `.github/workflows/ci.yml` (runs after `build-and-test`) that executes `tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`
+          - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
+          - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads

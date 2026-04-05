@@ -6082,6 +6082,48 @@ Design rationale:
 - Avoided wrong approach from §11:
   - no ad-hoc tail-only diagnostics that omit first-failure identity and artifact paths (§11.73).
 
+### 10.11.69 Phase 20 Leaf 5.3: CI parity-matrix job with failure-only per-crate artifact archival
+
+Problem:
+
+- The parity matrix harness existed locally, but CI had no dedicated job that executes the full
+  seven-crate matrix and preserves per-crate outputs for failure triage.
+- Without explicit artifact archival in CI, first-failure logs are visible only in console output
+  and are harder to inspect post-run.
+
+Scope analysis:
+
+- Implemented with small, focused changes (<1000 LOC):
+  - extend `.github/workflows/ci.yml` with one additional job,
+  - add integration-level workflow regression checks in existing matrix harness tests.
+
+Implementation:
+
+- Added `parity-matrix` job to `.github/workflows/ci.yml`:
+  - `needs: build-and-test`,
+  - runs `./tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`.
+- Added failure-only artifact upload step:
+  - condition: `if: failure()`,
+  - action: `actions/upload-artifact@v4`,
+  - archives per-crate paths under `${{ runner.temp }}/rusty-parity-matrix/<crate>/**` for:
+    - `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`.
+- Added workflow regression coverage in `transpiler/tests/parity_matrix_harness.rs`:
+  - asserts CI workflow defines `parity-matrix` job,
+  - asserts matrix invocation command in workflow,
+  - asserts failure-path artifact upload step and per-crate archive paths.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+
+Design rationale:
+
+- Keep matrix execution in a dedicated CI job so existing build/test feedback remains legible.
+- Upload artifacts only on failure to avoid routine storage overhead while preserving full
+  diagnostics for triage.
+- Avoided wrong approach from §11:
+  - no unconditional artifact uploads for every successful matrix run (§11.74).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -6979,3 +7021,15 @@ without an explicit first-failing crate line and normalized artifact-path diagno
 - Artifact discovery becomes manual and error-prone without canonical `baseline.txt`/`build.log`/
   `run.log` path lines.
 - Standardized first-failure diagnostics keep matrix triage deterministic across local and CI runs.
+
+### 11.74 Unconditional Parity-Matrix Artifact Upload on Successful CI Runs
+
+**Rejected approach:** Always upload full per-crate parity-matrix artifacts, including successful
+runs.
+
+**Why it was rejected:**
+
+- It increases artifact storage and upload time on every healthy run without improving failure
+  diagnosis.
+- It obscures true signal by producing large routine artifacts that are rarely consumed.
+- Failure-only archival preserves actionable data when needed while keeping normal CI runs lean.

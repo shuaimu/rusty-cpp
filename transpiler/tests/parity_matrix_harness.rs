@@ -12,6 +12,10 @@ fn matrix_script() -> PathBuf {
     repo_root().join("tests/transpile_tests/run_parity_matrix.sh")
 }
 
+fn ci_workflow_file() -> PathBuf {
+    repo_root().join(".github/workflows/ci.yml")
+}
+
 #[test]
 fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
     let script = matrix_script();
@@ -148,4 +152,33 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
         "stderr:\n{}",
         stderr
     );
+}
+
+#[test]
+fn test_ci_workflow_defines_parity_matrix_job() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("parity-matrix:"));
+    assert!(workflow.contains("./tests/transpile_tests/run_parity_matrix.sh"));
+    assert!(workflow.contains("--work-root \"${RUNNER_TEMP}/rusty-parity-matrix\""));
+}
+
+#[test]
+fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("Upload parity matrix artifacts on failure"));
+    assert!(workflow.contains("if: failure()"));
+    assert!(workflow.contains("actions/upload-artifact@v4"));
+
+    for crate_name in [
+        "either", "tap", "cfg-if", "take_mut", "arrayvec", "semver", "bitflags",
+    ] {
+        assert!(
+            workflow.contains(&format!(
+                "${{{{ runner.temp }}}}/rusty-parity-matrix/{}/**",
+                crate_name
+            )),
+            "missing artifact upload path for crate '{}'",
+            crate_name
+        );
+    }
 }

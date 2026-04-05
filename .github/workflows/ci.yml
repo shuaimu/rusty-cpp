@@ -36,3 +36,33 @@ jobs:
           mkdir build && cd build
           cmake ..
           make -j $(nproc)
+
+  parity-matrix:
+    runs-on: self-hosted
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run parity matrix
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./tests/transpile_tests/run_parity_matrix.sh \
+            --work-root "${RUNNER_TEMP}/rusty-parity-matrix"
+
+      - name: Upload parity matrix artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-matrix-artifacts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/rusty-parity-matrix/either/**
+            ${{ runner.temp }}/rusty-parity-matrix/tap/**
+            ${{ runner.temp }}/rusty-parity-matrix/cfg-if/**
+            ${{ runner.temp }}/rusty-parity-matrix/take_mut/**
+            ${{ runner.temp }}/rusty-parity-matrix/arrayvec/**
+            ${{ runner.temp }}/rusty-parity-matrix/semver/**
+            ${{ runner.temp }}/rusty-parity-matrix/bitflags/**
+          if-no-files-found: warn
+          retention-days: 14
