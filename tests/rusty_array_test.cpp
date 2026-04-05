@@ -1,6 +1,7 @@
 // Tests for rusty range helpers used by transpiled iterator lowering
 #include "../include/rusty/array.hpp"
 #include "../include/rusty/io.hpp"
+#include "../include/rusty/slice.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -177,6 +178,39 @@ void test_span_equality_helper_shape() {
     printf("PASS\n");
 }
 
+void test_slice_iter_helpers_shape() {
+    printf("test_slice_iter_helpers_shape: ");
+    std::vector<int> data{1, 2, 3};
+
+    auto iter = rusty::iter(std::span<const int>(data));
+    auto first = iter.next();
+    assert(first.is_some());
+    assert(*first.unwrap() == 1);
+
+    auto back = iter.next_back();
+    assert(back.is_some());
+    assert(*back.unwrap() == 3);
+
+    auto hint = iter.size_hint();
+    assert(std::get<0>(hint) == 1);
+    auto upper = std::move(std::get<1>(hint));
+    assert(upper.is_some());
+    assert(upper.unwrap() == 1);
+
+    auto cloned = rusty::iter(std::span<const int>(data)).cloned();
+    auto c0 = cloned.next();
+    assert(c0.is_some());
+    assert(c0.unwrap() == 1);
+
+    auto mut_iter = rusty::iter(std::span<int>(data));
+    auto mut_first = mut_iter.next();
+    assert(mut_first.is_some());
+    *mut_first.unwrap() = 9;
+    assert(data[0] == 9);
+
+    printf("PASS\n");
+}
+
 void test_cursor_new_helper_shape() {
     printf("test_cursor_new_helper_shape: ");
     auto cursor = rusty::io::cursor_new(std::vector<uint8_t>{7, 8, 9});
@@ -252,6 +286,7 @@ int main() {
     test_slice_helpers_basic_shapes();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
+    test_slice_iter_helpers_shape();
     test_cursor_new_helper_shape();
     test_filter_map_lazy_shape();
     test_filter_map_span_shape();

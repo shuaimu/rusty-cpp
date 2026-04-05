@@ -7528,6 +7528,140 @@ Design rationale:
     call sites,
   - no broad closure parameter rewriting that ignores Rust pattern shape.
 
+### 10.11.91 Phase 20 Leaf 4.15.4.3.3.3.3.3.1 (`arrayvec` Stage D): declaration-order/unqualified-call family (`extend_panic`, `rusty::partial_cmp`, `Ok/Err`)
+
+Problem:
+
+- After 10.11.90, the first deterministic `arrayvec` Stage D blockers began with
+  declaration-order/unqualified-call fallout:
+  - `extend_panic()` unresolved in template member bodies (non-dependent free-function call),
+  - emitted `rusty::partial_cmp(...)` call sites without a fallback helper symbol,
+  - bare `Ok(...)` / `Err(...)` constructor emissions in `io::Result<...>` return contexts.
+
+Scope analysis:
+
+- Addressed as a focused generic change set under the 1000-LOC target.
+- Kept parity workflow crate-agnostic (no `arrayvec`-specific branches or generated C++ patching).
+
+Implementation:
+
+- Generic top-level function forward declarations (`transpiler/src/codegen.rs`):
+  - `emit_item_forward_decls(...)` now emits forward declarations for `syn::Item::Fn`
+    (including nested module content), in addition to existing struct/enum declarations.
+  - This allows non-dependent template-body calls to later free functions to resolve in C++
+    without reordering merged type output.
+- `io::Result` type/constructor lowering (`transpiler/src/types.rs`, `transpiler/src/codegen.rs`):
+  - Added std-type mapping for `io::Result` / `std::io::Result` → `rusty::io::Result`.
+  - Extended expected-type-aware `Ok/Err` call lowering:
+    - `rusty::Result<...>` still lowers to `::Ok/::Err`,
+    - `rusty::io::Result<...>` (and `io::Result<...>`) lowers to `::ok/::err`.
+- Runtime fallback helper completion (`transpiler/src/codegen.rs`):
+  - Added `rusty::partial_cmp(A&&, B&&)` to generated runtime fallback helper text and marker
+    detection so emitted call sites compile in expanded/module fallback paths.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415433333333_template_method_call_can_resolve_late_free_fn_via_forward_decl`
+  - `test_leaf415433333333_ok_err_lower_to_io_result_constructors_with_expected_type`
+  - `test_leaf415433333333_runtime_fallback_includes_partial_cmp_helper`
+- `transpiler/src/types.rs`:
+  - extended `test_std_types`
+  - extended `test_std_types_full_path`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf415433333333 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_std_types -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous deterministic `extend_panic` / bare `Ok` / missing `rusty::partial_cmp` blockers are
+  removed from first-failure output.
+- The next deterministic `arrayvec` Stage D blockers now start at slice/iterator/runtime surface
+  gaps (`iter`, `slice::Iter`, `Formatter::debug_list`) and immediate dependents.
+
+Design rationale:
+
+- Kept fixes at generic lowering/runtime-fallback layers to preserve crate-agnostic parity behavior.
+- Avoided wrong approaches from §11:
+  - no crate-specific symbol injection for `arrayvec`,
+  - no `-fpermissive` / compiler-flag masking of unresolved names,
+  - no generated-runner patching outside transpiler/runtime source.
+
+### 10.11.92 Phase 20 Leaf 4.15.4.3.3.3.3.3.2 (`arrayvec` Stage D): slice/iterator/runtime blocker family (`iter`, `slice::Iter`, `Formatter::debug_list`)
+
+Problem:
+
+- After 10.11.91, first deterministic `arrayvec` Stage D failures began at:
+  - unresolved iterator surface calls (`iter` / `iter_mut`),
+  - unresolved slice iterator type paths (`slice::Iter`),
+  - missing formatter debug-list shape (`Formatter::debug_list().entries(...).finish()`).
+
+Scope analysis:
+
+- Implemented as a focused generic change set under the <1000 LOC target.
+- Kept all fixes fixture-agnostic (no crate-specific output patching/scripts).
+
+Implementation:
+
+- Generic iterator lowering/runtime support:
+  - `transpiler/src/codegen.rs` now lowers `.iter()` / `.iter_mut()` method calls to
+    `rusty::iter(receiver)`.
+  - `transpiler/src/types.rs` maps `slice::Iter` / `slice::IterMut` families to
+    `rusty::slice_iter::Iter<...>`.
+  - `include/rusty/slice.hpp` now provides:
+    - `rusty::slice_iter::Iter<T>` (`next`, `next_back`, `size_hint`, `cloned`, `into_iter`),
+    - `rusty::iter(...)` fallback dispatch (member `.iter()` if present, else `data()/size()`,
+      else deref fallback).
+- Expected-type collect and formatter fallback completion:
+  - expected-type `.collect()` lowers to `ExpectedType::from_iter(...)` for deterministic
+    `self.iter().cloned().collect()` recovery in return-typed contexts.
+  - runtime fallback helpers now include `rusty::fmt::DebugList` and
+    `rusty::fmt::Formatter::debug_list()` chain surface.
+- Full-matrix regression hardening:
+  - constrained function forward declarations to void/unit-return signatures to avoid alias-order
+    regressions (for example `cfg-if` `Option2`/`Option3` prototypes emitted before alias imports),
+    while preserving the needed `extend_panic` declaration-order fix from 10.11.91.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154333333332_iter_method_call_lowers_to_runtime_helper`
+  - `test_leaf4154333333332_collect_with_expected_type_lowers_to_from_iter`
+  - `test_leaf4154333333332_runtime_fallback_formatter_supports_debug_list_chain`
+  - `test_leaf4154333333332_forward_decls_skip_non_void_alias_dependent_functions`
+- `transpiler/src/types.rs`:
+  - extended `test_std_types`, `test_std_types_full_path`, and `test_leaf42_runtime_type_fallback_mappings`
+    with `slice::Iter` mappings.
+- `tests/rusty_array_test.cpp`:
+  - `test_slice_iter_helpers_shape` for runtime iterator behavior.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4154333333332 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_std_types -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+- `tests/transpile_tests/run_parity_matrix.sh`
+
+Re-probe result:
+
+- Previous first deterministic `iter` / `slice::Iter` / `Formatter::debug_list` blockers are
+  removed from `arrayvec` Stage D first-failure output.
+- Full seven-crate matrix result is back to expected ordering:
+  `either`, `tap`, `cfg-if`, `take_mut` pass; first failing crate remains `arrayvec`.
+- Next deterministic `arrayvec` Stage D family now starts at destructor/control-flow fallouts
+  (`while (rusty::intrinsics::unreachable())` bool-context and destructor `return` expression).
+
+Design rationale:
+
+- Chose generic lowering/runtime completion over crate-specific generated-output surgery.
+- Kept collect-lowering scoped to expected-type contexts to preserve existing non-range
+  `it.collect()` behavior where no target type is available.
+- Preserved declaration-order stability while adding a guard against alias-order forward-decl
+  regressions.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -8662,3 +8796,34 @@ new local name in expression lookup before lowering the initializer.
 - Correct behavior is staged:
   - emit initializer expression in the outer binding context,
   - then commit the renamed shadow binding for subsequent statements.
+
+### 11.91 Reordering Merged Type Emission Around Call Sites Instead of Emitting Function Forward Declarations
+
+**Rejected approach:** Fix non-dependent template call lookup failures (for example `extend_panic`)
+by crate-specific item reordering or by moving merged struct/class emission after selected free
+functions.
+
+**Why it was rejected:**
+
+- Merged-type emission order is globally coupled to many existing parity fixes (impl merge, forward
+  decl strategy, module flattening); ad-hoc reordering risks broad regressions.
+- It does not scale for nested-module cases where call sites and free-function definitions span
+  multiple scopes.
+- A generic top-level function forward-declaration pass is smaller, deterministic, and preserves the
+  existing emitter architecture without crate-specific branching.
+
+### 11.92 Forward-Declaring All Function Signatures Unconditionally (Including Alias-Dependent Non-Void Returns)
+
+**Rejected approach:** Emit forward declarations for every top-level function signature regardless
+of return-type dependency ordering (for example signatures that depend on later alias imports such
+as `Option2<T>`).
+
+**Why it was rejected:**
+
+- In flattened parity outputs, forward declarations are emitted before later `use ... as ...`
+  alias lowerings, so non-void alias-dependent signatures can become unresolved (`Option2`/`Option3`
+  regression in `cfg-if`).
+- It trades one declaration-order issue (`extend_panic`) for a broader alias-order regression
+  surface across crates.
+- A constrained strategy (forward-declare void/unit-return functions only) preserves the intended
+  non-dependent call lookup fix while avoiding alias-order fallout.

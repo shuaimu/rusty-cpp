@@ -480,6 +480,11 @@ impl CodeGen {
                     self.writeln(&format!("enum class {};", name));
                     emitted_any = true;
                 }
+                syn::Item::Fn(f) => {
+                    if self.emit_function_forward_decl(f) {
+                        emitted_any = true;
+                    }
+                }
                 _ => continue,
             }
         }
@@ -509,10 +514,80 @@ impl CodeGen {
         emitted_any
     }
 
+    fn emit_function_forward_decl(&mut self, f: &syn::ItemFn) -> bool {
+        // Skip Rust libtest scaffolding and #[test] entrypoints in forward declarations.
+        // Those are emitted via dedicated test-wrapper paths, not as top-level functions.
+        if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
+            return false;
+        }
+        let can_forward_declare = match &f.sig.output {
+            syn::ReturnType::Default => true,
+            syn::ReturnType::Type(_, ty) => {
+                matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty())
+            }
+        };
+        if !can_forward_declare {
+            return false;
+        }
+
+        let name = escape_cpp_keyword(&f.sig.ident.to_string());
+        let is_async = f.sig.asyncness.is_some();
+        let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
+            &f.sig.generics,
+            &f.sig.inputs,
+            &f.sig.output,
+        );
+        let mut emitted_generics = f.sig.generics.clone();
+        if let Some(param_name) = undeduced_return_type_param.as_deref() {
+            emitted_generics.params = emitted_generics
+                .params
+                .into_iter()
+                .filter(|param| match param {
+                    syn::GenericParam::Type(tp) => tp.ident != param_name,
+                    _ => true,
+                })
+                .collect();
+        }
+
+        self.emit_template_prefix(&emitted_generics);
+        self.push_type_param_scope(&f.sig.generics);
+        let mut return_type = if undeduced_return_type_param.is_some() {
+            "auto".to_string()
+        } else {
+            self.map_return_type(&f.sig.output)
+        };
+        let params = self.map_fn_params(&f.sig.inputs);
+        self.pop_type_param_scope();
+
+        if is_async {
+            return_type = format!("rusty::Task<{}>", return_type);
+        }
+
+        let abi_prefix = if let Some(abi) = &f.sig.abi {
+            if let Some(name) = &abi.name {
+                if name.value() == "C" {
+                    "extern \"C\" "
+                } else {
+                    ""
+                }
+            } else {
+                "extern \"C\" "
+            }
+        } else {
+            ""
+        };
+        self.writeln(&format!(
+            "{}{} {}({});",
+            abi_prefix, return_type, name, params
+        ));
+        true
+    }
+
     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
         items.iter().any(|item| match item {
             syn::Item::Struct(_) => true,
             syn::Item::Enum(e) => enum_is_c_like(e),
+            syn::Item::Fn(_) => true,
             syn::Item::Mod(m) => m
                 .content
                 .as_ref()
@@ -7316,9 +7391,21 @@ impl CodeGen {
                 );
             }
         }
-        if mc.method == "collect" && mc.args.is_empty() && Self::is_range_expression(&mc.receiver) {
+        if (mc.method == "iter" || mc.method == "iter_mut") && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
-            return format!("rusty::collect_range({})", receiver);
+            return format!("rusty::iter({})", receiver);
+        }
+        if mc.method == "collect" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            if let Some(expected) = expected_ty {
+                let expected_cpp = self.map_type(expected);
+                if expected_cpp != "auto" && !expected_cpp.contains("/* TODO") {
+                    return format!("{}::from_iter({})", expected_cpp, receiver);
+                }
+            }
+            if Self::is_range_expression(&mc.receiver) {
+                return format!("rusty::collect_range({})", receiver);
+            }
         }
         if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
             return io_call;
@@ -8089,6 +8176,11 @@ impl CodeGen {
                 if expected_cpp.starts_with("rusty::Result<") {
                     return format!("{}::Ok({})", expected_cpp, arg);
                 }
+                if expected_cpp.starts_with("rusty::io::Result<")
+                    || expected_cpp.starts_with("io::Result<")
+                {
+                    return format!("{}::ok({})", expected_cpp, arg);
+                }
             }
             if let Some(args) = self.lookup_constructor_template_args("Ok") {
                 return format!("rusty::Result<{}, {}>::Ok({})", args[0], args[1], arg);
@@ -8101,6 +8193,11 @@ impl CodeGen {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Result<") {
                     return format!("{}::Err({})", expected_cpp, arg);
+                }
+                if expected_cpp.starts_with("rusty::io::Result<")
+                    || expected_cpp.starts_with("io::Result<")
+                {
+                    return format!("{}::err({})", expected_cpp, arg);
                 }
             }
             if let Some(args) = self.lookup_constructor_template_args("Err") {
@@ -11435,6 +11532,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::parse<",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
+        "rusty::partial_cmp(",
         "namespace cmp = core::cmp;",
         "core::cmp::",
     ];
@@ -11446,14 +11544,24 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
 }\n\
+template<typename A, typename B>\n\
+auto partial_cmp(A&& a, B&& b) {\n\
+    return std::forward<A>(a).partial_cmp(std::forward<B>(b));\n\
+}\n\
 namespace fmt {\n\
 using Result = bool;\n\
 struct Arguments {};\n\
+struct DebugList {\n\
+    template<typename... Args>\n\
+    DebugList& entries(Args&&...) { return *this; }\n\
+    Result finish() { return true; }\n\
+};\n\
 struct Formatter {\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return true; }\n\
     template<typename... Args>\n\
     static Result debug_struct_field1_finish(Args&&...) { return true; }\n\
+    DebugList debug_list() const { return DebugList{}; }\n\
 };\n\
 }\n\
 namespace path {\n\
@@ -16700,8 +16808,11 @@ mod tests {
     #[test]
     fn test_nested_fn_to_lambda() {
         let out = transpile_str("fn outer() { fn inner(x: i32) -> i32 { x + 1 } inner(1); }");
-        assert!(out
-            .contains("const rusty::SafeFn<int32_t(int32_t)> inner = +[](int32_t x) -> int32_t {"));
+        assert!(
+            out.contains(
+                "const rusty::SafeFn<int32_t(int32_t)> inner = +[](int32_t x) -> int32_t {"
+            )
+        );
         assert!(out.contains("return x + 1;"));
         assert!(out.contains("inner(1);"));
     }
@@ -16985,6 +17096,98 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415433333333_template_method_call_can_resolve_late_free_fn_via_forward_decl() {
+        let out = transpile_str(
+            r#"
+            struct Wrap<T> { value: T }
+            impl<T> Wrap<T> {
+                fn ping(&mut self) {
+                    helper();
+                }
+            }
+            fn helper() {}
+            "#,
+        );
+        let decl_pos = out
+            .find("void helper();")
+            .expect("expected function forward declaration");
+        let struct_pos = out.find("struct Wrap {").expect("expected struct emission");
+        assert!(decl_pos < struct_pos);
+    }
+
+    #[test]
+    fn test_leaf4154333333332_forward_decls_skip_non_void_alias_dependent_functions() {
+        let out = transpile_str(
+            r#"
+            use core::option::Option as Option2;
+            fn works1() -> Option2<u32> { Option2::Some(1) }
+            fn helper() {}
+            "#,
+        );
+        assert!(!out.contains("Option2<uint32_t> works1();"));
+        assert!(out.contains("void helper();"));
+    }
+
+    #[test]
+    fn test_leaf415433333333_ok_err_lower_to_io_result_constructors_with_expected_type() {
+        let out = transpile_str(
+            r#"
+            use std::io;
+            fn ok_path() -> io::Result<usize> { Ok(1) }
+            fn err_path(e: io::Error) -> io::Result<usize> { Err(e) }
+            "#,
+        );
+        assert!(out.contains("return rusty::io::Result<size_t>::ok(1);"));
+        assert!(out.contains("return rusty::io::Result<size_t>::err("));
+        assert!(!out.contains("return Ok("));
+        assert!(!out.contains("return Err("));
+    }
+
+    #[test]
+    fn test_leaf415433333333_runtime_fallback_includes_partial_cmp_helper() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("auto partial_cmp(A&& a, B&& b)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332_iter_method_call_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(values: &[i32]) {
+                let _ = values.iter();
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::iter(values)"));
+        assert!(!out.contains("values.iter()"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332_collect_with_expected_type_lowers_to_from_iter() {
+        let out = transpile_str(
+            r#"
+            struct Wrap;
+            impl Wrap {
+                fn from_iter<I>(iter: I) -> Wrap { todo!() }
+                fn clone(&self) -> Wrap {
+                    self.iter().cloned().collect()
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return Wrap::from_iter(rusty::iter((*this)).cloned());"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332_runtime_fallback_formatter_supports_debug_list_chain() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("struct DebugList {"));
+        assert!(helpers.contains("DebugList& entries(Args&&...)"));
+        assert!(helpers.contains("Result finish() { return true; }"));
+        assert!(helpers.contains("DebugList debug_list() const { return DebugList{}; }"));
+    }
+
+    #[test]
     fn test_leaf48_typed_slice_array_reference_materializes_static_span_backing() {
         let out = transpile_str(
             r#"
@@ -16993,8 +17196,11 @@ mod tests {
             }
             "#,
         );
-        assert!(out
-            .contains("const std::span<const rusty::Result<int32_t, std::string_view>> values ="));
+        assert!(
+            out.contains(
+                "const std::span<const rusty::Result<int32_t, std::string_view>> values ="
+            )
+        );
         assert!(out.contains(
             "static const std::array<rusty::Result<int32_t, std::string_view>, 4> _slice_ref_tmp = {"
         ));
@@ -17857,7 +18063,9 @@ mod tests {
         "#,
         );
         assert!(!out.contains("std::visit(overloaded {"));
-        assert!(out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"));
+        assert!(
+            out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));")
+        );
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("auto&& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("auto&& right_val = std::get<1>(_m_tuple);"));
@@ -18089,8 +18297,11 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto buf = rusty::array_repeat(static_cast<uint8_t>(0), 4);"));
-        assert!(out
-            .contains("const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"));
+        assert!(
+            out.contains(
+                "const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"
+            )
+        );
         assert!(out.contains("const auto _y = rusty::len(buf_shadow1);"));
     }
 
@@ -18191,7 +18402,9 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));"));
+        assert!(
+            out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));")
+        );
         assert!(
             out.contains("return Either<const L&, const R&>(Right<const L&, const R&>(inner));")
         );

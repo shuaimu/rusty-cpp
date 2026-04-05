@@ -65,6 +65,12 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // Runtime compatibility fallbacks for expanded Rust paths.
         "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
         "std::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
+        "slice::Iter" | "core::slice::Iter" | "std::slice::Iter" => {
+            Some(("rusty::slice_iter::Iter", true))
+        }
+        "slice::IterMut" | "core::slice::IterMut" | "std::slice::IterMut" => {
+            Some(("rusty::slice_iter::Iter", true))
+        }
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
@@ -81,6 +87,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "ManuallyDrop" | "std::mem::ManuallyDrop" => Some(("rusty::mem::ManuallyDrop", true)),
 
         // I/O types
+        "io::Result" | "std::io::Result" => Some(("rusty::io::Result", true)),
         "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
         "io::Error" | "std::io::Error" => Some(("rusty::io::Error", false)),
         "io::SeekFrom" | "std::io::SeekFrom" => Some(("rusty::io::SeekFrom", false)),
@@ -264,6 +271,14 @@ mod tests {
         assert_eq!(map_std_type("Option"), Some(("rusty::Option", true)));
         assert_eq!(map_std_type("Result"), Some(("rusty::Result", true)));
         assert_eq!(
+            map_std_type("io::Result"),
+            Some(("rusty::io::Result", true))
+        );
+        assert_eq!(
+            map_std_type("slice::Iter"),
+            Some(("rusty::slice_iter::Iter", true))
+        );
+        assert_eq!(
             map_std_type("std::marker::PhantomData"),
             Some(("rusty::PhantomData", true))
         );
@@ -285,6 +300,10 @@ mod tests {
         assert_eq!(
             map_std_type("core::task::Poll"),
             Some(("rusty::Poll", true))
+        );
+        assert_eq!(
+            map_std_type("core::slice::Iter"),
+            Some(("rusty::slice_iter::Iter", true))
         );
         assert_eq!(
             map_std_type("core::fmt::Formatter"),
@@ -313,6 +332,14 @@ mod tests {
     fn test_std_types_full_path() {
         assert_eq!(map_std_type("std::vec::Vec"), Some(("rusty::Vec", true)));
         assert_eq!(map_std_type("std::sync::Arc"), Some(("rusty::Arc", true)));
+        assert_eq!(
+            map_std_type("std::io::Result"),
+            Some(("rusty::io::Result", true))
+        );
+        assert_eq!(
+            map_std_type("std::slice::Iter"),
+            Some(("rusty::slice_iter::Iter", true))
+        );
         assert_eq!(
             map_std_type("std::collections::HashMap"),
             Some(("rusty::HashMap", true))
