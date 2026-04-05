@@ -5854,7 +5854,14 @@ impl CodeGen {
                 };
 
                 let is_consumed = self.consuming_method_receiver_vars.contains(&name_str);
-                let qualifier = if is_mut || is_consumed { "" } else { "const " };
+                let qualifier = if is_mut
+                    || is_consumed
+                    || type_str.trim_start().starts_with("const ")
+                {
+                    ""
+                } else {
+                    "const "
+                };
 
                 if let Some(init) = &local.init {
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
@@ -5960,7 +5967,12 @@ impl CodeGen {
                     let is_consumed = self
                         .consuming_method_receiver_vars
                         .contains(&name.to_string());
-                    let qualifier = if is_mut || is_consumed { "" } else { "const " };
+                    let qualifier =
+                        if is_mut || is_consumed || ty.trim_start().starts_with("const ") {
+                            ""
+                        } else {
+                            "const "
+                        };
                     if let Some(init) = &local.init {
                         let expr_str =
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
@@ -8695,7 +8707,16 @@ impl CodeGen {
                 let ty = self.map_type(&c.ty);
                 let source_is_explicit_reference =
                     matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
-                if ty.ends_with('*')
+                if type_string_has_auto_placeholder(&ty) {
+                    if ty.ends_with('*')
+                        && self.is_expr_reference_like(&c.expr)
+                        && !source_is_explicit_reference
+                    {
+                        format!("&{}", expr)
+                    } else {
+                        expr
+                    }
+                } else if ty.ends_with('*')
                     && self.is_expr_reference_like(&c.expr)
                     && !source_is_explicit_reference
                 {
@@ -10622,16 +10643,17 @@ impl CodeGen {
             match stmt {
                 syn::Stmt::Local(local) => match &local.pat {
                     syn::Pat::Ident(pi) => {
-                        let qualifier = if pi.mutability.is_some() {
-                            ""
-                        } else {
-                            "const "
-                        };
                         let ty = if let Some(ty) = get_local_type(local) {
                             self.map_type(ty)
                         } else {
                             "auto".to_string()
                         };
+                        let qualifier =
+                            if pi.mutability.is_some() || ty.trim_start().starts_with("const ") {
+                                ""
+                            } else {
+                                "const "
+                            };
                         if let Some(init) = &local.init {
                             let init_str = self.emit_expr_to_string(&init.expr);
                             stmts.push(format!("{}{} {} = {};", qualifier, ty, pi.ident, init_str));
@@ -10641,12 +10663,14 @@ impl CodeGen {
                     }
                     syn::Pat::Type(pt) => {
                         if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
-                            let qualifier = if pi.mutability.is_some() {
-                                ""
-                            } else {
-                                "const "
-                            };
                             let ty = self.map_type(&pt.ty);
+                            let qualifier =
+                                if pi.mutability.is_some() || ty.trim_start().starts_with("const ")
+                                {
+                                    ""
+                                } else {
+                                    "const "
+                                };
                             if let Some(init) = &local.init {
                                 let init_str = self.emit_expr_to_string(&init.expr);
                                 stmts.push(format!(
@@ -11165,6 +11189,11 @@ fn is_numeric_cpp_scalar_type(cpp_type: &str) -> bool {
             | "size_t"
             | "ptrdiff_t"
     )
+}
+
+fn type_string_has_auto_placeholder(ty: &str) -> bool {
+    ty.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|token| token == "auto")
 }
 
 fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
@@ -16677,6 +16706,34 @@ mod tests {
         );
         assert!(out.contains("return s.saturating_add(1);"));
         assert!(!out.contains("rusty::saturating_add(s, 1)"));
+    }
+
+    #[test]
+    fn test_leaf41543333331_typed_raw_pointer_local_does_not_emit_duplicate_const() {
+        let out = transpile_str(
+            r#"
+            fn f(values: &[i32], start: usize, end: usize) {
+                let range_slice: *const _ = &values[start..end];
+                let _ = range_slice;
+            }
+            "#,
+        );
+        assert!(!out.contains("const const auto* range_slice"));
+        assert!(out.contains("const auto* range_slice"));
+    }
+
+    #[test]
+    fn test_leaf41543333331_cast_to_inferred_raw_pointer_avoids_static_cast_auto_pointer() {
+        let out = transpile_str(
+            r#"
+            fn f(x: &mut i32) {
+                let p = x as *mut _;
+            }
+            "#,
+        );
+        assert!(!out.contains("static_cast<auto*>"));
+        assert!(!out.contains("static_cast<const auto*>"));
+        assert!(out.contains("const auto p = &x;"));
     }
 
     #[test]

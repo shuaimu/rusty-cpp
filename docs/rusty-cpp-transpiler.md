@@ -7402,6 +7402,62 @@ Design rationale:
   - no blanket rewrite of all `saturating_*` calls regardless of receiver type,
   - no ad-hoc per-call-site arithmetic expansion duplicated across emitted code.
 
+### 10.11.89 Phase 20 Leaf 4.15.4.3.3.3.3.1 (`arrayvec` Stage D): drain-range pointer/type emission hardening (`const const` + `static_cast<auto*>`)
+
+Problem:
+
+- After 10.11.88, the first deterministic `arrayvec` Stage D blockers were emitted C++ type-shape
+  issues in `drain_range`-path lowering:
+  - duplicate const qualifier emission (`const const auto* ...`) on typed immutable locals whose
+    mapped type already carried `const`,
+  - invalid inferred-pointer cast output (`static_cast<auto*>(...)`) from Rust casts using
+    placeholder types (`*mut _` / `*const _`).
+
+Scope analysis:
+
+- Completed as a focused generic change set under the 1000-LOC target for a single leaf.
+- No fixture-specific scripts or generated C++ patching were introduced.
+
+Implementation:
+
+- Local declaration qualifier hardening (`transpiler/src/codegen.rs`):
+  - immutable local bindings now suppress the extra `const` prefix when the emitted type string is
+    already const-qualified,
+  - applied consistently in both normal statement lowering (`emit_local`) and block-expression IIFE
+    lowering (`block_expr_to_iife_string`) so synthetic blocks cannot reintroduce `const const`.
+- Inferred cast target hardening (`transpiler/src/codegen.rs`):
+  - cast emission now detects mapped cast-target strings that still contain `auto` placeholders and
+    avoids generating invalid `static_cast<auto*>`/`static_cast<const auto*>` forms,
+  - pointer-shaped casts in this placeholder mode lower to address-of/no-op forms preserving
+    compileable output shape until concrete target typing is available.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf41543333331_typed_raw_pointer_local_does_not_emit_duplicate_const`
+  - `test_leaf41543333331_cast_to_inferred_raw_pointer_avoids_static_cast_auto_pointer`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf41543333331 -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- The deterministic drain-range pointer/type-emission blockers at prior line 593/597 sites are
+  removed (no duplicate `const`, no `static_cast<auto*>` emission).
+- The next deterministic Stage D blockers move forward to downstream families beginning with
+  `ManuallyDrop` path/lowering and immediate dependents.
+
+Design rationale:
+
+- Kept the fix generic at emitter normalization points (qualifier and cast lowering), avoiding
+  one-off rewrites tied to `arrayvec` AST shapes.
+- Avoided wrong approaches from §11:
+  - no generated-file patching in parity artifacts,
+  - no crate-specific branch logic for `arrayvec::drain_range`,
+  - no fallback to permissive compiler flags (`-fpermissive`) to mask invalid output.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
