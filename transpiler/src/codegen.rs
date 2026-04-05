@@ -481,6 +481,9 @@ impl CodeGen {
                     emitted_any = true;
                 }
                 syn::Item::Fn(f) => {
+                    if Self::has_cfg_test(&f.attrs) {
+                        continue;
+                    }
                     if self.emit_function_forward_decl(f) {
                         emitted_any = true;
                     }
@@ -493,6 +496,9 @@ impl CodeGen {
             let syn::Item::Mod(m) = item else {
                 continue;
             };
+            if Self::has_cfg_test(&m.attrs) {
+                continue;
+            }
             let Some((_, nested_items)) = &m.content else {
                 continue;
             };
@@ -3742,12 +3748,14 @@ impl CodeGen {
                 if !force_expr_path && self.try_emit_control_flow(expr) {
                     return;
                 }
+                let should_emit_tail_return =
+                    is_tail && semi.is_none() && self.in_value_return_scope();
                 let expr_str = if is_tail && semi.is_none() {
                     self.emit_expr_to_string_with_expected(expr, self.current_return_type_hint())
                 } else {
                     self.emit_expr_to_string(expr)
                 };
-                if is_tail && semi.is_none() {
+                if should_emit_tail_return {
                     // Tail expression without semicolon → return (or co_return in async)
                     let keyword = if self.in_async { "co_return" } else { "return" };
                     self.writeln(&format!("{} {};", keyword, expr_str));
@@ -5858,12 +5866,48 @@ impl CodeGen {
     }
 
     fn emit_while(&mut self, while_expr: &syn::ExprWhile) {
-        let cond = self.emit_expr_to_string(&while_expr.cond);
+        if let syn::Expr::Let(let_expr) = &*while_expr.cond {
+            if self.emit_while_let(let_expr, &while_expr.body) {
+                return;
+            }
+        }
+        let bool_ty: syn::Type = parse_quote!(bool);
+        let cond = self.emit_expr_to_string_with_expected(&while_expr.cond, Some(&bool_ty));
         self.writeln(&format!("while ({}) {{", cond));
         self.indent += 1;
         self.emit_block(&while_expr.body);
         self.indent -= 1;
         self.writeln("}");
+    }
+
+    fn emit_while_let(&mut self, let_expr: &syn::ExprLet, body: &syn::Block) -> bool {
+        let Some((cond_expr_raw, binding_name, unwrap_method)) =
+            self.if_let_expr_condition_parts(let_expr)
+        else {
+            return false;
+        };
+        let cond_expr = cond_expr_raw.replace("_iflet", "_whilelet");
+        let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+
+        self.writeln("while (true) {");
+        self.indent += 1;
+        self.writeln(&format!("auto&& _whilelet = {};", scrutinee));
+        self.writeln(&format!("if (!({})) {{ break; }}", cond_expr));
+        if let Some(binding) = binding_name {
+            if let Some(unwrap) = unwrap_method {
+                if scrutinee.ends_with(".as_mut()") {
+                    self.writeln(&format!("auto& {} = *_whilelet.{}();", binding, unwrap));
+                } else {
+                    self.writeln(&format!("auto {} = _whilelet.{}();", binding, unwrap));
+                }
+            } else {
+                self.writeln(&format!("auto {} = _whilelet;", binding));
+            }
+        }
+        self.emit_block(body);
+        self.indent -= 1;
+        self.writeln("}");
+        true
     }
 
     fn emit_loop(&mut self, loop_expr: &syn::ExprLoop) {
@@ -10489,6 +10533,13 @@ impl CodeGen {
             syn::Expr::Block(block) => {
                 // Multi-statement body
                 let mut inner = self.new_inner_for_block();
+                // Closure blocks are expression bodies even when emitted inside
+                // surrounding void-return contexts; keep tail-expression return
+                // behavior local to the lambda body.
+                inner.return_value_scopes.clear();
+                inner.return_type_hints.clear();
+                inner.push_return_value_scope("auto");
+                inner.return_type_hints.push(None);
                 inner.emit_block(&block.block);
                 let body_str = inner.into_output();
                 format!("[{}]({}) {{\n{}}}", capture, params_str, body_str)
@@ -16838,7 +16889,8 @@ mod tests {
         );
         assert!(out.contains("const rusty::SafeFn<void()> check_ref = +[]() {"));
         assert!(out.contains("const auto propagate_ref = [&]() {"));
-        assert!(out.contains("return check_ref();"));
+        assert!(out.contains("check_ref();"));
+        assert!(!out.contains("return check_ref();"));
         assert!(!out.contains("const rusty::SafeFn<void()> propagate_ref = +[]() {"));
     }
 
@@ -17185,6 +17237,69 @@ mod tests {
         assert!(helpers.contains("DebugList& entries(Args&&...)"));
         assert!(helpers.contains("Result finish() { return true; }"));
         assert!(helpers.contains("DebugList debug_list() const { return DebugList{}; }"));
+    }
+
+    #[test]
+    fn test_leaf4154333333333_drop_while_let_lowers_without_unreachable_bool_condition() {
+        let out = transpile_str(
+            r#"
+            struct Drain;
+            impl Drain {
+                fn next(&mut self) -> Option<i32> { None }
+            }
+            impl Drop for Drain {
+                fn drop(&mut self) {
+                    while let Some(v) = self.next() {
+                        let _ = v;
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("while (true) {"));
+        assert!(out.contains("auto&& _whilelet = next();"));
+        assert!(out.contains("if (!(_whilelet.is_some())) { break; }"));
+        assert!(out.contains("auto v = _whilelet.unwrap();"));
+        assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
+    }
+
+    #[test]
+    fn test_leaf4154333333333_drop_tail_expr_does_not_emit_return_value() {
+        let out = transpile_str(
+            r#"
+            struct ScopeExitGuard<T, Data, F>
+            where
+                F: FnMut(&Data, &mut T),
+            {
+                value: T,
+                data: Data,
+                f: F,
+            }
+            impl<T, Data, F> Drop for ScopeExitGuard<T, Data, F>
+            where
+                F: FnMut(&Data, &mut T),
+            {
+                fn drop(&mut self) {
+                    (self.f)(&self.data, &mut self.value)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("(f)(&data, &value);"));
+        assert!(!out.contains("return (f)(&data, &value);"));
+    }
+
+    #[test]
+    fn test_leaf4154333333333_closure_block_tail_expr_keeps_return() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let _cb = |x: i32| { x + 1 };
+            }
+            "#,
+        );
+        assert!(out.contains("[&](int32_t x) {"));
+        assert!(out.contains("return x + 1;"));
     }
 
     #[test]

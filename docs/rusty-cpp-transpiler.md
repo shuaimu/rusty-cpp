@@ -7662,6 +7662,76 @@ Design rationale:
 - Preserved declaration-order stability while adding a guard against alias-order forward-decl
   regressions.
 
+### 10.11.93 Phase 20 Leaf 4.15.4.3.3.3.3.3.3 (`arrayvec` Stage D): destructor/control-flow blocker family (`while let` + destructor tail return)
+
+Problem:
+
+- After 10.11.92, first deterministic `arrayvec` Stage D failures began with:
+  - `while (rusty::intrinsics::unreachable())` in generated destructor paths (`while let` condition lowered through expression fallback and emitted as `void` in bool context),
+  - destructor tail-expression lowering as `return <expr>;` (C++ forbids returning a value from destructors).
+
+Scope analysis:
+
+- Implemented as a focused generic codegen change set under the <1000 LOC target.
+- Kept fixes crate-agnostic and emitter-local (no post-generation patch scripts).
+
+Implementation:
+
+- `transpiler/src/codegen.rs`:
+  - Added statement-level `while let` lowering:
+    - `while let PAT = expr { ... }` now emits a deterministic `while (true)` loop with
+      `_whilelet` scrutinee materialization, pattern condition check, optional binding unwrap, and
+      `break` on non-match.
+  - Hardened `while` condition emission with boolean expected type:
+    - `emit_while` now emits condition via `emit_expr_to_string_with_expected(..., bool)` to avoid
+      `void`→`bool` conversion fallout on unreachable-style fallbacks.
+  - Made tail-expression statement emission return-scope aware:
+    - tail expressions emit `return` only in value-return scopes,
+    - void scopes (including destructors) emit expression statements (`expr;`) instead of
+      `return expr;`.
+  - Preserved closure-body tail-return semantics:
+    - closure block emit path now resets return-scope context locally so lambda block tails still
+      emit `return ...;` where needed.
+  - Forward-declaration guard follow-up:
+    - forward declaration pass now skips `#[cfg(test)]` functions/modules to avoid reintroducing
+      omitted test-module namespaces through predecls.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154333333333_drop_while_let_lowers_without_unreachable_bool_condition`
+  - `test_leaf4154333333333_drop_tail_expr_does_not_emit_return_value`
+  - `test_leaf4154333333333_closure_block_tail_expr_keeps_return`
+
+Verification:
+
+- Focused transpiler regressions:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333333 -- --nocapture`
+- Full transpiler suite:
+  - `cargo test -p rusty-cpp-transpiler`
+- Full repo suites:
+  - `cargo test --release -j $(nproc) -- --test-threads=$(nproc)`
+  - `cmake-example-project` configure + build (`cmake .. && make -j $(nproc)`)
+- Parity re-probes:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+  - `tests/transpile_tests/run_parity_matrix.sh`
+
+Re-probe result:
+
+- Previous deterministic destructor/control-flow blockers are removed from first-failure output.
+- Full matrix remains stable in ordering (`either`, `tap`, `cfg-if`, `take_mut` pass).
+- Next deterministic `arrayvec` Stage D blockers now start at import/runtime path families:
+  `std::path`, `std::str`, `char_::encode_utf8`, and `Utf8Error` (plus immediate dependents).
+
+Design rationale:
+
+- Kept fixes localized to statement/control-flow emission points rather than broad expression
+  rewrites.
+- Avoided wrong approaches from §11:
+  - no crate-specific generated C++ patching for `arrayvec`,
+  - no blanket suppression/removal of unreachable or return emission globally without scope context,
+  - no broad disabling of forward declarations (kept declaration-order benefit with cfg-test guard).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
