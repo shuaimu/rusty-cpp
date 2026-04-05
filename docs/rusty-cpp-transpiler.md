@@ -8161,6 +8161,75 @@ Avoided wrong approaches from §11:
 - §11.91/§11.92: no declaration-order hacks or output surgery to mask unresolved-name frontiers.
 - §11.82: no eager crate-specific iterator-adapter emulation in this procedural leaf.
 
+### 10.99 Leaf 4.15.4.3.3.3.3.3.7.1 — Boxed/Iterator/Add Frontier Collapse
+
+Scope completed in this pass:
+
+- Implemented the first executable leaf (`4.15.4.3.3.3.3.3.7.1`) for the deterministic
+  post-6.3 `arrayvec` Stage D frontier.
+- Kept the implementation in shared transpiler/runtime layers only (no crate-specific scripts).
+- Total change stayed under the 1000-LOC guideline, so no further decomposition was needed.
+
+Implementation details:
+
+- `transpiler/src/types.rs`:
+  - mapped `alloc::boxed::box_new`/`std::boxed::box_new`/`boxed::box_new`
+    to `rusty::boxed::box_new`,
+  - mapped bare `into_vec` path to `rusty::boxed::into_vec`,
+  - mapped `Add::add` path family to callable runtime object `rusty::ops::add_fn`
+    (instead of a template function symbol).
+- `transpiler/src/codegen.rs`:
+  - lowered iterator adapter calls:
+    - `.map(...)` chains to `rusty::map(...)`,
+    - `.fold(init, f)` to `rusty::fold(..., init, f)`,
+  - lowered borrowed `for` loops through `rusty::for_in(...)` with borrow-shell stripping
+    (no direct `&expr` emission),
+  - kept lowering generic and fixture-agnostic.
+- `include/rusty/slice.hpp`:
+  - added iterator adaptation support for begin/end-only ranges in `rusty::iter(...)`,
+  - extended `rusty::for_in(...)` to re-route iter/data-deref providers through shared
+    iterator adaptation,
+  - added callable object `rusty::ops::add_fn`.
+- `include/rusty/rusty.hpp`:
+  - added shared `rusty::boxed::{box_new, into_vec}` helpers for array/vector and fallback forms.
+
+Regression tests added/updated:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154333333371_alloc_boxed_and_into_vec_paths_rewritten`
+  - `test_leaf4154333333371_iter_fold_add_lowers_to_runtime_fold_and_ops_add`
+  - `test_leaf4154333333371_into_iter_map_fold_chain_lowers_to_runtime_helpers`
+  - updated borrowed `for` loop regression to the `rusty::for_in(data)` shape.
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` for `rusty::ops::add_fn`.
+
+Verification:
+
+- Focused leaf tests:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333371 -- --nocapture`
+- Full transpiler suite:
+  - `cargo test -p rusty-cpp-transpiler`
+- Full workspace suite:
+  - `cargo test`
+- Parity re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Prior 7.1 head blocker family is removed from Stage D first-failure output:
+  - no unresolved `alloc::boxed::box_new`/`into_vec` at the head,
+  - no unresolved `Add::add` callable-path head failure,
+  - no unresolved iterator `.map`/`.fold` path head failure.
+- New deterministic frontier begins at downstream iterator-state/test-shape fallout:
+  - `IntoIter::next` self-field shadow emission (`const auto index = index;`),
+  - then dependent optional/range-adaptation and span/data-shape compile errors.
+
+Avoided wrong approaches from §11:
+
+- §11.82: no eager global iterator-method rewrites detached from receiver shape.
+- §11.96: no mapping of callable trait paths (like `Add::add`) to unresolved function-template
+  symbols in value position.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -9368,3 +9437,18 @@ the same token unchanged in expression/value contexts.
   deterministically fails with primary-expression errors.
 - Correct behavior requires expression-position construction (`rusty::fmt::Error{}`) while keeping
   type-position mapping as `rusty::fmt::Error`.
+
+### 11.96 Mapping Callable Trait Paths (for example `Add::add`) to Function-Template Symbols
+
+**Rejected approach:** Rewrite callable trait paths like `Add::add` directly to a function-template
+name (`rusty::ops::add`) and pass that symbol in value position (for example as a reducer in
+`fold`).
+
+**Why it was rejected:**
+
+- In C++, an overloaded function-template name in value position is not always deducible as a
+  concrete callable, which causes immediate template-argument-deduction failures at call sites.
+- This creates deterministic parity failures for iterator reductions that pass the callable without
+  explicit invocation (`fold(..., Add::add)` style).
+- Correct behavior is to map callable-path usage to a concrete callable object surface
+  (`rusty::ops::add_fn`) while keeping direct call semantics available through that object.

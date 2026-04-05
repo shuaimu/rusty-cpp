@@ -112,6 +112,38 @@ namespace rusty {
     
     template<typename T>
     using RefCounted = Rc<T>;
+
+    namespace boxed {
+
+    template<typename T>
+    constexpr std::decay_t<T> box_new(T&& value) {
+        return std::forward<T>(value);
+    }
+
+    template<typename T, std::size_t N>
+    Vec<T> into_vec(std::array<T, N> values) {
+        Vec<T> out(N);
+        for (auto& value : values) {
+            out.push(std::move(value));
+        }
+        return out;
+    }
+
+    template<typename T, typename Alloc>
+    Vec<T> into_vec(std::vector<T, Alloc> values) {
+        Vec<T> out(values.size());
+        for (auto& value : values) {
+            out.push(std::move(value));
+        }
+        return out;
+    }
+
+    template<typename T>
+    constexpr std::decay_t<T> into_vec(T&& value) {
+        return std::forward<T>(value);
+    }
+
+    } // namespace boxed
 }
 
 #endif // RUSTY_HPP

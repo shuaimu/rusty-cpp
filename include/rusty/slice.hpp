@@ -2,6 +2,9 @@
 #define RUSTY_SLICE_HPP
 
 #include <cstddef>
+#include <functional>
+#include <iterator>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <type_traits>
@@ -106,6 +109,112 @@ private:
 namespace detail {
 template<typename T>
 inline constexpr bool dependent_false_v = false;
+
+template<typename T>
+constexpr decltype(auto) deref_if_pointer(T&& value) {
+    if constexpr (std::is_pointer_v<std::remove_reference_t<T>>) {
+        return *std::forward<T>(value);
+    } else {
+        return std::forward<T>(value);
+    }
+}
+
+template<typename NextIter>
+class next_iter_range {
+public:
+    explicit next_iter_range(NextIter iter) : iter_(std::move(iter)) {}
+
+    class iterator {
+        using next_result_type = decltype(std::declval<NextIter&>().next());
+        using item_type = std::decay_t<decltype(option_take_value(std::declval<next_result_type&>()))>;
+
+    public:
+        iterator() : iter_(nullptr), at_end_(true) {}
+
+        explicit iterator(NextIter* iter, bool at_end = false)
+            : iter_(iter), at_end_(at_end) {
+            if (!at_end_) {
+                advance();
+            }
+        }
+
+        decltype(auto) operator*() const {
+            return deref_if_pointer(*current_);
+        }
+
+        iterator& operator++() {
+            advance();
+            return *this;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return at_end_ != other.at_end_;
+        }
+
+    private:
+        void advance() {
+            current_.reset();
+            auto next_item = iter_->next();
+            if (!option_has_value(next_item)) {
+                at_end_ = true;
+                return;
+            }
+            current_.emplace(option_take_value(next_item));
+            at_end_ = false;
+        }
+
+        NextIter* iter_;
+        std::optional<item_type> current_;
+        bool at_end_;
+    };
+
+    iterator begin() { return iterator(&iter_); }
+    iterator end() { return iterator(&iter_, true); }
+
+private:
+    NextIter iter_;
+};
+
+template<typename Iter, typename Func>
+class map_next_iter {
+public:
+    map_next_iter(Iter iter, Func func)
+        : iter_(std::move(iter)), func_(std::move(func)) {}
+
+    auto next() {
+        using next_result_type = decltype(iter_.next());
+        using item_type = decltype(option_take_value(std::declval<next_result_type&>()));
+        using mapped_type = std::decay_t<decltype(
+            std::invoke(std::declval<Func&>(), deref_if_pointer(std::declval<item_type>())))>;
+
+        auto item = iter_.next();
+        if (!option_has_value(item)) {
+            return std::optional<mapped_type>{};
+        }
+        return std::optional<mapped_type>(std::invoke(
+            func_,
+            deref_if_pointer(option_take_value(item))));
+    }
+
+private:
+    Iter iter_;
+    Func func_;
+};
+
+template<typename NextIter>
+auto make_next_iter_range(NextIter&& iter) {
+    using stored_iter = std::decay_t<NextIter>;
+    return next_iter_range<stored_iter>(std::forward<NextIter>(iter));
+}
+
+template<typename Iter, typename Func>
+auto make_map_next_iter(Iter&& iter, Func&& func) {
+    using stored_iter = std::decay_t<Iter>;
+    using stored_func = std::decay_t<Func>;
+    return map_next_iter<stored_iter, stored_func>(
+        std::forward<Iter>(iter),
+        std::forward<Func>(func));
+}
 } // namespace detail
 
 template<typename Range>
@@ -118,6 +227,8 @@ decltype(auto) iter(Range&& range) {
         using elem_type = std::remove_pointer_t<elem_ptr>;
         auto* data = view.data();
         return slice_iter::Iter<elem_type>(data, data + view.size());
+    } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {
+        return std::forward<Range>(range);
     } else if constexpr (requires { *std::forward<Range>(range); }) {
         return iter(*std::forward<Range>(range));
     } else {
@@ -127,6 +238,71 @@ decltype(auto) iter(Range&& range) {
         );
     }
 }
+
+template<typename Range>
+decltype(auto) for_in(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).next(); }) {
+        return detail::make_next_iter_range(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return for_in(std::forward<Range>(range).into_iter());
+    } else if constexpr (
+        requires { std::forward<Range>(range).iter(); }
+        || requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }
+        || requires { *std::forward<Range>(range); }
+    ) {
+        return for_in(iter(std::forward<Range>(range)));
+    } else {
+        return std::forward<Range>(range);
+    }
+}
+
+template<typename Range, typename Func>
+decltype(auto) map(Range&& range, Func&& func) {
+    if constexpr (requires { std::forward<Range>(range).next(); }) {
+        return detail::make_map_next_iter(
+            std::forward<Range>(range),
+            std::forward<Func>(func));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return map(
+            std::forward<Range>(range).into_iter(),
+            std::forward<Func>(func));
+    } else {
+        return detail::make_map_next_iter(
+            iter(std::forward<Range>(range)),
+            std::forward<Func>(func));
+    }
+}
+
+template<typename Range, typename Acc, typename Func>
+auto fold(Range&& range, Acc init, Func&& func) {
+    auto acc = std::move(init);
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        acc = std::invoke(
+            func,
+            std::move(acc),
+            std::forward<decltype(item)>(item));
+    }
+    return acc;
+}
+
+namespace ops {
+
+template<typename Lhs, typename Rhs>
+constexpr auto add(Lhs&& lhs, Rhs&& rhs) {
+    return detail::deref_if_pointer(std::forward<Lhs>(lhs))
+           + detail::deref_if_pointer(std::forward<Rhs>(rhs));
+}
+
+struct add_fn_t {
+    template<typename Lhs, typename Rhs>
+    constexpr auto operator()(Lhs&& lhs, Rhs&& rhs) const {
+        return add(std::forward<Lhs>(lhs), std::forward<Rhs>(rhs));
+    }
+};
+
+inline constexpr add_fn_t add_fn{};
+
+} // namespace ops
 
 } // namespace rusty
 

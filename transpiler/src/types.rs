@@ -118,6 +118,10 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
     match rust_path {
         // Box::new → rusty::Box<T>::new_ (new is a C++ keyword, _ suffix for consistency)
         "Box::new" => Some("rusty::Box::new_"),
+        "alloc::boxed::box_new" | "std::boxed::box_new" | "boxed::box_new" => {
+            Some("rusty::boxed::box_new")
+        }
+        "into_vec" => Some("rusty::boxed::into_vec"),
         // String::from → rusty::String constructor
         "String::from" => Some("rusty::String::from"),
         "String::new" => Some("rusty::String::new_"),
@@ -167,6 +171,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::rt::panic_fmt" | "rt::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
+        "Add::add" | "core::ops::Add::add" | "std::ops::Add::add" => Some("rusty::ops::add_fn"),
         "core::cmp::min" | "std::cmp::min" => Some("core::cmp::min"),
         "core::cmp::max" | "std::cmp::max" => Some("core::cmp::max"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
@@ -547,6 +552,19 @@ mod tests {
         assert_eq!(
             map_function_path("std::io::_print"),
             Some("rusty::io::_print")
+        );
+        assert_eq!(
+            map_function_path("alloc::boxed::box_new"),
+            Some("rusty::boxed::box_new")
+        );
+        assert_eq!(
+            map_function_path("into_vec"),
+            Some("rusty::boxed::into_vec")
+        );
+        assert_eq!(map_function_path("Add::add"), Some("rusty::ops::add_fn"));
+        assert_eq!(
+            map_function_path("core::ops::Add::add"),
+            Some("rusty::ops::add_fn")
         );
     }
 

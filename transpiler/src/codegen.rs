@@ -6245,6 +6245,18 @@ impl CodeGen {
             }
             _ => self.emit_expr_to_string(&for_expr.expr),
         };
+        let iter_expr = if iter_is_borrowed {
+            // Borrowed Rust `for` inputs should drop the borrow shell (`&expr`/`&mut expr`)
+            // but still route through shared iterator adaptation to handle next()-style
+            // iterators and non-range iterator providers.
+            format!("rusty::for_in({})", iter)
+        } else {
+            // Rust `for x in expr` desugars through IntoIterator; `for_in` handles:
+            // - types with `.into_iter()`
+            // - next()-style iterators
+            // - plain C++ ranges.
+            format!("rusty::for_in({})", iter)
+        };
         if iter_is_borrowed {
             let mut refs = HashSet::new();
             self.collect_pattern_binding_names(&for_expr.pat, &mut refs);
@@ -6253,7 +6265,7 @@ impl CodeGen {
 
         // Rust `for x in expr` → C++ `for (auto& x : expr)` or `for (auto x : expr)`
         // Use auto&& to handle both references and values correctly
-        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter));
+        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_expr));
         self.indent += 1;
         self.emit_block(&for_expr.body);
         self.indent -= 1;
@@ -7822,6 +7834,12 @@ impl CodeGen {
         }
         if let Some(filter_map_call) = self.try_emit_iter_filter_map_call(mc) {
             return filter_map_call;
+        }
+        if let Some(map_call) = self.try_emit_iter_map_call(mc) {
+            return map_call;
+        }
+        if let Some(fold_call) = self.try_emit_iter_fold_call(mc) {
+            return fold_call;
         }
 
         let method_name = mc.method.to_string();
@@ -9906,6 +9924,35 @@ impl CodeGen {
         let receiver = self.emit_expr_to_string(&iter_call.receiver);
         let mapper = self.emit_expr_maybe_move(mc.args.first()?);
         Some(format!("rusty::filter_map({}, {})", receiver, mapper))
+    }
+
+    fn try_emit_iter_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "map" || mc.args.len() != 1 {
+            return None;
+        }
+        let inner = match self.peel_paren_group_expr(&mc.receiver) {
+            syn::Expr::MethodCall(inner) => inner,
+            _ => return None,
+        };
+        if !matches!(
+            inner.method.to_string().as_str(),
+            "iter" | "iter_mut" | "into_iter" | "cloned"
+        ) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let mapper = self.emit_expr_maybe_move(mc.args.first()?);
+        Some(format!("rusty::map({}, {})", receiver, mapper))
+    }
+
+    fn try_emit_iter_fold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "fold" || mc.args.len() != 2 {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let init = self.emit_expr_maybe_move(mc.args.first()?);
+        let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
+        Some(format!("rusty::fold({}, {}, {})", receiver, init, reducer))
     }
 
     fn try_emit_error_description_dispatch_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -14995,13 +15042,13 @@ mod tests {
     #[test]
     fn test_for_in_range() {
         let out = transpile_str("fn f() { for i in 0..10 { i; } }");
-        assert!(out.contains("for (auto&& i : rusty::range(0, 10)) {"));
+        assert!(out.contains("for (auto&& i : rusty::for_in(rusty::range(0, 10))) {"));
     }
 
     #[test]
     fn test_for_in_variable() {
         let out = transpile_str("fn f() { for x in items { x; } }");
-        assert!(out.contains("for (auto&& x : items) {"));
+        assert!(out.contains("for (auto&& x : rusty::for_in(items)) {"));
     }
 
     #[test]
@@ -15033,8 +15080,8 @@ mod tests {
     #[test]
     fn test_nested_loops() {
         let out = transpile_str("fn f() { for i in 0..5 { for j in 0..5 { i; } } }");
-        assert!(out.contains("for (auto&& i : rusty::range(0, 5)) {"));
-        assert!(out.contains("for (auto&& j : rusty::range(0, 5)) {"));
+        assert!(out.contains("for (auto&& i : rusty::for_in(rusty::range(0, 5))) {"));
+        assert!(out.contains("for (auto&& j : rusty::for_in(rusty::range(0, 5))) {"));
     }
 
     #[test]
@@ -16448,6 +16495,44 @@ mod tests {
         assert!(out.contains("using rusty::BTreeSet;"));
         assert!(out.contains("using rusty::VecDeque;"));
         assert!(!out.contains("using std::collections::HashMap;"));
+    }
+
+    #[test]
+    fn test_leaf4154333333371_alloc_boxed_and_into_vec_paths_rewritten() {
+        let out = transpile_str("fn f() { let _ = into_vec(alloc::boxed::box_new([1, 2, 3])); }");
+        assert!(out.contains("rusty::boxed::into_vec(rusty::boxed::box_new(std::array{1, 2, 3}))"));
+        assert!(!out.contains("alloc::boxed::box_new"));
+        assert!(!out.contains("into_vec(alloc::"));
+    }
+
+    #[test]
+    fn test_leaf4154333333371_iter_fold_add_lowers_to_runtime_fold_and_ops_add() {
+        let out = transpile_str(
+            r#"
+            use core::ops::Add;
+            fn f(v: [i32; 3]) -> i32 {
+                v.iter().fold(0, Add::add)
+            }
+            "#,
+        );
+        assert!(out.contains("return rusty::fold(rusty::iter(v), 0, rusty::ops::add_fn);"));
+        assert!(!out.contains(".fold(0, Add::add)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333371_into_iter_map_fold_chain_lowers_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            use core::ops::Add;
+            fn f(v: [i32; 3]) -> i32 {
+                v.into_iter().map(|x| x + 1).fold(0, Add::add)
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::map(v.into_iter(),"));
+        assert!(out.contains("rusty::fold("));
+        assert!(out.contains("rusty::ops::add_fn"));
+        assert!(!out.contains(".map([&](auto&& x) { return x + 1; }).fold(0, Add::add)"));
     }
 
     #[test]
@@ -18393,7 +18478,7 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("for (auto&& x : data)"));
+        assert!(out.contains("for (auto&& x : rusty::for_in(data))"));
         assert!(!out.contains("for (auto&& x : &data)"));
     }
 
