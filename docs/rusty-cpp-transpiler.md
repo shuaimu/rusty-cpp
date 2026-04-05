@@ -407,6 +407,66 @@ my_crate/                    →  my_crate.cppm (primary module interface)
 
 **Compiler support (as of 2026)**: GCC 14+, Clang 17+, and MSVC 19.34+ all support C++20 modules. CMake 3.28+ has `import std` support. Module support is production-ready for new projects.
 
+#### Practical Module Emission Rules (from Real-Crate Parity)
+
+The direct mapping above is necessary but not sufficient. Real crates force a few extra invariants.
+
+1. Use a **global module fragment** before `export module` when including headers:
+
+```cpp
+module;
+#include <variant>
+#include <tuple>
+#include <utility>
+#include <rusty/rusty.hpp>
+
+export module either;
+```
+
+Without this shape, standard library declarations can conflict with named-module rules on some toolchains.
+
+2. Only emit `export` at top-level module scope.
+
+```cpp
+// Wrong (invalid C++20 module syntax)
+namespace inner {
+    export struct Foo { int x; };
+}
+
+// Correct
+namespace inner {
+    struct Foo { int x; };
+}
+```
+
+3. Treat module-linkage-sensitive re-exports as Rust-only comments in module mode.
+
+```rust
+pub mod iterator { pub struct IterEither<L, R>(L, R); }
+pub use iterator::IterEither;
+```
+
+```cpp
+namespace iterator {
+    template<class L, class R>
+    struct IterEither { /* ... */ };
+}
+// Rust-only re-export skipped in module mode: using iterator::IterEither;
+```
+
+4. Keep forward declarations constrained and alias-safe.
+
+```cpp
+// Good: simple forward declaration for declaration-order resilience
+void extend_panic();
+
+// Avoid broad alias-dependent forward declarations that can break order:
+// Option3 foo();   // if Option3 is declared later via alias, this is fragile
+```
+
+5. Merge `impl` methods into owning type declarations before emitting inline module bodies.
+   This avoids invalid free-function fallbacks for methods that should live on the type.
+
 ### 2.6 Impl Blocks
 
 Rust splits methods across multiple `impl` blocks. In C++, all methods must be declared in the class body. The transpiler must **merge all `impl` blocks** for a type into a single class definition.
@@ -428,6 +488,8 @@ struct Foo {
     int32_t get() const { return x; }
 };
 ```
+
+Practical rule from real expanded crates: method de-duplication must be keyed by **emitted C++ signature**, not raw Rust impl tokens. Different Rust impl bounds can collapse to the same C++ signature after path/trait lowering.
 
 ---
 
@@ -454,6 +516,85 @@ using Shape = std::variant<Circle, Rectangle, None_>;
 ```
 
 Each variant becomes its own struct, and the enum becomes a `using` alias for `std::variant<...>`. This is type-safe, zero-overhead, and preserves value semantics. For recursive enums (like linked lists or ASTs), use `rusty::Box<T>` for the recursive case.
+
+#### Generic Enum Rule: Always Carry Template Parameters
+
+For generic enums, variant structs and the variant alias must carry the same template parameter list.
+
+```rust
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+```
+
+```cpp
+template<class L, class R>
+struct Either_Left { L _0; };
+
+template<class L, class R>
+struct Either_Right { R _0; };
+
+template<class L, class R>
+using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;
+```
+
+If you omit `<L, R>` in either the variant struct or alias, template deduction and pattern matching quickly fail downstream.
+
+#### Constructor Lowering Rule: Use Expected Type Context
+
+Rust often writes constructor calls without explicit type args:
+
+```rust
+let a: Either<i32, i32> = Left(1);
+let mut b: Either<i32, i32> = Left(2);
+b = Right(3);
+```
+
+C++ often needs specialization at emission sites:
+
+```cpp
+Either<int32_t, int32_t> a = Left<int32_t, int32_t>(1);
+Either<int32_t, int32_t> b = Left<int32_t, int32_t>(2);
+b = Right<int32_t, int32_t>(3);
+```
+
+So the transpiler should thread expected-type hints through:
+
+1. typed `let` initializers,
+2. assignments to typed locals,
+3. return expressions in typed functions,
+4. value-producing match arms.
+
+#### `Self::Variant` and Qualified Variant Paths
+
+Patterns and constructor paths may appear as `Self::Left`, `crate::Left`, `self::Right`, `super::Left`.
+Lowering should normalize to the owning enum context before emitting C++ variant types/constructors.
+
+```rust
+impl<L, R> Either<L, R> {
+    fn flip(self) -> Either<R, L> {
+        match self {
+            Self::Left(l) => Either::Right(l),
+            Self::Right(r) => Either::Left(r),
+        }
+    }
+}
+```
+
+```cpp
+template<class L, class R>
+Either<R, L> flip(Either<L, R> self) {
+    return std::visit(overloaded{
+        [&](const Either_Left<L, R>& _v) -> Either<R, L> {
+            return Either<R, L>(Right<R, L>(_v._0));
+        },
+        [&](const Either_Right<L, R>& _v) -> Either<R, L> {
+            return Either<R, L>(Left<R, L>(_v._0));
+        },
+    }, self);
+}
+```
 
 ### 3.2 Traits → Microsoft Proxy ⚠️⚠️
 
@@ -604,6 +745,66 @@ Point operator+(Point lhs, const Point& rhs) {
 }
 ```
 
+#### 3.2.6 UFCS in Rust and C++ Lowering
+
+**UFCS (Universal Function Call Syntax)** in Rust is the `Trait::method(receiver, ...)` form.
+It is common in expanded macro output and trait-heavy code.
+
+```rust
+use std::io::Read;
+
+fn fill(cursor: &mut Cursor<&[u8]>, buf: &mut [u8]) -> usize {
+    Read::read(cursor, buf).unwrap()
+}
+```
+
+Textbook lowering rule:
+
+1. Detect call shape `TraitPath::method(&receiver, args...)` or `TraitPath::method(&mut receiver, args...)`.
+2. Rewrite to receiver-call form: `receiver.method(args...)`.
+3. Normalize non-receiver UFCS arguments in method position (`&arg`/`&mut arg` → `arg`) only for this rewrite.
+4. Guard against false positives:
+   - do not rewrite free functions that just happen to be namespaced,
+   - do not rewrite constructor-like calls such as `Type::new(...)`.
+
+```cpp
+size_t fill(Cursor<span<const uint8_t>>& cursor, span<uint8_t> buf) {
+    return cursor.read(buf).unwrap();
+}
+```
+
+#### 3.2.7 Extension-Trait Method Lowering
+
+Rust extension traits often appear as method calls on types that do not physically declare those methods.
+In C++, this is typically represented via free-function lowering.
+
+```rust
+use tap::Tap;
+
+fn f(x: i32) -> i32 {
+    x.tap(|v| println!("{v}"))
+}
+```
+
+```cpp
+int32_t f(int32_t x) {
+    return tap(x, [&](auto v) { std::println("{}", v); });
+}
+```
+
+This keeps behavior without requiring intrusive class modification.
+
+#### 3.2.8 Module-Mode Trait Facade Fallback
+
+In module-expanded output, some external trait facade symbols may be unavailable.
+When that happens, emitting unresolved `pro::proxy<...Facade>` symbols is worse than softening.
+
+Practical fallback policy:
+
+1. keep local trait/facade lowering where symbols are known and emitted,
+2. soften unresolved/external trait-only surfaces to placeholder-safe forms in module mode,
+3. emit explicit Rust-only comments when a trait item is intentionally not materialized.
+
 ### 3.3 Pattern Matching ⚠️
 
 ```rust
@@ -640,6 +841,78 @@ template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 | Guard: `x if x > 0` | if-else chain |
 
 **Note**: C++26 proposes `inspect` for proper pattern matching (P2688). If targeting future standards, this becomes much cleaner.
+
+#### Match-as-Expression vs Match-as-Statement
+
+Rust uses `match` in both statement and expression positions:
+
+```rust
+let v = match e {
+    Either::Left(x) => x + 1,
+    Either::Right(y) => y - 1,
+};
+```
+
+A robust C++ lowering for value position is an IIFE:
+
+```cpp
+auto v = [&]() -> int32_t {
+    return std::visit(overloaded{
+        [&](const Either_Left<int32_t, int32_t>& _v) -> int32_t { return _v._0 + 1; },
+        [&](const Either_Right<int32_t, int32_t>& _v) -> int32_t { return _v._0 - 1; },
+    }, e);
+}();
+```
+
+This avoids fallthrough/missing-return issues and gives each arm an explicit return type.
+
+#### Nested Pattern Binding Rule
+
+Nested tuple/struct patterns should emit explicit binding statements rather than relying on ad-hoc lambda parameter shapes.
+
+```rust
+match value {
+    Either::Left((a, b)) => a + b,
+    Either::Right((c, d)) => c - d,
+}
+```
+
+```cpp
+std::visit(overloaded{
+    [&](const Either_Left<std::tuple<int32_t, int32_t>, std::tuple<int32_t, int32_t>>& _v) {
+        auto&& _t = _v._0;
+        auto a = std::get<0>(_t);
+        auto b = std::get<1>(_t);
+        return a + b;
+    },
+    [&](const Either_Right<std::tuple<int32_t, int32_t>, std::tuple<int32_t, int32_t>>& _v) {
+        auto&& _t = _v._0;
+        auto c = std::get<0>(_t);
+        auto d = std::get<1>(_t);
+        return c - d;
+    },
+}, value);
+```
+
+#### `Result`/`Option` Try-Style Match Lowering
+
+Certain match shapes are semantically try-like and clearer as control-flow lowering:
+
+```rust
+let x = match res {
+    Ok(v) => v,
+    Err(e) => return Err(e),
+};
+```
+
+```cpp
+if (res.is_err()) {
+    return rusty::Result<T, E>::Err(res.unwrap_err());
+}
+auto x = res.unwrap();
+```
+
+This strategy removes many malformed generated shapes (`return return`, invalid variant constructor context, etc.).
 
 ### 3.4 The `?` Operator ⚠️
 
@@ -682,6 +955,45 @@ std::expected<std::string, Error> read_file(std::string_view path) {
 
 Map `Result` to exceptions: `Err(e)` throws, `Ok(v)` returns `v`. The `?` operator is implicit. This is the simplest transpilation but changes error handling semantics.
 
+#### Practical `?` Lowering Matrix Used by the Transpiler
+
+In practice, one macro is not enough. The emitted form must depend on sync/async context and `Result` vs `Option` return semantics.
+
+| Rust context | Emitted family |
+|---|---|
+| sync function returning `Result<..., E>` | `RUSTY_TRY(expr)` |
+| sync function returning `Option<T>` | `RUSTY_TRY_OPT(expr)` |
+| async function returning `Result<..., E>` | `RUSTY_CO_TRY(expr)` |
+| async function returning `Option<T>` | `RUSTY_CO_TRY_OPT(expr)` |
+
+```rust
+fn next_token(it: &mut Iter) -> Option<Token> {
+    let t = it.next()?;
+    Some(t.normalize())
+}
+```
+
+```cpp
+rusty::Option<Token> next_token(Iter& it) {
+    auto t = RUSTY_TRY_OPT(it.next());
+    return rusty::Option<Token>::Some(t.normalize());
+}
+```
+
+```rust
+async fn fetch_len(c: &Client) -> Result<usize, Error> {
+    let body = c.get().await?;
+    Ok(body.len())
+}
+```
+
+```cpp
+rusty::Task<rusty::Result<size_t, Error>> fetch_len(const Client& c) {
+    auto body = RUSTY_CO_TRY(co_await c.get());
+    co_return rusty::Result<size_t, Error>::ok(body.len());
+}
+```
+
 ### 3.5 `break` with Value from `loop`
 
 ```rust
@@ -703,6 +1015,31 @@ auto result = [&]() -> int32_t {
 ```
 
 Wrap the loop in an immediately-invoked lambda that uses `return` instead of `break value`.
+
+#### `while let` Lowering Pattern
+
+Rust:
+
+```rust
+while let Some(x) = iter.next() {
+    consume(x);
+}
+```
+
+C++ lowering that preserves semantics without bool-context traps:
+
+```cpp
+while (true) {
+    auto _whilelet = iter.next();
+    if (!_whilelet.is_some()) {
+        break;
+    }
+    auto x = _whilelet.unwrap();
+    consume(x);
+}
+```
+
+This shape avoids invalid codegen such as using non-bool sentinel paths directly as loop conditions.
 
 ### 3.6 Lifetimes
 
@@ -784,6 +1121,20 @@ Raw pointer operations pass through naturally — C++ pointers are inherently un
 | `ptr as *const T` | `static_cast<const T*>(ptr)` |
 | `*ptr` (deref) | `*ptr` |
 | `&x as *const T` | `static_cast<const T*>(&x)` |
+
+Practical pointer-method lowering is also needed for real crates:
+
+```rust
+ptr.add(i).write(value);
+std::ptr::copy_nonoverlapping(src, dst, n);
+```
+
+```cpp
+rusty::ptr_write(rusty::ptr_add(ptr, i), value);
+rusty::ptr_copy_nonoverlapping(src, dst, n);
+```
+
+This keeps generated C++ valid when Rust raw-pointer method shapes do not map directly to well-typed C++ member calls.
 
 #### Design Decision
 
@@ -957,7 +1308,7 @@ Task<rusty::Result<rusty::String, Error>> fetch(std::string_view url) {
 - **C++20 generates the state machine** — `co_await`/`co_return` map directly to Rust's `.await`
 - **Executor is a library, not language** — same as Rust (tokio is a library too)
 
-### 3.8 Derive Macros
+### 3.9 Derive Macros
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -995,7 +1346,7 @@ struct std::hash<Point> {
 };
 ```
 
-### 3.9 Procedural / Declarative Macros
+### 3.10 Procedural / Declarative Macros
 
 Rust macros operate on token trees and are Turing-complete. There is no general C++ equivalent.
 
@@ -1009,7 +1360,7 @@ Rust macros operate on token trees and are Turing-complete. There is no general 
 
 **Recommendation**: Expand all macros before transpilation (using `rustc`'s macro expansion output or `cargo expand`), then transpile the expanded code.
 
-### 3.10 Generics / Templates
+### 3.11 Generics / Templates
 
 ```rust
 fn max<T: Ord>(a: T, b: T) -> T {
@@ -1033,6 +1384,66 @@ T max(T a, T b) {
 | `impl<T> Struct<T>` | Template class method definitions |
 | `T: 'static` | No equivalent (lifetime erased) |
 | Monomorphization | Same — C++ templates are monomorphized |
+
+### 3.12 Name and Path Rewriting Cookbook
+
+Real crates rely on many Rust path families that are not valid C++ namespaces.
+A practical transpiler needs explicit rewriting rules instead of ad-hoc fallback text.
+
+#### 3.11.1 Import Rewriting
+
+```rust
+use std::io::{self, Read, SeekFrom};
+use core::cmp::Ordering;
+use alloc::collections::BTreeMap;
+```
+
+```cpp
+namespace io = rusty::io;                 // keep `io::...` call sites valid
+// Rust-only: using std::io::Read;        // trait import, no C++ symbol emitted
+using rusty::io::SeekFrom;
+using rusty::cmp::Ordering;
+using rusty::BTreeMap;
+```
+
+Rules:
+
+1. preserve runtime-relevant symbols as C++-valid mappings,
+2. skip trait-only imports as Rust-only comments,
+3. rewrite `core::`/`alloc::` consistently (not piecemeal),
+4. never emit unresolved `using std::foo::Bar` just because Rust path exists.
+
+#### 3.11.2 Runtime Path Lowering
+
+Representative examples:
+
+| Rust path | Lowered path |
+|---|---|
+| `core::intrinsics::unreachable` | `rusty::intrinsics::unreachable` |
+| `core::panicking::panic_fmt` | `rusty::panicking::panic_fmt` |
+| `std::str::Utf8Error` | `rusty::str_runtime::Utf8Error` |
+| `std::char::from_u32` | `rusty::char_runtime::from_u32` |
+| `std::io::Result<T>` | `rusty::io::Result<T>` |
+
+The lowering table should be centralized; do not distribute these rewrites across unrelated emit paths.
+
+#### 3.11.3 Associated/Omitted-Template Recovery
+
+Rust often omits template args where type context is obvious:
+
+```rust
+let m = MaybeUninit::uninit();
+let e = CapacityError::new(());  // local alias with default parameter
+```
+
+C++ emission must recover owner/template context:
+
+```cpp
+auto m = rusty::MaybeUninit<T>::uninit();
+auto e = CapacityError<>::new_(());
+```
+
+Without this recovery, codegen drifts into unresolved `Type::member` or wrong-template diagnostics.
 
 ---
 
@@ -1093,6 +1504,57 @@ auto sum = vec
     | std::ranges::fold_left(0, std::plus{});  // C++23
 ```
 
+In practice, transpiled crates frequently need an explicit iterator runtime bridge instead of assuming every value is a native C++ range.
+
+#### Iterator Lowering Rules Used in Practice
+
+1. `.iter()` / `.iter_mut()` calls should lower to shared iterator helpers when direct container APIs are unavailable.
+
+```rust
+let it = values.iter();
+```
+
+```cpp
+auto it = rusty::iter(values);
+```
+
+2. Rust slice iterator type paths should map to concrete runtime iterator wrappers.
+
+```rust
+type I<'a, T> = std::slice::Iter<'a, T>;
+```
+
+```cpp
+template<class T>
+using I = rusty::slice_iter::Iter<T>;
+```
+
+3. `.collect()` should be expected-type-aware in generated C++.
+
+```rust
+let out: Vec<_> = self.iter().cloned().collect();
+```
+
+```cpp
+auto out = rusty::Vec<T>::from_iter(self.iter().cloned());
+```
+
+4. `for x in expr` should bridge through an iterator adapter for non-range iterator objects.
+
+```rust
+for x in iter_obj {
+    consume(x);
+}
+```
+
+```cpp
+for (auto&& x : rusty::into_iter_range(iter_obj)) {
+    consume(x);
+}
+```
+
+This avoids hard dependency on `begin/end` members on every lowered iterator type.
+
 ### 4.7 Trait Objects with Multiple Traits
 
 ```rust
@@ -1135,6 +1597,8 @@ pro::proxy<IteratorFacade> make_iter() {
 | `-> impl Trait` | `-> pro::proxy<Facade>` |
 | `-> Box<dyn Trait>` | `-> pro::proxy<Facade>` |
 | `-> &dyn Trait` | `-> pro::proxy_view<Facade>` |
+
+In module-expanded builds, when a required external facade symbol is not emitted/available, use a guarded fallback strategy (placeholder-safe type + explicit Rust-only marker) rather than emitting unresolved proxy symbols that break whole-module compilation.
 
 ---
 
@@ -1203,12 +1667,17 @@ pro::proxy<IteratorFacade> make_iter() {
                              │
                     ┌────────▼────────┐
                     │  C++ Code Gen   │
-                    │  (emit .hpp/.cpp│
+                    │  (emit .cppm)   │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │   parity-test   │
+                    │  stage A→E      │
                     └────────┬────────┘
                              │
                     ┌────────▼────────┐
                     │  C++20 Output   │
-                    │  (.hpp/.cpp)    │
+                    │  + artifacts    │
                     └─────────────────┘
 ```
 
@@ -1219,7 +1688,9 @@ pro::proxy<IteratorFacade> make_iter() {
 3. **Type Resolution**: Resolve all types, infer where needed, map Rust types → C++ types
 4. **Trait Mapper**: Convert trait definitions to Proxy facades (`PRO_DEF_MEM_DISPATCH` + `pro::facade_builder`)
 5. **Lifetime Eraser**: Strip all lifetime annotations (they have no runtime effect)
-6. **Code Generator**: Emit idiomatic C++20 code
+6. **Code Generator**: Emit idiomatic C++20 module code (`.cppm`) with guarded runtime helpers
+7. **Parity Harness**: Execute Stage A-E (baseline, expand/transpile, build-shape checks, compile, run)
+8. **Matrix Runner**: Run deterministic first-failure parity across target crate set
 
 ---
 
@@ -1264,6 +1735,33 @@ No production-quality **Rust→C++** transpiler exists today. The closest concep
 - Build system integration (Cargo.toml → CMakeLists.txt)
 - Test transpilation (`#[test]` → Google Test or Catch2)
 - Documentation comments (`///` → Doxygen `///`)
+
+### Delivery Discipline (Required)
+
+For each feature family, use the same loop:
+
+1. Add/adjust lowering rule.
+2. Add focused regression tests for that lowering.
+3. Re-run parity on the first failing target.
+4. Advance only when the deterministic first blocker family moves.
+
+This prevents chasing cascaded diagnostics and keeps changes auditable.
+
+### Recommended Operational Commands
+
+Single crate:
+
+```bash
+cargo run -p rusty-cpp-transpiler -- parity-test \
+  --manifest-path tests/transpile_tests/either/Cargo.toml \
+  --stop-after run
+```
+
+Matrix:
+
+```bash
+tests/transpile_tests/run_parity_matrix.sh
+```
 
 ---
 
