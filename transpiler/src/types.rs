@@ -126,7 +126,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "String::from" => Some("rusty::String::from"),
         "String::new" => Some("rusty::String::new_"),
         // Vec::new
-        "Vec::new" => Some("rusty::Vec::new_"),
+        "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" => Some("rusty::Vec::new_"),
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         // thread::spawn
         "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
@@ -434,6 +434,14 @@ mod tests {
             Some("rusty::String::new_")
         );
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
+        assert_eq!(
+            map_function_path("std::vec::Vec::new"),
+            Some("rusty::Vec::new_")
+        );
+        assert_eq!(
+            map_function_path("alloc::vec::Vec::new"),
+            Some("rusty::Vec::new_")
+        );
         assert_eq!(
             map_function_path("thread::spawn"),
             Some("rusty::thread::spawn")

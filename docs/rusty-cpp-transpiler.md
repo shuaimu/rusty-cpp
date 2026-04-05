@@ -2039,17 +2039,16 @@ From the active TODO frontier, the currently active leaf work is in the `arrayve
 
 Active work items:
 
-1. `Leaf 4.15.4.3.3.3.3.3.8.1` is complete.
-   - self-field shadowing in assignment-heavy methods is fixed (`this->field` emission)
-   - optional-like iterator adaptation for `for_in`/`map`/`fold` is hardened
-   - expected-type-aware slice call-arg lowering now covers `&[...]` and `&[x; n]`
-2. `Leaf 4.15.4.3.3.3.3.3.8.2` is complete.
-   - full matrix rerun still stops first at `arrayvec` (`pass=4`, `fail=1`)
-3. Current active next leaf: `Leaf 4.15.4.3.3.3.3.3.9.1`
-   - collapse template placeholder/omitted-template frontier in `arrayvec` Stage D:
-   - `ArrayVec<auto, ...>` / `Result<..., auto>` template-arg recovery
-   - avoid address-of-rvalue conversion-call shapes such as `(&std::array{...}).try_into()`
-   - collapse immediate dependent unresolved constructor/call cascades (`ArrayVec`, `Cell`, mapped collection constructors)
+1. `Leaf 4.15.4.3.3.3.3.3.9.1` is complete.
+   - method-form `try_into` lowering now prefers target `::try_from(receiver)` and avoids `&rvalue` receiver call shapes
+   - associated constructor owner-template recovery now handles omitted/placeholder paths for `ArrayVec`/`Cell`/`Vec` in test-shaped contexts (expected-type, in-scope generic/default, and local placeholder-hint paths)
+   - omitted default generic recovery now prefers declared defaults (`CapacityError<T=()>` remains `CapacityError<std::tuple<>>`, not accidental capture of in-scope `T`)
+2. Arrayvec Stage D repro after 9.1 moved the deterministic head off the template-placeholder family.
+   - previous 9.1 lead shapes (`Result<ArrayVec<auto, ...>>`, `(&std::array{...}).try_into()`, and immediate `ArrayVec`/`Cell`/`Vec` constructor cascades) are no longer first-failure diagnostics
+   - current first deterministic family is downstream import/runtime path lowering (`slice::from_raw_parts*` namespace lowering, `core::panicking` path lowering)
+3. Current active next leaf remains `Leaf 4.15.4.3.3.3.3.3.9` (parent).
+   - rerun the full seven-crate matrix after 9.1 stabilization
+   - capture the new first deterministic failure from matrix order and continue with generic (non crate-specific) fixes
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2142,6 +2141,7 @@ Required approach:
 
 - apply rewrites only when a recognized shape and type context is present
 - keep generic literal emission stable; perform conversions only in targeted coercion sites
+- when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
