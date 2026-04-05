@@ -156,6 +156,26 @@ void test_option_equality() {
     printf("PASS\n");
 }
 
+void test_option_std_optional_cross_type_equality() {
+    printf("test_option_std_optional_cross_type_equality: ");
+    {
+        Option<size_t> some(Some(static_cast<size_t>(3)));
+        std::optional<int> same = 3;
+        std::optional<int> different = 4;
+
+        assert(some == same);
+        assert(same == some);
+        assert(some != different);
+        assert(different != some);
+
+        Option<size_t> none(None);
+        std::optional<int> none_std = std::nullopt;
+        assert(none == none_std);
+        assert(none_std == none);
+    }
+    printf("PASS\n");
+}
+
 // Test move semantics
 void test_option_move() {
     printf("test_option_move: ");
@@ -281,6 +301,7 @@ int main() {
     test_option_reference();
     test_option_unwrap_edge();
     test_option_equality();
+    test_option_std_optional_cross_type_equality();
     test_option_move();
     test_option_custom_type();
     test_option_nested();

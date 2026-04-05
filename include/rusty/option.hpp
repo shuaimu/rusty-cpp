@@ -567,8 +567,9 @@ bool operator!=(std::nullopt_t, const Option<T>& rhs) {
     return rhs.is_some();
 }
 
-template<typename T>
-bool operator==(const Option<T>& lhs, const std::optional<T>& rhs) {
+template<typename T, typename U>
+requires requires(const T& l, const U& r) { l == r; }
+bool operator==(const Option<T>& lhs, const std::optional<U>& rhs) {
     if (lhs.is_none() && !rhs.has_value()) return true;
     if (lhs.is_some() && rhs.has_value()) {
         return lhs.as_ref().unwrap() == *rhs;
@@ -576,18 +577,21 @@ bool operator==(const Option<T>& lhs, const std::optional<T>& rhs) {
     return false;
 }
 
-template<typename T>
-bool operator==(const std::optional<T>& lhs, const Option<T>& rhs) {
+template<typename U, typename T>
+requires requires(const T& l, const U& r) { l == r; }
+bool operator==(const std::optional<U>& lhs, const Option<T>& rhs) {
     return rhs == lhs;
 }
 
-template<typename T>
-bool operator!=(const Option<T>& lhs, const std::optional<T>& rhs) {
+template<typename T, typename U>
+requires requires(const T& l, const U& r) { l == r; }
+bool operator!=(const Option<T>& lhs, const std::optional<U>& rhs) {
     return !(lhs == rhs);
 }
 
-template<typename T>
-bool operator!=(const std::optional<T>& lhs, const Option<T>& rhs) {
+template<typename U, typename T>
+requires requires(const T& l, const U& r) { l == r; }
+bool operator!=(const std::optional<U>& lhs, const Option<T>& rhs) {
     return !(lhs == rhs);
 }
 

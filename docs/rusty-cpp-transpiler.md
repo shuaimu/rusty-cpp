@@ -2039,16 +2039,17 @@ From the active TODO frontier, the currently active leaf work is in the `arrayve
 
 Active work items:
 
-1. `Leaf 4.15.4.3.3.3.3.3.7.1`
-   - collapse boxed/iterator/add frontier generically:
-   - `alloc::boxed::box_new` / `into_vec` path mapping
-   - iterator `map`/`fold` lowering via shared helpers
-   - callable path mapping for `Add::add`
-   - `for ... in ...` iterator bridge to avoid direct `begin/end` assumptions on non-range iterables
-2. Add fixture-agnostic regressions for this frontier (`leaf4154333333371` test family)
-3. Re-run `arrayvec` parity and verify first-failure family movement
-4. `Leaf 4.15.4.3.3.3.3.3.7.2`
-   - re-run full seven-crate matrix and capture next deterministic frontier (or close Leaf 4 if all pass)
+1. `Leaf 4.15.4.3.3.3.3.3.8.1` is complete.
+   - self-field shadowing in assignment-heavy methods is fixed (`this->field` emission)
+   - optional-like iterator adaptation for `for_in`/`map`/`fold` is hardened
+   - expected-type-aware slice call-arg lowering now covers `&[...]` and `&[x; n]`
+2. `Leaf 4.15.4.3.3.3.3.3.8.2` is complete.
+   - full matrix rerun still stops first at `arrayvec` (`pass=4`, `fail=1`)
+3. Current active next leaf: `Leaf 4.15.4.3.3.3.3.3.9.1`
+   - collapse template placeholder/omitted-template frontier in `arrayvec` Stage D:
+   - `ArrayVec<auto, ...>` / `Result<..., auto>` template-arg recovery
+   - avoid address-of-rvalue conversion-call shapes such as `(&std::array{...}).try_into()`
+   - collapse immediate dependent unresolved constructor/call cascades (`ArrayVec`, `Cell`, mapped collection constructors)
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2135,10 +2136,12 @@ Rejected pattern:
 - globally stripping references
 - globally rewriting all method calls as free functions
 - globally forcing constructor template args
+- globally injecting expected-type numeric literal casts across unrelated expressions
 
 Required approach:
 
 - apply rewrites only when a recognized shape and type context is present
+- keep generic literal emission stable; perform conversions only in targeted coercion sites
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

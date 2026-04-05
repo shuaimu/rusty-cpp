@@ -145,6 +145,31 @@ void test_slice_helpers_basic_shapes() {
     printf("PASS\n");
 }
 
+struct SliceOnlyContainer {
+    std::array<int, 4> backing{1, 2, 3, 4};
+
+    std::span<int> as_mut_slice() { return std::span<int>(backing); }
+    std::span<const int> as_slice() const { return std::span<const int>(backing); }
+    size_t len() const { return backing.size(); }
+};
+
+void test_slice_full_prefers_as_slice_helpers_shape() {
+    printf("test_slice_full_prefers_as_slice_helpers_shape: ");
+    SliceOnlyContainer container{};
+
+    auto mut_span = rusty::slice_full(container);
+    static_assert(std::is_same_v<decltype(mut_span), std::span<int>>);
+    mut_span[1] = 42;
+    assert(container.backing[1] == 42);
+
+    const SliceOnlyContainer& const_container = container;
+    auto const_span = rusty::slice_full(const_container);
+    static_assert(std::is_same_v<decltype(const_span), std::span<const int>>);
+    assert(const_span[1] == 42);
+
+    printf("PASS\n");
+}
+
 void test_len_helper_shapes() {
     printf("test_len_helper_shapes: ");
     std::vector<uint8_t> data{1, 2, 3, 4};
@@ -269,6 +294,53 @@ void test_filter_map_span_shape() {
     printf("PASS\n");
 }
 
+struct OptionalCounterIter {
+    int cur = 0;
+
+    std::optional<int> next() {
+        if (cur >= 4) {
+            return std::nullopt;
+        }
+        return cur++;
+    }
+};
+
+struct RustyOptionCounterIter {
+    int cur = 1;
+
+    rusty::Option<int> next() {
+        if (cur > 3) {
+            return rusty::None;
+        }
+        return rusty::Option<int>(cur++);
+    }
+};
+
+void test_for_in_map_fold_optional_next_shape() {
+    printf("test_for_in_map_fold_optional_next_shape: ");
+    {
+        std::vector<int> seen;
+        for (auto&& value : rusty::for_in(OptionalCounterIter{})) {
+            seen.push_back(value);
+        }
+        assert((seen == std::vector<int>{0, 1, 2, 3}));
+    }
+    {
+        auto mapped = rusty::map(OptionalCounterIter{}, [](int value) { return value + 10; });
+        int sum = rusty::fold(std::move(mapped), 0, rusty::ops::add_fn);
+        assert(sum == 46);
+    }
+    printf("PASS\n");
+}
+
+void test_for_in_map_fold_rusty_option_next_shape() {
+    printf("test_for_in_map_fold_rusty_option_next_shape: ");
+    auto mapped = rusty::map(RustyOptionCounterIter{}, [](int value) { return value * 2; });
+    int sum = rusty::fold(std::move(mapped), 0, rusty::ops::add_fn);
+    assert(sum == 12);
+    printf("PASS\n");
+}
+
 void test_io_print_shim_shape() {
     printf("test_io_print_shim_shape: ");
     rusty::io::_print();
@@ -284,12 +356,15 @@ int main() {
     test_range_bounds_helpers_shape();
     test_saturating_math_helpers_shape();
     test_slice_helpers_basic_shapes();
+    test_slice_full_prefers_as_slice_helpers_shape();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
     test_slice_iter_helpers_shape();
     test_cursor_new_helper_shape();
     test_filter_map_lazy_shape();
     test_filter_map_span_shape();
+    test_for_in_map_fold_optional_next_shape();
+    test_for_in_map_fold_rusty_option_next_shape();
     test_io_print_shim_shape();
 
     printf("\nAll rusty range tests passed!\n");
