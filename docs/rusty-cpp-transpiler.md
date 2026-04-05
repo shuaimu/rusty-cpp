@@ -6703,6 +6703,267 @@ Design rationale:
   - no blanket dropping of all `use crate::...` imports,
   - no ad-hoc string replacement for `IterNames` paths.
 
+### 10.11.79 Phase 20 Leaf 4.15.1-4.15.2 (`tap` in full matrix): iterator/io blocker family plus block-closure extension rewrite context
+
+Problem:
+
+- Full seven-crate matrix rerun for Leaf 4.15 initially failed at `tap` Stage D with deterministic iterator/io + closure-context blockers:
+  - invalid `.iter().filter_map(...)` member-chain emission on `std::span`,
+  - unresolved `std::io::_print` path in generated C++,
+  - block-closure body emission losing extension-method rewrite context (`result.tap_err(...)` not rewritten in block closures).
+- After those were addressed, the same `tap` path surfaced a runtime-surface gap:
+  - generated `Result::ok()` call was valid Rust lowering but missing in `rusty::Result`.
+
+Scope analysis:
+
+- Implemented as a focused generic fix under 1000 LOC across transpiler lowering + runtime helpers.
+- No crate-specific scripts, no generated-artifact editing.
+
+Implementation:
+
+- Transpiler codegen:
+  - Added `.iter().filter_map(...)` call-shape rewrite to `rusty::filter_map(receiver, mapper)` when the source shape is `receiver.iter().filter_map(mapper)`.
+  - Kept rewrite narrow to the exact iterator-chain shape (did not broaden to arbitrary method-chain rewriting).
+- Runtime helpers:
+  - Added lazy `rusty::filter_map` view in `include/rusty/array.hpp` for range/span receivers and option-like mapper outputs.
+  - Added `rusty::io::_print(...)` permissive shim in `include/rusty/io.hpp`.
+  - Added `Result::ok()` / `Result::err()` surface in `include/rusty/result.hpp` (including `Result<void, E>` `ok()` shape to `Option<std::tuple<>>`).
+- Path mapping:
+  - Added `std::io::_print` / `io::_print` function-path mapping to `rusty::io::_print`.
+- Closure emission context:
+  - Block-closure emission now clones parent `CodeGen` context (with cleared output buffer) instead of initializing an empty context, preserving extension-method rewrite/type-path context inside nested closure blocks.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415_iter_filter_map_chain_lowers_to_rusty_filter_map_helper`
+  - `test_leaf415_block_closure_keeps_extension_method_rewrite_context`
+  - updated `test_leaf42_runtime_function_paths_lowered` coverage for `std::io::_print`
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` coverage for `std::io::_print`
+- C++ runtime tests:
+  - `tests/rusty_array_test.cpp`: lazy `filter_map` behavior, span receiver behavior, `_print` shim call-shape test
+  - `tests/rusty_result_test.cpp`: `Result::ok()` / `Result::err()` coverage (`T` and `void` variants)
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler`
+- `./tests/run_cpp_tests.sh`
+- Matrix re-probes:
+  - `tests/transpile_tests/run_parity_matrix.sh --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- `tap` now passes Stage A-E in the full matrix path.
+- Full matrix first failure moved forward to `take_mut` Stage D with the next deterministic blocker family:
+  - `rusty::PhantomData` emitted as value expression in struct-literal fields,
+  - nested local-struct method emission shape in `scope_based_take`,
+  - unit-struct value construction fallout.
+
+Design rationale:
+
+- Fixes stayed crate-agnostic and pipeline-honest: first deterministic blockers were resolved in transpiler/runtime surfaces, then the matrix was re-run to expose the next blocker.
+- Avoided wrong approaches from §11:
+  - no crate-specific `tap` output patching,
+  - no global “rewrite every method call to free function” behavior (§11.76),
+  - no fresh/empty nested block emitter context that drops rewrite metadata (§11.81),
+  - no eager `filter_map` lowering that forces side effects for otherwise lazy iterator chains (§11.82).
+
+### 10.11.80 Phase 20 Leaf 4.15.3 (`take_mut` Stage D): complete blocker-cluster collapse and Stage-E handoff
+
+Problem:
+
+- After `tap` passed in the full matrix, first failure moved to `take_mut` Stage D with this initial cluster:
+  - path-only `PhantomData` values emitted without constructor form inside struct literals,
+  - function-local `impl` blocks emitted as free function definitions in local scope (invalid C++),
+  - unit-struct values emitted as bare type paths (`Foo`) instead of value construction (`Foo{}`).
+
+Scope analysis:
+
+- Implemented as a focused, generic fix under 1000 LOC.
+- Kept crate-agnostic; no generated-output patching.
+
+Implementation:
+
+- Added expected-type constructor fallback for path-only value expressions in field/value context:
+  - when a path matches expected type context, emit `Type{}` value construction.
+- Added unit-struct value-path lowering:
+  - tracked unit struct metadata and emitted `Foo{}` in expression position.
+- Added struct metadata pre-pass:
+  - collect named-field metadata before emission so field expected-type lookup works even when struct literal use appears before struct definition (for example `Scope` constructing `Hole { ... }` before `Hole` definition).
+- Added local-scope nested-impl guard:
+  - nested `impl` items inside emitted blocks now lower to a Rust-only skip comment instead of invalid local free-function definitions.
+- Added delayed-init local lowering for typed `let x: T;`:
+  - emits `std::optional<T>` storage,
+  - assignment lowers to `x.emplace(...)`,
+  - value reads lower to `x.value()`.
+- Added tuple move preservation for delayed-init locals:
+  - tuple expression lowering now preserves move semantics for moved local paths (including delayed-init locals) so `std::make_tuple(...)` receives move values rather than non-copy lvalue refs.
+- Added Rust prelude `drop(...)` lowering:
+  - `drop`, `std::mem::drop`, and `mem::drop` now map to `rusty::mem::drop`,
+  - `use std::mem::drop;` import rewriting now emits `using rusty::mem::drop;`,
+  - runtime `rusty::mem::drop` now consumes and drops values in-call.
+- Added `rusty::Result::unwrap_or_else` void-callable compatibility:
+  - handles `abort`-style closures (`|_| std::abort()`) by allowing `void` callable return type and treating it as diverging path.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4153_unit_struct_path_in_value_position_uses_brace_constructor`
+  - `test_leaf4153_struct_literal_field_path_uses_expected_type_constructor`
+  - `test_leaf4153_nested_impl_block_in_function_scope_is_skipped`
+  - `test_leaf4153_uninitialized_typed_local_is_not_const`
+  - `test_leaf4153_uninitialized_typed_local_assignment_uses_emplace_and_value`
+  - `test_leaf4153_uninitialized_tuple_return_moves_optional_values`
+  - `test_leaf4153_drop_function_path_maps_to_rusty_mem_drop`
+  - `test_leaf4153_std_mem_drop_import_remapped`
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` for `drop` path mapping.
+- `tests/rusty_result_test.cpp`:
+  - `test_result_unwrap_or_else_void_callable_compiles`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4153 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- `take_mut` now passes Stage D (build succeeds) in parity re-probes after the above fixes.
+- Next deterministic blocker moved forward to Stage E runtime parity (`run` stage), which becomes the handoff for Leaf 4.15.4/full-matrix follow-up.
+
+Design rationale:
+
+- Kept fixes in shared expression/codegen/runtime paths so they benefit other crates with similar delayed-init, move-semantics, and prelude-runtime call shapes.
+- Avoided wrong approaches from §11:
+  - no `take_mut`-specific string replacement in generated output (§11.35),
+  - no broad global reference-lowering rewrite (§11.33),
+  - no blanket skipping of all nested local items (only invalid local `impl` emission path is guarded) (§11.83),
+  - no reintroduction of empty-context nested block emission (§11.81).
+
+### 10.11.81 Phase 20 Leaf 4.15.4.1 (`arrayvec` Stage D): const-generic/template preservation + keyword/import path hardening
+
+Problem:
+
+- Full-matrix re-probe moved first deterministic failure to `arrayvec` Stage D and surfaced this blocker family first:
+  - dropped const-generic parameters in declarations/usages (`CAP` missing from templates and type paths),
+  - reserved-keyword module/import emission (`namespace char { ... }`),
+  - unresolved unqualified imports lowered as `using ::CapacityError;` in nested modules.
+
+Scope analysis:
+
+- Implemented as a focused generic codegen fix under 1000 LOC.
+- No crate-specific scripts or generated-output patching.
+
+Implementation:
+
+- Const-generic preservation:
+  - `template<...>` emission now preserves const generic parameters (`const N: usize` -> `size_t N`),
+  - generic type-path emission now preserves const generic arguments (for example `ArrayVec<T, CAP>` and `ArrayVec<i32, 8>`).
+- Generic-parameter scope tracking:
+  - in-scope generic-name tracking now includes const params for template-argument recovery paths.
+- Module/import keyword hardening:
+  - inline module namespace emission now escapes C++ keywords (for example `mod char` -> `namespace char_`),
+  - `using`-path normalization now escapes keyword path segments consistently.
+- Unqualified local import recovery:
+  - unresolved bare imports now attempt unique local-type resolution from pre-collected declared types, so shapes like `super::CapacityError` can lower to `errors::CapacityError` rather than invalid `::CapacityError`.
+- Import classification:
+  - `std::slice` import family is now lowered as Rust-only to avoid invalid `using std::slice;` emission.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf4154_const_generic_template_preserved_in_struct_and_type_use`
+  - `test_leaf4154_keyword_module_name_escaped_in_namespace_and_using`
+  - `test_leaf4154_super_bare_import_resolves_to_unique_local_type`
+  - `test_leaf4154_use_std_slice_is_rust_only`
+  - updated `test_leaf414_local_lowercase_module_reexport_is_not_external` expectation for scoped import recovery
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4154 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous first blockers are removed in generated `arrayvec` runner:
+  - no `namespace char` parse error (`char_` emitted),
+  - const-generic `CAP` is preserved in forward declarations/struct templates/type paths,
+  - `using ::CapacityError` family is replaced by scoped `using errors::CapacityError`.
+- Next deterministic Stage D blocker family is now:
+  - member/method collision (`len` field vs `len()` method),
+  - duplicate associated-item emission (`CAPACITY`, `Item`),
+  - associated-type alias generic recovery (`using Error = CapacityError;` missing template args).
+
+Design rationale:
+
+- Kept fixes generic and structural (template/lowering/import resolution paths) so they apply to all crates using const generics and nested-module imports.
+- Avoided wrong approaches from §11:
+  - no crate-specific post-processing of `arrayvec` generated C++,
+  - no blanket suppression of all bare imports (kept targeted recovery),
+  - no disabling const-generic lowering to sidestep compile errors.
+
+### 10.11.82 Phase 20 Leaf 4.15.4.2 (`arrayvec` Stage D): merged-item/member-collision + associated-type alias lowering
+
+Problem:
+
+- After 10.11.81, the first deterministic `arrayvec` Stage D blockers were:
+  - field/member collisions from merged impl emission (`len` field vs `len()` method),
+  - duplicate associated items emitted into the same struct body (`CAPACITY`, `Item`),
+  - bare local generic type-paths in type position (`CapacityError`) emitting without template arguments.
+
+Scope analysis:
+
+- Completed with focused generic codegen changes under 1000 LOC.
+- No crate-specific scripts or one-off generated-C++ rewrite steps.
+
+Implementation:
+
+- Member-collision handling in merged struct emission:
+  - pre-collect merged impl member names before field emission,
+  - auto-rename colliding named fields (`name` -> `name_field`, with deterministic suffixing),
+  - track Rust field name -> emitted C++ member name and apply it to field access and struct-literal designated-member lowering.
+- Associated-item dedup inside merged type bodies:
+  - added per-type non-method member-name tracking for merged impl emission,
+  - deduplicated repeated associated const/type emissions by emitted C++ member name.
+- Associated type alias robustness:
+  - when alias target name collides with the alias identifier itself (for example `using IntoIter = IntoIter<T, CAP>;`), qualify target path (`::...`) to avoid local alias self-shadowing.
+- Local generic type-position recovery:
+  - bare local generic type paths in type position now recover omitted template arguments from local declared-type metadata and in-scope generics (`CapacityError` family).
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf41542_field_name_collision_with_method_is_renamed`
+  - `test_leaf41542_merged_impl_assoc_items_are_deduplicated`
+  - `test_leaf41542_local_generic_type_position_recovers_template_args`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf41542 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Previous first blockers are removed:
+  - no `len` field/method collision errors,
+  - no duplicate `CAPACITY`/`Item` redeclarations in the first failing family,
+  - no bare `CapacityError` in type-position signatures/aliases.
+- Next deterministic `arrayvec` Stage D blockers move forward to downstream runtime/path families (for example `cmp::Ordering` path/lowering and later unresolved runtime symbol families), which are handed off to Leaf 4.15.4.3/follow-ups.
+
+Design rationale:
+
+- Collision and dedup handling was added at generic merged-impl emission boundaries so it benefits all crates with expanded trait/inherent impl overlap.
+- Type-position template-arg recovery remains generic local-type logic instead of `arrayvec`-specific patches.
+- Avoided wrong approaches from §11:
+  - no crate-specific generated-file sed/patch post-processing,
+  - no blanket drop of all trait-associated items to avoid collisions,
+  - no unconditional renaming of all fields/methods regardless of conflict.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7698,3 +7959,74 @@ them out wholesale) and rely on later stages to recover.
 - Correct approach is targeted generic remapping:
   - rewrite supported import/path families to explicit `rusty::` runtime shims,
   - lower Rust numeric-limit/runtime constants to valid C++ expressions.
+
+### 11.81 Reinitializing Block-Closure Codegen with Empty Context
+
+**Rejected approach:** Emit block-closure bodies using a fresh empty `CodeGen` state that only
+copies minimal fields (for example, struct/module path), while dropping extension-method/path/type
+rewrite context.
+
+**Why it was rejected:**
+
+- Nested block closures can contain the same Rust patterns as top-level expressions (extension
+  methods, runtime path mappings, expected-type hints). Empty-state emission loses those rewrites.
+- It creates inconsistent behavior between expression-closure and block-closure forms for the same
+  source semantics.
+- Cloning parent context (with a fresh output buffer) keeps nested emission deterministic without
+  introducing crate-specific closure special-casing.
+
+### 11.82 Lowering `iter().filter_map(...)` to Eager Side-Effect Loops
+
+**Rejected approach:** Replace `iter().filter_map(...)` with an eager loop that immediately executes
+the mapper closure (for example by collecting into a temporary) even when the result is unused.
+
+**Why it was rejected:**
+
+- Rust `filter_map` is lazy; eager lowering changes side-effect timing/behavior and can introduce
+  false parity mismatches.
+- It masks iterator-adapter semantics under ad-hoc execution behavior that is hard to reason about
+  across crates.
+- A lazy runtime `rusty::filter_map` view preserves the adapter model and keeps transpiler behavior
+  generic.
+
+### 11.83 Emitting Function-Local `impl` Items as Free Functions in Local Scope
+
+**Rejected approach:** Lower nested Rust `impl` items encountered inside block/function scope by
+emitting their methods as plain free function definitions at that same local scope.
+
+**Why it was rejected:**
+
+- C++ forbids nested named function definitions in block scope, so this emission is syntactically
+  invalid and fails before useful parity diagnostics.
+- It conflates Rust local-item semantics with C++ top-level function rules and produces
+  misleading errors unrelated to the user code intent.
+- Until a complete local-type/local-impl lowering model is introduced, a narrow guard that skips
+  invalid local `impl` emission is safer and keeps stage-failure signals focused on the next real
+  blocker.
+
+### 11.84 Dropping Const-Generic Parameters From Template Emission
+
+**Rejected approach:** Emit only type generic parameters in `template<...>` and ignore const
+generics, then rely on downstream fallback/placeholder code generation.
+
+**Why it was rejected:**
+
+- It deterministically breaks real Rust code using const generics (`CAP`-style parameters) with
+  undeclared identifiers and wrong template arity.
+- It creates large downstream error cascades that hide the true first blocker in parity logs.
+- Correct handling is generic and local to template/path lowering: preserve const generic params and
+  arguments directly in emitted C++ templates/types.
+
+### 11.85 Resolving Merged Member Collisions by Dropping All Trait-Impl Associated Items
+
+**Rejected approach:** Avoid merged-impl collisions by globally skipping trait-impl associated
+const/type items (or all merged non-method items) whenever a duplicate name appears.
+
+**Why it was rejected:**
+
+- It silently removes required associated-item surface and changes semantics for code that relies on
+  those associated aliases/constants.
+- It hides real lowering issues (`len` field/method collisions, alias target shadowing, omitted
+  template args) instead of fixing emission boundaries.
+- A generic collision-aware strategy (field rename mapping + per-type dedup + alias target
+  qualification) keeps emitted API shape stable while preserving deterministic build behavior.

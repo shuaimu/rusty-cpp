@@ -33,7 +33,16 @@ enum RuntimeMatchEnumKind {
     Result,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgPassStyle {
+    Reference,
+    Pointer,
+    Value,
+    Mixed,
+}
+
 /// Code generation context tracking indentation and output buffer.
+#[derive(Clone)]
 pub struct CodeGen {
     output: String,
     indent: usize,
@@ -46,11 +55,14 @@ pub struct CodeGen {
     impl_method_conflict_keys: HashMap<String, HashSet<String>>,
     /// Maps (type_name, method_name) → C++ operator name for operator trait impls.
     operator_renames: HashMap<(String, String), String>,
+    /// Marks impl methods that come from `Drop` trait impls.
+    /// These are emitted as C++ destructors (`~Type()`).
+    drop_trait_methods: HashSet<(String, String)>,
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     current_struct: Option<String>,
-    /// Stack of in-scope generic type parameter names.
-    /// Used for dependent-type emission (`typename T::Assoc`).
+    /// Stack of in-scope generic parameter names (type + const).
+    /// Used for dependent-type emission and generic-argument recovery.
     type_param_scopes: Vec<HashSet<String>>,
     /// Generic type parameters declared by enum name.
     /// Used to recover variant template arguments in pattern lowering.
@@ -61,6 +73,9 @@ pub struct CodeGen {
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     local_declared_types: HashSet<String>,
+    /// Unit struct type names (scoped and unscoped) available for value-constructor
+    /// lowering (`Foo` in value position -> `Foo{}`).
+    unit_struct_types: HashSet<String>,
     /// Extension-style trait impl methods keyed by scoped trait name.
     /// Methods in these impls are emitted as `rusty::` free functions.
     extension_trait_impl_methods: HashMap<String, Vec<ExtensionImplMethod>>,
@@ -75,6 +90,19 @@ pub struct CodeGen {
     data_enum_types: HashSet<String>,
     /// Named struct field types for local type-context recovery in match lowering.
     struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
+    /// Named struct field declaration order keyed by struct name.
+    /// Used for constructor-style lowering when designated initializers are unavailable.
+    struct_field_order: HashMap<String, Vec<String>>,
+    /// Named struct field emitted C++ member names keyed by Rust field name.
+    /// Needed when field names are rewritten to avoid collisions with merged impl items.
+    struct_field_cpp_names: HashMap<String, HashMap<String, String>>,
+    /// Collected free-function parameter passing styles keyed by scoped function path.
+    /// Used to lower `&x`/`&mut x` arguments to C++ reference arguments without
+    /// turning them into raw pointers at call sites.
+    function_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
+    /// Collected method parameter passing styles keyed by method name.
+    /// Mixed signatures remain conservative and do not trigger address-of stripping.
+    method_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
     /// Set of variable names that are reassigned in the current block.
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
@@ -94,6 +122,14 @@ pub struct CodeGen {
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
     local_cpp_bindings: Vec<HashMap<String, String>>,
+    /// Scoped locals declared with explicit type but without initializer.
+    /// Lowered as `std::optional<T>` storage so non-default-constructible
+    /// types remain valid until first assignment.
+    delayed_init_locals: Vec<HashSet<String>>,
+    /// Scoped local nested-function names.
+    /// Used so nested fn lowering can detect sibling nested-fn references and
+    /// only capture those callables when needed.
+    local_function_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
@@ -143,6 +179,10 @@ pub struct CodeGen {
     /// Per-type method signature keys already emitted in the current type body.
     /// This catches collisions that only appear after Rust-path → C++ mapping.
     emitted_method_conflict_keys: Vec<HashSet<String>>,
+    /// Per-type non-method member names already emitted in the current type body.
+    /// Used to deduplicate merged associated const/type aliases and avoid collisions
+    /// with data fields.
+    emitted_non_method_member_names: Vec<HashSet<String>>,
     /// Stack tracking whether current function/method context returns a value.
     /// Used for tail expression lowering decisions (e.g., tail `match`).
     return_value_scopes: Vec<bool>,
@@ -155,6 +195,9 @@ pub struct CodeGen {
     /// True when emitting inside an async function body.
     /// Controls whether `return` emits `co_return` instead.
     in_async: bool,
+    /// Nested block depth while emitting statements.
+    /// Used to guard item kinds that C++ cannot define inside function scope.
+    block_depth: usize,
     /// User-provided type mappings for external crate types.
     user_type_map: types::UserTypeMap,
 }
@@ -167,21 +210,29 @@ impl CodeGen {
             impl_blocks: HashMap::new(),
             impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
+            drop_trait_methods: HashSet::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
             declared_type_params: HashMap::new(),
             local_declared_types: HashSet::new(),
+            unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             struct_field_types: HashMap::new(),
+            struct_field_order: HashMap::new(),
+            struct_field_cpp_names: HashMap::new(),
+            function_arg_pass_styles: HashMap::new(),
+            method_arg_pass_styles: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
+            delayed_init_locals: Vec::new(),
+            local_function_bindings: Vec::new(),
             param_bindings: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -198,10 +249,12 @@ impl CodeGen {
             option_type_aliases: HashSet::new(),
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
+            emitted_non_method_member_names: Vec::new(),
             return_value_scopes: Vec::new(),
             return_type_hints: Vec::new(),
             constructor_template_hints: Vec::new(),
             in_async: false,
+            block_depth: 0,
             user_type_map: types::UserTypeMap::default(),
         }
     }
@@ -255,6 +308,7 @@ impl CodeGen {
         self.impl_blocks.clear();
         self.impl_method_conflict_keys.clear();
         self.operator_renames.clear();
+        self.drop_trait_methods.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
         self.expanded_libtest_mode = false;
@@ -263,27 +317,36 @@ impl CodeGen {
         self.option_type_aliases.clear();
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
+        self.emitted_non_method_member_names.clear();
         self.return_value_scopes.clear();
         self.return_type_hints.clear();
         self.constructor_template_hints.clear();
         self.enum_type_params.clear();
         self.declared_type_params.clear();
         self.local_declared_types.clear();
+        self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
         self.extension_method_names.clear();
         self.data_enum_types.clear();
         self.struct_field_types.clear();
+        self.struct_field_order.clear();
+        self.struct_field_cpp_names.clear();
+        self.function_arg_pass_styles.clear();
+        self.method_arg_pass_styles.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
         self.repeat_elem_type_hints.clear();
         self.param_bindings.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
+        self.delayed_init_locals.clear();
+        self.local_function_bindings.clear();
         self.self_receiver_ref_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
         self.self_path_overrides.clear();
+        self.block_depth = 0;
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -294,16 +357,22 @@ impl CodeGen {
         self.collect_top_level_item_names(&file.items);
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
-        // Pass 1c: collect extension-style trait impl methods.
+        // Pass 1c: pre-collect struct field/unit-struct metadata for expected-type
+        // recovery even when struct definitions appear later in source order.
+        self.collect_struct_metadata(&file.items, &[]);
+        // Pass 1d: collect function/method argument passing styles for
+        // call-site reference lowering (`&x` -> `x` when callee expects `T&`).
+        self.collect_call_arg_pass_styles(&file.items, &[]);
+        // Pass 1e: collect extension-style trait impl methods.
         self.collect_extension_trait_impl_methods(&file.items, &[]);
         self.extension_method_names
             .extend(self.external_extension_method_hints.iter().cloned());
-        // Pass 1d: collect all impl blocks (including inline-module nested ones)
+        // Pass 1f: collect all impl blocks (including inline-module nested ones)
         // by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
-        // Pass 1e: collect macro_rules! names so macro-only imports can be skipped.
+        // Pass 1g: collect macro_rules! names so macro-only imports can be skipped.
         self.collect_macro_rules_names(&file.items);
-        // Pass 1f: pre-collect trait names for module-mode import skipping.
+        // Pass 1h: pre-collect trait names for module-mode import skipping.
         // Some `use` items appear before inline `trait` declarations in source order.
         if self.module_name.is_some() || self.expanded_libtest_mode {
             self.collect_skipped_module_trait_names(&file.items, &[]);
@@ -326,6 +395,7 @@ impl CodeGen {
         self.writeln("#include <limits>");
         self.writeln("#include <variant>");
         self.writeln("#include <tuple>");
+        self.writeln("#include <optional>");
         self.writeln("#include <utility>");
         self.writeln("#include <type_traits>");
         self.writeln("#include <string>");
@@ -417,7 +487,8 @@ impl CodeGen {
             if !Self::has_forward_decl_items(nested_items) {
                 continue;
             }
-            self.writeln(&format!("namespace {} {{", mod_name));
+            let mod_cpp_name = escape_cpp_keyword(&mod_name);
+            self.writeln(&format!("namespace {} {{", mod_cpp_name));
             self.indent += 1;
             self.emit_item_forward_decls(nested_items);
             self.indent -= 1;
@@ -496,10 +567,15 @@ impl CodeGen {
                         &self.declared_item_names,
                     );
 
-                    let op_name = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
-                        let trait_name = path.segments.last()?.ident.to_string();
-                        map_operator_trait(&trait_name).map(|s| s.to_string())
-                    });
+                    let trait_name = impl_block
+                        .trait_
+                        .as_ref()
+                        .and_then(|(_, path, _)| path.segments.last())
+                        .map(|seg| seg.ident.to_string());
+                    let is_drop_trait = trait_name.as_deref() == Some("Drop");
+                    let op_name = trait_name
+                        .as_ref()
+                        .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
 
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     let seen_method_keys = self
@@ -529,6 +605,11 @@ impl CodeGen {
                                 let method_name = merged.sig.ident.to_string();
                                 self.operator_renames
                                     .insert((type_name.clone(), method_name), op.clone());
+                            }
+                            if is_drop_trait {
+                                let method_name = merged.sig.ident.to_string();
+                                self.drop_trait_methods
+                                    .insert((type_name.clone(), method_name));
                             }
                             collected_item = syn::ImplItem::Fn(merged);
                         }
@@ -680,6 +761,7 @@ impl CodeGen {
             .iter()
             .filter_map(|param| match param {
                 syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
                 _ => None,
             })
             .collect();
@@ -690,9 +772,310 @@ impl CodeGen {
         self.declared_type_params
             .insert(type_name.to_string(), type_params.clone());
         if !module_path.is_empty() {
-            self.declared_type_params
-                .insert(format!("{}::{}", module_path.join("::"), type_name), type_params);
+            self.declared_type_params.insert(
+                format!("{}::{}", module_path.join("::"), type_name),
+                type_params,
+            );
         }
+    }
+
+    fn collect_struct_metadata(&mut self, items: &[syn::Item], module_path: &[String]) {
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    let struct_name = s.ident.to_string();
+                    if matches!(s.fields, syn::Fields::Unit) {
+                        self.unit_struct_types.insert(struct_name.clone());
+                        if !module_path.is_empty() {
+                            self.unit_struct_types.insert(format!(
+                                "{}::{}",
+                                module_path.join("::"),
+                                struct_name
+                            ));
+                        }
+                    }
+
+                    if let syn::Fields::Named(fields) = &s.fields {
+                        let named_field_types: HashMap<String, syn::Type> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                field
+                                    .ident
+                                    .as_ref()
+                                    .map(|ident| (ident.to_string(), field.ty.clone()))
+                            })
+                            .collect();
+                        let named_field_order: Vec<String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| field.ident.as_ref().map(|ident| ident.to_string()))
+                            .collect();
+                        let named_field_cpp_names: HashMap<String, String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                field.ident.as_ref().map(|ident| {
+                                    let rust_name = ident.to_string();
+                                    (rust_name.clone(), escape_cpp_keyword(&rust_name))
+                                })
+                            })
+                            .collect();
+                        if !named_field_types.is_empty() {
+                            self.struct_field_types
+                                .insert(struct_name.clone(), named_field_types.clone());
+                            self.struct_field_order
+                                .insert(struct_name.clone(), named_field_order.clone());
+                            self.struct_field_cpp_names
+                                .insert(struct_name.clone(), named_field_cpp_names.clone());
+                            if !module_path.is_empty() {
+                                self.struct_field_types.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    named_field_types,
+                                );
+                                self.struct_field_order.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    named_field_order,
+                                );
+                                self.struct_field_cpp_names.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    named_field_cpp_names,
+                                );
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_struct_metadata(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_call_arg_pass_styles(&mut self, items: &[syn::Item], module_path: &[String]) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) => {
+                    let fn_name = f.sig.ident.to_string();
+                    let scoped_name = if module_path.is_empty() {
+                        fn_name.clone()
+                    } else {
+                        format!("{}::{}", module_path.join("::"), fn_name)
+                    };
+                    let styles = self.collect_arg_pass_styles_from_inputs(&f.sig.inputs, false);
+                    self.record_function_arg_pass_styles(&scoped_name, styles);
+                }
+                syn::Item::Impl(impl_block) => {
+                    for impl_item in &impl_block.items {
+                        let syn::ImplItem::Fn(method) = impl_item else {
+                            continue;
+                        };
+                        let method_name = method.sig.ident.to_string();
+                        let styles =
+                            self.collect_arg_pass_styles_from_inputs(&method.sig.inputs, true);
+                        self.record_method_arg_pass_styles(&method_name, styles);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_call_arg_pass_styles(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_arg_pass_styles_from_inputs(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+        skip_receiver: bool,
+    ) -> Vec<ArgPassStyle> {
+        let mut styles = Vec::new();
+        for input in inputs {
+            match input {
+                syn::FnArg::Receiver(_) => {
+                    if !skip_receiver {
+                        styles.push(ArgPassStyle::Value);
+                    }
+                }
+                syn::FnArg::Typed(pt) => {
+                    styles.push(self.arg_pass_style_for_type(&pt.ty));
+                }
+            }
+        }
+        styles
+    }
+
+    fn arg_pass_style_for_type(&self, ty: &syn::Type) -> ArgPassStyle {
+        let cpp = self.map_type(ty);
+        if cpp.ends_with('&') {
+            ArgPassStyle::Reference
+        } else if cpp.ends_with('*') {
+            ArgPassStyle::Pointer
+        } else {
+            ArgPassStyle::Value
+        }
+    }
+
+    fn merge_arg_pass_style(existing: ArgPassStyle, incoming: ArgPassStyle) -> ArgPassStyle {
+        if existing == incoming {
+            existing
+        } else {
+            ArgPassStyle::Mixed
+        }
+    }
+
+    fn merge_arg_pass_style_vec(dst: &mut Vec<ArgPassStyle>, incoming: &[ArgPassStyle]) {
+        let old_len = dst.len();
+        if old_len < incoming.len() {
+            dst.resize(incoming.len(), ArgPassStyle::Value);
+        }
+        for (idx, style) in incoming.iter().copied().enumerate() {
+            dst[idx] = if idx >= old_len {
+                style
+            } else if matches!(dst[idx], ArgPassStyle::Mixed) {
+                ArgPassStyle::Mixed
+            } else {
+                Self::merge_arg_pass_style(dst[idx], style)
+            };
+        }
+    }
+
+    fn record_function_arg_pass_styles(&mut self, key: &str, styles: Vec<ArgPassStyle>) {
+        use std::collections::hash_map::Entry;
+        match self.function_arg_pass_styles.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => Self::merge_arg_pass_style_vec(occ.get_mut(), &styles),
+            Entry::Vacant(vac) => {
+                vac.insert(styles);
+            }
+        }
+    }
+
+    fn record_method_arg_pass_styles(&mut self, method_name: &str, styles: Vec<ArgPassStyle>) {
+        use std::collections::hash_map::Entry;
+        match self.method_arg_pass_styles.entry(method_name.to_string()) {
+            Entry::Occupied(mut occ) => Self::merge_arg_pass_style_vec(occ.get_mut(), &styles),
+            Entry::Vacant(vac) => {
+                vac.insert(styles);
+            }
+        }
+    }
+
+    fn call_path_candidates(&self, path: &syn::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if joined.is_empty() {
+            return out;
+        }
+
+        out.push(joined.clone());
+
+        if path.segments.len() == 1 && !self.module_stack.is_empty() {
+            out.push(format!("{}::{}", self.module_stack.join("::"), joined));
+        }
+
+        if let Some(rest) = joined.strip_prefix("crate::") {
+            out.push(rest.to_string());
+        }
+        if let Some(rest) = joined.strip_prefix("self::") {
+            if self.module_stack.is_empty() {
+                out.push(rest.to_string());
+            } else {
+                out.push(format!("{}::{}", self.module_stack.join("::"), rest));
+            }
+        }
+        if let Some(rest) = joined.strip_prefix("super::") {
+            if self.module_stack.len() > 1 {
+                out.push(format!(
+                    "{}::{}",
+                    self.module_stack[..self.module_stack.len() - 1].join("::"),
+                    rest
+                ));
+            } else {
+                out.push(rest.to_string());
+            }
+        }
+
+        let mut dedup = HashSet::new();
+        out.retain(|k| dedup.insert(k.clone()));
+        out
+    }
+
+    fn lookup_function_arg_pass_style(
+        &self,
+        func: &syn::Expr,
+        arg_idx: usize,
+    ) -> Option<ArgPassStyle> {
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        for key in self.call_path_candidates(&path_expr.path) {
+            if let Some(styles) = self.function_arg_pass_styles.get(&key) {
+                if let Some(style) = styles.get(arg_idx).copied() {
+                    return Some(style);
+                }
+            }
+        }
+        None
+    }
+
+    fn lookup_method_arg_pass_style(
+        &self,
+        method_name: &str,
+        arg_idx: usize,
+    ) -> Option<ArgPassStyle> {
+        self.method_arg_pass_styles
+            .get(method_name)
+            .and_then(|styles| styles.get(arg_idx).copied())
+    }
+
+    fn call_targets_callable_type_param(&self, func: &syn::Expr) -> bool {
+        let syn::Expr::Path(path_expr) = func else {
+            return false;
+        };
+        if path_expr.path.segments.len() != 1 {
+            return false;
+        }
+        let name = path_expr.path.segments[0].ident.to_string();
+        let Some(ty) = self.lookup_local_binding_type(&name) else {
+            return false;
+        };
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.path.segments.len() != 1 {
+            return false;
+        }
+        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+    }
+
+    fn emit_call_arg_with_pass_style(
+        &self,
+        arg: &syn::Expr,
+        style: Option<ArgPassStyle>,
+        callable_type_param_fallback: bool,
+    ) -> String {
+        if let syn::Expr::Reference(r) = arg {
+            if matches!(style, Some(ArgPassStyle::Reference))
+                || (style.is_none() && callable_type_param_fallback && r.mutability.is_none())
+            {
+                return self.emit_expr_to_string(&r.expr);
+            }
+        }
+        self.emit_expr_maybe_move(arg)
     }
 
     fn resolve_trait_scoped_key_for_impl(
@@ -802,6 +1185,15 @@ impl CodeGen {
             return self.impl_blocks.remove(type_name);
         }
         None
+    }
+
+    fn type_has_drop_impl(&self, type_name: &str) -> bool {
+        let method_name = "drop".to_string();
+        self.drop_trait_methods
+            .contains(&(type_name.to_string(), method_name.clone()))
+            || self
+                .drop_trait_methods
+                .contains(&(self.scoped_type_key(type_name), method_name))
     }
 
     /// Returns true if visibility is pub, we're in module mode, and the item is at
@@ -1022,12 +1414,47 @@ impl CodeGen {
         false
     }
 
-    /// Emit a nested function definition as a C++ lambda.
-    /// `fn foo(x: i32) -> i32 { x + 1 }` → `const auto foo = [&](int32_t x) -> int32_t { return x + 1; };`
+    fn token_stream_mentions_ident(stream: proc_macro2::TokenStream, ident: &str) -> bool {
+        for token in stream {
+            match token {
+                TokenTree::Ident(found) => {
+                    if found == ident {
+                        return true;
+                    }
+                }
+                TokenTree::Group(group) => {
+                    if Self::token_stream_mentions_ident(group.stream(), ident) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn nested_function_needs_sibling_capture(&self, f: &syn::ItemFn) -> bool {
+        let Some(local_fns) = self.local_function_bindings.last() else {
+            return false;
+        };
+        let self_name = f.sig.ident.to_string();
+        local_fns.iter().any(|candidate| {
+            candidate != &self_name
+                && Self::token_stream_mentions_ident(f.block.to_token_stream(), candidate)
+        })
+    }
+
+    /// Emit a nested function definition as a local callable.
+    /// Rust nested `fn` items cannot capture non-item locals, so emit
+    /// captureless callables by default. If a nested function references a
+    /// sibling nested function (lowered to another local callable), use a local
+    /// capture to keep the emitted C++ valid.
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
         let params = self.map_fn_params(&f.sig.inputs);
+        let param_types = self.map_fn_param_types(&f.sig.inputs);
+        let needs_sibling_capture = self.nested_function_needs_sibling_capture(f);
 
         let ret_annotation = if return_type == "void" {
             String::new()
@@ -1035,10 +1462,25 @@ impl CodeGen {
             format!(" -> {}", return_type)
         };
 
-        self.writeln(&format!(
-            "const auto {} = [&]({}){} {{",
-            name, params, ret_annotation
-        ));
+        let can_emit_safe_fn = return_type != "auto"
+            && !return_type.contains("/* TODO:")
+            && !param_types
+                .iter()
+                .any(|ty| ty == "auto" || ty.contains("/* TODO:"));
+
+        if can_emit_safe_fn && !needs_sibling_capture {
+            let signature = format!("{}({})", return_type, param_types.join(", "));
+            self.writeln(&format!(
+                "const rusty::SafeFn<{}> {} = +[]({}){} {{",
+                signature, name, params, ret_annotation
+            ));
+        } else {
+            let capture = if needs_sibling_capture { "&" } else { "" };
+            self.writeln(&format!(
+                "const auto {} = [{}]({}){} {{",
+                name, capture, params, ret_annotation
+            ));
+        }
         self.indent += 1;
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&f.sig.output);
@@ -1078,10 +1520,31 @@ impl CodeGen {
 
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let is_async = f.sig.asyncness.is_some();
-        // Emit template prefix if generic
-        self.emit_template_prefix(&f.sig.generics);
+        let undeduced_return_type_param = self.undeduced_return_type_param_for_function(
+            &f.sig.generics,
+            &f.sig.inputs,
+            &f.sig.output,
+        );
+        let has_explicit_return_hint = undeduced_return_type_param.is_none();
+        let mut emitted_generics = f.sig.generics.clone();
+        if let Some(param_name) = undeduced_return_type_param.as_deref() {
+            emitted_generics.params = emitted_generics
+                .params
+                .into_iter()
+                .filter(|param| match param {
+                    syn::GenericParam::Type(tp) => tp.ident != param_name,
+                    _ => true,
+                })
+                .collect();
+        }
+        // Emit template prefix if generic.
+        self.emit_template_prefix(&emitted_generics);
         self.push_type_param_scope(&f.sig.generics);
-        let return_type = self.map_return_type(&f.sig.output);
+        let return_type = if undeduced_return_type_param.is_some() {
+            "auto".to_string()
+        } else {
+            self.map_return_type(&f.sig.output)
+        };
         let params = self.map_fn_params(&f.sig.inputs);
 
         // Wrap return type in Task<> for async functions
@@ -1134,11 +1597,15 @@ impl CodeGen {
         let prev_async = self.in_async;
         self.in_async = is_async;
         self.push_return_value_scope(&return_type);
-        self.push_return_type_hint(&f.sig.output);
+        if has_explicit_return_hint {
+            self.push_return_type_hint(&f.sig.output);
+        }
         self.push_param_bindings(&f.sig.inputs);
         self.emit_block(&f.block);
         self.pop_param_bindings();
-        self.pop_return_type_hint();
+        if has_explicit_return_hint {
+            self.pop_return_type_hint();
+        }
         self.pop_return_value_scope();
         self.in_async = prev_async;
 
@@ -1171,6 +1638,17 @@ impl CodeGen {
     fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name = &s.ident;
         let name_str = name.to_string();
+        let has_drop_impl = self.type_has_drop_impl(&name_str);
+        let merged_impl_items = self.take_impls_for_type(&name_str);
+        let reserved_member_names: HashSet<String> = merged_impl_items
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| self.merged_impl_member_name(item))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Emit doc comments
         self.emit_doc_comments(&s.attrs);
@@ -1187,15 +1665,38 @@ impl CodeGen {
 
         // Emit fields
         let mut named_field_types: HashMap<String, syn::Type> = HashMap::new();
+        let mut named_field_order: Vec<String> = Vec::new();
+        let mut named_field_cpp_names: HashMap<String, String> = HashMap::new();
         match &s.fields {
             syn::Fields::Named(fields) => {
+                let mut used_member_names: HashSet<String> = HashSet::new();
                 for field in &fields.named {
                     // Emit field doc comments
                     self.emit_doc_comments(&field.attrs);
-                    let field_name = field.ident.as_ref().unwrap();
+                    let field_name = field.ident.as_ref().unwrap().to_string();
                     let field_type = self.map_type(&field.ty);
-                    self.writeln(&format!("{} {};", field_type, field_name));
-                    named_field_types.insert(field_name.to_string(), field.ty.clone());
+                    let mut emitted_field_name = escape_cpp_keyword(&field_name);
+                    if reserved_member_names.contains(&emitted_field_name) {
+                        emitted_field_name = format!("{}_field", emitted_field_name);
+                    }
+                    if used_member_names.contains(&emitted_field_name) {
+                        let mut idx = 2usize;
+                        loop {
+                            let candidate = format!("{}_{}", emitted_field_name, idx);
+                            if !used_member_names.contains(&candidate)
+                                && !reserved_member_names.contains(&candidate)
+                            {
+                                emitted_field_name = candidate;
+                                break;
+                            }
+                            idx += 1;
+                        }
+                    }
+                    self.writeln(&format!("{} {};", field_type, emitted_field_name));
+                    used_member_names.insert(emitted_field_name.clone());
+                    named_field_types.insert(field_name.clone(), field.ty.clone());
+                    named_field_order.push(field_name.clone());
+                    named_field_cpp_names.insert(field_name, emitted_field_name);
                 }
             }
             syn::Fields::Unnamed(fields) => {
@@ -1206,24 +1707,118 @@ impl CodeGen {
             }
             syn::Fields::Unit => {}
         }
+        if has_drop_impl {
+            self.writeln("bool rusty_forget_flag_ = false;");
+        }
+        if matches!(&s.fields, syn::Fields::Unit) {
+            self.unit_struct_types.insert(name_str.clone());
+            let scoped_name = self.scoped_type_key(&name_str);
+            self.unit_struct_types.insert(scoped_name);
+        }
         if !named_field_types.is_empty() {
             self.struct_field_types
                 .insert(name_str.clone(), named_field_types.clone());
             let scoped_name = self.scoped_type_key(&name_str);
             self.struct_field_types
                 .insert(scoped_name, named_field_types);
+            self.struct_field_order
+                .insert(name_str.clone(), named_field_order.clone());
+            let scoped_name = self.scoped_type_key(&name_str);
+            self.struct_field_order
+                .insert(scoped_name, named_field_order);
+            self.struct_field_cpp_names
+                .insert(name_str.clone(), named_field_cpp_names.clone());
+            let scoped_name = self.scoped_type_key(&name_str);
+            self.struct_field_cpp_names
+                .insert(scoped_name, named_field_cpp_names.clone());
+        }
+
+        if has_drop_impl {
+            if let syn::Fields::Named(fields) = &s.fields {
+                let ctor_params: Vec<String> = fields
+                    .named
+                    .iter()
+                    .filter_map(|field| {
+                        let field_name = field.ident.as_ref()?.to_string();
+                        let param_name = format!("{}_init", field_name);
+                        Some(format!("{} {}", self.map_type(&field.ty), param_name))
+                    })
+                    .collect();
+                let ctor_inits: Vec<String> = fields
+                    .named
+                    .iter()
+                    .filter_map(|field| {
+                        let rust_field_name = field.ident.as_ref()?.to_string();
+                        let member_name = named_field_cpp_names
+                            .get(&rust_field_name)
+                            .cloned()
+                            .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
+                        let param_name = format!("{}_init", rust_field_name);
+                        Some(format!("{}(std::move({}))", member_name, param_name))
+                    })
+                    .collect();
+                self.writeln(&format!(
+                    "{}({}) : {} {{}}",
+                    name,
+                    ctor_params.join(", "),
+                    ctor_inits.join(", ")
+                ));
+
+                let move_inits: Vec<String> = fields
+                    .named
+                    .iter()
+                    .filter_map(|field| {
+                        let rust_field_name = field.ident.as_ref()?.to_string();
+                        let member_name = named_field_cpp_names
+                            .get(&rust_field_name)
+                            .cloned()
+                            .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
+                        let init = if matches!(&field.ty, syn::Type::Reference(_)) {
+                            format!("{}(other.{})", member_name, member_name)
+                        } else {
+                            format!("{}(std::move(other.{}))", member_name, member_name)
+                        };
+                        Some(init)
+                    })
+                    .collect();
+                let move_inits = if move_inits.is_empty() {
+                    "rusty_forget_flag_(false)".to_string()
+                } else {
+                    format!("{}, rusty_forget_flag_(false)", move_inits.join(", "))
+                };
+                self.writeln(&format!(
+                    "{}({}&& other) noexcept : {} {{",
+                    name, name, move_inits
+                ));
+                self.indent += 1;
+                self.writeln("other.rusty_forget_flag_ = true;");
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                self.writeln(&format!("{}({}&&) = default;", name, name));
+            }
+            self.writeln("void rusty_mark_forgotten() noexcept { rusty_forget_flag_ = true; }");
+            self.newline();
         }
 
         // Emit methods from impl blocks (merged)
-        if let Some(methods) = self.take_impls_for_type(&name_str) {
+        if let Some(methods) = merged_impl_items {
             if !matches!(&s.fields, syn::Fields::Unit if methods.is_empty()) {
                 self.newline();
             }
             self.current_struct = Some(name_str.clone());
             self.emitted_method_conflict_keys.push(HashSet::new());
+            let mut non_method_member_names: HashSet<String> =
+                named_field_cpp_names.values().cloned().collect();
+            if has_drop_impl {
+                non_method_member_names.insert("rusty_forget_flag_".to_string());
+            }
+            self.emitted_non_method_member_names
+                .push(non_method_member_names);
             for impl_item in &methods {
                 self.emit_impl_item(impl_item);
             }
+            self.emitted_non_method_member_names.pop();
             self.emitted_method_conflict_keys.pop();
             self.current_struct = None;
         }
@@ -2064,6 +2659,7 @@ impl CodeGen {
         }
 
         let mod_name = &m.ident;
+        let mod_cpp_name = escape_cpp_keyword(&mod_name.to_string());
         let is_pub = matches!(m.vis, syn::Visibility::Public(_));
         let has_inline_content = m.content.is_some();
 
@@ -2086,7 +2682,7 @@ impl CodeGen {
 
         // If the mod has inline content (mod foo { ... }), emit it
         if let Some((_, items)) = &m.content {
-            self.writeln(&format!("namespace {} {{", mod_name));
+            self.writeln(&format!("namespace {} {{", mod_cpp_name));
             self.indent += 1;
             self.module_stack.push(mod_name.to_string());
             if self.emit_item_forward_decls(items) {
@@ -2132,33 +2728,43 @@ impl CodeGen {
             ""
         };
         for path in &paths {
-            self.record_option_alias_import(path);
+            let resolved_path = self.resolve_unqualified_local_import_path(path);
+            self.record_option_alias_import(&resolved_path);
             if is_pub
                 && self.module_name.is_some()
-                && is_module_linkage_sensitive_reexport(normalize_use_import_path(path))
+                && is_module_linkage_sensitive_reexport(normalize_use_import_path(&resolved_path))
             {
-                self.writeln(&format!("// Rust-only: using {};", path));
+                self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 continue;
             }
-            if self.is_skipped_module_trait_import(path) {
-                self.writeln(&format!("// Rust-only: using {};", path));
+            if self.is_skipped_module_trait_import(&resolved_path) {
+                self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 continue;
             }
-            if self.is_macro_rules_import(path) {
-                self.writeln(&format!("// Rust-only macro import: using {};", path));
+            if self.is_macro_rules_import(&resolved_path) {
+                self.writeln(&format!(
+                    "// Rust-only macro import: using {};",
+                    resolved_path
+                ));
                 continue;
             }
-            if self.should_skip_unresolved_bare_import(path) {
-                self.writeln(&format!("// Rust-only unresolved import: using {};", path));
+            if self.should_skip_unresolved_bare_import(&resolved_path) {
+                self.writeln(&format!(
+                    "// Rust-only unresolved import: using {};",
+                    resolved_path
+                ));
                 continue;
             }
             if is_external {
-                self.writeln(&format!("// Rust-only unresolved import: using {};", path));
+                self.writeln(&format!(
+                    "// Rust-only unresolved import: using {};",
+                    resolved_path
+                ));
                 continue;
             }
-            match classify_use_import(path) {
+            match classify_use_import(&resolved_path) {
                 UseImportAction::RustOnly => {
-                    self.writeln(&format!("// Rust-only: using {};", path));
+                    self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 }
                 UseImportAction::Using(mapped_path) => {
                     let using_path = make_using_path_cpp_legal(&mapped_path);
@@ -2181,6 +2787,59 @@ impl CodeGen {
         }
     }
 
+    fn resolve_unqualified_local_import_path(&self, path: &str) -> String {
+        let normalized = normalize_use_import_path(path);
+        if normalized.is_empty()
+            || normalized.contains("::")
+            || normalized.contains(" = ")
+            || normalized.starts_with("::")
+            || normalized.starts_with("namespace ")
+        {
+            return path.to_string();
+        }
+        if self.declared_item_names.contains(normalized) {
+            return path.to_string();
+        }
+
+        let mut matches: Vec<String> = self
+            .local_declared_types
+            .iter()
+            .filter(|scoped| {
+                scoped
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == normalized)
+            })
+            .cloned()
+            .collect();
+        matches.sort();
+        matches.dedup();
+        if matches.len() != 1 {
+            let mut scoped_matches: Vec<String> = matches
+                .iter()
+                .filter(|name| name.contains("::"))
+                .cloned()
+                .collect();
+            scoped_matches.sort();
+            scoped_matches.dedup();
+            if scoped_matches.len() == 1 {
+                let resolved = &scoped_matches[0];
+                if path.starts_with("namespace ") {
+                    return format!("namespace {}", resolved);
+                }
+                return resolved.clone();
+            }
+            return path.to_string();
+        }
+
+        let resolved = &matches[0];
+        if path.starts_with("namespace ") {
+            format!("namespace {}", resolved)
+        } else {
+            resolved.clone()
+        }
+    }
+
     fn is_skipped_module_trait_import(&self, path: &str) -> bool {
         let normalized = normalize_use_import_path(path);
         if self.skipped_module_traits.contains(normalized) {
@@ -2196,9 +2855,12 @@ impl CodeGen {
         if self.declared_item_names.contains(normalized) {
             return false;
         }
-        self.skipped_module_traits
-            .iter()
-            .any(|scoped| scoped.rsplit("::").next().is_some_and(|tail| tail == normalized))
+        self.skipped_module_traits.iter().any(|scoped| {
+            scoped
+                .rsplit("::")
+                .next()
+                .is_some_and(|tail| tail == normalized)
+        })
     }
 
     fn is_macro_rules_import(&self, path: &str) -> bool {
@@ -2252,29 +2914,34 @@ impl CodeGen {
         &self,
         generics: &syn::Generics,
     ) -> (Vec<String>, Vec<String>) {
-        let type_params: Vec<&syn::TypeParam> = generics
-            .params
-            .iter()
-            .filter_map(|p| {
-                if let syn::GenericParam::Type(tp) = p {
-                    Some(tp)
-                } else {
-                    None
+        let mut params: Vec<String> = Vec::new();
+        let mut emitted_type_params: Vec<&syn::TypeParam> = Vec::new();
+        for param in &generics.params {
+            match param {
+                syn::GenericParam::Type(tp)
+                    if !self.is_type_param_in_scope(&tp.ident.to_string()) =>
+                {
+                    params.push(format!("typename {}", tp.ident));
+                    emitted_type_params.push(tp);
                 }
-            })
-            .filter(|tp| !self.is_type_param_in_scope(&tp.ident.to_string()))
-            .collect();
-
-        if type_params.is_empty() {
-            return (Vec::new(), Vec::new());
+                syn::GenericParam::Const(cp)
+                    if !self.is_type_param_in_scope(&cp.ident.to_string()) =>
+                {
+                    let const_ty = self.map_type(&cp.ty);
+                    params.push(format!("{} {}", const_ty, cp.ident));
+                }
+                _ => {}
+            }
         }
 
-        let params_str: Vec<String> = type_params.iter().map(|tp| tp.ident.to_string()).collect();
+        if params.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
 
         let mut constraints: Vec<String> = Vec::new();
         let skip_facade_constraints = self.module_name.is_some();
 
-        for tp in &type_params {
+        for tp in &emitted_type_params {
             for bound in &tp.bounds {
                 if let syn::TypeParamBound::Trait(tb) = bound {
                     if skip_facade_constraints {
@@ -2309,7 +2976,7 @@ impl CodeGen {
             }
         }
 
-        (params_str, constraints)
+        (params, constraints)
     }
 
     fn emitted_template_signature_key(&self, generics: &syn::Generics) -> String {
@@ -2329,6 +2996,24 @@ impl CodeGen {
             scope.insert(key)
         } else {
             true
+        }
+    }
+
+    /// Returns true if name is first-seen in current type scope, false if duplicate.
+    fn mark_emitted_non_method_member_name(&mut self, name: &str) -> bool {
+        if let Some(scope) = self.emitted_non_method_member_names.last_mut() {
+            scope.insert(name.to_string())
+        } else {
+            true
+        }
+    }
+
+    fn merged_impl_member_name(&self, item: &syn::ImplItem) -> Option<String> {
+        match item {
+            syn::ImplItem::Fn(method) => Some(escape_cpp_keyword(&method.sig.ident.to_string())),
+            syn::ImplItem::Const(c) => Some(escape_cpp_keyword(&c.ident.to_string())),
+            syn::ImplItem::Type(t) => Some(escape_cpp_keyword(&t.ident.to_string())),
+            _ => None,
         }
     }
 
@@ -2458,7 +3143,10 @@ impl CodeGen {
         match item {
             syn::ImplItem::Fn(method) => self.emit_method(method),
             syn::ImplItem::Const(c) => {
-                let name = &c.ident;
+                let name = escape_cpp_keyword(&c.ident.to_string());
+                if !self.mark_emitted_non_method_member_name(&name) {
+                    return;
+                }
                 let ty = self.map_type(&c.ty);
                 let expr = self.emit_expr_to_string(&c.expr);
                 self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
@@ -2473,8 +3161,19 @@ impl CodeGen {
                     ));
                     return;
                 }
-                let name = &t.ident;
-                let ty = self.map_type(&t.ty);
+                let name = escape_cpp_keyword(&t.ident.to_string());
+                let mut ty = self.map_type(&t.ty);
+                if ty == name || ty.starts_with(&format!("{}<", name)) {
+                    let ns_prefix = if self.module_stack.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}::", self.module_stack.join("::"))
+                    };
+                    ty = format!("::{}{}", ns_prefix, ty);
+                }
+                if !self.mark_emitted_non_method_member_name(&name) {
+                    return;
+                }
                 self.writeln(&format!("using {} = {};", name, ty));
             }
             _ => {
@@ -2492,13 +3191,22 @@ impl CodeGen {
         self.emit_template_prefix(&method.sig.generics);
         self.push_type_param_scope(&method.sig.generics);
 
+        let mut is_drop_destructor = false;
         // Check if this method is an operator trait impl (renamed)
         let name = if let Some(ref struct_name) = self.current_struct {
-            if let Some(op) = self
+            let scoped_name = self.scoped_type_key(struct_name);
+            is_drop_destructor = self
+                .drop_trait_methods
+                .contains(&(struct_name.clone(), method_ident.clone()))
+                || self
+                    .drop_trait_methods
+                    .contains(&(scoped_name.clone(), method_ident.clone()));
+            if is_drop_destructor {
+                format!("~{}", struct_name)
+            } else if let Some(op) = self
                 .operator_renames
                 .get(&(struct_name.clone(), method_ident.clone()))
                 .or_else(|| {
-                    let scoped_name = self.scoped_type_key(struct_name);
                     self.operator_renames
                         .get(&(scoped_name, method_ident.clone()))
                 })
@@ -2527,26 +3235,31 @@ impl CodeGen {
         }
 
         // Analyze receiver to determine method kind
-        let (qualifier, is_static) = match method.sig.inputs.first() {
+        let (mut qualifier, mut is_static) = match method.sig.inputs.first() {
             Some(syn::FnArg::Receiver(recv)) => {
                 if recv.reference.is_some() {
                     if recv.mutability.is_some() {
                         // &mut self → non-const method
-                        ("", false)
+                        ("".to_string(), false)
                     } else {
                         // &self → const method
-                        (" const", false)
+                        (" const".to_string(), false)
                     }
                 } else {
                     // self (by value) → non-const method (consumes)
-                    ("", false)
+                    ("".to_string(), false)
                 }
             }
             _ => {
                 // No self → static method
-                ("", true)
+                ("".to_string(), true)
             }
         };
+        if is_drop_destructor {
+            // C++ destructors cannot be static/const-qualified and have no return type.
+            qualifier.clear();
+            is_static = false;
+        }
 
         // Build params list (skip self receiver)
         let params: Vec<String> = method
@@ -2570,7 +3283,7 @@ impl CodeGen {
         let conflict_key = self.emitted_method_conflict_key(
             &name,
             &emitted_template_key,
-            qualifier,
+            &qualifier,
             is_static,
             &params,
         );
@@ -2578,15 +3291,22 @@ impl CodeGen {
             self.pop_type_param_scope();
             return;
         }
-        self.writeln(&format!(
-            "{}{} {}({}){} {{",
-            static_prefix,
-            return_type,
-            name,
-            params.join(", "),
-            qualifier
-        ));
+        if is_drop_destructor {
+            self.writeln(&format!("{}({}) {{", name, params.join(", ")));
+        } else {
+            self.writeln(&format!(
+                "{}{} {}({}){} {{",
+                static_prefix,
+                return_type,
+                name,
+                params.join(", "),
+                qualifier
+            ));
+        }
         self.indent += 1;
+        if is_drop_destructor {
+            self.writeln("if (rusty_forget_flag_) { return; }");
+        }
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
@@ -2615,6 +3335,17 @@ impl CodeGen {
         let prev_repeat_hints = std::mem::replace(&mut self.repeat_elem_type_hints, repeat_hints);
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
+        self.delayed_init_locals.push(HashSet::new());
+        let local_functions: HashSet<String> = block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Fn(f)) => Some(f.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        self.local_function_bindings.push(local_functions);
+        self.block_depth += 1;
 
         let stmts = &block.stmts;
         let len = stmts.len();
@@ -2624,8 +3355,11 @@ impl CodeGen {
             self.emit_stmt(stmt, is_last);
         }
 
+        self.block_depth -= 1;
         self.local_bindings.pop();
         self.local_cpp_bindings.pop();
+        self.delayed_init_locals.pop();
+        self.local_function_bindings.pop();
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
         self.repeat_elem_type_hints = prev_repeat_hints;
@@ -2668,6 +3402,8 @@ impl CodeGen {
                     };
                     self.register_local_binding(f.sig.ident.to_string(), return_ty);
                     self.emit_nested_function(f);
+                } else if self.block_depth > 0 && matches!(item, syn::Item::Impl(_)) {
+                    self.writeln("// Rust-only nested impl block skipped in local scope");
                 } else {
                     self.emit_item(item);
                 }
@@ -2733,6 +3469,9 @@ impl CodeGen {
 
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        if self.try_emit_runtime_match_stmt(match_expr, variant_ctx.as_ref()) {
+            return;
+        }
 
         // Decide strategy: switch-compatible value patterns vs std::visit variant dispatch.
         if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
@@ -2740,6 +3479,114 @@ impl CodeGen {
         } else {
             self.emit_match_as_visit(&scrutinee, &match_expr.arms, variant_ctx.as_ref());
         }
+    }
+
+    fn try_emit_runtime_match_stmt(
+        &mut self,
+        match_expr: &syn::ExprMatch,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        let mut parsed_arms: Vec<(Option<(&'static str, &'static str)>, Option<&'static str>)> =
+            Vec::with_capacity(match_expr.arms.len());
+
+        for arm in &match_expr.arms {
+            match &arm.pat {
+                syn::Pat::TupleStruct(ts) => {
+                    let Some((cond_method, unwrap_method)) =
+                        self.runtime_tuple_struct_match_methods(&ts.path, variant_ctx)
+                    else {
+                        return false;
+                    };
+                    if ts.elems.len() != 1 {
+                        return false;
+                    }
+                    parsed_arms.push((Some((cond_method, unwrap_method)), None));
+                }
+                syn::Pat::Path(pp) => {
+                    let Some(cond_method) =
+                        self.runtime_path_match_condition_method(&pp.path, variant_ctx)
+                    else {
+                        return false;
+                    };
+                    parsed_arms.push((None, Some(cond_method)));
+                }
+                syn::Pat::Wild(_) | syn::Pat::Ident(_) => {
+                    parsed_arms.push((None, None));
+                }
+                _ => return false,
+            }
+        }
+
+        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+        self.writeln("{");
+        self.indent += 1;
+        self.writeln(&format!("auto&& _m = {};", scrutinee));
+        self.writeln("do {");
+        self.indent += 1;
+
+        for (idx, arm) in match_expr.arms.iter().enumerate() {
+            let (tuple_info, path_cond) = parsed_arms[idx];
+            let condition = if let Some((cond_method, _)) = tuple_info {
+                format!("_m.{}()", cond_method)
+            } else if let Some(cond_method) = path_cond {
+                format!("_m.{}()", cond_method)
+            } else {
+                "true".to_string()
+            };
+
+            self.writeln(&format!("if ({}) {{", condition));
+            self.indent += 1;
+
+            if let Some((_, unwrap_method)) = tuple_info {
+                let matched_value = format!("_mv{}", idx);
+                self.writeln(&format!("auto {} = _m.{}();", matched_value, unwrap_method));
+                if let syn::Pat::TupleStruct(ts) = &arm.pat {
+                    let mut binding_stmts = Vec::new();
+                    if !self.collect_pattern_binding_stmts(
+                        &ts.elems[0],
+                        &matched_value,
+                        &mut binding_stmts,
+                    ) {
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.indent -= 1;
+                        self.writeln("} while (false);");
+                        self.indent -= 1;
+                        self.writeln("}");
+                        return false;
+                    }
+                    for stmt in binding_stmts {
+                        self.writeln(&stmt);
+                    }
+                }
+            } else if let syn::Pat::Ident(pi) = &arm.pat {
+                if pi.ident != "_" {
+                    self.writeln(&format!("const auto& {} = _m;", pi.ident));
+                }
+            }
+
+            if let Some((_, guard)) = &arm.guard {
+                let guard_str = self.emit_expr_to_string(guard);
+                self.writeln(&format!("if ({}) {{", guard_str));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.writeln("break;");
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                self.emit_arm_body(&arm.body);
+                self.writeln("break;");
+            }
+
+            self.indent -= 1;
+            self.writeln("}");
+        }
+
+        self.indent -= 1;
+        self.writeln("} while (false);");
+        self.indent -= 1;
+        self.writeln("}");
+        true
     }
 
     /// Check if all match arms can be lowered to value-based switch/if matching.
@@ -3820,7 +4667,8 @@ impl CodeGen {
                 return Some(kind);
             }
         }
-        if let Some(kind) = variant_ctx.and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
+        if let Some(kind) =
+            variant_ctx.and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
         {
             return Some(kind);
         }
@@ -3890,7 +4738,21 @@ impl CodeGen {
                     if ts.elems.len() != 1 {
                         return None;
                     }
+                    let direct_binding_passthrough = arm.guard.is_none()
+                        && matches!(
+                            (&ts.elems[0], self.extract_value_expr(&arm.body)),
+                            (syn::Pat::Ident(pi), Some(syn::Expr::Path(body_path)))
+                                if body_path.path.segments.len() == 1
+                                    && body_path.path.segments[0].ident == pi.ident
+                        );
                     saw_runtime_pattern = true;
+                    if direct_binding_passthrough {
+                        out.push_str(&format!(
+                            "if (_m.{}()) {{ return _m.{}(); }} ",
+                            cond_method, unwrap_method
+                        ));
+                        continue;
+                    }
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     let matched_value = format!("_mv{}", idx);
                     out.push_str(&format!(
@@ -4768,7 +5630,8 @@ impl CodeGen {
                         ));
                     }
                 } else {
-                    self.writeln(&format!("{}{} {};", qualifier, type_str, cpp_name));
+                    // `let x: T;` can be initialized later; emit mutable storage.
+                    self.writeln(&format!("{} {};", type_str, cpp_name));
                 }
             }
             syn::Pat::Tuple(tuple) => {
@@ -4807,7 +5670,13 @@ impl CodeGen {
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&pat_type.ty));
                         self.writeln(&format!("{}{} {} = {};", qualifier, ty, cpp_name, expr_str));
                     } else {
-                        self.writeln(&format!("{}{} {};", qualifier, ty, cpp_name));
+                        // `let x: T;` can be initialized later; emit mutable storage.
+                        if self.should_use_optional_delayed_init_storage(&pat_type.ty) {
+                            self.mark_delayed_init_local(&name.to_string());
+                            self.writeln(&format!("std::optional<{}> {};", ty, cpp_name));
+                        } else {
+                            self.writeln(&format!("{} {};", ty, cpp_name));
+                        }
                     }
                 } else if matches!(pat_type.pat.as_ref(), syn::Pat::Wild(_)) {
                     if let Some(init) = &local.init {
@@ -4868,6 +5737,26 @@ impl CodeGen {
         if let Some(scope) = self.local_bindings.last_mut() {
             scope.insert(name, ty);
         }
+    }
+
+    fn should_use_optional_delayed_init_storage(&self, ty: &syn::Type) -> bool {
+        !matches!(
+            ty,
+            syn::Type::Reference(_) | syn::Type::ImplTrait(_) | syn::Type::Infer(_)
+        )
+    }
+
+    fn mark_delayed_init_local(&mut self, name: &str) {
+        if let Some(scope) = self.delayed_init_locals.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn is_delayed_init_local(&self, name: &str) -> bool {
+        self.delayed_init_locals
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
     }
 
     fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
@@ -5674,6 +6563,64 @@ impl CodeGen {
             })
     }
 
+    fn lookup_struct_field_cpp_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
+        self.struct_field_cpp_names
+            .get(struct_name)
+            .and_then(|fields| fields.get(field_name).cloned())
+            .or_else(|| {
+                let scoped = self.scoped_type_key(struct_name);
+                self.struct_field_cpp_names
+                    .get(&scoped)
+                    .and_then(|fields| fields.get(field_name).cloned())
+            })
+    }
+
+    fn lookup_field_cpp_name_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<String> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let struct_name = tp.path.segments.last()?.ident.to_string();
+        let struct_name = if struct_name == "Self" {
+            self.current_struct.clone()?
+        } else {
+            struct_name
+        };
+        self.lookup_struct_field_cpp_name(&struct_name, field_name)
+    }
+
+    fn lookup_field_cpp_name_for_expr_base(
+        &self,
+        base: &syn::Expr,
+        field_name: &str,
+    ) -> Option<String> {
+        match base {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let base_name = path.path.segments[0].ident.to_string();
+                if base_name == "self" {
+                    if let Some(struct_name) = &self.current_struct {
+                        return self.lookup_struct_field_cpp_name(struct_name, field_name);
+                    }
+                    return None;
+                }
+                let base_ty = self.lookup_local_binding_type(&base_name)?;
+                self.lookup_field_cpp_name_from_type(&base_ty, field_name)
+            }
+            syn::Expr::Paren(p) => self.lookup_field_cpp_name_for_expr_base(&p.expr, field_name),
+            syn::Expr::Group(g) => self.lookup_field_cpp_name_for_expr_base(&g.expr, field_name),
+            syn::Expr::Reference(r) => {
+                self.lookup_field_cpp_name_for_expr_base(&r.expr, field_name)
+            }
+            _ => None,
+        }
+    }
+
+    fn lookup_struct_field_order(&self, struct_name: &str) -> Option<&Vec<String>> {
+        self.struct_field_order.get(struct_name).or_else(|| {
+            let scoped = self.scoped_type_key(struct_name);
+            self.struct_field_order.get(&scoped)
+        })
+    }
+
     fn push_param_bindings(
         &mut self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -5903,12 +6850,19 @@ impl CodeGen {
         if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
             return io_call;
         }
+        if let Some(filter_map_call) = self.try_emit_iter_filter_map_call(mc) {
+            return filter_map_call;
+        }
 
         let method_name = mc.method.to_string();
         let args: Vec<String> = mc
             .args
             .iter()
-            .map(|a| self.emit_expr_maybe_move(a))
+            .enumerate()
+            .map(|(idx, arg)| {
+                let style = self.lookup_method_arg_pass_style(&method_name, idx);
+                self.emit_call_arg_with_pass_style(arg, style, false)
+            })
             .collect();
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
@@ -5996,6 +6950,9 @@ impl CodeGen {
                 {
                     return span_expr;
                 }
+                if let Some(expected_inner) = self.expected_reference_inner_type(expected_ty) {
+                    return self.emit_expr_to_string_with_expected(&r.expr, Some(expected_inner));
+                }
                 let ref_inner = self.peel_paren_group_expr(&r.expr);
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
                     return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
@@ -6024,19 +6981,29 @@ impl CodeGen {
                 let elems: Vec<String> = tup
                     .elems
                     .iter()
-                    .map(|e| self.emit_expr_to_string_with_expected(e, expected_ty))
+                    .map(|e| {
+                        self.emit_expr_to_string_with_expected_and_move_if_needed(e, expected_ty)
+                    })
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
             syn::Expr::Struct(struct_expr) => {
                 self.emit_struct_expr_to_string_with_expected(struct_expr, expected_ty)
             }
-            syn::Expr::Path(path) if self.is_option_none_path(&path.path) => {
-                if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty) {
-                    return format!("{}(rusty::None)", expected_cpp);
+            syn::Expr::Path(path) => {
+                if self.is_option_none_path(&path.path) {
+                    if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty)
+                    {
+                        return format!("{}(rusty::None)", expected_cpp);
+                    }
+                    if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
+                        return format!("rusty::Option<{}>(rusty::None)", inner_cpp);
+                    }
                 }
-                if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
-                    return format!("rusty::Option<{}>(rusty::None)", inner_cpp);
+                if let Some(expected_ctor) =
+                    self.try_emit_path_constructor_with_expected(path, expected_ty)
+                {
+                    return expected_ctor;
                 }
                 self.emit_expr_path_to_string(&path.path)
             }
@@ -6073,19 +7040,84 @@ impl CodeGen {
         let target_name = self
             .expected_struct_literal_cpp_type(struct_expr, expected_ty)
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
+
+        let resolved_struct_name = struct_expr.path.segments.last().map(|seg| {
+            let raw = seg.ident.to_string();
+            if raw == "Self" {
+                self.current_struct
+                    .clone()
+                    .unwrap_or_else(|| "Self".to_string())
+            } else {
+                raw
+            }
+        });
+        if struct_expr.rest.is_none()
+            && resolved_struct_name
+                .as_ref()
+                .is_some_and(|name| self.type_has_drop_impl(name))
+        {
+            if let Some(struct_name) = resolved_struct_name.as_ref() {
+                if let Some(field_order) = self.lookup_struct_field_order(struct_name) {
+                    let field_exprs: HashMap<String, &syn::Expr> = struct_expr
+                        .fields
+                        .iter()
+                        .filter_map(|field| match &field.member {
+                            syn::Member::Named(ident) => Some((ident.to_string(), &field.expr)),
+                            _ => None,
+                        })
+                        .collect();
+                    if field_order
+                        .iter()
+                        .all(|name| field_exprs.contains_key(name))
+                    {
+                        let args: Vec<String> = field_order
+                            .iter()
+                            .map(|field_name| {
+                                let expr = field_exprs
+                                    .get(field_name)
+                                    .expect("field presence checked above");
+                                let field_ty =
+                                    self.lookup_struct_literal_field_type(struct_expr, field_name);
+                                self.emit_expr_to_string_with_expected(expr, field_ty.as_ref())
+                            })
+                            .collect();
+                        return format!("{}({})", target_name, args.join(", "));
+                    }
+                }
+            }
+        }
+
         let fields: Vec<String> = struct_expr
             .fields
             .iter()
             .map(|f| {
-                let val = self.emit_expr_to_string(&f.expr);
-                let member_name = match &f.member {
+                let rust_member_name = match &f.member {
                     syn::Member::Named(ident) => ident.to_string(),
                     syn::Member::Unnamed(idx) => format!("_{}", idx.index),
                 };
-                format!(".{} = {}", member_name, val)
+                let emitted_member_name = self
+                    .lookup_struct_literal_field_cpp_name(struct_expr, &rust_member_name)
+                    .unwrap_or_else(|| escape_cpp_keyword(&rust_member_name));
+                let field_ty =
+                    self.lookup_struct_literal_field_type(struct_expr, &rust_member_name);
+                let val = self.emit_expr_to_string_with_expected(&f.expr, field_ty.as_ref());
+                format!(".{} = {}", emitted_member_name, val)
             })
             .collect();
         format!("{}{{{}}}", target_name, fields.join(", "))
+    }
+
+    fn expected_reference_inner_type<'a>(
+        &self,
+        expected_ty: Option<&'a syn::Type>,
+    ) -> Option<&'a syn::Type> {
+        let ty = expected_ty?;
+        match ty {
+            syn::Type::Reference(r) => Some(&r.elem),
+            syn::Type::Paren(p) => self.expected_reference_inner_type(Some(&p.elem)),
+            syn::Type::Group(g) => self.expected_reference_inner_type(Some(&g.elem)),
+            _ => None,
+        }
     }
 
     fn expected_struct_literal_cpp_type(
@@ -6098,6 +7130,38 @@ impl CodeGen {
             return None;
         }
         Some(self.map_type(expected_ty))
+    }
+
+    fn lookup_struct_literal_field_type(
+        &self,
+        struct_expr: &syn::ExprStruct,
+        field_name: &str,
+    ) -> Option<syn::Type> {
+        let struct_name = struct_expr.path.segments.last()?.ident.to_string();
+        let struct_name = if struct_name == "Self" {
+            self.current_struct.clone()?
+        } else {
+            struct_name
+        };
+        self.lookup_struct_field_type(&struct_name, field_name)
+    }
+
+    fn lookup_struct_literal_field_cpp_name(
+        &self,
+        struct_expr: &syn::ExprStruct,
+        field_name: &str,
+    ) -> Option<String> {
+        let struct_name = if let Some(seg) = struct_expr.path.segments.last() {
+            let ident = seg.ident.to_string();
+            if ident == "Self" {
+                self.current_struct.clone()?
+            } else {
+                ident
+            }
+        } else {
+            self.current_struct.clone()?
+        };
+        self.lookup_struct_field_cpp_name(&struct_name, field_name)
     }
 
     fn expected_type_matches_struct_literal_path(
@@ -6133,6 +7197,81 @@ impl CodeGen {
             }
         }
         false
+    }
+
+    fn try_emit_path_constructor_with_expected(
+        &self,
+        path_expr: &syn::ExprPath,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let expected_ty = expected_ty?;
+        if path_expr.path.segments.len() == 1 {
+            let local_name = path_expr.path.segments[0].ident.to_string();
+            if self.lookup_local_binding_cpp_name(&local_name).is_some() {
+                return None;
+            }
+        }
+        if !self.expected_type_matches_struct_literal_path(expected_ty, &path_expr.path) {
+            return None;
+        }
+        Some(format!("{}{{}}", self.map_type(expected_ty)))
+    }
+
+    fn expected_type_last_ident(&self, expected_ty: &syn::Type) -> Option<String> {
+        match expected_ty {
+            syn::Type::Path(tp) => Some(tp.path.segments.last()?.ident.to_string()),
+            syn::Type::Reference(r) => self.expected_type_last_ident(&r.elem),
+            syn::Type::Paren(p) => self.expected_type_last_ident(&p.elem),
+            syn::Type::Group(g) => self.expected_type_last_ident(&g.elem),
+            _ => None,
+        }
+    }
+
+    fn mapped_assoc_method_name_for_call_path(&self, path: &syn::Path) -> Option<String> {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if let Some(mapped) = types::map_function_path(&joined) {
+            return mapped.split("::").last().map(|s| s.to_string());
+        }
+        let last = path.segments.last()?.ident.to_string();
+        Some(escape_cpp_keyword(&last))
+    }
+
+    fn try_emit_associated_call_with_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: &syn::Type,
+    ) -> Option<String> {
+        let syn::Expr::Path(func_path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let func_path = &func_path_expr.path;
+        if func_path.segments.len() != 2 {
+            return None;
+        }
+        let owner_seg = func_path.segments.iter().nth_back(1)?;
+        if !matches!(owner_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let expected_last = self.expected_type_last_ident(expected_ty)?;
+        if owner_seg.ident != expected_last.as_str() {
+            return None;
+        }
+        let owner_cpp = self.map_type(expected_ty);
+        if !owner_cpp.contains('<') {
+            return None;
+        }
+        let method = self.mapped_assoc_method_name_for_call_path(func_path)?;
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        Some(format!("{}::{}({})", owner_cpp, method, args.join(", ")))
     }
 
     fn try_emit_reference_array_literal_with_expected_span(
@@ -6303,6 +7442,9 @@ impl CodeGen {
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_expected(call, ty) {
                 return emitted;
             }
+            if let Some(emitted) = self.try_emit_associated_call_with_expected_type(call, ty) {
+                return emitted;
+            }
         }
         if expected_ty.is_none() {
             if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call)
@@ -6340,6 +7482,24 @@ impl CodeGen {
         }
 
         let func = self.emit_expr_to_string(&call.func);
+        if matches!(func.as_str(), "rusty::ptr::read" | "rusty::ptr::write")
+            && !call.args.is_empty()
+        {
+            let args: Vec<String> = call
+                .args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    if idx == 0 {
+                        if let Some(ptr_arg) = self.emit_raw_pointer_call_arg(arg) {
+                            return ptr_arg;
+                        }
+                    }
+                    self.emit_expr_maybe_move(arg)
+                })
+                .collect();
+            return format!("{}({})", func, args.join(", "));
+        }
         if let Some(expected) = expected_ty {
             if self.is_noreturn_panic_like_call_path(&func) {
                 let args: Vec<String> = call
@@ -6413,12 +7573,28 @@ impl CodeGen {
             return format!("Err({})", arg);
         }
 
+        let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
         let args: Vec<String> = call
             .args
             .iter()
-            .map(|a| self.emit_expr_maybe_move(a))
+            .enumerate()
+            .map(|(idx, arg)| {
+                let style = self.lookup_function_arg_pass_style(&call.func, idx);
+                self.emit_call_arg_with_pass_style(arg, style, callable_type_param_fallback)
+            })
             .collect();
         format!("{}({})", func, args.join(", "))
+    }
+
+    fn emit_raw_pointer_call_arg(&self, arg: &syn::Expr) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(arg);
+        if matches!(peeled, syn::Expr::Reference(_)) {
+            return Some(self.emit_expr_to_string(arg));
+        }
+        if self.is_expr_reference_like(arg) {
+            return Some(format!("&{}", self.emit_expr_to_string(arg)));
+        }
+        None
     }
 
     fn emit_cursor_new_arg_expr(&self, arg: &syn::Expr) -> String {
@@ -6943,23 +8119,31 @@ impl CodeGen {
                 let is_self = matches!(f.base.as_ref(), syn::Expr::Path(p)
                     if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
                 if is_self {
+                    let emitted_member = match &f.member {
+                        syn::Member::Named(ident) => {
+                            let rust_name = ident.to_string();
+                            self.current_struct
+                                .as_ref()
+                                .and_then(|s| self.lookup_struct_field_cpp_name(s, &rust_name))
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name))
+                        }
+                        syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                    };
                     if let Some(self_name) = self.current_self_path_override() {
-                        match &f.member {
-                            syn::Member::Named(ident) => format!("{}.{}", self_name, ident),
-                            syn::Member::Unnamed(idx) => {
-                                format!("{}._{}", self_name, idx.index)
-                            }
-                        }
+                        format!("{}.{}", self_name, emitted_member)
                     } else {
-                        match &f.member {
-                            syn::Member::Named(ident) => ident.to_string(),
-                            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
-                        }
+                        emitted_member
                     }
                 } else {
                     let base = self.emit_expr_to_string(&f.base);
                     match &f.member {
-                        syn::Member::Named(ident) => format!("{}.{}", base, ident),
+                        syn::Member::Named(ident) => {
+                            let rust_name = ident.to_string();
+                            let emitted = self
+                                .lookup_field_cpp_name_for_expr_base(&f.base, &rust_name)
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                            format!("{}.{}", base, emitted)
+                        }
                         syn::Member::Unnamed(idx) => format!("{}._{}", base, idx.index),
                     }
                 }
@@ -7006,10 +8190,13 @@ impl CodeGen {
                 format!("co_await {}", inner)
             }
             syn::Expr::Assign(a) => {
-                let left = self.emit_expr_to_string(&a.left);
+                let mut delayed_init_local: Option<String> = None;
                 let expected_ty = if let syn::Expr::Path(path) = a.left.as_ref() {
                     if path.path.segments.len() == 1 {
                         let name = path.path.segments[0].ident.to_string();
+                        if self.is_delayed_init_local(&name) {
+                            delayed_init_local = Some(name.clone());
+                        }
                         self.lookup_local_binding_type(&name)
                     } else {
                         None
@@ -7018,7 +8205,15 @@ impl CodeGen {
                     None
                 };
                 let right = self.emit_expr_to_string_with_expected(&a.right, expected_ty.as_ref());
-                format!("{} = {}", left, right)
+                if let Some(name) = delayed_init_local {
+                    let left = self
+                        .lookup_local_binding_cpp_name(&name)
+                        .unwrap_or_else(|| escape_cpp_keyword(&name));
+                    format!("{}.emplace({})", left, right)
+                } else {
+                    let left = self.emit_expr_to_string(&a.left);
+                    format!("{} = {}", left, right)
+                }
             }
             syn::Expr::Struct(s) => self.emit_struct_expr_to_string_with_expected(s, None),
             syn::Expr::Paren(p) => {
@@ -7028,7 +8223,16 @@ impl CodeGen {
             syn::Expr::Cast(c) => {
                 let expr = self.emit_expr_to_string(&c.expr);
                 let ty = self.map_type(&c.ty);
-                format!("static_cast<{}>({})", ty, expr)
+                let source_is_explicit_reference =
+                    matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
+                if ty.ends_with('*')
+                    && self.is_expr_reference_like(&c.expr)
+                    && !source_is_explicit_reference
+                {
+                    format!("static_cast<{}>(&{})", ty, expr)
+                } else {
+                    format!("static_cast<{}>({})", ty, expr)
+                }
             }
             syn::Expr::Index(idx) => {
                 if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
@@ -7043,7 +8247,12 @@ impl CodeGen {
                 let elems: Vec<String> = tup
                     .elems
                     .iter()
-                    .map(|e| self.emit_expr_to_string_with_expected(e, tuple_expected_ty.as_ref()))
+                    .map(|e| {
+                        self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            e,
+                            tuple_expected_ty.as_ref(),
+                        )
+                    })
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
@@ -7371,6 +8580,24 @@ impl CodeGen {
             return Some(format!("{}({})", method, arg_expr));
         }
         Some(format!("{}.{}({})", receiver, method, arg_expr))
+    }
+
+    fn try_emit_iter_filter_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "filter_map" || mc.args.len() != 1 {
+            return None;
+        }
+
+        let iter_call = match self.peel_paren_group_expr(&mc.receiver) {
+            syn::Expr::MethodCall(inner) => inner,
+            _ => return None,
+        };
+        if iter_call.method != "iter" || !iter_call.args.is_empty() {
+            return None;
+        }
+
+        let receiver = self.emit_expr_to_string(&iter_call.receiver);
+        let mapper = self.emit_expr_maybe_move(mc.args.first()?);
+        Some(format!("rusty::filter_map({}, {})", receiver, mapper))
     }
 
     fn try_emit_error_description_dispatch_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -7744,8 +8971,8 @@ impl CodeGen {
             if let Some(struct_name) = &self.current_struct {
                 let mut resolved = segments.clone();
                 resolved[0] = struct_name.clone();
-                if let Some(last) = resolved.last_mut() {
-                    *last = escape_cpp_keyword(last);
+                for seg in &mut resolved {
+                    *seg = escape_cpp_keyword(seg);
                 }
                 return resolved.join("::");
             }
@@ -7774,8 +9001,8 @@ impl CodeGen {
             match first.as_str() {
                 "crate" if segments.len() > 1 => {
                     let mut resolved = segments[1..].to_vec();
-                    if let Some(last) = resolved.last_mut() {
-                        *last = escape_cpp_keyword(last);
+                    for seg in &mut resolved {
+                        *seg = escape_cpp_keyword(seg);
                     }
                     return resolved.join("::");
                 }
@@ -7786,8 +9013,8 @@ impl CodeGen {
                         self.module_stack.clone()
                     };
                     resolved.extend(segments[1..].iter().cloned());
-                    if let Some(last) = resolved.last_mut() {
-                        *last = escape_cpp_keyword(last);
+                    for seg in &mut resolved {
+                        *seg = escape_cpp_keyword(seg);
                     }
                     return resolved.join("::");
                 }
@@ -7798,8 +9025,8 @@ impl CodeGen {
                         Vec::new()
                     };
                     resolved.extend(segments[1..].iter().cloned());
-                    if let Some(last) = resolved.last_mut() {
-                        *last = escape_cpp_keyword(last);
+                    for seg in &mut resolved {
+                        *seg = escape_cpp_keyword(seg);
                     }
                     return resolved.join("::");
                 }
@@ -7831,17 +9058,18 @@ impl CodeGen {
                 .get(&scoped_base)
                 .or_else(|| self.declared_type_params.get(base));
             if let Some(type_params) = maybe_params {
-                if !type_params.is_empty() && type_params.iter().all(|p| self.is_type_param_in_scope(p))
+                if !type_params.is_empty()
+                    && type_params.iter().all(|p| self.is_type_param_in_scope(p))
                 {
                     let mut qualified = segments.clone();
                     let mapped_base = if base == "IterEither" {
                         "iterator::IterEither".to_string()
                     } else {
-                        base.to_string()
+                        escape_cpp_keyword(base)
                     };
                     qualified[0] = format!("{}<{}>", mapped_base, type_params.join(", "));
-                    if let Some(last) = qualified.last_mut() {
-                        *last = escape_cpp_keyword(last);
+                    for seg in qualified.iter_mut().skip(1) {
+                        *seg = escape_cpp_keyword(seg);
                     }
                     return qualified.join("::");
                 }
@@ -7866,8 +9094,8 @@ impl CodeGen {
                 return "iterator::IterEither".to_string();
             }
             let mut escaped = segments.clone();
-            if let Some(last) = escaped.last_mut() {
-                *last = escape_cpp_keyword(last);
+            for seg in &mut escaped {
+                *seg = escape_cpp_keyword(seg);
             }
             return format!("iterator::{}", escaped.join("::"));
         }
@@ -7915,11 +9143,11 @@ impl CodeGen {
             }
         }
 
-        // Escape C++ keywords in the last segment (e.g., Point::new → Point::new_)
+        // Escape C++ keywords across all path segments.
         if segments.len() > 1 {
             let mut escaped = segments.clone();
-            if let Some(last) = escaped.last_mut() {
-                *last = escape_cpp_keyword(last);
+            for seg in &mut escaped {
+                *seg = escape_cpp_keyword(seg);
             }
             return escaped.join("::");
         }
@@ -7932,10 +9160,113 @@ impl CodeGen {
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
+                if self.is_delayed_init_local(&name) {
+                    return format!("{}.value()", mapped);
+                }
                 return mapped;
             }
         }
+        if self.is_unit_struct_path(path) {
+            return format!("{}{{}}", self.emit_path_to_string(path));
+        }
         self.emit_path_to_string(path)
+    }
+
+    fn is_unit_struct_path(&self, path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if self.unit_struct_types.contains(&joined) {
+            return true;
+        }
+        if let Some(last) = path.segments.last() {
+            if self.unit_struct_types.contains(&last.ident.to_string()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn declared_type_params_for_path<'a>(&'a self, path: &syn::Path) -> Option<&'a Vec<String>> {
+        if path.segments.is_empty() {
+            return None;
+        }
+
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let mut candidates: Vec<String> = Vec::new();
+        candidates.push(segments.join("::"));
+        if let Some(last) = segments.last() {
+            candidates.push(last.clone());
+        }
+
+        if segments.len() == 1 {
+            candidates.push(self.scoped_type_key(&segments[0]));
+        } else {
+            match segments[0].as_str() {
+                "crate" if segments.len() > 1 => {
+                    let resolved = segments[1..].join("::");
+                    candidates.push(resolved);
+                }
+                "self" if segments.len() > 1 => {
+                    let mut resolved = self.module_stack.clone();
+                    resolved.extend(segments[1..].iter().cloned());
+                    if !resolved.is_empty() {
+                        candidates.push(resolved.join("::"));
+                    }
+                }
+                "super" if segments.len() > 1 => {
+                    let mut resolved = if self.module_stack.len() > 1 {
+                        self.module_stack[..self.module_stack.len() - 1].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    resolved.extend(segments[1..].iter().cloned());
+                    if !resolved.is_empty() {
+                        candidates.push(resolved.join("::"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for candidate in candidates {
+            if let Some(params) = self.declared_type_params.get(&candidate) {
+                return Some(params);
+            }
+        }
+        None
+    }
+
+    fn recover_omitted_local_generic_type_args(
+        &self,
+        path: &syn::Path,
+        mapped_path: &str,
+    ) -> Option<String> {
+        let last_seg = path.segments.last()?;
+        if !matches!(last_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let params = self.declared_type_params_for_path(path)?;
+        if params.is_empty() {
+            return None;
+        }
+
+        let mut recovered_args: Vec<String> = Vec::new();
+        for param in params {
+            if self.is_type_param_in_scope(param) {
+                recovered_args.push(param.clone());
+            } else {
+                break;
+            }
+        }
+
+        if recovered_args.is_empty() {
+            return Some(format!("{}<>", mapped_path));
+        }
+        Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
 
     fn map_type(&self, ty: &syn::Type) -> String {
@@ -8019,19 +9350,17 @@ impl CodeGen {
                 // Check if the last segment has generic arguments
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
-                        let type_args: Vec<String> = args
+                        let generic_args: Vec<String> = args
                             .args
                             .iter()
-                            .filter_map(|arg| {
-                                if let syn::GenericArgument::Type(t) = arg {
-                                    Some(self.map_type(t))
-                                } else {
-                                    None
-                                }
+                            .filter_map(|arg| match arg {
+                                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                                syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                                _ => None,
                             })
                             .collect();
 
-                        if !type_args.is_empty() {
+                        if !generic_args.is_empty() {
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
                             // iterator::IterEither) are preserved for generic type paths.
                             let mut base = path_str.clone();
@@ -8041,9 +9370,17 @@ impl CodeGen {
                             return self.maybe_prefix_typename_for_dependent_path(format!(
                                 "{}<{}>",
                                 base,
-                                type_args.join(", ")
+                                generic_args.join(", ")
                             ));
                         }
+                    }
+                }
+
+                if !path_str.contains('<') {
+                    if let Some(recovered) =
+                        self.recover_omitted_local_generic_type_args(&tp.path, &path_str)
+                    {
+                        return self.maybe_prefix_typename_for_dependent_path(recovered);
                     }
                 }
 
@@ -8306,11 +9643,7 @@ impl CodeGen {
         match closure.body.as_ref() {
             syn::Expr::Block(block) => {
                 // Multi-statement body
-                let mut inner = CodeGen::new_();
-                inner.current_struct = self.current_struct.clone();
-                inner.type_param_scopes = self.type_param_scopes.clone();
-                inner.module_stack = self.module_stack.clone();
-                inner.indent = 0;
+                let mut inner = self.new_inner_for_block();
                 inner.emit_block(&block.block);
                 let body_str = inner.into_output();
                 format!("[{}]({}) {{\n{}}}", capture, params_str, body_str)
@@ -8327,8 +9660,10 @@ impl CodeGen {
     fn emit_closure_param(&self, pat: &syn::Pat) -> String {
         match pat {
             syn::Pat::Ident(pi) => {
-                // Untyped param: |x| → auto x
-                format!("auto {}", pi.ident)
+                // Untyped param: |x| → forwarding reference.
+                // This preserves Rust call-site ownership/borrow behavior without
+                // forcing eager copies for inferred reference parameters.
+                format!("auto&& {}", pi.ident)
             }
             syn::Pat::Type(pt) => {
                 // Typed param: |x: i32| → int32_t x
@@ -8409,51 +9744,13 @@ impl CodeGen {
         }
     }
 
-    /// Create a new CodeGen for inner use (e.g., closure bodies).
-    fn new_() -> Self {
-        Self {
-            output: String::new(),
-            indent: 0,
-            impl_blocks: HashMap::new(),
-            impl_method_conflict_keys: HashMap::new(),
-            operator_renames: HashMap::new(),
-            current_struct: None,
-            type_param_scopes: Vec::new(),
-            enum_type_params: HashMap::new(),
-            declared_type_params: HashMap::new(),
-            local_declared_types: HashSet::new(),
-            extension_trait_impl_methods: HashMap::new(),
-            extension_method_names: HashSet::new(),
-            external_extension_method_hints: HashSet::new(),
-            data_enum_types: HashSet::new(),
-            struct_field_types: HashMap::new(),
-            reassigned_vars: std::collections::HashSet::new(),
-            consuming_method_receiver_vars: std::collections::HashSet::new(),
-            repeat_elem_type_hints: HashMap::new(),
-            local_bindings: Vec::new(),
-            local_cpp_bindings: Vec::new(),
-            param_bindings: Vec::new(),
-            self_receiver_ref_scopes: Vec::new(),
-            pattern_ref_bindings: Vec::new(),
-            deref_method_scopes: Vec::new(),
-            deref_mut_method_scopes: Vec::new(),
-            self_path_overrides: Vec::new(),
-            module_name: None,
-            module_stack: Vec::new(),
-            skipped_module_traits: HashSet::new(),
-            expanded_test_markers: Vec::new(),
-            expanded_libtest_mode: false,
-            emitted_top_level_functions: HashSet::new(),
-            macro_rules_names: HashSet::new(),
-            option_type_aliases: HashSet::new(),
-            declared_item_names: HashSet::new(),
-            emitted_method_conflict_keys: Vec::new(),
-            return_value_scopes: Vec::new(),
-            return_type_hints: Vec::new(),
-            constructor_template_hints: Vec::new(),
-            in_async: false,
-            user_type_map: types::UserTypeMap::default(),
-        }
+    /// Clone parent context for nested block emission (for example closure bodies).
+    /// Keeps method/path/type-rewrite context consistent inside nested scopes.
+    fn new_inner_for_block(&self) -> Self {
+        let mut inner = self.clone();
+        inner.output.clear();
+        inner.indent = 0;
+        inner
     }
 
     fn emit_expr_maybe_move(&self, expr: &syn::Expr) -> String {
@@ -8462,6 +9759,19 @@ impl CodeGen {
             format!("std::move({})", inner)
         } else {
             self.emit_expr_to_string(expr)
+        }
+    }
+
+    fn emit_expr_to_string_with_expected_and_move_if_needed(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let inner = self.emit_expr_to_string_with_expected(expr, expected_ty);
+        if self.should_insert_move(expr) {
+            format!("std::move({})", inner)
+        } else {
+            inner
         }
     }
 
@@ -8491,6 +9801,14 @@ impl CodeGen {
 
                 // Skip names that start with uppercase (likely type names or enum variants)
                 if name.starts_with(|c: char| c.is_uppercase()) {
+                    return false;
+                }
+
+                // Borrowed bindings (`&T` / `&mut T`) should not be moved.
+                if self
+                    .lookup_local_binding_type(&name)
+                    .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
+                {
                     return false;
                 }
 
@@ -8711,8 +10029,14 @@ impl CodeGen {
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
         let mut scope = HashSet::new();
         for param in &generics.params {
-            if let syn::GenericParam::Type(tp) = param {
-                scope.insert(tp.ident.to_string());
+            match param {
+                syn::GenericParam::Type(tp) => {
+                    scope.insert(tp.ident.to_string());
+                }
+                syn::GenericParam::Const(cp) => {
+                    scope.insert(cp.ident.to_string());
+                }
+                _ => {}
             }
         }
         self.type_param_scopes.push(scope);
@@ -8752,8 +10076,8 @@ impl CodeGen {
         path
     }
 
-    /// Emit a `template<typename T, typename U, ...>` prefix if the generics
-    /// have type parameters. Lifetime parameters are erased (skipped).
+    /// Emit a `template<...>` prefix if generics include type/const params.
+    /// Lifetime parameters are erased (skipped).
     /// Trait bounds are emitted as `requires` clauses.
     fn emit_template_prefix(&mut self, generics: &syn::Generics) {
         let (params, constraints) = self.collect_emitted_template_parts(generics);
@@ -8761,9 +10085,7 @@ impl CodeGen {
             return;
         }
 
-        let params_str: Vec<String> = params.iter().map(|p| format!("typename {}", p)).collect();
-
-        self.writeln(&format!("template<{}>", params_str.join(", ")));
+        self.writeln(&format!("template<{}>", params.join(", ")));
 
         if !constraints.is_empty() {
             self.writeln(&format!("    requires ({})", constraints.join(" && ")));
@@ -8946,6 +10268,80 @@ impl CodeGen {
         }
     }
 
+    fn undeduced_return_type_param_for_function(
+        &self,
+        generics: &syn::Generics,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+        output: &syn::ReturnType,
+    ) -> Option<String> {
+        let syn::ReturnType::Type(_, ret_ty) = output else {
+            return None;
+        };
+        let syn::Type::Path(ret_path) = ret_ty.as_ref() else {
+            return None;
+        };
+        if ret_path.qself.is_some() || ret_path.path.segments.len() != 1 {
+            return None;
+        }
+        let ret_name = ret_path.path.segments[0].ident.to_string();
+        let is_declared_param = generics.params.iter().any(|param| match param {
+            syn::GenericParam::Type(tp) => tp.ident == ret_name.as_str(),
+            _ => false,
+        });
+        if !is_declared_param {
+            return None;
+        }
+        let used_in_inputs = inputs.iter().any(|arg| match arg {
+            syn::FnArg::Typed(pt) => self.type_mentions_named_type_param(&pt.ty, &ret_name),
+            syn::FnArg::Receiver(_) => false,
+        });
+        if used_in_inputs {
+            return None;
+        }
+        Some(ret_name)
+    }
+
+    fn type_mentions_named_type_param(&self, ty: &syn::Type, name: &str) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == name
+                {
+                    return true;
+                }
+                if let Some(qself) = &tp.qself {
+                    if self.type_mentions_named_type_param(&qself.ty, name) {
+                        return true;
+                    }
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner) => {
+                                self.type_mentions_named_type_param(inner, name)
+                            }
+                            _ => false,
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_mentions_named_type_param(&r.elem, name),
+            syn::Type::Ptr(p) => self.type_mentions_named_type_param(&p.elem, name),
+            syn::Type::Slice(s) => self.type_mentions_named_type_param(&s.elem, name),
+            syn::Type::Array(a) => self.type_mentions_named_type_param(&a.elem, name),
+            syn::Type::Tuple(tup) => tup
+                .elems
+                .iter()
+                .any(|elem| self.type_mentions_named_type_param(elem, name)),
+            syn::Type::Paren(p) => self.type_mentions_named_type_param(&p.elem, name),
+            syn::Type::Group(g) => self.type_mentions_named_type_param(&g.elem, name),
+            _ => false,
+        }
+    }
+
     fn is_explicit_unit_type(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Tuple(t) => t.elems.is_empty(),
@@ -8974,6 +10370,19 @@ impl CodeGen {
             })
             .collect();
         params.join(", ")
+    }
+
+    fn map_fn_param_types(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> Vec<String> {
+        inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(pat_type) => Some(self.map_type(&pat_type.ty)),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -9471,6 +10880,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_vec_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_slice_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_option_import(normalized) {
         return action;
     }
@@ -9513,16 +10925,35 @@ fn alias_target_requires_template_alias(target: &str) -> bool {
 /// form (`X = Y`). Rust `use super::{Foo}` can flatten to bare names, so normalize
 /// those to global-qualified form.
 fn make_using_path_cpp_legal(path: &str) -> String {
-    if path.is_empty()
-        || path.starts_with("namespace ")
-        || path.starts_with("::")
-        || path.contains("::")
-        || path.contains(" = ")
-    {
-        path.to_string()
-    } else {
-        format!("::{}", path)
+    if path.is_empty() || path.starts_with("namespace ") {
+        return path.to_string();
     }
+
+    if let Some((alias, target)) = split_use_import_alias(path) {
+        let alias = escape_cpp_keyword(alias);
+        let target = escape_cpp_path_segments(target);
+        return format!("{} = {}", alias, target);
+    }
+
+    if path.starts_with("::") {
+        return format!(
+            "::{}",
+            escape_cpp_path_segments(path.trim_start_matches("::"))
+        );
+    }
+
+    if path.contains("::") {
+        return escape_cpp_path_segments(path);
+    }
+
+    format!("::{}", escape_cpp_keyword(path))
+}
+
+fn escape_cpp_path_segments(path: &str) -> String {
+    path.split("::")
+        .map(escape_cpp_keyword)
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// `pub use ...::Either::{Left, Right};` often appears before the enum declaration in the
@@ -9552,7 +10983,11 @@ fn is_module_linkage_sensitive_reexport(path: &str) -> bool {
 }
 
 fn enum_is_c_like(item: &syn::ItemEnum) -> bool {
-    item.generics.params.is_empty() && item.variants.iter().all(|variant| variant.fields.is_empty())
+    item.generics.params.is_empty()
+        && item
+            .variants
+            .iter()
+            .all(|variant| variant.fields.is_empty())
 }
 
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
@@ -9620,6 +11055,7 @@ fn rewrite_std_mem_import(path: &str) -> Option<UseImportAction> {
 
     let item = path.strip_prefix("std::mem::")?;
     let action = match item {
+        "drop" => UseImportAction::Using("rusty::mem::drop".to_string()),
         "forget" => UseImportAction::Using("rusty::mem::forget".to_string()),
         "MaybeUninit" => UseImportAction::Using("rusty::MaybeUninit".to_string()),
         _ => UseImportAction::RustOnly,
@@ -9661,6 +11097,16 @@ fn rewrite_std_vec_import(path: &str) -> Option<UseImportAction> {
         _ => UseImportAction::RustOnly,
     };
     Some(action)
+}
+
+fn rewrite_std_slice_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::slice" {
+        return Some(UseImportAction::RustOnly);
+    }
+    if path.starts_with("std::slice::") {
+        return Some(UseImportAction::RustOnly);
+    }
+    None
 }
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
@@ -9740,13 +11186,20 @@ fn escape_cpp_string_literal_content(value: &str) -> String {
 
 fn escape_cpp_keyword(name: &str) -> String {
     match name {
-        "new" | "delete" | "class" | "template" | "virtual" | "override" | "final" | "operator"
-        | "friend" | "namespace" | "using" | "throw" | "catch" | "try" | "public" | "private"
-        | "protected" | "mutable" | "volatile" | "register" | "inline" | "explicit" | "export"
-        | "typedef" | "typename" | "decltype" | "constexpr" | "nullptr" | "alignof" | "alignas"
-        | "thread_local" | "static_assert" | "noexcept" | "consteval" | "constinit" | "this"
-        | "co_await" | "co_return" | "co_yield" | "requires" | "concept" | "import" | "module"
-        | "default" => {
+        "alignas" | "alignof" | "and" | "and_eq" | "asm" | "auto" | "bitand" | "bitor" | "bool"
+        | "break" | "case" | "catch" | "char" | "char8_t" | "char16_t" | "char32_t" | "class"
+        | "compl" | "concept" | "const" | "consteval" | "constexpr" | "constinit"
+        | "const_cast" | "continue" | "co_await" | "co_return" | "co_yield" | "decltype"
+        | "default" | "delete" | "do" | "double" | "dynamic_cast" | "else" | "enum"
+        | "explicit" | "export" | "extern" | "false" | "final" | "float" | "for" | "friend"
+        | "goto" | "if" | "import" | "inline" | "int" | "long" | "module" | "mutable"
+        | "namespace" | "new" | "noexcept" | "not" | "not_eq" | "nullptr" | "operator" | "or"
+        | "or_eq" | "override" | "private" | "protected" | "public" | "register"
+        | "reinterpret_cast" | "requires" | "return" | "short" | "signed" | "sizeof" | "static"
+        | "static_assert" | "static_cast" | "struct" | "switch" | "template" | "this"
+        | "thread_local" | "throw" | "true" | "try" | "typedef" | "typename" | "union"
+        | "unsigned" | "using" | "virtual" | "void" | "volatile" | "wchar_t" | "while" | "xor"
+        | "xor_eq" => {
             format!("{}_", name)
         }
         _ => name.to_string(),
@@ -10423,14 +11876,14 @@ mod tests {
     #[test]
     fn test_leaf49_numeric_literal_method_receiver_is_parenthesized() {
         let out = transpile_str("fn f() { 10.tap(|v| v); }");
-        assert!(out.contains("(10).tap([&](auto v) { return v; });"));
+        assert!(out.contains("(10).tap([&](auto&& v) { return v; });"));
         assert!(!out.contains(" 10.tap("));
     }
 
     #[test]
     fn test_leaf49_negative_numeric_literal_method_receiver_is_parenthesized() {
         let out = transpile_str("fn f() { (-10).tap(|v| v); }");
-        assert!(out.contains("((-10)).tap([&](auto v) { return v; });"));
+        assert!(out.contains("((-10)).tap([&](auto&& v) { return v; });"));
         assert!(!out.contains("-10.tap("));
     }
 
@@ -10508,6 +11961,316 @@ mod tests {
         );
         assert!(out.contains("auto& val = *self_.as_mut().unwrap_err();"));
         assert!(!out.contains("auto val = self_.as_mut().unwrap_err();"));
+    }
+
+    #[test]
+    fn test_leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg() {
+        let out = transpile_str(
+            r#"
+            trait TapOps: Sized {
+                fn tap<R, F>(self, f: F) -> Self
+                where
+                    F: FnOnce(&mut Self) -> R;
+            }
+            impl<T> TapOps for T {
+                fn tap<R, F>(mut self, f: F) -> Self
+                where
+                    F: FnOnce(&mut Self) -> R,
+                {
+                    let _ = f(&mut self);
+                    self
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<void>(f(&self_));"));
+        assert!(!out.contains("static_cast<void>(f(self_));"));
+    }
+
+    #[test]
+    fn test_leaf415_block_closure_keeps_extension_method_rewrite_context() {
+        let out = transpile_str(
+            r#"
+            trait TapResultOps<T, E> { fn tap_err<R, F: FnOnce(&mut E) -> R>(self, f: F) -> Self; }
+            impl<T, E> TapResultOps<T, E> for Result<T, E> {
+                fn tap_err<R, F: FnOnce(&mut E) -> R>(self, f: F) -> Self { self }
+            }
+            fn f(values: &[Result<i32, i32>]) {
+                let _ = values.iter().filter_map(|result| {
+                    result.tap_err(|error| {
+                        let _ = error;
+                    }).ok()
+                });
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::filter_map(values,"));
+        assert!(out.contains("rusty::tap_err("));
+        assert!(!out.contains("result.tap_err("));
+    }
+
+    #[test]
+    fn test_leaf4153_unit_struct_path_in_value_position_uses_brace_constructor() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                struct Foo;
+                let x = Foo;
+            }
+            "#,
+        );
+        assert!(out.contains("const auto x = Foo{};"));
+    }
+
+    #[test]
+    fn test_leaf4153_struct_literal_field_path_uses_expected_type_constructor() {
+        let out = transpile_str(
+            r#"
+            use std::marker::PhantomData;
+            struct Holder {
+                marker: PhantomData<i32>,
+            }
+            fn f() {
+                let h = Holder { marker: PhantomData };
+            }
+            "#,
+        );
+        assert!(out.contains(".marker = rusty::PhantomData<int32_t>{}"));
+    }
+
+    #[test]
+    fn test_leaf4153_nested_impl_block_in_function_scope_is_skipped() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                struct Foo;
+                impl Foo {
+                    fn bar(&self) {}
+                }
+                let _x = Foo;
+            }
+            "#,
+        );
+        assert!(out.contains("// Rust-only nested impl block skipped in local scope"));
+        assert!(out.contains("const auto _x = Foo{};"));
+        assert!(!out.contains("bar() const"));
+    }
+
+    #[test]
+    fn test_leaf4153_undeduced_return_generic_uses_auto_return_template() {
+        let out = transpile_str(
+            r#"
+            fn scope<F, R>(f: F) -> R
+            where
+                F: FnOnce(&i32) -> R,
+            {
+                let x = 1;
+                f(&x)
+            }
+            "#,
+        );
+        assert!(out.contains("auto scope(F f) {"));
+        assert!(out.contains("return f(x);"));
+        assert!(!out.contains("template<typename F, typename R>\nauto scope(F f) {"));
+    }
+
+    #[test]
+    fn test_leaf4153_free_function_ref_arg_call_drops_address_of() {
+        let out = transpile_str(
+            r#"
+            fn take<T>(mut_ref: &mut T) {}
+            fn f() {
+                let mut v = 1;
+                take(&mut v);
+            }
+            "#,
+        );
+        assert!(out.contains("take(v);"));
+        assert!(!out.contains("take(&v);"));
+    }
+
+    #[test]
+    fn test_leaf4153_method_ref_arg_call_drops_address_of() {
+        let out = transpile_str(
+            r#"
+            struct Scope;
+            impl Scope {
+                fn take<T>(&self, mut_ref: &mut T) {}
+            }
+            fn f(scope: &Scope) {
+                let mut v = 1;
+                scope.take(&mut v);
+            }
+            "#,
+        );
+        assert!(out.contains("scope.take(v);"));
+        assert!(!out.contains("scope.take(&v);"));
+    }
+
+    #[test]
+    fn test_leaf4153_reference_arguments_are_not_std_moved_at_call_sites() {
+        let out = transpile_str(
+            r#"
+            fn g(v: &mut i32) {}
+            fn f(v: &mut i32) {
+                g(v);
+            }
+            "#,
+        );
+        assert!(out.contains("g(v);"));
+        assert!(!out.contains("g(std::move(v));"));
+    }
+
+    #[test]
+    fn test_leaf4153_uninitialized_typed_local_is_not_const() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x: i32;
+            }
+            "#,
+        );
+        assert!(out.contains("std::optional<int32_t> x;"));
+        assert!(!out.contains("const int32_t x;"));
+    }
+
+    #[test]
+    fn test_leaf4153_uninitialized_typed_local_assignment_uses_emplace_and_value() {
+        let out = transpile_str(
+            r#"
+            fn f(flag: bool) -> i32 {
+                let x: i32;
+                if flag {
+                    x = 1;
+                } else {
+                    x = 2;
+                }
+                x
+            }
+            "#,
+        );
+        assert!(out.contains("std::optional<int32_t> x;"));
+        assert!(out.contains("x.emplace(1)"));
+        assert!(out.contains("x.emplace(2)"));
+        assert!(out.contains("return x.value();"));
+    }
+
+    #[test]
+    fn test_leaf4153_uninitialized_tuple_return_moves_optional_values() {
+        let out = transpile_str(
+            r#"
+            struct Hole { n: i32 }
+            fn f() -> (i32, Hole) {
+                let x: i32;
+                let hole: Hole;
+                x = 1;
+                hole = Hole { n: 2 };
+                (x, hole)
+            }
+            "#,
+        );
+        assert!(out.contains("std::optional<int32_t> x;"));
+        assert!(out.contains("std::optional<Hole> hole;"));
+        assert!(out.contains("std::make_tuple(std::move(x.value()), std::move(hole.value()))"));
+    }
+
+    #[test]
+    fn test_leaf4153_drop_function_path_maps_to_rusty_mem_drop() {
+        let out = transpile_str(
+            r#"
+            fn f(v: i32) {
+                drop(v);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::mem::drop("));
+        assert!(!out.contains("\ndrop("));
+    }
+
+    #[test]
+    fn test_leaf4154_drop_trait_impl_emits_destructor() {
+        let out = transpile_str(
+            r#"
+            struct Foo;
+            impl Drop for Foo {
+                fn drop(&mut self) {}
+            }
+            "#,
+        );
+        assert!(out.contains("~Foo() {"));
+        assert!(out.contains("Foo(Foo&&) = default;"));
+        assert!(!out.contains("void drop("));
+    }
+
+    #[test]
+    fn test_leaf4154_drop_struct_literal_uses_constructor_call() {
+        let out = transpile_str(
+            r#"
+            struct Foo { value: i32 }
+            impl Drop for Foo {
+                fn drop(&mut self) {}
+            }
+            fn f() {
+                let x = Foo { value: 1 };
+            }
+            "#,
+        );
+        assert!(out.contains("Foo(int32_t value_init) : value(std::move(value_init)) {}"));
+        assert!(out.contains("const auto x = Foo(1);"));
+        assert!(!out.contains("Foo{.value = 1}"));
+    }
+
+    #[test]
+    fn test_leaf4153_result_match_statement_uses_runtime_conditionals() {
+        let out = transpile_str(
+            r#"
+            fn f(x: Result<i32, i32>) {
+                match x {
+                    Ok(v) => { let _ = v; }
+                    Err(e) => { let _ = e; }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto&& _m = x;"));
+        assert!(out.contains("if (_m.is_ok()) {"));
+        assert!(out.contains("if (_m.is_err()) {"));
+        assert!(!out.contains("std::visit(overloaded {"));
+        assert!(!out.contains("const Ok&"));
+        assert!(!out.contains("const Err&"));
+    }
+
+    #[test]
+    fn test_leaf4153_runtime_result_match_direct_binding_passthrough_uses_unwrap_calls() {
+        let out = transpile_str(
+            r#"
+            fn f(x: Result<i32, i32>) -> i32 {
+                match x {
+                    Ok(v) => v,
+                    Err(e) => e,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("if (_m.is_ok()) { return _m.unwrap(); }"));
+        assert!(out.contains("if (_m.is_err()) { return _m.unwrap_err(); }"));
+    }
+
+    #[test]
+    fn test_leaf4153_expected_type_specializes_associated_constructor_call() {
+        let out = transpile_str(
+            r#"
+            use std::cell::Cell;
+            struct Scope {
+                active_holes: Cell<usize>,
+            }
+            fn f() -> Scope {
+                Scope { active_holes: Cell::new(0) }
+            }
+            "#,
+        );
+        assert!(out.contains(".active_holes = rusty::Cell<size_t>::new_(0)"));
+        assert!(!out.contains(".active_holes = Cell::new_(0)"));
     }
 
     #[test]
@@ -11802,7 +13565,7 @@ mod tests {
     #[test]
     fn test_closure_untyped_params() {
         let out = transpile_str("fn f() { let add = |a, b| a + b; }");
-        assert!(out.contains("[&](auto a, auto b)"));
+        assert!(out.contains("[&](auto&& a, auto&& b)"));
         assert!(out.contains("return a + b;"));
     }
 
@@ -11968,6 +13731,7 @@ mod tests {
                 Pin::new_unchecked(x);
                 Pin::get_ref(x);
                 Pin::get_unchecked_mut(y);
+                std::io::_print();
                 let _ = core::cmp::Ordering::Equal;
             }
         "#,
@@ -11982,12 +13746,14 @@ mod tests {
         assert!(out.contains("rusty::pin::new_unchecked"));
         assert!(out.contains("rusty::pin::get_ref"));
         assert!(out.contains("rusty::pin::get_unchecked_mut"));
+        assert!(out.contains("rusty::io::_print"));
         assert!(out.contains("rusty::cmp::Ordering::Equal"));
         assert!(out.contains("std::nullopt"));
         assert!(!out.contains("core::intrinsics::"));
         assert!(!out.contains("core::panicking::"));
         assert!(!out.contains("core::option::Option::None"));
         assert!(!out.contains("core::hash::Hash::hash"));
+        assert!(!out.contains("std::io::_print"));
     }
 
     #[test]
@@ -12699,8 +14465,8 @@ mod tests {
         "#,
         );
         assert!(!out.contains("/* for_both!("));
-        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
-        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
+        assert!(out.contains("return rusty::io::read(inner, buf);"));
+        assert!(out.contains("return rusty::io::write(inner, buf);"));
         assert!(out.contains("return inner.seek(std::move(pos));"));
         assert!(out.contains("const auto& inner = _v._0; return inner;"));
         assert!(out.contains("return inner.fmt(std::move(f));"));
@@ -12720,8 +14486,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
-        assert!(!out.contains("return inner.read(std::move(buf));"));
+        assert!(out.contains("return rusty::io::read(inner, buf);"));
+        assert!(!out.contains("return inner.read(buf);"));
     }
 
     #[test]
@@ -12738,8 +14504,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
-        assert!(!out.contains("return inner.write(std::move(buf));"));
+        assert!(out.contains("return rusty::io::write(inner, buf);"));
+        assert!(!out.contains("return inner.write(buf);"));
     }
 
     #[test]
@@ -12766,10 +14532,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return rusty::io::read(inner, std::move(buf));"));
-        assert!(out.contains("return rusty::io::write(inner, std::move(buf));"));
-        assert!(!out.contains("return inner.read(std::move(buf));"));
-        assert!(!out.contains("return inner.write(std::move(buf));"));
+        assert!(out.contains("return rusty::io::read(inner, buf);"));
+        assert!(out.contains("return rusty::io::write(inner, buf);"));
+        assert!(!out.contains("return inner.read(buf);"));
+        assert!(!out.contains("return inner.write(buf);"));
     }
 
     #[test]
@@ -13390,7 +15156,7 @@ mod tests {
         );
         assert!(!out.contains("// TODO: external crate 'traits'"));
         assert!(out.contains("using traits::Flag;"));
-        assert!(out.contains("using ::Flag;"));
+        assert!(!out.contains("using ::Flag;"));
 
         let using_pos = out
             .find("using traits::Flag;")
@@ -13513,6 +15279,132 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154_use_std_slice_is_rust_only() {
+        let out = transpile_str("use std::slice;");
+        assert!(out.contains("// Rust-only: using std::slice;"));
+        assert!(!out.contains("\nusing std::slice;"));
+    }
+
+    #[test]
+    fn test_leaf4154_super_bare_import_resolves_to_unique_local_type() {
+        let out = transpile_str(
+            r#"
+            use errors::CapacityError;
+            mod errors {
+                pub struct CapacityError {}
+            }
+            mod inner {
+                use super::CapacityError;
+                fn f(_e: CapacityError) {}
+            }
+        "#,
+        );
+        assert!(out.contains("using errors::CapacityError;"));
+        assert!(!out.contains("using ::CapacityError;"));
+    }
+
+    #[test]
+    fn test_leaf4154_keyword_module_name_escaped_in_namespace_and_using() {
+        let out = transpile_str(
+            r#"
+            mod char {
+                pub fn encode_utf8() {}
+            }
+            mod inner {
+                use super::char::encode_utf8;
+            }
+        "#,
+        );
+        assert!(out.contains("namespace char_ {"));
+        assert!(out.contains("using char_::encode_utf8;"));
+        assert!(!out.contains("namespace char {"));
+    }
+
+    #[test]
+    fn test_leaf4154_const_generic_template_preserved_in_struct_and_type_use() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize> {
+                xs: [T; CAP],
+            }
+            fn f(v: ArrayVec<i32, 8>) {}
+        "#,
+        );
+        assert!(out.contains("template<typename T, size_t CAP>"));
+        assert!(out.contains("std::array<T, CAP> xs;"));
+        assert!(out.contains("ArrayVec<int32_t, 8> v"));
+    }
+
+    #[test]
+    fn test_leaf41542_field_name_collision_with_method_is_renamed() {
+        let out = transpile_str(
+            r#"
+            struct S {
+                len: usize,
+            }
+            impl S {
+                fn len(&self) -> usize { self.len }
+            }
+        "#,
+        );
+        assert!(out.contains("size_t len_field;"));
+        assert!(out.contains("size_t len() const"));
+        assert!(out.contains("return len_field;"));
+        assert!(!out.contains("size_t len;"));
+    }
+
+    #[test]
+    fn test_leaf41542_merged_impl_assoc_items_are_deduplicated() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                const CAPACITY: usize = 1;
+                type Item = i32;
+            }
+            impl S {
+                const CAPACITY: usize = 1;
+                type Item = i32;
+            }
+        "#,
+        );
+        assert_eq!(
+            out.matches("static constexpr size_t CAPACITY = 1;").count(),
+            1
+        );
+        assert_eq!(out.matches("using Item = int32_t;").count(), 1);
+    }
+
+    #[test]
+    fn test_leaf41542_local_generic_type_position_recovers_template_args() {
+        let out = transpile_str(
+            r#"
+            mod errors {
+                pub struct CapacityError<T> {
+                    value: T,
+                }
+            }
+            struct Wrap<T> {
+                value: T,
+            }
+            trait Tryish {
+                type Error;
+            }
+            impl<T> Tryish for Wrap<T> {
+                type Error = errors::CapacityError;
+            }
+            impl<T> Wrap<T> {
+                fn f(&self) -> Result<(), errors::CapacityError> {
+                    Ok(())
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("using Error = errors::CapacityError<T>;"));
+        assert!(out.contains("rusty::Result<std::tuple<>, errors::CapacityError<T>> f() const"));
+    }
+
+    #[test]
     fn test_use_core_no_external_crate_comment() {
         let out = transpile_str("use core::fmt::Display;");
         assert!(!out.contains("// TODO: external crate"));
@@ -13593,7 +15485,11 @@ mod tests {
     #[test]
     fn test_nested_fn_to_lambda() {
         let out = transpile_str("fn outer() { fn inner(x: i32) -> i32 { x + 1 } inner(1); }");
-        assert!(out.contains("const auto inner = [&](int32_t x) -> int32_t {"));
+        assert!(
+            out.contains(
+                "const rusty::SafeFn<int32_t(int32_t)> inner = +[](int32_t x) -> int32_t {"
+            )
+        );
         assert!(out.contains("return x + 1;"));
         assert!(out.contains("inner(1);"));
     }
@@ -13601,15 +15497,26 @@ mod tests {
     #[test]
     fn test_nested_fn_void() {
         let out = transpile_str("fn outer() { fn helper() { do_it(); } helper(); }");
-        assert!(out.contains("const auto helper = [&]() {"));
+        assert!(out.contains("const rusty::SafeFn<void()> helper = +[]() {"));
         assert!(!out.contains("-> void"));
     }
 
     #[test]
     fn test_nested_fn_multiple() {
         let out = transpile_str("fn outer() { fn a() {} fn b() {} a(); b(); }");
-        assert!(out.contains("const auto a = [&]()"));
-        assert!(out.contains("const auto b = [&]()"));
+        assert!(out.contains("const rusty::SafeFn<void()> a = +[]()"));
+        assert!(out.contains("const rusty::SafeFn<void()> b = +[]()"));
+    }
+
+    #[test]
+    fn test_nested_fn_sibling_call_uses_capture_lambda() {
+        let out = transpile_str(
+            "fn outer() { fn check_ref() {} fn propagate_ref() { check_ref() } propagate_ref(); }",
+        );
+        assert!(out.contains("const rusty::SafeFn<void()> check_ref = +[]() {"));
+        assert!(out.contains("const auto propagate_ref = [&]() {"));
+        assert!(out.contains("return check_ref();"));
+        assert!(!out.contains("const rusty::SafeFn<void()> propagate_ref = +[]() {"));
     }
 
     #[test]
@@ -13716,6 +15623,19 @@ mod tests {
         let out = transpile_str("fn f() { let buf = [0u8; 16]; let n = buf.len(); }");
         assert!(out.contains("const auto n = rusty::len(buf);"));
         assert!(!out.contains("buf.len()"));
+    }
+
+    #[test]
+    fn test_leaf415_iter_filter_map_chain_lowers_to_rusty_filter_map_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(values: &[i32]) {
+                let _ = values.iter().filter_map(|v| Some(v));
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::filter_map(values,"));
+        assert!(!out.contains("values.iter().filter_map("));
     }
 
     #[test]
@@ -13885,6 +15805,13 @@ mod tests {
         let out = transpile_str("use std::mem::forget;");
         assert!(out.contains("using rusty::mem::forget;"));
         assert!(!out.contains("using std::mem::forget;"));
+    }
+
+    #[test]
+    fn test_leaf4153_std_mem_drop_import_remapped() {
+        let out = transpile_str("use std::mem::drop;");
+        assert!(out.contains("using rusty::mem::drop;"));
+        assert!(!out.contains("using std::mem::drop;"));
     }
 
     #[test]
