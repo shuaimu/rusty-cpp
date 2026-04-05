@@ -64,6 +64,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Runtime compatibility fallbacks for expanded Rust paths.
         "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
+        "std::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
@@ -111,6 +112,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "io::stdin" | "std::io::stdin" => Some("rusty::io::stdin_"),
         "io::stdout" | "std::io::stdout" => Some("rusty::io::stdout_"),
         "io::stderr" | "std::io::stderr" => Some("rusty::io::stderr_"),
+        "io::_print" | "std::io::_print" => Some("rusty::io::_print"),
         "io::Cursor::new" | "std::io::Cursor::new" => Some("rusty::io::Cursor::new_"),
 
         // Expanded-Rust runtime compatibility shims.
@@ -120,6 +122,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
+        "drop" | "std::mem::drop" | "mem::drop" => Some("rusty::mem::drop"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
         "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
         "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
@@ -129,6 +132,8 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
         "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
+        "core::cmp::min" | "std::cmp::min" => Some("core::cmp::min"),
+        "core::cmp::max" | "std::cmp::max" => Some("core::cmp::max"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
             Some("rusty::str_runtime::from_utf8")
         }
@@ -256,6 +261,10 @@ mod tests {
             Some(("rusty::Option", true))
         );
         assert_eq!(
+            map_std_type("std::cmp::Ordering"),
+            Some(("rusty::cmp::Ordering", false))
+        );
+        assert_eq!(
             map_std_type("core::task::Poll"),
             Some(("rusty::Poll", true))
         );
@@ -367,6 +376,8 @@ mod tests {
             map_function_path("core::hash::Hash::hash"),
             Some("rusty::hash::hash")
         );
+        assert_eq!(map_function_path("std::cmp::min"), Some("core::cmp::min"));
+        assert_eq!(map_function_path("core::cmp::max"), Some("core::cmp::max"));
         assert_eq!(
             map_function_path("std::str::from_utf8"),
             Some("rusty::str_runtime::from_utf8")
@@ -396,6 +407,7 @@ mod tests {
             map_function_path("std::mem::forget"),
             Some("rusty::mem::forget")
         );
+        assert_eq!(map_function_path("drop"), Some("rusty::mem::drop"));
         assert_eq!(
             map_function_path("panic::resume_unwind"),
             Some("rusty::panic::resume_unwind")
@@ -405,6 +417,10 @@ mod tests {
             Some("rusty::panic::begin_panic")
         );
         assert_eq!(map_function_path("std::process::abort"), Some("std::abort"));
+        assert_eq!(
+            map_function_path("std::io::_print"),
+            Some("rusty::io::_print")
+        );
     }
 
     #[test]

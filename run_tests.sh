@@ -1,11 +1,26 @@
 #!/bin/bash
-# Script to run tests with required environment variables
+# Script to run tests with environment defaults that work on both macOS and Linux.
+set -euo pipefail
 
-# Set Z3 header path for macOS (Homebrew installation)
-export Z3_SYS_Z3_HEADER=/opt/homebrew/include/z3.h
+# Keep user-provided overrides if valid; otherwise avoid forcing missing paths.
+if [[ -n "${Z3_SYS_Z3_HEADER:-}" && ! -f "${Z3_SYS_Z3_HEADER}" ]]; then
+  unset Z3_SYS_Z3_HEADER
+fi
 
-# Set LLVM/Clang library path for macOS
-export DYLD_LIBRARY_PATH=/opt/homebrew/Cellar/llvm/19.1.7/lib:$DYLD_LIBRARY_PATH
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ -z "${Z3_SYS_Z3_HEADER:-}" ]]; then
+    for candidate in /opt/homebrew/include/z3.h /usr/local/include/z3.h; do
+      if [[ -f "${candidate}" ]]; then
+        export Z3_SYS_Z3_HEADER="${candidate}"
+        break
+      fi
+    done
+  fi
 
-# Run cargo test with all required environment variables
+  llvm_lib_dir="/opt/homebrew/Cellar/llvm/19.1.7/lib"
+  if [[ -d "${llvm_lib_dir}" ]]; then
+    export DYLD_LIBRARY_PATH="${llvm_lib_dir}:${DYLD_LIBRARY_PATH:-}"
+  fi
+fi
+
 cargo test "$@"

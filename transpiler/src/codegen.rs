@@ -9118,6 +9118,9 @@ impl CodeGen {
             "core::cmp::Ordering::Less" => return "rusty::cmp::Ordering::Less".to_string(),
             "core::cmp::Ordering::Equal" => return "rusty::cmp::Ordering::Equal".to_string(),
             "core::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
+            "std::cmp::Ordering::Less" => return "rusty::cmp::Ordering::Less".to_string(),
+            "std::cmp::Ordering::Equal" => return "rusty::cmp::Ordering::Equal".to_string(),
+            "std::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
             _ => {}
         }
 
@@ -10558,6 +10561,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::parse<",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
+        "namespace cmp = core::cmp;",
         "core::cmp::",
     ];
     markers.iter().any(|m| output.contains(m))
@@ -10740,6 +10744,14 @@ Discriminant discriminant_value(const V& value) {\n\
 namespace core {\n\
 namespace cmp {\n\
 using Ordering = ::rusty::cmp::Ordering;\n\
+template<typename A, typename B>\n\
+constexpr auto min(A&& a, B&& b) {\n\
+    return (std::forward<B>(b) < std::forward<A>(a)) ? std::forward<B>(b) : std::forward<A>(a);\n\
+}\n\
+template<typename A, typename B>\n\
+constexpr auto max(A&& a, B&& b) {\n\
+    return (std::forward<A>(a) < std::forward<B>(b)) ? std::forward<B>(b) : std::forward<A>(a);\n\
+}\n\
 struct PartialOrd {\n\
     template<typename A, typename B>\n\
     static auto partial_cmp(A&& a, B&& b) {\n\
@@ -10884,6 +10896,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
         return action;
     }
     if let Some(action) = rewrite_std_option_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_cmp_import(normalized) {
         return action;
     }
     if is_rust_only_import(normalized) {
@@ -11114,6 +11129,21 @@ fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
         return Some(UseImportAction::Using("rusty::Option".to_string()));
     }
     None
+}
+
+fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::cmp" {
+        return Some(UseImportAction::Raw("namespace cmp = core::cmp;".to_string()));
+    }
+
+    let item = path.strip_prefix("std::cmp::")?;
+    let action = match item {
+        "Ordering" => UseImportAction::Using("rusty::cmp::Ordering".to_string()),
+        "min" => UseImportAction::Using("core::cmp::min".to_string()),
+        "max" => UseImportAction::Using("core::cmp::max".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 /// Check if a using path refers to a Rust-only trait/module with no C++ equivalent.
@@ -13731,6 +13761,8 @@ mod tests {
                 Pin::new_unchecked(x);
                 Pin::get_ref(x);
                 Pin::get_unchecked_mut(y);
+                std::cmp::min(x, y);
+                core::cmp::max(x, y);
                 std::io::_print();
                 let _ = core::cmp::Ordering::Equal;
             }
@@ -13746,6 +13778,8 @@ mod tests {
         assert!(out.contains("rusty::pin::new_unchecked"));
         assert!(out.contains("rusty::pin::get_ref"));
         assert!(out.contains("rusty::pin::get_unchecked_mut"));
+        assert!(out.contains("core::cmp::min"));
+        assert!(out.contains("core::cmp::max"));
         assert!(out.contains("rusty::io::_print"));
         assert!(out.contains("rusty::cmp::Ordering::Equal"));
         assert!(out.contains("std::nullopt"));
@@ -13753,6 +13787,7 @@ mod tests {
         assert!(!out.contains("core::panicking::"));
         assert!(!out.contains("core::option::Option::None"));
         assert!(!out.contains("core::hash::Hash::hash"));
+        assert!(!out.contains("std::cmp::min"));
         assert!(!out.contains("std::io::_print"));
     }
 
@@ -13786,10 +13821,43 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415431_std_cmp_alias_enables_core_cmp_runtime_min_max_helpers() {
+        let out = transpile_str(
+            r#"
+            use std::cmp;
+            fn f(a: i32, b: i32) -> i32 { cmp::min(a, b) }
+        "#,
+        );
+        assert!(out.contains("namespace cmp = core::cmp;"));
+        assert!(out.contains("namespace core {"));
+        assert!(out.contains("constexpr auto min(A&& a, B&& b)"));
+        assert!(out.contains("constexpr auto max(A&& a, B&& b)"));
+    }
+
+    #[test]
     fn test_leaf422_core_option_none_path_lowered() {
         let out = transpile_str("fn f() { let x = core::option::Option::None; }");
         assert!(out.contains("std::nullopt"));
         assert!(!out.contains("core::option::Option::None"));
+    }
+
+    #[test]
+    fn test_leaf415431_std_cmp_ordering_variant_paths_lowered() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let _ = std::cmp::Ordering::Equal;
+                let _ = std::cmp::Ordering::Less;
+                let _ = std::cmp::Ordering::Greater;
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::cmp::Ordering::Equal"));
+        assert!(out.contains("rusty::cmp::Ordering::Less"));
+        assert!(out.contains("rusty::cmp::Ordering::Greater"));
+        assert!(!out.contains("std::cmp::Ordering::Equal"));
+        assert!(!out.contains("std::cmp::Ordering::Less"));
+        assert!(!out.contains("std::cmp::Ordering::Greater"));
     }
 
     #[test]
@@ -15812,6 +15880,36 @@ mod tests {
         let out = transpile_str("use std::mem::drop;");
         assert!(out.contains("using rusty::mem::drop;"));
         assert!(!out.contains("using std::mem::drop;"));
+    }
+
+    #[test]
+    fn test_leaf415431_std_cmp_module_import_emits_core_cmp_alias() {
+        let out = transpile_str("use std::cmp;");
+        assert!(out.contains("namespace cmp = core::cmp;"));
+        assert!(!out.contains("using std::cmp;"));
+    }
+
+    #[test]
+    fn test_leaf415431_std_cmp_alias_import_emits_custom_core_cmp_alias() {
+        let out = transpile_str("use std::cmp as cmp2;");
+        assert!(out.contains("namespace cmp2 = core::cmp;"));
+        assert!(!out.contains("namespace cmp = core::cmp;"));
+    }
+
+    #[test]
+    fn test_leaf415431_std_cmp_ordering_import_remapped() {
+        let out = transpile_str("use std::cmp::Ordering;");
+        assert!(out.contains("using rusty::cmp::Ordering;"));
+        assert!(!out.contains("using std::cmp::Ordering;"));
+    }
+
+    #[test]
+    fn test_leaf415431_std_cmp_min_max_imports_remapped() {
+        let out = transpile_str("use std::cmp::{min, max};");
+        assert!(out.contains("using core::cmp::min;"));
+        assert!(out.contains("using core::cmp::max;"));
+        assert!(!out.contains("using std::cmp::min;"));
+        assert!(!out.contains("using std::cmp::max;"));
     }
 
     #[test]

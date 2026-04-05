@@ -6964,6 +6964,81 @@ Design rationale:
   - no blanket drop of all trait-associated items to avoid collisions,
   - no unconditional renaming of all fields/methods regardless of conflict.
 
+### 10.11.83 Phase 20 Leaf 4.15.4.3.1 (`arrayvec` Stage D): `std::cmp` import/path/runtime lowering family
+
+Problem:
+
+- After 10.11.82, the first deterministic full-matrix blocker was `arrayvec` Stage D unresolved
+  `cmp` symbols, led by:
+  - `cmp was not declared in this scope`,
+  - `rusty::Option<cmp::Ordering> ...`,
+  - `cmp::Ordering cmp(...)`,
+  - `cmp::min(...)` calls without a resolved module/runtime target.
+- Root cause: `std::cmp` imports were still treated as Rust-only and skipped, while generated code
+  still referenced `cmp::...` members.
+
+Scope analysis:
+
+- Completed with focused generic lowering/runtime changes and fixture-agnostic tests, well under
+  the 1000-LOC target for a leaf task.
+- No crate-specific generated-file rewrites or special-case parity scripts were introduced.
+
+Implementation:
+
+- Import lowering:
+  - added `rewrite_std_cmp_import` handling in `classify_use_import` before Rust-only filtering,
+  - `use std::cmp;` now emits `namespace cmp = core::cmp;`,
+  - `use std::cmp::Ordering;` maps to `using rusty::cmp::Ordering;`,
+  - `use std::cmp::{min, max};` maps to `using core::cmp::{min,max};`.
+- Runtime fallback support:
+  - extended runtime fallback `core::cmp` shim with generic `min`/`max` helpers,
+  - added fallback trigger marker for emitted `namespace cmp = core::cmp;` aliases.
+- Path/function lowering:
+  - lowered `std::cmp::Ordering::{Less,Equal,Greater}` path variants to
+    `rusty::cmp::Ordering::{...}`,
+  - added function-path mappings for `std::cmp::min/max` and `core::cmp::min/max` to
+    `core::cmp::min/max`,
+  - added `std::cmp::Ordering` type mapping to `rusty::cmp::Ordering`.
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415431_std_cmp_module_import_emits_core_cmp_alias`
+  - `test_leaf415431_std_cmp_alias_import_emits_custom_core_cmp_alias`
+  - `test_leaf415431_std_cmp_ordering_import_remapped`
+  - `test_leaf415431_std_cmp_min_max_imports_remapped`
+  - `test_leaf415431_std_cmp_alias_enables_core_cmp_runtime_min_max_helpers`
+  - `test_leaf415431_std_cmp_ordering_variant_paths_lowered`
+  - updated `test_leaf42_runtime_function_paths_lowered` for `std::cmp::min` and `core::cmp::max`
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_type_fallback_mappings` with `std::cmp::Ordering`
+  - updated `test_leaf42_runtime_function_path_mappings` with `std::cmp::min` and
+    `core::cmp::max`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf415431 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler leaf42_runtime_function -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh`
+
+Re-probe result:
+
+- Full matrix now reaches `arrayvec` with the previous `cmp::Ordering` unresolved-family removed.
+- New first deterministic `arrayvec` Stage D blocker family starts at `std::mem::size_of` and
+  dependent downstream type/runtime lowering issues:
+  - `std::mem has not been declared`,
+  - `LenUint::MAX`/`MaybeUninit` related follow-on failures.
+- This handoff defines Leaf 4.15.4.3.2 scope.
+
+Design rationale:
+
+- Kept the fix generic at import/path/runtime boundaries so it applies to all expanded crates that
+  rely on `std::cmp` module-style imports or fully-qualified ordering paths.
+- Avoided wrong approaches from §11:
+  - no crate-specific `arrayvec` post-processing,
+  - no blanket re-enable/disable of all `std::cmp::*` imports,
+  - no aliasing `std::cmp` to unrelated namespaces that would lose `Ordering` semantics.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -8030,3 +8105,17 @@ const/type items (or all merged non-method items) whenever a duplicate name appe
   template args) instead of fixing emission boundaries.
 - A generic collision-aware strategy (field rename mapping + per-type dedup + alias target
   qualification) keeps emitted API shape stable while preserving deterministic build behavior.
+
+### 11.86 Treating `std::cmp` Module Imports as Rust-Only (or Mapping Them to Unrelated Namespaces)
+
+**Rejected approach:** Keep `use std::cmp;` and related imports Rust-only (skipped), or alias them
+to non-equivalent namespaces that do not provide both `Ordering` and `min/max` surfaces.
+
+**Why it was rejected:**
+
+- Expanded crates frequently use module-style `cmp::Ordering` and `cmp::min/max` paths; skipping
+  the import leaves unresolved symbols and deterministic Stage D compile failures.
+- Mapping to unrelated namespaces (for example only `std` or only `rusty::cmp`) creates partial
+  API coverage and breaks one of the two required surfaces (ordering enum vs comparator helpers).
+- The correct fix is generic import/path/runtime lowering: preserve a coherent `core::cmp` target
+  and provide fallback `min/max` helpers together with `Ordering`.
