@@ -70,6 +70,9 @@ pub struct CodeGen {
     /// Generic type parameters declared by local type name (scoped and unscoped).
     /// Used to recover omitted template arguments in associated-path expressions.
     declared_type_params: HashMap<String, Vec<String>>,
+    /// Local type aliases that resolve to numeric scalar types.
+    /// Used to lower `Alias::MAX` to `std::numeric_limits<Alias>::max()`.
+    numeric_type_aliases: HashMap<String, String>,
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     local_declared_types: HashSet<String>,
@@ -215,6 +218,7 @@ impl CodeGen {
             type_param_scopes: Vec::new(),
             enum_type_params: HashMap::new(),
             declared_type_params: HashMap::new(),
+            numeric_type_aliases: HashMap::new(),
             local_declared_types: HashSet::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
@@ -323,6 +327,7 @@ impl CodeGen {
         self.constructor_template_hints.clear();
         self.enum_type_params.clear();
         self.declared_type_params.clear();
+        self.numeric_type_aliases.clear();
         self.local_declared_types.clear();
         self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
@@ -1444,6 +1449,13 @@ impl CodeGen {
         })
     }
 
+    fn is_local_function_name_in_scope(&self, name: &str) -> bool {
+        self.local_function_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
     /// Emit a nested function definition as a local callable.
     /// Rust nested `fn` items cannot capture non-item locals, so emit
     /// captureless callables by default. If a nested function references a
@@ -2258,6 +2270,13 @@ impl CodeGen {
         let name = &t.ident;
         let target = self.map_type(&t.ty);
         self.writeln(&format!("using {} = {};", name, target));
+        if is_numeric_cpp_scalar_type(&target) {
+            let alias = name.to_string();
+            self.numeric_type_aliases
+                .insert(alias.clone(), target.clone());
+            self.numeric_type_aliases
+                .insert(self.scoped_type_key(&alias), target);
+        }
     }
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
@@ -6826,6 +6845,19 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if mc.method == "assume_init" && mc.args.is_empty() {
+            if let Some(expected) = expected_ty {
+                let maybe_uninit_expected: syn::Type = parse_quote!(MaybeUninit<#expected>);
+                let raw_receiver =
+                    self.emit_expr_to_string_with_expected(&mc.receiver, Some(&maybe_uninit_expected));
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("{}.assume_init()", receiver);
+            }
+        }
         if mc.method == "len" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::len({})", receiver);
@@ -6989,6 +7021,19 @@ impl CodeGen {
             }
             syn::Expr::Struct(struct_expr) => {
                 self.emit_struct_expr_to_string_with_expected(struct_expr, expected_ty)
+            }
+            syn::Expr::Index(idx) => {
+                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
+                    return slice_expr;
+                }
+                if let Some(unreachable_expr) =
+                    self.try_emit_empty_array_index_expr_to_string(idx, expected_ty)
+                {
+                    return unreachable_expr;
+                }
+                let base = self.emit_expr_to_string(&idx.expr);
+                let index = self.emit_expr_to_string(&idx.index);
+                format!("{}[{}]", base, index)
             }
             syn::Expr::Path(path) => {
                 if self.is_option_none_path(&path.path) {
@@ -7493,6 +7538,22 @@ impl CodeGen {
                     if idx == 0 {
                         if let Some(ptr_arg) = self.emit_raw_pointer_call_arg(arg) {
                             return ptr_arg;
+                        }
+                    }
+                    self.emit_expr_maybe_move(arg)
+                })
+                .collect();
+            return format!("{}({})", func, args.join(", "));
+        }
+        if func == "rusty::mem::replace" && !call.args.is_empty() {
+            let args: Vec<String> = call
+                .args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    if idx == 0 {
+                        if let syn::Expr::Reference(r) = self.peel_paren_group_expr(arg) {
+                            return self.emit_expr_to_string(&r.expr);
                         }
                     }
                     self.emit_expr_maybe_move(arg)
@@ -8238,6 +8299,11 @@ impl CodeGen {
                 if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
                     return slice_expr;
                 }
+                if let Some(unreachable_expr) =
+                    self.try_emit_empty_array_index_expr_to_string(idx, None)
+                {
+                    return unreachable_expr;
+                }
                 let base = self.emit_expr_to_string(&idx.expr);
                 let index = self.emit_expr_to_string(&idx.index);
                 format!("{}[{}]", base, index)
@@ -8654,6 +8720,21 @@ impl CodeGen {
         Some(emitted)
     }
 
+    fn try_emit_empty_array_index_expr_to_string(
+        &self,
+        idx: &syn::ExprIndex,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let base = self.peel_paren_group_expr(&idx.expr);
+        let syn::Expr::Array(array) = base else {
+            return None;
+        };
+        if !array.elems.is_empty() {
+            return None;
+        }
+        Some(self.match_expr_unreachable_fallback_with_expected(expected_ty))
+    }
+
     fn is_range_expression(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Range(_) => true,
@@ -9040,8 +9121,10 @@ impl CodeGen {
         if segments.len() > 1
             && segments
                 .get(1)
-                .and_then(|s| s.chars().next())
-                .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                .is_some_and(|s| {
+                    s.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                        || s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                })
             && path
                 .segments
                 .first()
@@ -9053,21 +9136,37 @@ impl CodeGen {
             } else {
                 format!("{}::{}", self.module_stack.join("::"), base)
             };
-            let maybe_params = self
-                .declared_type_params
-                .get(&scoped_base)
-                .or_else(|| self.declared_type_params.get(base));
+            let maybe_params = self.lookup_declared_type_params_for_base(&scoped_base, base);
             if let Some(type_params) = maybe_params {
-                if !type_params.is_empty()
+                let recovered_params = if !type_params.is_empty()
                     && type_params.iter().all(|p| self.is_type_param_in_scope(p))
                 {
+                    Some(type_params.clone())
+                } else if !type_params.is_empty() {
+                    self.current_struct.as_ref().and_then(|struct_name| {
+                        self.declared_type_params
+                            .get(struct_name)
+                            .or_else(|| self.declared_type_params.get(&self.scoped_type_key(struct_name)))
+                            .and_then(|current_params| {
+                                if current_params.len() >= type_params.len() {
+                                    Some(current_params[..type_params.len()].to_vec())
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(recovered_params) = recovered_params {
                     let mut qualified = segments.clone();
                     let mapped_base = if base == "IterEither" {
                         "iterator::IterEither".to_string()
                     } else {
                         escape_cpp_keyword(base)
                     };
-                    qualified[0] = format!("{}<{}>", mapped_base, type_params.join(", "));
+                    qualified[0] = format!("{}<{}>", mapped_base, recovered_params.join(", "));
                     for seg in qualified.iter_mut().skip(1) {
                         *seg = escape_cpp_keyword(seg);
                     }
@@ -9106,11 +9205,8 @@ impl CodeGen {
         if joined == "core::panicking::panic" {
             return "rusty::panicking::panic".to_string();
         }
-        if matches!(
-            joined.as_str(),
-            "std::usize::MAX" | "core::usize::MAX" | "usize::MAX"
-        ) {
-            return "std::numeric_limits<size_t>::max()".to_string();
+        if let Some(max_expr) = self.try_emit_numeric_limits_max_path(path, &segments) {
+            return max_expr;
         }
 
         // Map Rust Ordering enum variants to fallback ordering enum variants.
@@ -9159,6 +9255,79 @@ impl CodeGen {
         escape_cpp_keyword(&joined)
     }
 
+    fn try_emit_numeric_limits_max_path(
+        &self,
+        path: &syn::Path,
+        segments: &[String],
+    ) -> Option<String> {
+        if segments.len() < 2 || segments.last().map_or(true, |s| s != "MAX") {
+            return None;
+        }
+
+        // Primitive paths like `usize::MAX`, `std::u32::MAX`, `core::isize::MAX`.
+        let primitive_candidate = if segments.len() == 2 {
+            Some(segments[0].as_str())
+        } else if segments.len() == 3 && matches!(segments[0].as_str(), "std" | "core") {
+            Some(segments[1].as_str())
+        } else {
+            None
+        };
+        if let Some(candidate) = primitive_candidate {
+            if let Some(cpp_prim) = types::map_primitive_type(candidate) {
+                return Some(format!("std::numeric_limits<{}>::max()", cpp_prim));
+            }
+        }
+
+        // Numeric alias paths like `LenUint::MAX`.
+        let base_segments: Vec<String> = segments[..segments.len() - 1].to_vec();
+        let mut candidates: Vec<String> = Vec::new();
+        candidates.push(base_segments.join("::"));
+        if let Some(last) = base_segments.last() {
+            candidates.push(last.clone());
+        }
+
+        if base_segments.len() == 1 {
+            candidates.push(self.scoped_type_key(&base_segments[0]));
+        } else {
+            match base_segments[0].as_str() {
+                "crate" if base_segments.len() > 1 => {
+                    candidates.push(base_segments[1..].join("::"));
+                }
+                "self" if base_segments.len() > 1 => {
+                    let mut resolved = self.module_stack.clone();
+                    resolved.extend(base_segments[1..].iter().cloned());
+                    if !resolved.is_empty() {
+                        candidates.push(resolved.join("::"));
+                    }
+                }
+                "super" if base_segments.len() > 1 => {
+                    let mut resolved = if self.module_stack.len() > 1 {
+                        self.module_stack[..self.module_stack.len() - 1].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    resolved.extend(base_segments[1..].iter().cloned());
+                    if !resolved.is_empty() {
+                        candidates.push(resolved.join("::"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if candidates
+            .iter()
+            .any(|candidate| self.numeric_type_aliases.contains_key(candidate))
+        {
+            let mut base_path = path.clone();
+            let _ = base_path.segments.pop();
+            let base_cpp = self.emit_path_to_string(&base_path);
+            return Some(format!("std::numeric_limits<{}>::max()", base_cpp));
+        }
+
+        None
+    }
+
     fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
@@ -9172,7 +9341,73 @@ impl CodeGen {
         if self.is_unit_struct_path(path) {
             return format!("{}{{}}", self.emit_path_to_string(path));
         }
-        self.emit_path_to_string(path)
+        let mut emitted = self.emit_path_to_string(path);
+        if let Some(template_args) = self.emit_expr_path_template_args(path) {
+            emitted.push_str(&template_args);
+        }
+        emitted
+    }
+
+    fn emit_expr_path_template_args(&self, path: &syn::Path) -> Option<String> {
+        let last = path.segments.last()?;
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        if path.segments.len() == 1 {
+            let local_name = last.ident.to_string();
+            if self.is_local_function_name_in_scope(&local_name) {
+                return None;
+            }
+        }
+        let mapped_args: Vec<String> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                _ => None,
+            })
+            .collect();
+        if mapped_args.is_empty() {
+            return None;
+        }
+        Some(format!("<{}>", mapped_args.join(", ")))
+    }
+
+    fn lookup_declared_type_params_for_base<'a>(
+        &'a self,
+        scoped_base: &str,
+        base: &str,
+    ) -> Option<&'a Vec<String>> {
+        if let Some(params) = self.declared_type_params.get(scoped_base) {
+            return Some(params);
+        }
+        if let Some(params) = self.declared_type_params.get(base) {
+            return Some(params);
+        }
+
+        let mut tail_matches: Vec<&String> = self
+            .declared_type_params
+            .keys()
+            .filter(|key| key.rsplit("::").next().is_some_and(|tail| tail == base))
+            .collect();
+        tail_matches.sort();
+        tail_matches.dedup();
+        if tail_matches.len() == 1 {
+            return self.declared_type_params.get(tail_matches[0]);
+        }
+
+        let mut scoped_tail_matches: Vec<&String> = tail_matches
+            .into_iter()
+            .filter(|key| key.contains("::"))
+            .collect();
+        scoped_tail_matches.sort();
+        scoped_tail_matches.dedup();
+        if scoped_tail_matches.len() == 1 {
+            return self.declared_type_params.get(scoped_tail_matches[0]);
+        }
+
+        None
     }
 
     fn is_unit_struct_path(&self, path: &syn::Path) -> bool {
@@ -10501,6 +10736,24 @@ fn normalize_token_text(tokens: String) -> String {
     tokens.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn is_numeric_cpp_scalar_type(cpp_type: &str) -> bool {
+    matches!(
+        cpp_type,
+        "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "__int128"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "unsigned __int128"
+            | "size_t"
+            | "ptrdiff_t"
+    )
+}
+
 fn facade_name_for_trait_path(path: &syn::Path) -> Option<String> {
     let first = path.segments.first()?.ident.to_string();
     let last = path.segments.last()?.ident.to_string();
@@ -11072,6 +11325,8 @@ fn rewrite_std_mem_import(path: &str) -> Option<UseImportAction> {
     let action = match item {
         "drop" => UseImportAction::Using("rusty::mem::drop".to_string()),
         "forget" => UseImportAction::Using("rusty::mem::forget".to_string()),
+        "size_of" => UseImportAction::Using("rusty::mem::size_of".to_string()),
+        "replace" => UseImportAction::Using("rusty::mem::replace".to_string()),
         "MaybeUninit" => UseImportAction::Using("rusty::MaybeUninit".to_string()),
         _ => UseImportAction::RustOnly,
     };
@@ -12373,6 +12628,18 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415432_numeric_type_alias_max_lowers_to_numeric_limits() {
+        let out = transpile_str(
+            r#"
+            type LenUint = u32;
+            fn max_len() -> usize { LenUint::MAX as usize }
+        "#,
+        );
+        assert!(out.contains("std::numeric_limits<LenUint>::max()"));
+        assert!(!out.contains("LenUint::MAX"));
+    }
+
+    #[test]
     fn test_leaf4122_std_rt_begin_panic_path_lowers_to_rusty_panic() {
         let out = transpile_str("fn fail() { std::rt::begin_panic(\"boom\"); }");
         assert!(out.contains("rusty::panic::begin_panic(\"boom\")"));
@@ -12388,6 +12655,7 @@ mod tests {
                     let _x = std::ptr::read(p);
                     std::ptr::write(p, v);
                     std::mem::forget(v);
+                    std::mem::replace(&mut v, 2);
                 }
             }
         "#,
@@ -12395,9 +12663,117 @@ mod tests {
         assert!(out.contains("rusty::ptr::read(std::move(p))"));
         assert!(out.contains("rusty::ptr::write(std::move(p), std::move(v))"));
         assert!(out.contains("rusty::mem::forget(std::move(v))"));
+        assert!(out.contains("rusty::mem::replace(v, 2)"));
         assert!(!out.contains("std::ptr::read"));
         assert!(!out.contains("std::ptr::write"));
         assert!(!out.contains("std::mem::forget"));
+    }
+
+    #[test]
+    fn test_leaf415432_std_mem_size_of_turbofish_preserved_in_function_path() {
+        let out = transpile_str(
+            r#"
+            fn f() -> usize {
+                std::mem::size_of::<usize>()
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::mem::size_of<size_t>()"));
+        assert!(!out.contains("std::mem::size_of()"));
+    }
+
+    #[test]
+    fn test_leaf415432_mem_size_of_alias_turbofish_preserved() {
+        let out = transpile_str(
+            r#"
+            use std::mem;
+            fn f() -> usize {
+                mem::size_of::<u8>()
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::mem::size_of<uint8_t>()"));
+        assert!(!out.contains("mem::size_of()"));
+    }
+
+    #[test]
+    fn test_leaf415432_nested_local_fn_turbofish_call_drops_template_args() {
+        let out = transpile_str(
+            r#"
+            fn outer() {
+                fn check<T>() {}
+                fn run() {
+                    check::<i32>();
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("check();"));
+        assert!(!out.contains("check<int32_t>()"));
+    }
+
+    #[test]
+    fn test_leaf415432_assume_init_uses_expected_type_for_maybe_uninit_receiver() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+            struct S<T> { x: T }
+            impl<T> S<T> {
+                fn new_unsafe() -> S<T> {
+                    unsafe { S { x: MaybeUninit::uninit().assume_init() } }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::MaybeUninit<T>::uninit().assume_init()"));
+        assert!(!out.contains("MaybeUninit::uninit().assume_init()"));
+    }
+
+    #[test]
+    fn test_leaf415432_empty_array_index_lowers_to_unreachable_fallback() {
+        let out = transpile_str(
+            r#"
+            fn f() -> i32 {
+                if true {
+                    [][0]
+                }
+                1
+            }
+        "#,
+        );
+        assert!(out.contains("[&]() -> int32_t { rusty::intrinsics::unreachable(); }()"));
+        assert!(!out.contains("rusty::intrinsics::unreachable()[0]"));
+    }
+
+    #[test]
+    fn test_leaf415432_local_assoc_const_template_args_recovered_with_name_mismatch() {
+        let out = transpile_str(
+            r#"
+            mod utils {
+                use std::marker::PhantomData;
+                use std::mem::MaybeUninit;
+                struct MakeMaybeUninit<T, const N: usize>(PhantomData<fn() -> T>);
+                impl<T, const N: usize> MakeMaybeUninit<T, N> {
+                    const VALUE: MaybeUninit<T> = MaybeUninit::uninit();
+                    const ARRAY: [MaybeUninit<T>; N] = [Self::VALUE; N];
+                }
+            }
+
+            use utils::MakeMaybeUninit;
+
+            struct ArrayVec<T, const CAP: usize> {
+                xs: [std::mem::MaybeUninit<T>; CAP],
+            }
+
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn new_const() -> ArrayVec<T, CAP> {
+                    ArrayVec { xs: MakeMaybeUninit::ARRAY }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("MakeMaybeUninit<T, CAP>::ARRAY"));
+        assert!(!out.contains("MakeMaybeUninit::ARRAY"));
     }
 
     #[test]
@@ -15880,6 +16256,20 @@ mod tests {
         let out = transpile_str("use std::mem::drop;");
         assert!(out.contains("using rusty::mem::drop;"));
         assert!(!out.contains("using std::mem::drop;"));
+    }
+
+    #[test]
+    fn test_leaf415432_std_mem_size_of_import_remapped() {
+        let out = transpile_str("use std::mem::size_of;");
+        assert!(out.contains("using rusty::mem::size_of;"));
+        assert!(!out.contains("using std::mem::size_of;"));
+    }
+
+    #[test]
+    fn test_leaf415432_std_mem_replace_import_remapped() {
+        let out = transpile_str("use std::mem::replace;");
+        assert!(out.contains("using rusty::mem::replace;"));
+        assert!(!out.contains("using std::mem::replace;"));
     }
 
     #[test]

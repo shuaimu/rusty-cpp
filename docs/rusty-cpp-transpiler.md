@@ -7039,6 +7039,84 @@ Design rationale:
   - no blanket re-enable/disable of all `std::cmp::*` imports,
   - no aliasing `std::cmp` to unrelated namespaces that would lose `Ordering` semantics.
 
+### 10.11.84 Phase 20 Leaf 4.15.4.3.2 (`arrayvec` Stage D): `std::mem::size_of`/`std::mem` runtime-path lowering and immediate dependents
+
+Problem:
+
+- After 10.11.83, the first deterministic `arrayvec` Stage D blocker family was rooted at
+  `std::mem::size_of` and immediate dependents:
+  - unresolved `std::mem::size_of::<...>()` call shape (`::<...>` turbofish type args were dropped),
+  - `LenUint::MAX` alias path fallout in const bounds checks,
+  - `MaybeUninit::uninit().assume_init()` receiver typing fallback gaps,
+  - downstream malformed expressions (`[][CAP]` lowering and `MakeMaybeUninit::ARRAY` missing
+    template args) that appeared immediately after the `std::mem` family was unblocked.
+
+Scope analysis:
+
+- Completed with focused generic transpiler/runtime updates plus fixture-agnostic regressions, under
+  the 1000-LOC target for a leaf task.
+- No crate-specific post-processing scripts were introduced.
+
+Implementation:
+
+- Runtime/path lowering:
+  - added `rusty::mem::size_of<T>()` and `rusty::mem::replace(...)` in `include/rusty/mem.hpp`,
+  - mapped `std::mem::size_of`/`mem::size_of` and `std::mem::replace`/`mem::replace` to
+    `rusty::mem::*` in function-path lowering and `std::mem` import rewriting.
+- Expression/path robustness:
+  - preserved expression-path turbofish args for supported function-path calls (`size_of::<T>()`),
+  - lowered `Alias::MAX` (numeric type aliases) to `std::numeric_limits<...>::max()`,
+  - made `assume_init()` receiver emission expected-type aware so `MaybeUninit<T>::...` shape is
+    retained in unsafe constructors.
+- Immediate dependent fixes:
+  - added empty-array index fallback (`[][idx]`) to typed `rusty::intrinsics::unreachable()`
+    lowering, avoiding invalid `unreachable()[idx]` emissions,
+  - broadened local associated-path template-arg recovery for imported local generic types with
+    mismatched parameter names (`MakeMaybeUninit<T, N>` used from `ArrayVec<T, CAP>`).
+- Follow-up regression hardening:
+  - scoped turbofish emission to avoid nested-local callable regressions (`check::<T>()` on nested
+    lowered lambdas/SafeFn should not emit invalid template-call syntax).
+
+Regression tests:
+
+- `transpiler/src/codegen.rs`:
+  - `test_leaf415432_std_mem_size_of_turbofish_preserved_in_function_path`
+  - `test_leaf415432_mem_size_of_alias_turbofish_preserved`
+  - `test_leaf415432_numeric_type_alias_max_lowers_to_numeric_limits`
+  - `test_leaf415432_assume_init_uses_expected_type_for_maybe_uninit_receiver`
+  - `test_leaf415432_empty_array_index_lowers_to_unreachable_fallback`
+  - `test_leaf415432_local_assoc_const_template_args_recovered_with_name_mismatch`
+  - `test_leaf415432_nested_local_fn_turbofish_call_drops_template_args`
+  - `test_leaf415432_std_mem_size_of_import_remapped`
+  - `test_leaf415432_std_mem_replace_import_remapped`
+- `transpiler/src/types.rs`:
+  - updated `test_leaf42_runtime_function_path_mappings` for `std::mem::size_of` and
+    `std::mem::replace`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf415432 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler --test either_parity_harness test_either_parity_harness_stop_after_run_passes_as_control_crate -- --nocapture`
+- `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+- `cargo test --workspace`
+
+Re-probe result:
+
+- The previous first deterministic `arrayvec` Stage D `std::mem::size_of`/`std::mem` family and its
+  immediate dependents are removed.
+- New first deterministic `arrayvec` Stage D blocker family is now unresolved
+  `ArrayVecImpl::{push,try_push,push_unchecked,...}` (`ArrayVecImpl` associated-path/type-order
+  lowering), defining Leaf 4.15.4.3.3 handoff context.
+
+Design rationale:
+
+- Kept all changes generic at runtime/path/expr-lowering layers so they benefit other expanded
+  crates, not only `arrayvec`.
+- Avoided wrong approaches from §11:
+  - no crate-specific generated-file rewrites,
+  - no blanket suppression of turbofish/template-arg emission,
+  - no broad import disabling for `std::mem` families.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

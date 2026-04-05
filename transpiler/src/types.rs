@@ -123,6 +123,8 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
         "drop" | "std::mem::drop" | "mem::drop" => Some("rusty::mem::drop"),
+        "std::mem::size_of" | "mem::size_of" => Some("rusty::mem::size_of"),
+        "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
         "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
         "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
@@ -408,6 +410,14 @@ mod tests {
             Some("rusty::mem::forget")
         );
         assert_eq!(map_function_path("drop"), Some("rusty::mem::drop"));
+        assert_eq!(
+            map_function_path("std::mem::size_of"),
+            Some("rusty::mem::size_of")
+        );
+        assert_eq!(
+            map_function_path("mem::replace"),
+            Some("rusty::mem::replace")
+        );
         assert_eq!(
             map_function_path("panic::resume_unwind"),
             Some("rusty::panic::resume_unwind")
