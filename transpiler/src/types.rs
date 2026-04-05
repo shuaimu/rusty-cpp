@@ -78,6 +78,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
+        "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => {
+            Some(("rusty::fmt::Error", false))
+        }
         "std::str::Utf8Error" | "core::str::Utf8Error" => {
             Some(("rusty::str_runtime::Utf8Error", false))
         }
@@ -334,6 +337,7 @@ mod tests {
             map_std_type("fmt::Arguments"),
             Some(("rusty::fmt::Arguments", false))
         );
+        assert_eq!(map_std_type("fmt::Error"), Some(("rusty::fmt::Error", false)));
         assert_eq!(map_std_type("Pin"), Some(("rusty::pin::Pin", true)));
         assert_eq!(
             map_std_type("std::path::Path"),

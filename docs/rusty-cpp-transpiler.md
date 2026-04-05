@@ -8064,6 +8064,66 @@ Avoided wrong approaches from §11:
 - §11.91/§11.92: no declaration-order hacks to hide downstream blockers.
 - §11.94: no string-level `return return` post-processing hacks (left for structural 6.2 fix).
 
+### 10.97 Leaf 4.15.4.3.3.3.3.3.6.2 — Control-Flow/Error-Shape Fallout (`return return`, `fmt::Error`, first-order dependent import shape)
+
+Scope completed in this pass:
+
+- Implemented Leaf `4.15.4.3.3.3.3.3.6.2` as the immediate dependent frontier after 6.1.
+- Change volume stayed under the 1000-LOC guideline; no extra decomposition was required.
+
+Implementation details:
+
+- `transpiler/src/codegen.rs`:
+  - Added try-style runtime match-expression lowering for explicit-return-arm shapes on runtime
+    `Option`/`Result` patterns (generic tuple/path/ident/wild pattern support for this lowering
+    path), removing invalid lambda `return return` emission.
+  - Added expression-path unit-value lowering for `fmt::Error`-family paths:
+    - `fmt::Error`, `core::fmt::Error`, `std::fmt::Error` emit as `rusty::fmt::Error{}`.
+  - Added `rewrite_std_collections_import(...)` and wired it into import classification to remap
+    `std::collections`/`alloc::collections` concrete collection imports to `rusty::*`.
+  - Added runtime fallback surface:
+    - `rusty::fmt::Error` unit type.
+- `transpiler/src/types.rs`:
+  - Added `fmt::Error`/`core::fmt::Error`/`std::fmt::Error` mapping to `rusty::fmt::Error`.
+
+Regression tests added/updated:
+
+- Added `leaf4154333333362` coverage in `transpiler/src/codegen.rs`:
+  - runtime Option match with explicit `return None` lowers without `return return`,
+  - `fmt::Error` path maps to `rusty::fmt::Error`,
+  - runtime fallback includes `struct Error {}`,
+  - `std::collections` grouped imports remap to `rusty::*`.
+- Updated existing `use std::collections::HashMap` and alias/group expectations to the new
+  `rusty::*` import behavior.
+- Extended `types` mapping tests for `fmt::Error`.
+
+Verification:
+
+- Focused leaf tests:
+  - `cargo test -p rusty-cpp-transpiler leaf4154333333362 -- --nocapture`
+- Full transpiler suite:
+  - `cargo test -p rusty-cpp-transpiler`
+- Full workspace suite:
+  - `cargo test`
+- Parity re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec`
+
+Re-probe result:
+
+- Prior deterministic 6.2 head blockers are removed:
+  - no `return return` lambda emission at the failure head,
+  - no unresolved/invalid `fmt::Error` path emission,
+  - no `using std::collections::HashMap;` first failure.
+- New deterministic first blockers now start at downstream expanded-runtime/test-shape families:
+  - unresolved `alloc::boxed::box_new` / `into_vec`,
+  - unresolved `Add::add`,
+  - iterator `.map` surface gaps and dependent shape errors.
+
+Avoided wrong approaches from §11:
+
+- §11.94: no output-level `return return` text rewrite; fixed structurally in AST/codegen path.
+- §11.95: no type-only emission for Rust unit-like value paths (for `fmt::Error` value position).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -9258,3 +9318,16 @@ replace `return return` with `return`) to make Stage D compile.
 - It risks semantic drift in nested lambdas/branches where one `return` may belong to a distinct
   expression context.
 - Correct handling should be structural in codegen (Leaf 6.2 scope), not output-text surgery.
+
+### 11.95 Treating Rust Unit-Like Value Paths (`fmt::Error`) as Type Names in Expression Position
+
+**Rejected approach:** Map `fmt::Error` only as a type-path token (`rusty::fmt::Error`) and emit
+the same token unchanged in expression/value contexts.
+
+**Why it was rejected:**
+
+- Rust `fmt::Error` is used as a unit-like value in code such as `map_err(|_| fmt::Error)`.
+- Emitting `rusty::fmt::Error` without value construction is invalid in C++ expression context and
+  deterministically fails with primary-expression errors.
+- Correct behavior requires expression-position construction (`rusty::fmt::Error{}`) while keeping
+  type-position mapping as `rusty::fmt::Error`.

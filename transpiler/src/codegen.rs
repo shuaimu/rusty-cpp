@@ -9991,6 +9991,9 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if self.match_expr_has_explicit_return_arm(match_expr) {
+            if let Some(lowered) = self.emit_try_style_runtime_match_expr(match_expr, expected_ty) {
+                return lowered;
+            }
             if let Some(lowered) = self.emit_try_style_either_match_expr(match_expr, expected_ty) {
                 return lowered;
             }
@@ -10049,6 +10052,168 @@ impl CodeGen {
             self.extract_value_expr(&arm.body)
                 .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)))
         })
+    }
+
+    fn runtime_try_pattern_details(
+        &self,
+        pat: &syn::Pat,
+        variant_ctx: Option<&VariantTypeContext>,
+        matched_var: &str,
+    ) -> Option<(String, Vec<String>, Option<&'static str>)> {
+        match pat {
+            syn::Pat::TupleStruct(ts) => {
+                let (cond_method, unwrap_method) =
+                    self.runtime_tuple_struct_match_methods(&ts.path, variant_ctx)?;
+                if ts.elems.len() != 1 {
+                    return None;
+                }
+                let mut stmts = vec![format!("auto {} = _m.{}();", matched_var, unwrap_method)];
+                if !self.collect_pattern_binding_stmts(&ts.elems[0], matched_var, &mut stmts) {
+                    return None;
+                }
+                Some((
+                    format!("_m.{}()", cond_method),
+                    stmts,
+                    Some(unwrap_method),
+                ))
+            }
+            syn::Pat::Path(pp) => {
+                let cond_method = self.runtime_path_match_condition_method(&pp.path, variant_ctx)?;
+                Some((format!("_m.{}()", cond_method), Vec::new(), None))
+            }
+            syn::Pat::Wild(_) => Some(("true".to_string(), Vec::new(), None)),
+            syn::Pat::Ident(pi) => Some((
+                "true".to_string(),
+                vec![format!("const auto& {} = _m;", pi.ident)],
+                None,
+            )),
+            _ => None,
+        }
+    }
+
+    fn emit_try_style_runtime_match_expr(
+        &self,
+        match_expr: &syn::ExprMatch,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if match_expr.arms.len() != 2 {
+            return None;
+        }
+        if match_expr.arms.iter().any(|arm| arm.guard.is_some()) {
+            return None;
+        }
+
+        let mut return_arm: Option<&syn::Arm> = None;
+        let mut success_arm: Option<&syn::Arm> = None;
+        for arm in &match_expr.arms {
+            let is_return = self
+                .extract_value_expr(&arm.body)
+                .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)));
+            if is_return {
+                if return_arm.is_some() {
+                    return None;
+                }
+                return_arm = Some(arm);
+            } else {
+                if success_arm.is_some() {
+                    return None;
+                }
+                success_arm = Some(arm);
+            }
+        }
+
+        let return_arm = return_arm?;
+        let success_arm = success_arm?;
+        let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+
+        let (success_cond, success_bindings, success_unwrap_method) =
+            self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")?;
+        let (return_cond, return_bindings, _) =
+            self.runtime_try_pattern_details(&return_arm.pat, variant_ctx.as_ref(), "_mv")?;
+
+        let mut value_ty = expected_ty.map(|ty| self.map_type(ty));
+        if value_ty.as_ref().is_some_and(|ty| {
+            ty == "auto" || type_string_has_auto_placeholder(ty) || ty.contains("/* TODO")
+        }) {
+            value_ty = None;
+        }
+        if value_ty.is_none() {
+            if let Some(unwrap_method) = success_unwrap_method {
+                value_ty = Some(format!(
+                    "std::remove_cvref_t<decltype(_m.{}())>",
+                    unwrap_method
+                ));
+            }
+        }
+        let value_ty = value_ty?;
+
+        let success_body = {
+            let emitted = self.emit_expr_to_string_with_expected(&success_arm.body, expected_ty);
+            self.maybe_wrap_variant_constructor_with_expected_enum(
+                &success_arm.body,
+                emitted,
+                expected_ty,
+            )
+        };
+
+        let return_stmt = match self.extract_value_expr(&return_arm.body) {
+            Some(syn::Expr::Return(ret)) => {
+                let keyword = if self.in_async { "co_return" } else { "return" };
+                match &ret.expr {
+                    Some(expr) => format!(
+                        "{} {}",
+                        keyword,
+                        self.emit_expr_to_string_with_expected(expr, self.current_return_type_hint())
+                    ),
+                    None => keyword.to_string(),
+                }
+            }
+            _ => return None,
+        };
+
+        let mut scrutinee =
+            self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
+        if let Some(ctx) = variant_ctx.as_ref() {
+            if let syn::Expr::Call(call) = match_expr.expr.as_ref() {
+                if let syn::Expr::Path(path) = call.func.as_ref() {
+                    if self.variant_ctor_name_from_path(&path.path).is_some() {
+                        let enum_ty = format!("{}<{}>", ctx.enum_name, ctx.template_args.join(", "));
+                        scrutinee = format!("{}({})", enum_ty, scrutinee);
+                    }
+                }
+            }
+        }
+
+        let success_bindings_str = if success_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", success_bindings.join(" "))
+        };
+        let return_bindings_str = if return_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", return_bindings.join(" "))
+        };
+        let return_guard = if return_cond == "true" {
+            String::new()
+        } else {
+            format!(
+                "if (!({})) {{ rusty::intrinsics::unreachable(); }} ",
+                return_cond
+            )
+        };
+
+        Some(format!(
+            "({{ auto&& _m = {}; {} _match_value; if ({}) {{ {}_match_value = {}; }} else {{ {}{}{}; }} _match_value; }})",
+            scrutinee,
+            value_ty,
+            success_cond,
+            success_bindings_str,
+            success_body,
+            return_guard,
+            return_bindings_str,
+            return_stmt
+        ))
     }
 
     fn emit_try_style_either_match_expr(
@@ -10599,6 +10764,19 @@ impl CodeGen {
     }
 
     fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if matches!(
+            joined.as_str(),
+            "fmt::Error" | "core::fmt::Error" | "std::fmt::Error" | "rusty::fmt::Error"
+        ) {
+            // Rust `fmt::Error` is a unit-like value; emit an object expression.
+            return "rusty::fmt::Error{}".to_string();
+        }
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
@@ -12348,6 +12526,7 @@ auto partial_cmp(A&& a, B&& b) {\n\
 namespace fmt {\n\
 using Result = bool;\n\
 struct Arguments {};\n\
+struct Error {};\n\
 struct DebugList {\n\
     template<typename... Args>\n\
     DebugList& entries(Args&&...) { return *this; }\n\
@@ -12827,6 +13006,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_vec_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_collections_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_slice_import(normalized) {
         return action;
     }
@@ -13121,6 +13303,26 @@ fn rewrite_std_vec_import(path: &str) -> Option<UseImportAction> {
     let item = path.strip_prefix("std::vec::")?;
     let action = match item {
         "Vec" => UseImportAction::Using("rusty::Vec".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_collections_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::collections" || path == "alloc::collections" {
+        // Rust collections module does not map to a direct C++ namespace import.
+        return Some(UseImportAction::RustOnly);
+    }
+
+    let item = path
+        .strip_prefix("std::collections::")
+        .or_else(|| path.strip_prefix("alloc::collections::"))?;
+    let action = match item {
+        "HashMap" => UseImportAction::Using("rusty::HashMap".to_string()),
+        "HashSet" => UseImportAction::Using("rusty::HashSet".to_string()),
+        "BTreeMap" => UseImportAction::Using("rusty::BTreeMap".to_string()),
+        "BTreeSet" => UseImportAction::Using("rusty::BTreeSet".to_string()),
+        "VecDeque" => UseImportAction::Using("rusty::VecDeque".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -16203,6 +16405,52 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154333333362_runtime_option_match_return_arm_uses_try_style_lowering() {
+        let out = transpile_str(
+            r#"
+            fn pop_or_none(opt: Option<char>) -> Option<char> {
+                let ch = match opt {
+                    Some(ch) => ch,
+                    None => return None,
+                };
+                Some(ch)
+            }
+        "#,
+        );
+        assert!(out.contains("({ auto&& _m = opt;"));
+        assert!(out.contains("if (_m.is_some())"));
+        assert!(out.contains("return rusty::Option<char32_t>(rusty::None);"));
+        assert!(!out.contains("return return"));
+    }
+
+    #[test]
+    fn test_leaf4154333333362_fmt_error_path_rewritten_to_rusty_fmt_error() {
+        let out = transpile_str(
+            r#"
+            use core::fmt;
+            fn marker() {
+                let _x = fmt::Error;
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::fmt::Error"));
+        assert!(!out.contains("= fmt::Error"));
+    }
+
+    #[test]
+    fn test_leaf4154333333362_std_collections_imports_rewritten_to_rusty() {
+        let out = transpile_str(
+            "use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet, VecDeque};",
+        );
+        assert!(out.contains("using rusty::HashMap;"));
+        assert!(out.contains("using rusty::HashSet;"));
+        assert!(out.contains("using rusty::BTreeMap;"));
+        assert!(out.contains("using rusty::BTreeSet;"));
+        assert!(out.contains("using rusty::VecDeque;"));
+        assert!(!out.contains("using std::collections::HashMap;"));
+    }
+
+    #[test]
     fn test_leaf423_core_from_ctor_uses_target_conversion() {
         let out = transpile_str(
             r#"
@@ -16339,7 +16587,8 @@ mod tests {
     #[test]
     fn test_use_statement() {
         let out = transpile_str_module("use std::collections::HashMap;", "my_crate");
-        assert!(out.contains("using std::collections::HashMap;"));
+        assert!(out.contains("using rusty::HashMap;"));
+        assert!(!out.contains("using std::collections::HashMap;"));
     }
 
     #[test]
@@ -17475,7 +17724,8 @@ mod tests {
     #[test]
     fn test_use_std_preserved() {
         let out = transpile_str("use std::collections::HashMap;");
-        assert!(out.contains("using std::collections::HashMap;"));
+        assert!(out.contains("using rusty::HashMap;"));
+        assert!(!out.contains("using std::collections::HashMap;"));
     }
 
     #[test]
@@ -17857,9 +18107,10 @@ mod tests {
     #[test]
     fn test_use_group_three_items() {
         let out = transpile_str("use std::collections::{HashMap, HashSet, BTreeMap};");
-        assert!(out.contains("using std::collections::HashMap;"));
-        assert!(out.contains("using std::collections::HashSet;"));
-        assert!(out.contains("using std::collections::BTreeMap;"));
+        assert!(out.contains("using rusty::HashMap;"));
+        assert!(out.contains("using rusty::HashSet;"));
+        assert!(out.contains("using rusty::BTreeMap;"));
+        assert!(!out.contains("using std::collections::HashMap;"));
     }
 
     // ── Phase 15 Gap 4: Unhandled item kinds ────────────────────
@@ -18400,6 +18651,12 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154333333362_runtime_fallback_formatter_exposes_error_type() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("struct Error {};"));
+    }
+
+    #[test]
     fn test_leaf4154333333334_runtime_fallback_includes_str_and_char_helpers() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("using Utf8Error = rusty::String;"));
@@ -18629,7 +18886,7 @@ mod tests {
     #[test]
     fn test_non_rust_only_imports_kept() {
         let out = transpile_str("use std::collections::HashMap;");
-        assert!(out.contains("using std::collections::HashMap;"));
+        assert!(out.contains("using rusty::HashMap;"));
         assert!(!out.contains("Rust-only"));
     }
 
@@ -18782,7 +19039,7 @@ mod tests {
     #[test]
     fn test_leaf410_rename_import_emits_cpp_alias_form() {
         let out = transpile_str("use std::collections::HashMap as Map;");
-        assert!(out.contains("using Map = std::collections::HashMap;"));
+        assert!(out.contains("using Map = rusty::HashMap;"));
         assert!(!out.contains("using std::collections::Map ="));
     }
 
