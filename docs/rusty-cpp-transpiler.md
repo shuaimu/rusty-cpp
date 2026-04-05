@@ -6452,6 +6452,83 @@ Design rationale:
   - no crate-specific `take_mut` rewrite path,
   - no blanket conversion of all unit returns away from `void` (§11.79).
 
+### 10.11.75 Phase 20 Leaf 4.12.2 (`take_mut`): runtime/path lowering for `std::ptr`/`std::mem`/`std::usize::MAX`/`std::rt::begin_panic`
+
+Problem:
+
+- Re-probing `take_mut` after Leaf 4.12.1 moved the first deterministic Stage D blockers to
+  runtime/path lowering:
+  - invalid module imports (`using std::ptr;`, `using std::mem;`),
+  - unresolved Rust runtime paths (`std::usize::MAX`, `std::rt::begin_panic`),
+  - and downstream unresolved calls (`ptr::read`, `ptr::write`, `mem::forget`).
+
+Scope analysis:
+
+- Implemented as a focused generic fix under 1000 LOC across transpiler path/import lowering and
+  minimal runtime shims.
+- No crate-specific handling for `take_mut`.
+
+Implementation:
+
+- Extended `use` import classification in `transpiler/src/codegen.rs`:
+  - `use std::ptr;` → `namespace ptr = rusty::ptr;`
+  - `use std::mem;` → `namespace mem = rusty::mem;`
+  - `use std::ptr::{read,write};` → `using rusty::ptr::{read,write};`
+  - `use std::mem::forget;` → `using rusty::mem::forget;`
+- Extended expression/path lowering:
+  - `std::usize::MAX` / `core::usize::MAX` / `usize::MAX` →
+    `std::numeric_limits<size_t>::max()`
+  - `std::rt::begin_panic` → `rusty::panic::begin_panic`
+  - `std::ptr::{read,write}` / `ptr::{read,write}` → `rusty::ptr::{read,write}`
+  - `std::mem::forget` / `mem::forget` → `rusty::mem::forget`
+- Added minimal runtime support in `include/rusty/`:
+  - `rusty::ptr::read` / `rusty::ptr::write` in `ptr.hpp`,
+  - `rusty::mem::forget` in new `mem.hpp`,
+  - `rusty::panic::begin_panic` in `panic.hpp`,
+  - wired via `rusty/rusty.hpp`.
+- Added `<limits>` include where transpiled output and parity runner includes are emitted.
+
+Regression tests:
+
+- Added `leaf4122` codegen tests in `transpiler/src/codegen.rs`:
+  - `test_leaf4122_std_ptr_module_import_emits_rusty_alias`
+  - `test_leaf4122_std_mem_module_import_emits_rusty_alias`
+  - `test_leaf4122_std_ptr_function_imports_remapped`
+  - `test_leaf4122_std_mem_forget_import_remapped`
+  - `test_leaf4122_std_usize_max_path_lowers_to_numeric_limits`
+  - `test_leaf4122_std_rt_begin_panic_path_lowers_to_rusty_panic`
+  - `test_leaf4122_std_ptr_and_mem_function_paths_remapped`
+- Extended `transpiler/src/types.rs` runtime mapping regression:
+  - `test_leaf42_runtime_function_path_mappings` now covers `ptr::read/write`,
+    `mem::forget`, and `std::rt::begin_panic`.
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4122 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- Previous deterministic runtime/path blockers are removed:
+  - no `using std::ptr;` / `using std::mem;`,
+  - no unresolved `std::usize::MAX` / `std::rt::begin_panic`,
+  - no unresolved `ptr::read/write` / `mem::forget` from this family.
+- Next deterministic blockers moved to the template/context family:
+  - `Hole{...}` CTAD shape,
+  - `let this` keyword collision,
+  - `Ok`/`Err` arm qualification fallout.
+
+Design rationale:
+
+- Kept fixes localized to existing generic path/import hooks and small runtime compatibility shims
+  so parity progresses without crate-specific scripts.
+- Avoided wrong approaches from §11:
+  - no crate-specific `take_mut` source/output patching,
+  - no blanket skipping of all `std::*` imports (valid rewrites must still lower),
+  - no acceptance of raw `std::rt`/`std::usize` Rust-only paths in emitted C++.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7432,3 +7509,18 @@ references, pointer payloads, and generic arguments) and rely on downstream cast
 - Correct behavior is split by context:
   - type/value position uses a concrete unit carrier type (`std::tuple<>`),
   - function return position for explicit unit remains `void`.
+
+### 11.80 Emitting Rust-Only Runtime Paths (`std::ptr`/`std::mem`/`std::usize`/`std::rt`) as Native C++ std Symbols
+
+**Rejected approach:** Keep these Rust runtime paths as direct C++ `std::...` symbols (or comment
+them out wholesale) and rely on later stages to recover.
+
+**Why it was rejected:**
+
+- C++ has no `std::ptr`, `std::mem` module namespace, `std::usize::MAX`, or `std::rt::begin_panic`;
+  direct emission deterministically fails before deeper parity signal.
+- Blanket comment-out of all `std::*` imports hides valid rewrites and regresses previously fixed
+  std-path lowering families.
+- Correct approach is targeted generic remapping:
+  - rewrite supported import/path families to explicit `rusty::` runtime shims,
+  - lower Rust numeric-limit/runtime constants to valid C++ expressions.

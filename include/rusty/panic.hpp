@@ -47,6 +47,11 @@ auto catch_unwind(AssertUnwindSafe<F> wrapped) {
     std::abort();
 }
 
+template<typename... Args>
+[[noreturn]] inline void begin_panic(Args&&...) {
+    std::abort();
+}
+
 } // namespace panic
 } // namespace rusty
 

@@ -1322,7 +1322,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Generate runner: strip module syntax, add includes, add main
         let mut runner_src = String::new();
         runner_src.push_str("// Auto-generated parity test runner\n");
-        runner_src.push_str("#include <cstdint>\n#include <cstddef>\n");
+        runner_src.push_str("#include <cstdint>\n#include <cstddef>\n#include <limits>\n");
         runner_src.push_str("#include <variant>\n#include <string>\n#include <optional>\n");
         runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
         runner_src.push_str("#include <functional>\n#include <span>\n");

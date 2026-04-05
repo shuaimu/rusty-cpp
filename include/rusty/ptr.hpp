@@ -30,6 +30,7 @@
 #define RUSTY_PTR_HPP
 
 #include <cstddef>  // for std::ptrdiff_t
+#include <utility>
 
 namespace rusty {
 
@@ -107,6 +108,26 @@ constexpr MutPtr<T> offset_mut(MutPtr<T> ptr, std::ptrdiff_t count) noexcept {
         return ptr + count;  // pointer arithmetic - caller guarantees bounds
     }
 }
+
+// Minimal Rust std::ptr runtime surface used by transpiled expanded output.
+namespace ptr {
+
+template<typename T>
+inline T read(const T* src) {
+    return *src;
+}
+
+template<typename T>
+inline T read(T* src) {
+    return std::move(*src);
+}
+
+template<typename T, typename U>
+inline void write(T* dst, U&& value) {
+    *dst = std::forward<U>(value);
+}
+
+} // namespace ptr
 
 } // namespace rusty
 

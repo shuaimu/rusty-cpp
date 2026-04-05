@@ -25,6 +25,8 @@
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"
+#include "rusty/ptr.hpp"
+#include "rusty/mem.hpp"
 #include "rusty/panic.hpp"
 #include "rusty/cell.hpp"
 #include "rusty/refcell.hpp"

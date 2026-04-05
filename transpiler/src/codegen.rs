@@ -313,6 +313,7 @@ impl CodeGen {
 
         self.writeln("#include <cstdint>");
         self.writeln("#include <cstddef>");
+        self.writeln("#include <limits>");
         self.writeln("#include <variant>");
         self.writeln("#include <tuple>");
         self.writeln("#include <utility>");
@@ -1826,7 +1827,8 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let return_type = self.map_extension_impl_return_type(&method.sig.output, &method_spec.self_ty);
+        let return_type =
+            self.map_extension_impl_return_type(&method.sig.output, &method_spec.self_ty);
         self.writeln(&format!(
             "{} {}({}) {{",
             return_type,
@@ -1908,15 +1910,10 @@ impl CodeGen {
             }
         }
 
-        method
-            .sig
-            .inputs
-            .iter()
-            .skip(1)
-            .any(|arg| match arg {
-                syn::FnArg::Typed(pt) => self.type_references_name(&pt.ty, type_param_name),
-                syn::FnArg::Receiver(_) => false,
-            })
+        method.sig.inputs.iter().skip(1).any(|arg| match arg {
+            syn::FnArg::Typed(pt) => self.type_references_name(&pt.ty, type_param_name),
+            syn::FnArg::Receiver(_) => false,
+        })
     }
 
     fn map_extension_impl_return_type(
@@ -5985,7 +5982,8 @@ impl CodeGen {
         };
         let last = tp.path.segments.last()?;
         let last_ident = last.ident.to_string();
-        let is_option_alias = last.ident != "Option" && self.option_type_aliases.contains(&last_ident);
+        let is_option_alias =
+            last.ident != "Option" && self.option_type_aliases.contains(&last_ident);
         if last.ident != "Option" && !is_option_alias {
             return None;
         }
@@ -6016,10 +6014,7 @@ impl CodeGen {
         Some(self.map_type(inner_ty))
     }
 
-    fn expected_option_cpp_type_for_none(
-        &self,
-        expected_ty: Option<&syn::Type>,
-    ) -> Option<String> {
+    fn expected_option_cpp_type_for_none(&self, expected_ty: Option<&syn::Type>) -> Option<String> {
         let ty = expected_ty?;
         let syn::Type::Path(tp) = ty else {
             return None;
@@ -7612,6 +7607,12 @@ impl CodeGen {
         if joined == "core::panicking::panic" {
             return "rusty::panicking::panic".to_string();
         }
+        if matches!(
+            joined.as_str(),
+            "std::usize::MAX" | "core::usize::MAX" | "usize::MAX"
+        ) {
+            return "std::numeric_limits<size_t>::max()".to_string();
+        }
 
         // Map Rust Ordering enum variants to fallback ordering enum variants.
         match joined.as_str() {
@@ -9177,6 +9178,12 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_panic_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_ptr_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_mem_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_cell_import(normalized) {
         return action;
     }
@@ -9310,12 +9317,41 @@ fn rewrite_std_panic_import(path: &str) -> Option<UseImportAction> {
     Some(action)
 }
 
+fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::ptr" {
+        return Some(UseImportAction::Raw(
+            "namespace ptr = rusty::ptr;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::ptr::")?;
+    let action = match item {
+        "read" | "write" => UseImportAction::Using(format!("rusty::ptr::{}", item)),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_mem_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::mem" {
+        return Some(UseImportAction::Raw(
+            "namespace mem = rusty::mem;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::mem::")?;
+    let action = match item {
+        "forget" => UseImportAction::Using("rusty::mem::forget".to_string()),
+        "MaybeUninit" => UseImportAction::Using("rusty::MaybeUninit".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
 fn rewrite_std_cell_import(path: &str) -> Option<UseImportAction> {
     let item = path.strip_prefix("std::cell::")?;
     let action = match item {
-        "Cell" | "RefCell" | "UnsafeCell" => {
-            UseImportAction::Using(format!("rusty::{}", item))
-        }
+        "Cell" | "RefCell" | "UnsafeCell" => UseImportAction::Using(format!("rusty::{}", item)),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -10221,6 +10257,41 @@ mod tests {
             .find("struct Scope {")
             .expect("Scope definition should be emitted");
         assert!(hole_decl < scope_def);
+    }
+
+    #[test]
+    fn test_leaf4122_std_usize_max_path_lowers_to_numeric_limits() {
+        let out = transpile_str("fn is_max(v: usize) -> bool { v == std::usize::MAX }");
+        assert!(out.contains("v == std::numeric_limits<size_t>::max()"));
+        assert!(!out.contains("std::usize::MAX"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_rt_begin_panic_path_lowers_to_rusty_panic() {
+        let out = transpile_str("fn fail() { std::rt::begin_panic(\"boom\"); }");
+        assert!(out.contains("rusty::panic::begin_panic(\"boom\")"));
+        assert!(!out.contains("std::rt::begin_panic"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_ptr_and_mem_function_paths_remapped() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *mut i32, v: i32) {
+                unsafe {
+                    let _x = std::ptr::read(p);
+                    std::ptr::write(p, v);
+                    std::mem::forget(v);
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::ptr::read(std::move(p))"));
+        assert!(out.contains("rusty::ptr::write(std::move(p), std::move(v))"));
+        assert!(out.contains("rusty::mem::forget(std::move(v))"));
+        assert!(!out.contains("std::ptr::read"));
+        assert!(!out.contains("std::ptr::write"));
+        assert!(!out.contains("std::mem::forget"));
     }
 
     #[test]
@@ -13166,7 +13237,11 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("const std::span<const rusty::Result<int32_t, std::string_view>> values ="));
+        assert!(
+            out.contains(
+                "const std::span<const rusty::Result<int32_t, std::string_view>> values ="
+            )
+        );
         assert!(out.contains(
             "static const std::array<rusty::Result<int32_t, std::string_view>, 4> _slice_ref_tmp = {"
         ));
@@ -13334,6 +13409,36 @@ mod tests {
         let out = transpile_str("use std::panic;");
         assert!(out.contains("namespace panic = rusty::panic;"));
         assert!(!out.contains("using std::panic;"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_ptr_module_import_emits_rusty_alias() {
+        let out = transpile_str("use std::ptr;");
+        assert!(out.contains("namespace ptr = rusty::ptr;"));
+        assert!(!out.contains("using std::ptr;"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_mem_module_import_emits_rusty_alias() {
+        let out = transpile_str("use std::mem;");
+        assert!(out.contains("namespace mem = rusty::mem;"));
+        assert!(!out.contains("using std::mem;"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_ptr_function_imports_remapped() {
+        let out = transpile_str("use std::ptr::{read, write};");
+        assert!(out.contains("using rusty::ptr::read;"));
+        assert!(out.contains("using rusty::ptr::write;"));
+        assert!(!out.contains("using std::ptr::read;"));
+        assert!(!out.contains("using std::ptr::write;"));
+    }
+
+    #[test]
+    fn test_leaf4122_std_mem_forget_import_remapped() {
+        let out = transpile_str("use std::mem::forget;");
+        assert!(out.contains("using rusty::mem::forget;"));
+        assert!(!out.contains("using std::mem::forget;"));
     }
 
     #[test]
@@ -13919,7 +14024,9 @@ mod tests {
         "#,
         );
         assert!(!out.contains("std::visit(overloaded {"));
-        assert!(out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));"));
+        assert!(
+            out.contains("auto _m1_tmp = Either<int32_t, int32_t>(Left<int32_t, int32_t>(2));")
+        );
         assert!(out.contains("auto _m1_tmp = std::nullopt;"));
         assert!(out.contains("auto&& left_val = std::get<0>(_m_tuple);"));
         assert!(out.contains("auto&& right_val = std::get<1>(_m_tuple);"));
@@ -14151,8 +14258,11 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto buf = rusty::array_repeat(static_cast<uint8_t>(0), 4);"));
-        assert!(out
-            .contains("const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"));
+        assert!(
+            out.contains(
+                "const auto buf_shadow1 = rusty::array_repeat(static_cast<uint8_t>(1), 4);"
+            )
+        );
         assert!(out.contains("const auto _y = rusty::len(buf_shadow1);"));
     }
 
@@ -14253,7 +14363,9 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));"));
+        assert!(
+            out.contains("return Either<const L&, const R&>(Left<const L&, const R&>(inner));")
+        );
         assert!(
             out.contains("return Either<const L&, const R&>(Right<const L&, const R&>(inner));")
         );

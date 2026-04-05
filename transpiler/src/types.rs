@@ -118,13 +118,15 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
+        "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
+        "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
+        "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
         "std::panic::catch_unwind" | "panic::catch_unwind" => Some("rusty::panic::catch_unwind"),
-        "std::panic::resume_unwind" | "panic::resume_unwind" => {
-            Some("rusty::panic::resume_unwind")
-        }
+        "std::panic::resume_unwind" | "panic::resume_unwind" => Some("rusty::panic::resume_unwind"),
         "std::panic::AssertUnwindSafe" | "panic::AssertUnwindSafe" => {
             Some("rusty::panic::AssertUnwindSafe")
         }
+        "std::rt::begin_panic" | "rt::begin_panic" => Some("rusty::panic::begin_panic"),
         "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
@@ -386,13 +388,23 @@ mod tests {
             Some("rusty::panic::catch_unwind")
         );
         assert_eq!(
+            map_function_path("std::ptr::read"),
+            Some("rusty::ptr::read")
+        );
+        assert_eq!(map_function_path("ptr::write"), Some("rusty::ptr::write"));
+        assert_eq!(
+            map_function_path("std::mem::forget"),
+            Some("rusty::mem::forget")
+        );
+        assert_eq!(
             map_function_path("panic::resume_unwind"),
             Some("rusty::panic::resume_unwind")
         );
         assert_eq!(
-            map_function_path("std::process::abort"),
-            Some("std::abort")
+            map_function_path("std::rt::begin_panic"),
+            Some("rusty::panic::begin_panic")
         );
+        assert_eq!(map_function_path("std::process::abort"), Some("std::abort"));
     }
 
     #[test]
