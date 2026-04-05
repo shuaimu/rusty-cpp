@@ -3663,6 +3663,17 @@ impl CodeGen {
         }
     }
 
+    fn runtime_match_enum_kind_by_variant_name(
+        &self,
+        variant_name: &str,
+    ) -> Option<RuntimeMatchEnumKind> {
+        match variant_name {
+            "Some" | "None" => Some(RuntimeMatchEnumKind::Option),
+            "Ok" | "Err" => Some(RuntimeMatchEnumKind::Result),
+            _ => None,
+        }
+    }
+
     fn runtime_match_enum_kind_for_path(
         &self,
         path: &syn::Path,
@@ -3674,7 +3685,17 @@ impl CodeGen {
                 return Some(kind);
             }
         }
-        variant_ctx.and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
+        if let Some(kind) = variant_ctx.and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
+        {
+            return Some(kind);
+        }
+        if path.segments.len() == 1 {
+            let variant_name = path.segments.last()?.ident.to_string();
+            if let Some(kind) = self.runtime_match_enum_kind_by_variant_name(&variant_name) {
+                return Some(kind);
+            }
+        }
+        None
     }
 
     fn runtime_tuple_struct_match_methods(
@@ -4716,18 +4737,19 @@ impl CodeGen {
 
     fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
         let Some(scope) = self.local_cpp_bindings.last_mut() else {
-            return rust_name.to_string();
+            return escape_cpp_keyword(rust_name);
         };
 
-        if !scope.contains_key(rust_name) && !scope.values().any(|v| v == rust_name) {
-            let cpp_name = rust_name.to_string();
+        let escaped_name = escape_cpp_keyword(rust_name);
+        if !scope.contains_key(rust_name) && !scope.values().any(|v| v == &escaped_name) {
+            let cpp_name = escaped_name;
             scope.insert(rust_name.to_string(), cpp_name.clone());
             return cpp_name;
         }
 
         let mut idx = 1usize;
         loop {
-            let candidate = format!("{}_shadow{}", rust_name, idx);
+            let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
             if !scope.values().any(|v| v == &candidate) {
                 scope.insert(rust_name.to_string(), candidate.clone());
                 return candidate;
@@ -5871,6 +5893,9 @@ impl CodeGen {
                     .collect();
                 format!("std::make_tuple({})", elems.join(", "))
             }
+            syn::Expr::Struct(struct_expr) => {
+                self.emit_struct_expr_to_string_with_expected(struct_expr, expected_ty)
+            }
             syn::Expr::Path(path) if self.is_option_none_path(&path.path) => {
                 if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty) {
                     return format!("{}(rusty::None)", expected_cpp);
@@ -5903,6 +5928,76 @@ impl CodeGen {
             }
             _ => self.emit_expr_to_string(expr),
         }
+    }
+
+    fn emit_struct_expr_to_string_with_expected(
+        &self,
+        struct_expr: &syn::ExprStruct,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let target_name = self
+            .expected_struct_literal_cpp_type(struct_expr, expected_ty)
+            .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
+        let fields: Vec<String> = struct_expr
+            .fields
+            .iter()
+            .map(|f| {
+                let val = self.emit_expr_to_string(&f.expr);
+                let member_name = match &f.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                };
+                format!(".{} = {}", member_name, val)
+            })
+            .collect();
+        format!("{}{{{}}}", target_name, fields.join(", "))
+    }
+
+    fn expected_struct_literal_cpp_type(
+        &self,
+        struct_expr: &syn::ExprStruct,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let expected_ty = expected_ty?;
+        if !self.expected_type_matches_struct_literal_path(expected_ty, &struct_expr.path) {
+            return None;
+        }
+        Some(self.map_type(expected_ty))
+    }
+
+    fn expected_type_matches_struct_literal_path(
+        &self,
+        expected_ty: &syn::Type,
+        struct_path: &syn::Path,
+    ) -> bool {
+        let expected_path = match expected_ty {
+            syn::Type::Path(tp) => &tp.path,
+            syn::Type::Reference(r) => {
+                return self.expected_type_matches_struct_literal_path(&r.elem, struct_path);
+            }
+            syn::Type::Paren(p) => {
+                return self.expected_type_matches_struct_literal_path(&p.elem, struct_path);
+            }
+            syn::Type::Group(g) => {
+                return self.expected_type_matches_struct_literal_path(&g.elem, struct_path);
+            }
+            _ => return false,
+        };
+        let Some(expected_last) = expected_path.segments.last() else {
+            return false;
+        };
+        let Some(struct_last) = struct_path.segments.last() else {
+            return false;
+        };
+        if expected_last.ident == struct_last.ident {
+            return true;
+        }
+        if expected_last.ident == "Self" {
+            if let Some(current_struct) = &self.current_struct {
+                return current_struct == &struct_last.ident.to_string();
+            }
+        }
+        false
     }
 
     fn try_emit_reference_array_literal_with_expected_span(
@@ -6775,22 +6870,7 @@ impl CodeGen {
                 let right = self.emit_expr_to_string_with_expected(&a.right, expected_ty.as_ref());
                 format!("{} = {}", left, right)
             }
-            syn::Expr::Struct(s) => {
-                let name = self.emit_path_to_string(&s.path);
-                let fields: Vec<String> = s
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let val = self.emit_expr_to_string(&f.expr);
-                        let member_name = match &f.member {
-                            syn::Member::Named(ident) => ident.to_string(),
-                            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
-                        };
-                        format!(".{} = {}", member_name, val)
-                    })
-                    .collect();
-                format!("{}{{{}}}", name, fields.join(", "))
-            }
+            syn::Expr::Struct(s) => self.emit_struct_expr_to_string_with_expected(s, None),
             syn::Expr::Paren(p) => {
                 let inner = self.emit_expr_to_string(&p.expr);
                 format!("({})", inner)
@@ -9452,7 +9532,7 @@ fn escape_cpp_keyword(name: &str) -> String {
         | "friend" | "namespace" | "using" | "throw" | "catch" | "try" | "public" | "private"
         | "protected" | "mutable" | "volatile" | "register" | "inline" | "explicit" | "export"
         | "typedef" | "typename" | "decltype" | "constexpr" | "nullptr" | "alignof" | "alignas"
-        | "thread_local" | "static_assert" | "noexcept" | "consteval" | "constinit"
+        | "thread_local" | "static_assert" | "noexcept" | "consteval" | "constinit" | "this"
         | "co_await" | "co_return" | "co_yield" | "requires" | "concept" | "import" | "module"
         | "default" => {
             format!("{}_", name)
@@ -10292,6 +10372,64 @@ mod tests {
         assert!(!out.contains("std::ptr::read"));
         assert!(!out.contains("std::ptr::write"));
         assert!(!out.contains("std::mem::forget"));
+    }
+
+    #[test]
+    fn test_leaf4123_local_binding_keyword_this_is_escaped() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let this = 1;
+                let _x = this;
+            }
+        "#,
+        );
+        assert!(out.contains("const auto this_ = 1;"));
+        assert!(
+            out.contains("const auto _x = this_;")
+                || out.contains("const auto _x = std::move(this_);")
+        );
+        assert!(!out.contains("const auto this = 1;"));
+    }
+
+    #[test]
+    fn test_leaf4123_struct_assignment_uses_expected_type_for_template_args() {
+        let out = transpile_str(
+            r#"
+            struct Hole<T, F> {
+                old: T,
+                func: F,
+            }
+            fn f() {
+                let mut hole: Hole<i32, i32> = Hole { old: 1, func: 2 };
+                hole = Hole { old: 3, func: 4 };
+            }
+        "#,
+        );
+        assert!(out.contains("Hole<int32_t, int32_t> hole = Hole<int32_t, int32_t>{"));
+        assert!(out.contains("hole = Hole<int32_t, int32_t>{.old = 3, .func = 4};"));
+        assert!(!out.contains("hole = Hole{.old = 3, .func = 4};"));
+    }
+
+    #[test]
+    fn test_leaf4123_result_match_on_call_uses_runtime_conditionals() {
+        let out = transpile_str(
+            r#"
+            fn mk() -> Result<i32, i32> { Ok(1) }
+            fn f() -> i32 {
+                match mk() {
+                    Ok(v) => v,
+                    Err(e) => e,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& _m = mk();"));
+        assert!(out.contains("if (_m.is_ok()) {"));
+        assert!(out.contains("if (_m.is_err()) {"));
+        assert!(!out.contains("std::visit(overloaded {"));
+        assert!(!out.contains("const Ok&"));
+        assert!(!out.contains("const Err&"));
     }
 
     #[test]

@@ -6529,6 +6529,66 @@ Design rationale:
   - no blanket skipping of all `std::*` imports (valid rewrites must still lower),
   - no acceptance of raw `std::rt`/`std::usize` Rust-only paths in emitted C++.
 
+### 10.11.76 Phase 20 Leaf 4.12.3 (`take_mut`): template/context lowering for `Hole{...}`/`let this`/bare `Ok`-`Err` match arms
+
+Problem:
+
+- After Leaf 4.12.2, `take_mut` parity exposed three deterministic template/context blockers:
+  - `Hole{...}` emitted without expected template specialization in typed assignment paths,
+  - `let this = ...` lowered to invalid C++ local identifier `this`,
+  - bare `Ok`/`Err` patterns in match-expression lowering missed runtime-kind inference and fell back to malformed visit-arm typing.
+
+Scope analysis:
+
+- Implemented as a focused generic fix under 1000 LOC in transpiler codegen.
+- No crate-specific handling for `take_mut`.
+
+Implementation:
+
+- Local binding keyword collision fix:
+  - updated local C++ name allocation to apply keyword escaping (`allocate_local_cpp_name`), including shadowed names.
+  - extended keyword set to include `this`.
+- Struct literal expected-type propagation:
+  - added expected-type-aware struct literal emission in expression lowering (`emit_expr_to_string_with_expected` path),
+  - when expected type matches the struct literal path, emit mapped expected type name (for example `Hole<T, F>{...}`) instead of bare path (`Hole{...}`).
+- Runtime pattern-kind fallback:
+  - added runtime enum-kind inference by bare variant names (`Ok`/`Err`/`Some`/`None`) when enum context cannot be recovered from the scrutinee type,
+  - keeps match-expression lowering on runtime conditional form (`_m.is_ok()`/`_m.is_err()`) instead of fragile `std::visit` fallback arm typing.
+
+Regression tests:
+
+- Added `leaf4123` codegen regressions in `transpiler/src/codegen.rs`:
+  - `test_leaf4123_local_binding_keyword_this_is_escaped`
+  - `test_leaf4123_struct_assignment_uses_expected_type_for_template_args`
+  - `test_leaf4123_result_match_on_call_uses_runtime_conditionals`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4123 -- --nocapture`
+- `cargo test -p rusty-cpp-transpiler test_leaf416_result_match_expression_uses_runtime_conditionals -- --nocapture`
+- `cargo test --workspace`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- The targeted blockers are removed in generated parity output:
+  - `let this` is now escaped (`this_`),
+  - bare `Ok`/`Err` match-expression lowering now uses runtime conditionals,
+  - `Hole` struct literals in typed contexts now carry template args (`Hole<T, F>{...}`).
+- Next deterministic `take_mut` Stage D blockers are downstream expression/lowering families:
+  - `rusty::PhantomData` emitted as a value expression in struct-literal fields,
+  - nested local-struct method emission shape in test bodies,
+  - unit-struct value construction fallout.
+
+Design rationale:
+
+- Kept all changes in existing generic codegen paths so they benefit all crates and avoid parity-script patching.
+- Avoided wrong approaches from §11:
+  - no crate-specific post-processing for `take_mut`,
+  - no blanket forcing of all struct literals to expected-type names without path matching,
+  - no fallback to ad-hoc `Result_*`/`Option_*` arm qualification hacks when runtime conditional lowering applies.
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.

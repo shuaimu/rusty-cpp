@@ -568,7 +568,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added cross-target extension-method hint propagation in crate/parity transpilation so integration targets rewrite extension calls even when impls are defined in sibling expanded targets.
           - [x] *done* Added focused regressions for extension free-function emission/rewrite, local method non-rewrite, wildcard `let _ = expr` side-effect preservation, and typed `Option::None` receiver lowering.
           - [x] *done* Re-probed `tap` parity: the deterministic extension-method blocker (`request for member 'tap' in non-class type`) is removed; next Stage D blockers are in iterator/io lowering families (`values.iter()` on spans and `std::io::_print` unresolved path).
-        - [ ] Leaf 4.12: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
+        - [x] *done* Leaf 4.12: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
           - [x] *done* Leaf 4.12.1: unit-in-type-position and struct order unblockers
           - [x] *done* Implemented generic unit type-position lowering fix: `()` in type context now maps to `std::tuple<>` (so references like `&mut ()` no longer emit invalid `void&`), while explicit unit return types still map to `void`.
           - [x] *done* Implemented generic struct forward declarations at file/module scope so earlier struct methods can reference later sibling structs (`Scope` method signatures referencing `Hole` now resolve).
@@ -579,8 +579,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added minimal runtime support for this family in `include/rusty/`: `rusty::ptr::{read,write}`, `rusty::mem::forget`, and `rusty::panic::begin_panic`, wired through `rusty/rusty.hpp`.
           - [x] *done* Added focused regressions in transpiler/type mapping tests (`leaf4122` + `test_leaf42_runtime_function_path_mappings`) covering module imports, function-import remaps, direct path-call remaps, `std::usize::MAX`, and `std::rt::begin_panic`.
           - [x] *done* Re-probed `take_mut` parity: previous deterministic `std::ptr`/`std::mem`/`std::usize::MAX`/`std::rt::begin_panic` blockers are removed; next deterministic blockers are template/context family (`Hole{...}` CTAD, `let this` keyword collision, `Ok`/`Err` arm qualification fallout).
-          - [ ] Leaf 4.12.3: template/context lowering family in expanded `take_mut` (`Hole{...}` CTAD, `let this` keyword collision, `Ok`/`Err` arm qualification fallout)
-          - [ ] Leaf 4.12.4: re-probe `take_mut` parity to capture next deterministic blocker after 4.12.2-4.12.3
+          - [x] *done* Leaf 4.12.3: template/context lowering family in expanded `take_mut` (`Hole{...}` CTAD, `let this` keyword collision, `Ok`/`Err` arm qualification fallout)
+          - [x] *done* Implemented generic local-name keyword escaping for same-scope bindings (`let this` now lowers to `this_` via `allocate_local_cpp_name` + keyword escaping)
+          - [x] *done* Implemented expected-type-aware struct literal emission in expression contexts so typed assignment/initializer paths emit explicit template specializations (`Hole<T, F>{...}` instead of `Hole{...}`)
+          - [x] *done* Implemented runtime enum-kind fallback for bare `Ok`/`Err`/`Some`/`None` patterns when variant context is missing, keeping `Result`/`Option` match expressions on runtime conditional lowering instead of malformed `std::visit` arm-type fallback
+          - [x] *done* Added focused regressions in `transpiler/src/codegen.rs` (`leaf4123`): local keyword binding escape, typed struct-assignment literal specialization, and bare-call `Result` match runtime conditional lowering
+          - [x] *done* Leaf 4.12.4: re-probe `take_mut` parity to capture next deterministic blocker after 4.12.2-4.12.3
+          - [x] *done* Re-probed `take_mut` parity after Leaf 4.12.3 (`tests/transpile_tests/run_parity_matrix.sh --crate take_mut ...`): previous `let this` and `Ok`/`Err` qualification blockers are removed and struct literal now carries template args; next deterministic Stage D blockers are downstream expression/lowering families (`rusty::PhantomData` emitted as value expression in struct literals, nested local-struct method emission shape, and unit-struct value construction fallout in `scope_based_take`)
         - [ ] Leaf 4.13: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
         - [ ] Leaf 4.14: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
         - [ ] Leaf 4.15: Re-run full seven-crate parity matrix to confirm Leaf 4 closure and mark complete
