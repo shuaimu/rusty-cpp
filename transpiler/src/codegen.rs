@@ -335,6 +335,10 @@ impl CodeGen {
         // We only insert the helper if code generation actually emits `std::visit(overloaded { ... })`.
         let helper_insert_pos = self.output.len();
 
+        if self.emit_struct_forward_decls(&file.items) {
+            self.newline();
+        }
+
         for item in &file.items {
             // Skip impl blocks — they've been merged into structs
             if matches!(item, syn::Item::Impl(_)) {
@@ -359,6 +363,24 @@ impl CodeGen {
         if !helper_text.is_empty() {
             self.output.insert_str(helper_insert_pos, &helper_text);
         }
+    }
+
+    fn emit_struct_forward_decls(&mut self, items: &[syn::Item]) -> bool {
+        let mut emitted_names = HashSet::new();
+        let mut emitted_any = false;
+        for item in items {
+            let syn::Item::Struct(s) = item else {
+                continue;
+            };
+            let name = s.ident.to_string();
+            if !emitted_names.insert(name.clone()) {
+                continue;
+            }
+            self.emit_template_prefix(&s.generics);
+            self.writeln(&format!("struct {};", name));
+            emitted_any = true;
+        }
+        emitted_any
     }
 
     fn emit_item(&mut self, item: &syn::Item) {
@@ -1951,6 +1973,9 @@ impl CodeGen {
             self.writeln(&format!("namespace {} {{", mod_name));
             self.indent += 1;
             self.module_stack.push(mod_name.to_string());
+            if self.emit_struct_forward_decls(items) {
+                self.newline();
+            }
             for item in items {
                 if matches!(item, syn::Item::Impl(_)) {
                     continue;
@@ -7834,7 +7859,7 @@ impl CodeGen {
             }
             syn::Type::Tuple(t) => {
                 if t.elems.is_empty() {
-                    "void".to_string()
+                    "std::tuple<>".to_string()
                 } else {
                     let elems: Vec<String> = t.elems.iter().map(|e| self.map_type(e)).collect();
                     format!("std::tuple<{}>", elems.join(", "))
@@ -8638,7 +8663,22 @@ impl CodeGen {
     fn map_return_type(&self, output: &syn::ReturnType) -> String {
         match output {
             syn::ReturnType::Default => "void".to_string(),
-            syn::ReturnType::Type(_, ty) => self.map_type(ty),
+            syn::ReturnType::Type(_, ty) => {
+                if self.is_explicit_unit_type(ty) {
+                    "void".to_string()
+                } else {
+                    self.map_type(ty)
+                }
+            }
+        }
+    }
+
+    fn is_explicit_unit_type(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Tuple(t) => t.elems.is_empty(),
+            syn::Type::Paren(p) => self.is_explicit_unit_type(&p.elem),
+            syn::Type::Group(g) => self.is_explicit_unit_type(&g.elem),
+            _ => false,
         }
     }
 
@@ -10140,6 +10180,47 @@ mod tests {
         );
         assert!(out.contains("auto& val = *self_.as_mut().unwrap_err();"));
         assert!(!out.contains("auto val = self_.as_mut().unwrap_err();"));
+    }
+
+    #[test]
+    fn test_leaf4121_unit_reference_type_position_is_not_void_ref() {
+        let out = transpile_str(
+            r#"
+            struct Scope<'s> {
+                marker: PhantomData<Cell<&'s mut ()>>,
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::PhantomData<rusty::Cell<std::tuple<>&>> marker;"));
+        assert!(!out.contains("Cell<void&>"));
+    }
+
+    #[test]
+    fn test_leaf4121_explicit_unit_return_type_emits_void_function() {
+        let out = transpile_str("fn f() -> () {}");
+        assert!(out.contains("void f() {"));
+    }
+
+    #[test]
+    fn test_leaf4121_module_struct_forward_decl_precedes_scope_method_use() {
+        let out = transpile_str(
+            r#"
+            mod scoped {
+                struct Scope {}
+                struct Hole<T> { value: T }
+                impl Scope {
+                    fn take<T>(&self, value: T) -> Hole<T> { Hole { value } }
+                }
+            }
+        "#,
+        );
+        let hole_decl = out
+            .find("struct Hole;")
+            .expect("forward declaration for Hole should be emitted");
+        let scope_def = out
+            .find("struct Scope {")
+            .expect("Scope definition should be emitted");
+        assert!(hole_decl < scope_def);
     }
 
     #[test]

@@ -6396,6 +6396,62 @@ Design rationale:
   - no per-crate `tap` special cases,
   - no per-target-local-only rewrite detection that misses sibling-target impls (§11.78).
 
+### 10.11.74 Phase 20 Leaf 4.12.1 (`take_mut`): remove first type/lifetime + type-order blockers (`void&` and unresolved postdeclared `Hole`)
+
+Problem:
+
+- Re-probing `take_mut` parity failed first on:
+  - invalid type lowering in generated marker field:
+    - `rusty::PhantomData<rusty::Cell<void&>>`
+  - unresolved sibling type in earlier struct method signatures:
+    - `Hole<T, F>` referenced inside `Scope` before `Hole` was declared.
+- These are deterministic C++ type/ordering blockers that prevent deeper parity signal.
+
+Scope analysis:
+
+- Implemented as a bounded generic fix (<1000 LOC) in transpiler codegen only.
+- No crate-specific handling for `take_mut`.
+
+Implementation:
+
+- Type-position unit mapping fix:
+  - changed `map_type(())` from `void` to `std::tuple<>` (type position only),
+  - preserved explicit unit return mapping (`-> ()`) as `void` via return-type special-case helper.
+- Struct order fix:
+  - added struct forward declaration emission for file and inline-module scopes:
+    - emits template-aware forward declarations before item emission,
+    - allows methods in earlier structs to reference later sibling structs.
+
+Regression tests:
+
+- Added focused codegen tests:
+  - `test_leaf4121_unit_reference_type_position_is_not_void_ref`
+  - `test_leaf4121_explicit_unit_return_type_emits_void_function`
+  - `test_leaf4121_module_struct_forward_decl_precedes_scope_method_use`
+
+Verification:
+
+- `cargo test -p rusty-cpp-transpiler leaf4121 -- --nocapture`
+- Re-probe:
+  - `tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root <tmp> --keep-work-dirs`
+
+Re-probe result:
+
+- Previous deterministic blockers are removed:
+  - no `Cell<void&>` emission for this path,
+  - no unresolved `Hole` type in `Scope` method signatures.
+- Next deterministic blockers move to runtime/path/template family:
+  - unresolved `std::ptr` / `std::mem` / `std::usize::MAX` / `std::rt::begin_panic`,
+  - `Hole{...}` CTAD/lowering shape and dependent fallout.
+
+Design rationale:
+
+- Unit type `()` should not lower to `void` in value/type positions where references are legal in Rust but forbidden for `void` in C++.
+- Forward declarations are a generic C++ ordering tool and avoid brittle source-order assumptions.
+- Avoided wrong approaches from §11:
+  - no crate-specific `take_mut` rewrite path,
+  - no blanket conversion of all unit returns away from `void` (§11.79).
+
 ### 10.11 Parity Test Command (Primary Workflow)
 
 The `parity-test` subcommand is the recommended way to verify that transpiled C++ produces the same results as the original Rust `cargo test`.
@@ -7362,3 +7418,17 @@ contains the corresponding trait impl block.
   failures (`request for member 'tap' ... non-class type`).
 - Cross-target hint propagation keeps behavior generic and deterministic without crate-specific
   branching.
+
+### 11.79 Lowering Rust Unit Type `()` to `void` in All Type Positions
+
+**Rejected approach:** Keep mapping `()` to `void` uniformly in all type positions (including
+references, pointer payloads, and generic arguments) and rely on downstream casting/fallbacks.
+
+**Why it was rejected:**
+
+- Rust allows references to unit (`&()`, `&mut ()`) and generic wrappers around them; C++ forbids
+  references to `void`, producing immediate compile errors (`void&`).
+- It breaks marker/lifetime-carrying shapes like `PhantomData<Cell<&mut ()>>` in expanded crates.
+- Correct behavior is split by context:
+  - type/value position uses a concrete unit carrier type (`std::tuple<>`),
+  - function return position for explicit unit remains `void`.

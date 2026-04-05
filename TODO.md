@@ -569,6 +569,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added focused regressions for extension free-function emission/rewrite, local method non-rewrite, wildcard `let _ = expr` side-effect preservation, and typed `Option::None` receiver lowering.
           - [x] *done* Re-probed `tap` parity: the deterministic extension-method blocker (`request for member 'tap' in non-class type`) is removed; next Stage D blockers are in iterator/io lowering families (`values.iter()` on spans and `std::io::_print` unresolved path).
         - [ ] Leaf 4.12: `take_mut` Stage D type/lifetime lowering family (`PhantomData<rusty::Cell<void&>>` + dependent fallout)
+          - [x] *done* Leaf 4.12.1: unit-in-type-position and struct order unblockers
+          - [x] *done* Implemented generic unit type-position lowering fix: `()` in type context now maps to `std::tuple<>` (so references like `&mut ()` no longer emit invalid `void&`), while explicit unit return types still map to `void`.
+          - [x] *done* Implemented generic struct forward declarations at file/module scope so earlier struct methods can reference later sibling structs (`Scope` method signatures referencing `Hole` now resolve).
+          - [x] *done* Added focused regressions for type-position unit mapping, explicit unit return mapping, and module-local forward declaration ordering.
+          - [x] *done* Re-probed `take_mut` parity: first deterministic blockers (`void&` and unresolved `Hole` type) are removed; next blockers are runtime/path/template family (`std::ptr`/`std::mem`/`std::usize::MAX`/`std::rt::*`, plus `Hole{...}` CTAD shape and related dependent fallout).
+          - [ ] Leaf 4.12.2: runtime/path lowering family in expanded `take_mut` (`std::ptr`, `std::mem`, `std::usize::MAX`, `std::rt::begin_panic`)
+          - [ ] Leaf 4.12.3: template/context lowering family in expanded `take_mut` (`Hole{...}` CTAD, `let this` keyword collision, `Ok`/`Err` arm qualification fallout)
+          - [ ] Leaf 4.12.4: re-probe `take_mut` parity to capture next deterministic blocker after 4.12.2-4.12.3
         - [ ] Leaf 4.13: `semver` Stage D import/re-export lowering family (`using std::vec::Vec`, unresolved `using ::Type`)
         - [ ] Leaf 4.14: `bitflags` Stage D unresolved re-export/type-order family (`using ::Flag/::Flags`, `IterNames`)
         - [ ] Leaf 4.15: Re-run full seven-crate parity matrix to confirm Leaf 4 closure and mark complete
