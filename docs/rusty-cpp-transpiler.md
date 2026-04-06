@@ -2116,8 +2116,12 @@ Active work items:
    - focused transpiler regressions (`leaf41543333333171`) assert both `Err` and `Ok` tuple-match assertion paths emit non-const payload locals and `_ResultCtorCtx::{Err,Ok}(std::move(u))` constructor calls.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-17-1b-1775450609 --keep-work-dirs`) removed the prior deterministic first hard head (`use of deleted function` at `runner.cpp:3236` from `_ResultCtorCtx::Err(std::move(u))` with `const auto u = ...`); canonical artifacts at `/tmp/rusty-parity-matrix-17-1b-1775450609/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3243`: `no match for operator==` on `rusty::Result<...>` equality in assertion scaffolding.
-18. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.17.2`.
-   - re-run the full seven-crate parity matrix after 17.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
+18. `Leaf 4.15.4.3.3.3.3.3.17.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-17-2-1775451587 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-17-2-1775451587/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:3243`: `no match for operator==` on `rusty::Result<std::array<int, 2>, arrayvec::ArrayVec<int, 2>>` equality in assertion scaffolding, followed by downstream string-conversion/array-comparison/template/runtime-surface cascades.
+19. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.18.1`.
+   - implement a generic assertion/equality lowering fix for context-qualified `Result` comparisons so transpiled test scaffolding does not depend on missing direct `operator==` surfaces, then reprobe matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
