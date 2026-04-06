@@ -8299,6 +8299,12 @@ impl CodeGen {
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::take({}, {})", receiver, count);
         }
+        if let Some(enumerate_call) = self.try_emit_iter_enumerate_call(mc) {
+            return enumerate_call;
+        }
+        if let Some(rev_call) = self.try_emit_iter_rev_call(mc) {
+            return rev_call;
+        }
         if mc.method == "is_some"
             && mc.args.is_empty()
             && self.is_std_optional_like_receiver_expr(&mc.receiver)
@@ -11270,6 +11276,28 @@ impl CodeGen {
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let mapper = self.emit_expr_maybe_move(mc.args.first()?);
         Some(format!("rusty::map({}, {})", receiver, mapper))
+    }
+
+    fn try_emit_iter_enumerate_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "enumerate" || !mc.args.is_empty() {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::enumerate({})", receiver))
+    }
+
+    fn try_emit_iter_rev_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "rev" || !mc.args.is_empty() {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::rev({})", receiver))
     }
 
     fn try_emit_iter_fold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -21754,6 +21782,44 @@ mod tests {
         );
         assert!(out.contains("s.by_ref()"));
         assert!(!out.contains("rusty::take(s,"));
+    }
+
+    #[test]
+    fn test_leaf41543333333131_iterator_rev_enumerate_lower_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<i32>) {
+                let _ = v.iter().enumerate();
+                let mut r = 0..8;
+                let _ = r.rev();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::enumerate(rusty::iter(v))"));
+        assert!(out.contains("rusty::rev(r)"));
+        assert!(!out.contains(".enumerate()"));
+        assert!(!out.contains(".rev()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333131_non_iterator_rev_enumerate_methods_are_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn rev(&self) {}
+                fn enumerate(&self) {}
+            }
+            fn f(s: S) {
+                s.rev();
+                s.enumerate();
+            }
+        "#,
+        );
+        assert!(out.contains("s.rev()"));
+        assert!(out.contains("s.enumerate()"));
+        assert!(!out.contains("rusty::rev(s)"));
+        assert!(!out.contains("rusty::enumerate(s)"));
     }
 
     #[test]

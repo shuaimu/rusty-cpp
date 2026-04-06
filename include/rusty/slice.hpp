@@ -242,6 +242,57 @@ private:
 };
 
 template<typename Iter>
+class enumerate_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::enumerate requires next() to return an Option/optional-like value"
+    );
+
+    explicit enumerate_next_iter(Iter iter) : iter_(std::move(iter)), index_(0) {}
+
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using entry_type = std::tuple<size_t, item_type>;
+        auto item = iter_.next();
+        if (!option_has_value(item)) {
+            return std::optional<entry_type>{};
+        }
+        return std::optional<entry_type>(
+            std::in_place,
+            index_++,
+            option_take_value(item)
+        );
+    }
+
+private:
+    Iter iter_;
+    size_t index_;
+};
+
+template<typename Iter>
+class rev_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::rev requires next() to return an Option/optional-like value"
+    );
+    static_assert(
+        requires(Iter& iter) { iter.next_back(); },
+        "rusty::rev requires next_back() on next-like iterators"
+    );
+
+    explicit rev_next_iter(Iter iter) : iter_(std::move(iter)) {}
+
+    auto next() {
+        return iter_.next_back();
+    }
+
+private:
+    Iter iter_;
+};
+
+template<typename Iter>
 class take_next_iter {
 public:
     static_assert(
@@ -283,6 +334,18 @@ auto make_map_next_iter(Iter&& iter, Func&& func) {
     return map_next_iter<stored_iter, stored_func>(
         std::forward<Iter>(iter),
         std::forward<Func>(func));
+}
+
+template<typename Iter>
+auto make_enumerate_next_iter(Iter&& iter) {
+    using stored_iter = std::decay_t<Iter>;
+    return enumerate_next_iter<stored_iter>(std::forward<Iter>(iter));
+}
+
+template<typename Iter>
+auto make_rev_next_iter(Iter&& iter) {
+    using stored_iter = std::decay_t<Iter>;
+    return rev_next_iter<stored_iter>(std::forward<Iter>(iter));
 }
 
 template<typename Iter>
@@ -356,6 +419,43 @@ decltype(auto) map(Range&& range, Func&& func) {
         return detail::make_map_next_iter(
             iter(std::forward<Range>(range)),
             std::forward<Func>(func));
+    }
+}
+
+template<typename Range>
+decltype(auto) enumerate(Range&& range) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_enumerate_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::enumerate requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return enumerate(std::forward<Range>(range).into_iter());
+    } else {
+        return enumerate(iter(std::forward<Range>(range)));
+    }
+}
+
+template<typename Range>
+decltype(auto) rev(Range&& range) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        using iter_type = std::remove_reference_t<Range>;
+        static_assert(
+            requires(iter_type& iter) { iter.next_back(); },
+            "rusty::rev requires next_back() on next-like iterators"
+        );
+        return detail::make_rev_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::rev requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return rev(std::forward<Range>(range).into_iter());
+    } else {
+        return rev(iter(std::forward<Range>(range)));
     }
 }
 

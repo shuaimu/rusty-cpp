@@ -2072,8 +2072,13 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-12-2-1775440731 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-12-2-1775440731/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard errors begin with iterator-adapter method-shape gaps on iterator-like receivers (`arrayvec::Drain<...>.rev()` and `rusty::slice_iter::Iter<...>.enumerate()` emitted as missing members), followed by downstream `Result` visit/call-shape cascades.
-9. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.13.1`.
-   - collapse the new `arrayvec` Stage D iterator-adapter method-shape frontier generically, then rerun matrix.
+9. `Leaf 4.15.4.3.3.3.3.3.13.1` is complete.
+   - transpiler lowering now rewrites iterator-like `.rev()`/`.enumerate()` calls to shared runtime adapters (`rusty::rev(...)` / `rusty::enumerate(...)`) under `is_iterator_like_receiver_expr` gating; non-iterator methods with the same names are preserved unchanged (keeps §11.3 no-blanket-rewrite discipline).
+   - runtime `include/rusty/slice.hpp` now provides shared next-adapter surfaces for `rev` and `enumerate` with option-like iterator constraints and `next_back()` enforcement for reverse iteration.
+   - focused transpiler/runtime regressions were added (`leaf41543333333131` + `tests/rusty_array_test.cpp` adapter-shape coverage).
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-13-1-1775441890 --keep-work-dirs`) removed the prior first deterministic head (`Drain<...>.rev()` / `Iter<...>.enumerate()` missing members); canonical artifacts at `/tmp/rusty-parity-matrix-13-1-1775441890/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+10. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.13.2`.
+   - re-run full seven-crate matrix after 13.1 and record the next deterministic first failure head with canonical artifact paths.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

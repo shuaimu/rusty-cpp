@@ -365,6 +365,40 @@ void test_take_iterator_adapter_shape() {
     printf("PASS\n");
 }
 
+void test_rev_enumerate_iterator_adapter_shape() {
+    printf("test_rev_enumerate_iterator_adapter_shape: ");
+    {
+        auto enumerated = rusty::enumerate(rusty::range(3, 6));
+        size_t idx = 0;
+        int value = 3;
+        for (auto&& [i, x] : rusty::for_in(enumerated)) {
+            assert(i == idx);
+            assert(x == value);
+            ++idx;
+            ++value;
+        }
+        assert(idx == 3);
+    }
+    {
+        auto rev_range = rusty::rev(rusty::range(0, 4));
+        std::vector<int> seen;
+        for (auto&& x : rusty::for_in(rev_range)) {
+            seen.push_back(x);
+        }
+        assert((seen == std::vector<int>{3, 2, 1, 0}));
+    }
+    {
+        std::array<int, 3> values{{10, 20, 30}};
+        auto enumerated = rusty::enumerate(rusty::iter(values));
+        for (auto&& [i, elt] : rusty::for_in(enumerated)) {
+            assert(*elt == values[i]);
+            *elt += static_cast<int>(i);
+        }
+        assert((values == std::array<int, 3>{{10, 21, 32}}));
+    }
+    printf("PASS\n");
+}
+
 void test_maybe_uninit_reference_pointer_shape() {
     printf("test_maybe_uninit_reference_pointer_shape: ");
     using RefSlot = rusty::MaybeUninit<const int&>;
@@ -399,6 +433,7 @@ int main() {
     test_for_in_map_fold_optional_next_shape();
     test_for_in_map_fold_rusty_option_next_shape();
     test_take_iterator_adapter_shape();
+    test_rev_enumerate_iterator_adapter_shape();
     test_maybe_uninit_reference_pointer_shape();
     test_io_print_shim_shape();
 
