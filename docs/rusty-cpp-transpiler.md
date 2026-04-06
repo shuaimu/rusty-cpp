@@ -2453,8 +2453,15 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-11-1-1775516598 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, used shared AST-aware shape-gated lowering (no text patching / no blanket rewrites), and introduced no crate-specific scripts.
-53. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.11.2`.
-   - focus: re-run full seven-crate parity matrix after 27.11.1 and capture the next deterministic frontier (or close Leaf 4 if all pass).
+53. `Leaf 4.15.4.3.3.3.3.3.27.11.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-11-2-1775516802 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-11-2-1775516802/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:4317`: `cannot convert Vec<int> to Vec<unsigned char>` in `test_arrayvec_const_constructible` (`var.push(into_vec(box_new(std::array{3,5,8})))` payload element-shape mismatch), followed by adjacent fallout at `runner.cpp:4375+` (ArrayString/char assertion equality shape) and downstream type/runtime diagnostics.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-11-2-1775516802 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+54. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.12.1`.
+   - focus: collapse the post-27.11.2 first deterministic payload-element coercion head generically, then verify matrix-head movement.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
