@@ -2022,9 +2022,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (post-10.1) advanced through 4 crates and stopped on first failure (`take_mut` Stage D)
-- confirmed passes in that run: `either`, `tap`, `cfg-if`
-- `arrayvec`, `semver`, and `bitflags` were not reached in that specific run because matrix execution stops at first fail
+- latest full matrix run (post-11.1) advanced through 5 crates and stopped on first failure (`arrayvec` Stage D)
+- confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`
+- `semver` and `bitflags` were not reached in that specific run because matrix execution stops at first fail
 
 Crate-focused progress integrated from former appendices:
 
@@ -2060,8 +2060,11 @@ Active work items:
    - generic cast lowering now treats AST pointer targets (`syn::Type::Ptr`) as pointer-typed even when rendered C++ type text is alias-based (`std::add_pointer_t<...>`), preserving address-of emission for reference-like sources.
    - focused transpiler regressions (`leaf41543333333111`) cover both direct generic casts and `std::ptr::read(...)` cast paths and assert the `static_cast<std::add_pointer_t<T>>(&...)` shape.
    - `take_mut` single-crate reprobe after 11.1 (`tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root /tmp/rusty-parity-matrix-11-1-1775436329 --keep-work-dirs`) now passes.
-6. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.11.2`.
-   - rerun the full seven-crate matrix and capture the next deterministic first-failure head (or close the parent if all pass).
+6. `Leaf 4.15.4.3.3.3.3.3.11.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-11-2-1775437753 --keep-work-dirs`) now fails first at `arrayvec` Stage D (`total=5`, `pass=4`, `fail=1`), with canonical artifacts at `/tmp/rusty-parity-matrix-11-2-1775437753/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard errors now begin with fixed-capacity constructor shape mismatch (`ArrayVec::<T, N>::from(rusty::array_repeat(..., N))`), where emitted repeat shape is `std::vector<T>` while `from` expects `std::array<T, N>`.
+7. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.12.1`.
+   - collapse the new `arrayvec` Stage D fixed-array repeat/constructor mismatch generically, then rerun matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2160,6 +2163,7 @@ Required approach:
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
+- for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
