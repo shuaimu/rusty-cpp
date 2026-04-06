@@ -4959,6 +4959,19 @@ impl CodeGen {
                 }
                 true
             }
+            syn::Pat::Struct(struct_pat) => {
+                for field_pat in &struct_pat.fields {
+                    let field_name = match &field_pat.member {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(index) => format!("_{}", index.index),
+                    };
+                    let field_expr = format!("{}.{}", source_expr, field_name);
+                    if !self.collect_pattern_binding_stmts(&field_pat.pat, &field_expr, out) {
+                        return false;
+                    }
+                }
+                true
+            }
             syn::Pat::Type(pt) => self.collect_pattern_binding_stmts(&pt.pat, source_expr, out),
             syn::Pat::Reference(r) => self.collect_pattern_binding_stmts(&r.pat, source_expr, out),
             syn::Pat::Paren(p) => self.collect_pattern_binding_stmts(&p.pat, source_expr, out),
@@ -21841,6 +21854,61 @@ mod tests {
         assert!(out.contains("rusty::enumerate(rusty::iter_mut(v))"));
         assert!(out.contains("rusty::iter(v)"));
         assert!(!out.contains("rusty::enumerate(rusty::iter(v))"));
+    }
+
+    #[test]
+    fn test_leaf41543333333151_result_match_stmt_with_nested_struct_pattern_uses_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            struct CapacityError { element: i32 }
+            fn f(r: Result<(), CapacityError>) {
+                match r {
+                    Err(CapacityError { .. }) => {}
+                    ref e => panic!("{:?}", e),
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("if (_m.is_err()) {"));
+        assert!(out.contains("auto _mv0 = _m.unwrap_err();"));
+        assert!(!out.contains("std::visit(overloaded {"));
+        assert!(!out.contains("complex tuple-struct pattern binding"));
+    }
+
+    #[test]
+    fn test_leaf41543333333151_result_match_expr_with_nested_struct_pattern_uses_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            struct CapacityError { element: i32 }
+            fn is_capacity_err(r: Result<(), CapacityError>) -> bool {
+                match r {
+                    Err(CapacityError { .. }) => true,
+                    _ => false,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("_m.is_err()"));
+        assert!(out.contains("return true;"));
+        assert!(!out.contains("std::visit(overloaded {"));
+    }
+
+    #[test]
+    fn test_leaf41543333333151_result_match_expr_with_struct_field_binding_extracts_field() {
+        let out = transpile_str(
+            r#"
+            struct CapacityError { element: i32 }
+            fn element_or_zero(r: Result<(), CapacityError>) -> i32 {
+                match r {
+                    Err(CapacityError { element }) => element,
+                    _ => 0,
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& element = _mv0.element;"));
+        assert!(out.contains("if (_m.is_err()) {"));
+        assert!(!out.contains("std::visit(overloaded {"));
     }
 
     #[test]

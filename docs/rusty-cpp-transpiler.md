@@ -2091,8 +2091,14 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-14-2-1775444973 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-14-2-1775444973/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error remains `Result` visit/call-shape mismatch in `test_insert`: `std::visit(..., rusty::Result<std::tuple<>, errors::CapacityError<int>>)` at `runner.cpp:3204` / `3219`, followed by existing downstream constructor/trait/string/template-surface cascades.
-13. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.15.1`.
-   - implement a generic `Result` match-dispatch lowering fix so `Result`-shaped matches are routed through `rusty::Result` helper dispatch instead of `std::visit` variant dispatch, then reprobe matrix.
+13. `Leaf 4.15.4.3.3.3.3.3.15.1` is complete.
+   - shared pattern-binding lowering in `transpiler/src/codegen.rs` now handles nested struct payload patterns (`Pat::Struct`) inside tuple-variant matches, including `{ .. }` and field-binding forms.
+   - this keeps `Result`-shaped statement/expression matches on runtime helper dispatch (`is_err`/`unwrap_err`, `is_ok`/`unwrap`) instead of falling back to `std::visit` for nested payload shape.
+   - focused transpiler regressions were added (`leaf41543333333151`) covering statement and expression runtime dispatch for `Err(CapacityError { .. })` plus nested field binding extraction from unwrapped payloads.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-15-1b-1775446136 --keep-work-dirs`) removed the prior deterministic first hard head (`std::visit(..., rusty::Result<...>)` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-15-1b-1775446136/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at unqualified Result constructor emission in `test_into_inner_1` (`Err` not declared at `runner.cpp:3236`), followed by downstream string/constructor/template-surface diagnostics.
+14. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.15.2`.
+   - re-run the full seven-crate parity matrix after 15.1 and record the next deterministic first failure head with canonical artifact paths.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2190,6 +2196,7 @@ Required approach:
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
+- for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 
