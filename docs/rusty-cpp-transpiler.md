@@ -2171,8 +2171,9 @@ Active work items:
    - focused transpiler regressions were added (`leaf41543333333221`) asserting reference-wrapped receivers emit `->` and non-pointer receivers keep `.`.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-22-1-1775461263 --keep-work-dirs`) removed the prior deterministic first hard head (`(&v).write_fmt(...)` pointer-plus-`.` mismatch at `runner.cpp:3343`); canonical artifacts at `/tmp/rusty-parity-matrix-22-1-1775461263/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3343`: method-surface mismatch (`ArrayVec<uint8_t, 8>` has no `write_fmt` member), followed by downstream method/template/runtime-surface cascades (`write` element-shape mismatch, `to_vec` missing, omitted template args for `ArrayVec`/`ArrayString`/`HashMap`, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout).
-28. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.22.2`.
-   - re-run the full seven-crate matrix after 22.1 and record/update the next deterministic first-failure head with canonical artifacts.
+28. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.23.1`.
+   - `Leaf 4.15.4.3.3.3.3.3.22.2` is complete via full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-22-2-1775462322 --keep-work-dirs`), which remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D and canonical artifacts at `/tmp/rusty-parity-matrix-22-2-1775462322/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error head remains method-surface mismatch in `test_write` (`runner.cpp:3343`, `arrayvec::ArrayVec<unsigned char, 8>` has no `write_fmt` member); next work item is collapsing this head family generically.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
