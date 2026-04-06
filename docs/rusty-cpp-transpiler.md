@@ -2416,8 +2416,24 @@ Active work items:
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-9-2-1775514496/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts from the max-capacity tuple family rooted at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` shape; first compiler diagnostic emitted via `/usr/include/c++/14/array:61`), followed by adjacent fallout at `runner.cpp:4293+` (`constexpr`/template-shape diagnostics).
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-50. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.10.1`.
-   - focus: collapse the post-27.9.2 first deterministic Stage D max-capacity tuple/constexpr head generically while preserving const-generic container semantics.
+50. `Leaf 4.15.4.3.3.3.3.3.27.10.1` is complete.
+   - plan/scope check: fix remains under the small-change budget (<1000 LOC), so no additional leaf decomposition was required.
+   - implemented generic max-capacity array materialization hardening across shared runtime/transpiler surfaces:
+     - `include/rusty/rusty.hpp`: added `rusty::sanitize_array_capacity<N>()`, mapping only `N == std::numeric_limits<size_t>::max()` to a safe compile-time placeholder (`1`) for array type materialization.
+     - `transpiler/src/codegen.rs`: array type emission now routes risky max-capacity/path-like const-generic capacities through `rusty::sanitize_array_capacity<...>()`, preventing emission of invalid `std::array<..., SIZE_MAX>` instantiations while preserving normal const-generic capacities.
+   - added fixture-agnostic transpiler regressions:
+     - `test_leaf41543333333327101_array_const_generic_capacity_uses_sanitizer`
+     - `test_leaf41543333333327101_array_usize_max_capacity_uses_sanitizer`
+     - updated existing const-generic struct emission assertion (`test_leaf4154_const_generic_template_preserved_in_struct_and_type_use`) to the sanitized array-capacity shape.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-10-1-1775515473 --keep-work-dirs`) removed the prior deterministic first hard head rooted at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` / `/usr/include/c++/14/array:61` instantiation failure).
+   - new deterministic first hard error now starts at `runner.cpp:4293` (`constexpr` literal-type/copy-template fallout family), with canonical artifacts at `/tmp/rusty-parity-matrix-27-10-1-1775515473/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `ctest --test-dir build-tests --output-on-failure`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-10-1-1775515473 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): changes are shared and shape-gated in core mapping/runtime logic, deterministic first-head discipline is preserved, and no crate-specific rewrites/scripts were introduced.
+51. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.10.2`.
+   - focus: run the full seven-crate matrix after 27.10.1, record canonical artifacts, and capture the next deterministic first failure head (or close Leaf 4 if all pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

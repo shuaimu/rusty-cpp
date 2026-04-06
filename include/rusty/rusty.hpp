@@ -1,6 +1,9 @@
 #ifndef RUSTY_HPP
 #define RUSTY_HPP
 
+#include <cstddef>
+#include <limits>
+
 // Rusty - Rust-inspired safe types for C++
 //
 // This library provides Rust-like types with proper lifetime annotations
@@ -127,6 +130,18 @@ namespace rusty {
     requires (!requires { T::default_(); })
     T default_value() {
         return T{};
+    }
+
+    // Clamp impossible fixed-array capacities in generated C++ type positions.
+    // Rust can express capacities like `usize::MAX` for type-level surfaces that
+    // are not materialized; C++ `std::array<T, SIZE_MAX>` is ill-formed.
+    template<std::size_t N>
+    constexpr std::size_t sanitize_array_capacity() noexcept {
+        if constexpr (N == std::numeric_limits<std::size_t>::max()) {
+            return 1;
+        } else {
+            return N;
+        }
     }
 
     // String-view compatibility helper for transpiled Rust `&str` coercions.

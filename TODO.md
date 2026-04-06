@@ -1182,7 +1182,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-9-2-1775514496 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head discipline, captured canonical artifacts before opening the next implementation leaf, and avoided crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.10: Collapse the post-27.9.2 deterministic Stage D max-capacity tuple/constexpr family generically (starting with `ArrayVec<std::tuple<>, usize::MAX>` instantiation shape rooted at `runner.cpp:4262`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.10.1: Implement generic transpiler/runtime fixes for the first deterministic 27.9.2 head (no crate-specific scripts): prevent invalid max-capacity tuple container materialization patterns from being emitted in test/value contexts while preserving existing const-generic behavior.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.10.1: Implement generic transpiler/runtime fixes for the first deterministic 27.9.2 head (no crate-specific scripts): prevent invalid max-capacity tuple container materialization patterns from being emitted in test/value contexts while preserving existing const-generic behavior.
+                              - [x] *done* Scope/plan analysis for 27.10.1:
+                                - implementation size is well under the <1000 LOC budget (small shared type-mapping/runtime tweak + focused regressions), so no leaf decomposition was needed.
+                                - execution plan: add a shared capacity-sanitization helper and gate array type emission through it only for risky max-capacity/path-like const-generic shapes, then verify first deterministic parity-head movement.
+                              - [x] *done* Implemented generic transpiler/runtime hardening (no crate-specific scripts):
+                                - `include/rusty/rusty.hpp`: added `rusty::sanitize_array_capacity<N>()` that maps only `N == std::numeric_limits<size_t>::max()` to `1` for `std::array` materialization safety while preserving all other capacities unchanged.
+                                - `transpiler/src/codegen.rs`: array type emission now uses `std::array<..., rusty::sanitize_array_capacity<...>()>` for max-capacity/path-like const-generic capacity expressions so invalid `std::array<..., SIZE_MAX>` instantiations are not emitted.
+                              - [x] *done* Added focused fixture-agnostic transpiler regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327101_array_const_generic_capacity_uses_sanitizer`
+                                - `test_leaf41543333333327101_array_usize_max_capacity_uses_sanitizer`
+                                - updated existing const-generic template-preservation assertion to the sanitized array shape so behavior stays coherent under the new generic mapping rule.
+                              - [x] *done* Re-probed `arrayvec` parity after 27.10.1 (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-10-1-1775515473 --keep-work-dirs`):
+                                - prior deterministic first hard error family rooted at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` / `std::array<..., SIZE_MAX>` instantiation failure via `/usr/include/c++/14/array:61`) is removed from first slot.
+                                - new deterministic Stage D first hard error now starts at `runner.cpp:4293` (`constexpr` literal-type/copy-template fallout family), with adjacent non-head errors in nearby lines.
+                                - canonical artifacts: `/tmp/rusty-parity-matrix-27-10-1-1775515473/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Verification for 27.10.1:
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `ctest --test-dir build-tests --output-on-failure`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-10-1-1775515473 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): kept changes shared and shape-gated in core mapping/runtime surfaces, avoided crate-specific rewrites/scripts, and preserved deterministic first-head discipline.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.10.2: Re-run full seven-crate parity matrix after 27.10.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

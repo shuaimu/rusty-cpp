@@ -13600,6 +13600,13 @@ impl CodeGen {
         Some(emitted_segs.join("::"))
     }
 
+    fn should_sanitize_array_capacity_expr(&self, len_expr: &syn::Expr, len_cpp: &str) -> bool {
+        if len_cpp.contains("std::numeric_limits<size_t>::max()") {
+            return true;
+        }
+        matches!(self.peel_paren_group_expr(len_expr), syn::Expr::Path(_))
+    }
+
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
@@ -13845,7 +13852,14 @@ impl CodeGen {
             syn::Type::Array(a) => {
                 let elem = self.map_type(&a.elem);
                 let len = self.emit_expr_to_string(&a.len);
-                format!("std::array<{}, {}>", elem, len)
+                if self.should_sanitize_array_capacity_expr(&a.len, &len) {
+                    format!(
+                        "std::array<{}, rusty::sanitize_array_capacity<{}>()>",
+                        elem, len
+                    )
+                } else {
+                    format!("std::array<{}, {}>", elem, len)
+                }
             }
             syn::Type::Slice(s) => {
                 let elem = self.map_type(&s.elem);
@@ -17793,6 +17807,26 @@ mod tests {
     fn test_array_type() {
         let out = transpile_str("fn f(a: [i32; 5]) {}");
         assert!(out.contains("std::array<int32_t, 5>"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327101_array_const_generic_capacity_uses_sanitizer() {
+        let out = transpile_str(
+            r#"
+            struct Buf<T, const CAP: usize> {
+                xs: [T; CAP],
+            }
+        "#,
+        );
+        assert!(out.contains("std::array<T, rusty::sanitize_array_capacity<CAP>()> xs;"));
+        assert!(!out.contains("std::array<T, CAP> xs;"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327101_array_usize_max_capacity_uses_sanitizer() {
+        let out = transpile_str("fn f() { let _v: [u8; usize::MAX]; }");
+        assert!(out.contains("std::optional<std::array<uint8_t, rusty::sanitize_array_capacity<std::numeric_limits<size_t>::max()>()>> _v;"));
+        assert!(!out.contains("std::array<uint8_t, std::numeric_limits<size_t>::max()>"));
     }
 
     #[test]
@@ -21920,7 +21954,7 @@ mod tests {
         "#,
         );
         assert!(out.contains("template<typename T, size_t CAP>"));
-        assert!(out.contains("std::array<T, CAP> xs;"));
+        assert!(out.contains("std::array<T, rusty::sanitize_array_capacity<CAP>()> xs;"));
         assert!(out.contains("ArrayVec<int32_t, 8> v"));
     }
 
