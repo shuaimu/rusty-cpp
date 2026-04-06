@@ -1233,7 +1233,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-11-2-1775516802 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and avoided crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.12: Collapse the post-27.11.2 deterministic Stage D payload-element coercion/assertion family generically (starting with `Vec<int>` → `Vec<uint8_t>` mismatch at `runner.cpp:4317` in `test_arrayvec_const_constructible`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.12.1: Implement generic transpiler/runtime fixes for the first deterministic 27.11.2 head (no crate-specific scripts): align boxed-array/vector element coercion lowering in typed `Vec<u8>` contexts so integer literals are emitted with byte-compatible element shape while preserving existing typed-conversion behavior elsewhere.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.12.1: Implement generic transpiler/runtime fixes for the first deterministic 27.11.2 head (no crate-specific scripts): align boxed-array/vector element coercion lowering in typed `Vec<u8>` contexts so integer literals are emitted with byte-compatible element shape while preserving existing typed-conversion behavior elsewhere.
+                              - [x] *done* Scope/plan analysis for 27.12.1:
+                                - implementation stayed under the <1000 LOC budget (small shape-gated transpiler lowering + focused regressions), so no additional task decomposition was needed.
+                              - [x] *done* Implemented generic transpiler lowering hardening in `transpiler/src/codegen.rs`:
+                                - added shape-gated `into_vec(box_new(...))` specialization for expected `Vec<u8>` contexts only, coercing boxed array/repeat payload elements to `uint8_t` (`static_cast<uint8_t>(...)`) before vector conversion.
+                                - kept behavior unchanged for non-`Vec<u8>` contexts to avoid blanket numeric rewrites.
+                              - [x] *done* Added focused fixture-agnostic transpiler regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_array_elements`
+                                - `test_leaf41543333333327121_into_vec_box_new_non_u8_context_unchanged`
+                                - `test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_repeat_seed`
+                              - [x] *done* Re-probed `arrayvec` parity after 27.12.1 (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-12-1-1775517396 --keep-work-dirs`):
+                                - prior deterministic first hard error family at `runner.cpp:4317` (`Vec<int>` vs `Vec<uint8_t>` push payload mismatch) is removed from first slot.
+                                - new deterministic Stage D first hard error now starts at `runner.cpp:4375` (`ArrayString<10>` vs `const char` assertion equality shape in `test_arraystring_const_constructible`), with adjacent downstream type/runtime fallout.
+                                - canonical artifacts: `/tmp/rusty-parity-matrix-27-12-1-1775517396/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Verification for 27.12.1:
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-12-1-1775517396 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shared and shape-gated in AST-aware codegen, no crate-specific scripts were added, and no blanket callsite/global numeric rewrite was introduced.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.12.2: Re-run full seven-crate parity matrix after 27.12.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

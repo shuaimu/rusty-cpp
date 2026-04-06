@@ -2460,8 +2460,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-11-2-1775516802 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-54. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.12.1`.
-   - focus: collapse the post-27.11.2 first deterministic payload-element coercion head generically, then verify matrix-head movement.
+54. `Leaf 4.15.4.3.3.3.3.3.27.12.1` is complete.
+   - plan/scope check: fix stays under the small-change budget (<1000 LOC), so no extra leaf decomposition was needed.
+   - implemented generic boxed-array/vector payload coercion hardening in `transpiler/src/codegen.rs`:
+     - added shape-gated `into_vec(box_new(...))` specialization when expected type is `Vec<u8>`,
+     - for boxed array/repeat payloads in that context, emit byte-compatible element shape (`static_cast<uint8_t>(...)`) before vector conversion.
+   - added fixture-agnostic transpiler regressions:
+     - `test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_array_elements`
+     - `test_leaf41543333333327121_into_vec_box_new_non_u8_context_unchanged`
+     - `test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_repeat_seed`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-12-1-1775517396 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:4317` (`Vec<int>` vs `Vec<uint8_t>` push payload mismatch in `test_arrayvec_const_constructible`).
+   - new deterministic first hard error now starts at `runner.cpp:4375`: `no match for operator==` between `ArrayString<10>` and `const char` in `test_arraystring_const_constructible`, with canonical artifacts at `/tmp/rusty-parity-matrix-27-12-1-1775517396/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-12-1-1775517396 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): kept changes shared and shape-gated in AST-aware lowering; no crate-specific scripts and no blanket numeric literal rewrites were introduced.
+55. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.12.2`.
+   - focus: re-run full seven-crate parity matrix after 27.12.1 and capture the next deterministic frontier (or close Leaf 4 if all pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

@@ -10308,6 +10308,88 @@ impl CodeGen {
         }
     }
 
+    fn expected_vec_element_type<'a>(
+        &self,
+        expected_ty: Option<&'a syn::Type>,
+    ) -> Option<&'a syn::Type> {
+        let ty = expected_ty?;
+        match ty {
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                if last.ident != "Vec" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
+            }
+            syn::Type::Reference(r) => self.expected_vec_element_type(Some(r.elem.as_ref())),
+            syn::Type::Paren(p) => self.expected_vec_element_type(Some(p.elem.as_ref())),
+            syn::Type::Group(g) => self.expected_vec_element_type(Some(g.elem.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn try_emit_boxed_u8_array_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(expr);
+        match peeled {
+            syn::Expr::Array(arr) => {
+                if arr.elems.is_empty() {
+                    return Some("std::array<uint8_t, 0>{}".to_string());
+                }
+                let elems: Vec<String> = arr
+                    .elems
+                    .iter()
+                    .map(|elem| format!("static_cast<uint8_t>({})", self.emit_expr_to_string(elem)))
+                    .collect();
+                Some(format!("std::array{{{}}}", elems.join(", ")))
+            }
+            syn::Expr::Repeat(repeat) => {
+                let value = self.emit_expr_to_string(&repeat.expr);
+                let len = self.emit_expr_to_string(&repeat.len);
+                Some(format!(
+                    "rusty::array_repeat(static_cast<uint8_t>({}), {})",
+                    value, len
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn try_emit_into_vec_box_new_with_u8_payload(
+        &self,
+        arg: &syn::Expr,
+    ) -> Option<String> {
+        let syn::Expr::Call(box_call) = self.peel_paren_group_expr(arg) else {
+            return None;
+        };
+        if box_call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(box_call.func.as_ref()) else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(
+            joined.as_str(),
+            "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
+        ) {
+            return None;
+        }
+        let payload = self.try_emit_boxed_u8_array_expr(&box_call.args[0])?;
+        Some(format!("rusty::boxed::box_new({})", payload))
+    }
+
     fn extract_iter_item_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
         match ty {
             syn::Type::Reference(r) => self.extract_iter_item_type_from_type(&r.elem),
@@ -11024,6 +11106,18 @@ impl CodeGen {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Vec<") {
                     return format!("{}::new_()", expected_cpp);
+                }
+            }
+        }
+        if func == "rusty::boxed::into_vec" && call.args.len() == 1 {
+            if self
+                .expected_vec_element_type(expected_ty)
+                .is_some_and(Self::is_u8_syn_type)
+            {
+                if let Some(specialized_arg) =
+                    self.try_emit_into_vec_box_new_with_u8_payload(&call.args[0])
+                {
+                    return format!("{}({})", func, specialized_arg);
                 }
             }
         }
@@ -20275,6 +20369,50 @@ mod tests {
         assert!(out.contains("rusty::boxed::into_vec(rusty::boxed::box_new(std::array{1, 2, 3}))"));
         assert!(!out.contains("alloc::boxed::box_new"));
         assert!(!out.contains("into_vec(alloc::"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_array_elements() {
+        let out = transpile_str(
+            r#"
+            fn f(mut var: ArrayVec<Vec<u8>, 10>) {
+                var.push(into_vec(alloc::boxed::box_new([3, 5, 8])));
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "var.push(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{static_cast<uint8_t>(3), static_cast<uint8_t>(5), static_cast<uint8_t>(8)})));"
+        ));
+        assert!(!out.contains("var.push(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{3, 5, 8})));"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327121_into_vec_box_new_non_u8_context_unchanged() {
+        let out = transpile_str(
+            r#"
+            fn f(mut var: ArrayVec<Vec<i32>, 10>) {
+                var.push(into_vec(alloc::boxed::box_new([3, 5, 8])));
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "var.push(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{3, 5, 8})));"
+        ));
+        assert!(!out.contains("static_cast<uint8_t>(3)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327121_into_vec_box_new_u8_context_coerces_repeat_seed() {
+        let out = transpile_str(
+            r#"
+            fn f(mut var: ArrayVec<Vec<u8>, 10>) {
+                var.push(into_vec(alloc::boxed::box_new([9; 4])));
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "var.push(rusty::boxed::into_vec(rusty::boxed::box_new(rusty::array_repeat(static_cast<uint8_t>(9), 4))));"
+        ));
     }
 
     #[test]
