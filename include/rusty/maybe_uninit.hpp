@@ -30,11 +30,25 @@ public:
     // Default constructor - does NOT initialize the value
     MaybeUninit() noexcept = default;
 
-    // No copy/move - manage manually
-    MaybeUninit(const MaybeUninit&) = delete;
-    MaybeUninit& operator=(const MaybeUninit&) = delete;
-    MaybeUninit(MaybeUninit&&) = delete;
-    MaybeUninit& operator=(MaybeUninit&&) = delete;
+    // Trivial copy/move — MaybeUninit is just raw bytes, so bitwise
+    // copy is always safe (no constructors/destructors involved).
+    // This is essential so std::array<MaybeUninit<T>, N> remains
+    // trivially moveable/copyable, allowing container types like
+    // ArrayString to be used as HashMap keys, return values, etc.
+    MaybeUninit(const MaybeUninit& other) noexcept {
+        __builtin_memcpy(storage_, other.storage_, sizeof(T));
+    }
+    MaybeUninit& operator=(const MaybeUninit& other) noexcept {
+        if (this != &other) __builtin_memcpy(storage_, other.storage_, sizeof(T));
+        return *this;
+    }
+    MaybeUninit(MaybeUninit&& other) noexcept {
+        __builtin_memcpy(storage_, other.storage_, sizeof(T));
+    }
+    MaybeUninit& operator=(MaybeUninit&& other) noexcept {
+        if (this != &other) __builtin_memcpy(storage_, other.storage_, sizeof(T));
+        return *this;
+    }
 
     // Destructor does NOT destroy the value - caller must do it
     ~MaybeUninit() = default;
@@ -115,11 +129,21 @@ public:
     // Default constructor - no initialization
     UninitArray() noexcept = default;
 
-    // No copy/move - manage manually
-    UninitArray(const UninitArray&) = delete;
-    UninitArray& operator=(const UninitArray&) = delete;
-    UninitArray(UninitArray&&) = delete;
-    UninitArray& operator=(UninitArray&&) = delete;
+    // Trivial copy/move — raw bytes, bitwise copy is safe.
+    UninitArray(const UninitArray& other) noexcept {
+        __builtin_memcpy(storage_, other.storage_, N * sizeof(T));
+    }
+    UninitArray& operator=(const UninitArray& other) noexcept {
+        if (this != &other) __builtin_memcpy(storage_, other.storage_, N * sizeof(T));
+        return *this;
+    }
+    UninitArray(UninitArray&& other) noexcept {
+        __builtin_memcpy(storage_, other.storage_, N * sizeof(T));
+    }
+    UninitArray& operator=(UninitArray&& other) noexcept {
+        if (this != &other) __builtin_memcpy(storage_, other.storage_, N * sizeof(T));
+        return *this;
+    }
 
     // Destructor does NOT destroy elements
     ~UninitArray() = default;
