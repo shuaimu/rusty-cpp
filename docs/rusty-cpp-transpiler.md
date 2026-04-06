@@ -2209,9 +2209,13 @@ Active work items:
      - runtime regression in `tests/rusty_array_test.cpp` for `rusty::to_vec` slice-surface behavior.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-26-1c-1775484823 --keep-work-dirs`) removed the prior deterministic first hard head family in `array_clone_from` (`to_vec` missing + `ArrayVec<auto,4>` + `clone_from(&v)` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-26-1c-1775484823/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3480`: `ArrayString` used without template arguments, followed by downstream template/runtime-surface diagnostics (`HashMap` omitted args, `RUSTY_TRY`/`Ok`, parse-surface and related fallout).
-34. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.26.2`.
-   - focus: re-run full seven-crate matrix after 26.1, capture canonical artifact paths for the next deterministic head, and update frontier status.
-   - guardrail (wrong-approach checklist §11): continue root-cause-first collapse and keep rewrites shape-gated; avoid blanket method/template rewrites across unrelated surfaces.
+34. `Leaf 4.15.4.3.3.3.3.3.26.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-26-2-1775487958 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-26-2-1775487958/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:3480`: omitted-template owner constructor surface `ArrayString::new_()` (`ArrayString` used without template arguments), followed by downstream omitted-template/runtime-surface diagnostics (`HashMap::new_()` missing template args, repeated `ArrayString` omitted args, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout on C-string receivers).
+35. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.1`.
+   - focus: collapse the omitted-template owner constructor family led by `ArrayString::new_()` / `HashMap::new_()` using generic expected-type/usage-context recovery only.
+   - guardrail (wrong-approach checklist §11): continue root-cause-first collapse with shape-gated template recovery; avoid blanket associated-call rewrites across unrelated owners.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
