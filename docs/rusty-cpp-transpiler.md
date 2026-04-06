@@ -2068,8 +2068,12 @@ Active work items:
    - fixed-array repeat materialization now uses a non-capturing lambda form (`[](auto _seed){...}(<expr>)`) to stay valid in non-local contexts; dynamic repeat lowering remains unchanged outside explicit fixed-array contexts (aligned with §11.3 no-blanket-rewrite rule).
    - focused regressions (`leaf41543333333121`) cover explicit-owner and omitted-owner `ArrayVec` repeat constructors plus non-capturing fixed-array lambda shape and dynamic-repeat preservation.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-12-1-fix-1775439781 --keep-work-dirs`) removed the prior first deterministic head (`ArrayVec::<T,N>::from(rusty::array_repeat(...))` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-12-1-fix-1775439781/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
-8. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.12.2`.
-   - re-run full seven-crate matrix after 12.1 and record the next deterministic first failure head with canonical artifact paths.
+8. `Leaf 4.15.4.3.3.3.3.3.12.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-12-2-1775440731 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-12-2-1775440731/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard errors begin with iterator-adapter method-shape gaps on iterator-like receivers (`arrayvec::Drain<...>.rev()` and `rusty::slice_iter::Iter<...>.enumerate()` emitted as missing members), followed by downstream `Result` visit/call-shape cascades.
+9. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.13.1`.
+   - collapse the new `arrayvec` Stage D iterator-adapter method-shape frontier generically, then rerun matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
