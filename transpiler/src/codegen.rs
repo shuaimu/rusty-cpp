@@ -2943,6 +2943,26 @@ impl CodeGen {
         }
     }
 
+    fn is_local_new_const_constructor_call(&self, expr: &syn::Expr) -> bool {
+        if self.block_depth == 0 {
+            return false;
+        }
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        if !call.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return false;
+        };
+        path_expr
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "new_const")
+    }
+
     fn emit_const(&mut self, c: &syn::ItemConst) {
         if self.is_rust_libtest_metadata_type(&c.ty) {
             let marker =
@@ -2952,6 +2972,25 @@ impl CodeGen {
                 "// Rust-only libtest metadata const skipped: {}",
                 c.ident
             ));
+            return;
+        }
+        if self.is_local_new_const_constructor_call(&c.expr) {
+            let rust_name = c.ident.to_string();
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            self.register_local_binding(rust_name.clone(), Some((*c.ty).clone()));
+            self.record_local_const_binding(&rust_name, false);
+
+            let ty = self.map_type(&c.ty);
+            let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
+            self.writeln(&format!("const auto {} = []() -> {} {{", cpp_name, ty));
+            self.indent += 1;
+            self.writeln(&format!("return {};", expr));
+            self.indent -= 1;
+            self.writeln("};");
+
+            if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                scope.insert(rust_name, format!("{}()", cpp_name));
+            }
             return;
         }
         let name = &c.ident;
@@ -17738,6 +17777,35 @@ mod tests {
     fn test_const() {
         let out = transpile_str("const MAX: i32 = 100;");
         assert!(out.contains("constexpr int32_t MAX = 100;"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327111_local_new_const_uses_factory_materialization() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                const OF_U8: ArrayVec<Vec<u8>, 10> = ArrayVec::new_const();
+                let mut var = OF_U8;
+                var.push(Vec::new());
+            }
+            "#,
+        );
+        assert!(out.contains("const auto OF_U8 = []() -> ArrayVec<rusty::Vec<uint8_t>, 10> {"));
+        assert!(out.contains("auto var = OF_U8();"));
+        assert!(!out.contains("constexpr ArrayVec<rusty::Vec<uint8_t>, 10> OF_U8"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327111_local_scalar_const_stays_constexpr() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                const N: usize = 4;
+                let _x = N;
+            }
+            "#,
+        );
+        assert!(out.contains("constexpr size_t N = 4;"));
     }
 
     #[test]
