@@ -2126,8 +2126,12 @@ Active work items:
    - focused transpiler regression (`leaf41543333333181`) asserts Result tuple-match assertion shapes keep direct `*left_val == *right_val` comparisons and context-typed `Result::Ok(...)` constructor emission (no bare `Ok(...)` in tuple scaffolding).
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-18-1-1775452758 --keep-work-dirs`) removed the prior deterministic first hard head (`no match for operator==` on `rusty::Result<...>` at `runner.cpp:3243`); canonical artifacts at `/tmp/rusty-parity-matrix-18-1-1775452758/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3258`: `request for member 'into'` on string literals (`("a").into()`), followed by downstream array/string comparison and template/runtime-surface cascades.
-20. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.18.2`.
-   - re-run the full seven-crate parity matrix after 18.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
+20. `Leaf 4.15.4.3.3.3.3.3.18.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-18-2-1775453841 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-18-2-1775453841/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains string-literal conversion surface mismatch in `test_into_inner_2`: `request for member 'into'` at `runner.cpp:3258` (`("a").into()` and siblings), followed by downstream array/string comparison (`std::array<rusty::String, 4>` vs `std::array<const char*, 4>` at `runner.cpp:3272`) and existing template/runtime-surface cascades.
+21. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.19.1`.
+   - implement generic `.into()` conversion lowering for literal/primitive expression receivers (no crate-specific scripts), add focused regressions, then re-run matrix in `19.2`.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2231,6 +2235,7 @@ Required approach:
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
 - for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
 - for Result assertion parity, do not add one-off transpiler rewrites that bypass value comparison shape for specific call sites; maintain runtime `rusty::Result` equality surfaces (`operator==`/`operator!=`) so generated assertion scaffolding remains generic
+- for `Into` conversion lowering, do not emit Rust trait-style member calls directly on literals/primitives (for example `("a").into()` in C++); lower through valid helper/context conversion surfaces instead
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
