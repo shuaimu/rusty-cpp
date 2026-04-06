@@ -2021,9 +2021,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run advanced through 5 crates and stopped on first failure (`arrayvec` Stage D)
-- confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`
-- `semver` and `bitflags` were not reached in that specific run because matrix execution stops at first fail
+- latest full matrix run (post-10.1) advanced through 4 crates and stopped on first failure (`take_mut` Stage D)
+- confirmed passes in that run: `either`, `tap`, `cfg-if`
+- `arrayvec`, `semver`, and `bitflags` were not reached in that specific run because matrix execution stops at first fail
 
 Crate-focused progress integrated from former appendices:
 
@@ -2037,7 +2037,7 @@ Crate-focused progress integrated from former appendices:
 
 ### 10.6 Active Frontier and Next Work
 
-From the active TODO frontier, the currently active leaf work is in the `arrayvec` Stage D chain.
+From the active TODO frontier, the currently active leaf work is now in the `take_mut` Stage D chain.
 
 Active work items:
 
@@ -2052,8 +2052,11 @@ Active work items:
 3. `Leaf 4.15.4.3.3.3.3.3.10.1` is complete.
    - generic runtime/transpiler hardening removed the prior deterministic Stage D lead diagnostics for `rusty::MaybeUninit<const T&>` reference-storage pointer shape and mixed optional-interface fallout (`std::optional` receiving `.is_some()`).
    - `arrayvec` reprobe artifact: `/tmp/rusty-parity-matrix-10-1b-1775434421/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
-4. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.10.2`.
-   - first deterministic Stage D head now begins with `array_repeat`/`std::array` conversion shape mismatches, followed by dependent `Result` visit/constructor emission mismatch families.
+4. `Leaf 4.15.4.3.3.3.3.3.10.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-2-1775435353 --keep-work-dirs`) now fails earlier at `take_mut` Stage D (`total=4`, `pass=3`, `fail=1`), with canonical artifacts at `/tmp/rusty-parity-matrix-10-2-1775435353/take_mut/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard errors now begin with scoped `take_or_recover` pointer-cast lowering shape (`static_cast<std::add_pointer_t<T>>(mut_ref)`), yielding invalid `T`→`T*` casts in pointer helper calls.
+5. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.11.1`.
+   - collapse the new `take_mut` Stage D pointer-cast head generically, then rerun matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2151,6 +2154,7 @@ Required approach:
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
+- for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
