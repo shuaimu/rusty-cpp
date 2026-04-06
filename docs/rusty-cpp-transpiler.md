@@ -2152,8 +2152,15 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-20-2-1775458371 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-20-2-1775458371/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at `runner.cpp:3342`: omitted-template owner constructor shape `ArrayVec<auto, 8>::new_()` (`wrong number of template arguments (1, should be 2)`), followed by downstream method/template/runtime-surface cascades (`to_vec` missing, omitted template args for `ArrayString`/`HashMap`, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout).
-25. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.21.1`.
-   - collapse the post-20.2 deterministic Stage D head family by recovering concrete owner template arguments for omitted-template constructor calls in typed/assertion scaffolding contexts, then re-probe the full matrix.
+25. `Leaf 4.15.4.3.3.3.3.3.21.1` is complete.
+   - transpiler local-placeholder owner recovery was hardened in `transpiler/src/codegen.rs` for omitted-template constructor shapes:
+     - method-call hint collection now recognizes `write` / `write_all` / `write_fmt` receiver contexts for candidate locals and seeds element-type recovery for constructor owner placeholders.
+     - simple-local receiver extraction now peels reference wrappers (`&expr` / `&mut expr`) before identifier resolution so receiver shapes like `(&mut v).write_fmt(...)` participate in inference.
+   - focused transpiler regressions were added (`leaf41543333333211`) asserting `ArrayVec::<_, 8>::new()` recovers `ArrayVec<uint8_t, 8>::new_()` from both `write(...)` and `write_fmt(...)` receiver contexts (no `ArrayVec<auto, 8>::new_()` emission).
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-21-1-1775459126 --keep-work-dirs`) removed the prior deterministic first hard head (`ArrayVec<auto, 8>::new_()` at `runner.cpp:3342`); canonical artifacts at `/tmp/rusty-parity-matrix-21-1-1775459126/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3343`: pointer/member-access shape mismatch on `(&v).write_fmt(...)` (`request for member 'write_fmt' in '& v'`), followed by downstream method/template/runtime-surface cascades.
+26. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.21.2`.
+   - re-run the full seven-crate matrix after 21.1 and record/update the next deterministic first-failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2261,6 +2268,7 @@ Required approach:
 - for receiver-gated generic method args (`push(T)`/`insert(_, T)`/`set(T)`), do not block receiver-driven expected-type recovery just because the declared arg type placeholder is not in current scope; resolve concrete arg type from receiver context before conversion-lowering decisions
 - for assertion/equality array-shape fallout, do not add fixture-specific `std::array` equality hacks or crate-local rewrites and do not special-case `assert_eq!` callsites; normalize compared element/container shapes through generic transpiler/runtime surfaces with explicit type/context gating
 - for omitted-template owner constructor fallout (`Type<auto, ...>::new_()`), do not hardcode crate/type-specific constructor rewrites or globally strip placeholder args; recover owner template args through explicit expected-type/scope inference gates so unaffected constructor sites keep their existing behavior
+- for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

@@ -15492,15 +15492,21 @@ fn collect_local_generic_placeholder_hints_in_expr(
         syn::Expr::MethodCall(mc) => {
             if let Some(name) = extract_simple_local_ident(&mc.receiver) {
                 if candidates.contains(&name) && !hints.contains_key(&name) {
-                    let arg_idx = match mc.method.to_string().as_str() {
-                        "push" | "try_push" | "set" => Some(0usize),
-                        "insert" | "try_insert" => Some(1usize),
-                        _ => None,
-                    };
-                    if let Some(arg_idx) = arg_idx {
-                        if let Some(arg) = mc.args.iter().nth(arg_idx) {
-                            if let Some(inferred) = infer_hint_type_for_local_placeholder(arg) {
-                                hints.insert(name, inferred);
+                    let method = mc.method.to_string();
+                    if matches!(method.as_str(), "write" | "write_all" | "write_fmt") {
+                        let ty: syn::Type = parse_quote!(u8);
+                        hints.insert(name, ty);
+                    } else {
+                        let arg_idx = match method.as_str() {
+                            "push" | "try_push" | "set" => Some(0usize),
+                            "insert" | "try_insert" => Some(1usize),
+                            _ => None,
+                        };
+                        if let Some(arg_idx) = arg_idx {
+                            if let Some(arg) = mc.args.iter().nth(arg_idx) {
+                                if let Some(inferred) = infer_hint_type_for_local_placeholder(arg) {
+                                    hints.insert(name, inferred);
+                                }
                             }
                         }
                     }
@@ -16113,6 +16119,7 @@ fn extract_simple_local_ident(expr: &syn::Expr) -> Option<String> {
         match current {
             syn::Expr::Paren(p) => current = &p.expr,
             syn::Expr::Group(g) => current = &g.expr,
+            syn::Expr::Reference(r) => current = &r.expr,
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 return Some(path.path.segments[0].ident.to_string());
             }
@@ -22101,6 +22108,36 @@ mod tests {
         );
         assert!(out.contains("ArrayVec<uint8_t, N> vec = ArrayVec<uint8_t, N>::new_();"));
         assert!(!out.contains("ArrayVec<auto, N>"));
+    }
+
+    #[test]
+    fn test_leaf41543333333211_untyped_arrayvec_new_recovers_type_from_write_method() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            fn f() {
+                let mut v = ArrayVec::<_, 8>::new();
+                (&mut v).write(&[9; 16]);
+            }
+        "#,
+        );
+        assert!(out.contains("auto v = ArrayVec<uint8_t, 8>::new_();"));
+        assert!(!out.contains("ArrayVec<auto, 8>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333211_untyped_arrayvec_new_recovers_type_from_write_fmt_method() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            fn f() {
+                let mut v = ArrayVec::<_, 8>::new();
+                (&mut v).write_fmt(std::string::String::new());
+            }
+        "#,
+        );
+        assert!(out.contains("auto v = ArrayVec<uint8_t, 8>::new_();"));
+        assert!(!out.contains("ArrayVec<auto, 8>::new_()"));
     }
 
     #[test]
