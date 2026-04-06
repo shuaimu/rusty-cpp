@@ -4475,13 +4475,22 @@ impl CodeGen {
         let mut tuple_elem_names = Vec::new();
         for (idx, elem) in tuple_scrutinee.elems.iter().enumerate() {
             let elem_name = format!("_m{}", idx);
+            let peer_expr = self.binding_tuple_peer_expr_for_index(tuple_scrutinee, idx);
             match elem {
                 syn::Expr::Reference(r) => {
                     let reference_target = self.peel_reference_target_expr(&r.expr);
-                    let mut inner_raw = self.emit_expr_to_string_with_expected(
-                        reference_target,
-                        tuple_expected_ty.as_ref(),
-                    );
+                    let mut inner_raw = self
+                        .emit_result_ctor_expr_with_peer_context(
+                            reference_target,
+                            tuple_expected_ty.as_ref(),
+                            peer_expr,
+                        )
+                        .unwrap_or_else(|| {
+                            self.emit_expr_to_string_with_expected(
+                                reference_target,
+                                tuple_expected_ty.as_ref(),
+                            )
+                        });
                     let inner = self.maybe_wrap_variant_constructor_with_expected_enum(
                         reference_target,
                         inner_raw,
@@ -4511,8 +4520,15 @@ impl CodeGen {
                     }
                 }
                 _ => {
-                    let elem_expr_raw =
-                        self.emit_expr_to_string_with_expected(elem, tuple_expected_ty.as_ref());
+                    let elem_expr_raw = self
+                        .emit_result_ctor_expr_with_peer_context(
+                            elem,
+                            tuple_expected_ty.as_ref(),
+                            peer_expr,
+                        )
+                        .unwrap_or_else(|| {
+                            self.emit_expr_to_string_with_expected(elem, tuple_expected_ty.as_ref())
+                        });
                     let elem_expr = self.maybe_wrap_variant_constructor_with_expected_enum(
                         elem,
                         elem_expr_raw,
@@ -4579,6 +4595,67 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         true
+    }
+
+    fn binding_tuple_peer_expr_for_index<'a>(
+        &self,
+        tuple: &'a syn::ExprTuple,
+        idx: usize,
+    ) -> Option<&'a syn::Expr> {
+        if tuple.elems.len() != 2 {
+            return None;
+        }
+        let peer_idx = if idx == 0 {
+            1
+        } else if idx == 1 {
+            0
+        } else {
+            return None;
+        };
+        let peer = tuple.elems.get(peer_idx)?;
+        let peer = self.peel_paren_group_expr(peer);
+        if let syn::Expr::Reference(r) = peer {
+            return Some(self.peel_reference_target_expr(&r.expr));
+        }
+        Some(peer)
+    }
+
+    fn emit_result_ctor_expr_with_peer_context(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+        peer_expr: Option<&syn::Expr>,
+    ) -> Option<String> {
+        if expected_ty.is_some() {
+            return None;
+        }
+        let peer_expr = peer_expr?;
+        let expr = self.extract_value_expr(expr)?;
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let ctor_name = path_expr.path.segments.last()?.ident.to_string();
+        if !matches!(ctor_name.as_str(), "Ok" | "Err") {
+            return None;
+        }
+        if !matches!(
+            path_expr.path.segments.last().map(|s| &s.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+        let arg = self.emit_expr_maybe_move(&call.args[0]);
+        let peer = self.emit_expr_to_string(peer_expr);
+        Some(format!(
+            "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; return _ResultCtorCtx::{}({}); }}()",
+            peer, ctor_name, arg
+        ))
     }
 
     fn is_binding_only_tuple_arm_pattern(&self, pat: &syn::Pat, arity: usize) -> bool {
@@ -21909,6 +21986,56 @@ mod tests {
         assert!(out.contains("auto&& element = _mv0.element;"));
         assert!(out.contains("if (_m.is_err()) {"));
         assert!(!out.contains("std::visit(overloaded {"));
+    }
+
+    #[test]
+    fn test_leaf41543333333161_tuple_match_err_constructor_uses_peer_result_context() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn into_inner(&self) -> Result<i32, i32> {
+                    Ok(1)
+                }
+            }
+            fn id<T>(x: T) -> T { x }
+            fn f(s: S, u: i32) {
+                match (&s.into_inner(), &Err(id(u))) {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("_ResultCtorCtx::Err("));
+        assert!(!out.contains("auto _m1_tmp = Err("));
+    }
+
+    #[test]
+    fn test_leaf41543333333161_tuple_match_ok_constructor_uses_peer_result_context() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn into_inner(&self) -> Result<i32, i32> {
+                    Err(1)
+                }
+            }
+            fn id<T>(x: T) -> T { x }
+            fn f(s: S, u: i32) {
+                match (&s.into_inner(), &Ok(id(u))) {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("_ResultCtorCtx::Ok("));
+        assert!(!out.contains("auto _m1_tmp = Ok("));
     }
 
     #[test]

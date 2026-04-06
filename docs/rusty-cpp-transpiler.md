@@ -2101,8 +2101,13 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-15-2-1775447107 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-15-2-1775447107/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at unqualified `Result` constructor emission in `test_into_inner_1` (`Err` not declared at `runner.cpp:3236`; generated shape `auto _m1_tmp = Err(std::move(u));`), followed by downstream string-conversion/constructor/template-surface cascades.
-15. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.16.1`.
-   - implement a generic constructor-qualification fix for `Result`-shaped `Ok`/`Err` emission in tuple/assertion/match scaffolding so generated C++ stays fully qualified and context-typed, then reprobe matrix.
+15. `Leaf 4.15.4.3.3.3.3.3.16.1` is complete.
+   - shared tuple/assertion binding scaffolding in `transpiler/src/codegen.rs` now hardens unresolved `Result` constructor emission by deriving constructor context from tuple peers (`using _ResultCtorCtx = std::remove_cvref_t<decltype((peer))>`) and emitting `_ResultCtorCtx::Ok/Err(...)` instead of bare `Ok/Err`.
+   - focused transpiler regressions were added (`leaf41543333333161`) covering both `Err(id(u))` and `Ok(id(u))` unresolved-payload tuple-match assertions, asserting context-qualified emission and absence of bare constructor calls.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-16-1-1775448430 --keep-work-dirs`) removed the prior deterministic first hard head (`Err` not declared from `auto _m1_tmp = Err(...)`); canonical artifacts at `/tmp/rusty-parity-matrix-16-1-1775448430/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts with ownership/copy fallout in `test_into_inner_1` (`use of deleted function` at `runner.cpp:3236`) from `_ResultCtorCtx::Err(std::move(u))` where `u` is emitted as `const auto u = v.clone();`.
+16. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.16.2`.
+   - re-run full seven-crate matrix after 16.1, record the next deterministic failure head with canonical artifacts, and update frontier status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2203,6 +2208,7 @@ Required approach:
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
+- for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
