@@ -227,6 +227,52 @@ void test_span_equality_helper_shape() {
     printf("PASS\n");
 }
 
+void test_vector_span_equality_helper_shape() {
+    printf("test_vector_span_equality_helper_shape: ");
+    {
+        std::vector<uint8_t> bytes{1, 2, 3, 4};
+        auto full = rusty::slice_full(bytes);
+        auto short_span = rusty::slice_to(bytes, 3);
+
+        assert(bytes == full);
+        assert(full == bytes);
+        assert(!(bytes == short_span));
+        assert(!(short_span == bytes));
+    }
+    {
+        struct Z {
+            int value;
+            bool operator==(const Z& other) const { return value == other.value; }
+        };
+
+        std::vector<Z> values{{1}, {2}, {3}};
+        std::array<Z, 3> same{{{1}, {2}, {3}}};
+        std::array<Z, 2> shorter{{{1}, {2}}};
+
+        auto same_span = std::span<const Z>(same);
+        auto short_span = std::span<const Z>(shorter);
+        assert(values == same_span);
+        assert(same_span == values);
+        assert(!(values == short_span));
+        assert(!(short_span == values));
+    }
+    {
+        struct Marker {};
+
+        std::vector<Marker> values(3);
+        std::array<Marker, 3> same{};
+        std::array<Marker, 2> shorter{};
+
+        auto same_span = std::span<const Marker>(same);
+        auto short_span = std::span<const Marker>(shorter);
+        assert(values == same_span);
+        assert(same_span == values);
+        assert(!(values == short_span));
+        assert(!(short_span == values));
+    }
+    printf("PASS\n");
+}
+
 void test_array_cross_element_equality_shape() {
     printf("test_array_cross_element_equality_shape: ");
     {
@@ -497,6 +543,7 @@ int main() {
     test_to_vec_helper_uses_slice_surface_shape();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
+    test_vector_span_equality_helper_shape();
     test_array_cross_element_equality_shape();
     test_slice_iter_helpers_shape();
     test_cursor_new_helper_shape();

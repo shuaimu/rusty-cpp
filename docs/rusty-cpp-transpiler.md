@@ -2356,8 +2356,23 @@ Active work items:
    - new deterministic first hard error now starts at `runner.cpp:4052` in `test_sizes`: assertion tuple compare emits `operator==` between `std::vector<unsigned char>` and `std::span<const unsigned char>`, which has no viable overload.
    - adjacent deterministic fallout in the same family appears at `runner.cpp:4130` and `runner.cpp:4186` (`std::span<Z>` compared with `std::vector<Z>`), indicating a shared container/slice equality-shape gap.
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts/failure-family evidence before opening the next implementation leaf.
-44. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.7.1`.
-   - focus: collapse the post-27.6.2 container/slice equality first head generically (assertion/equality lowering across `Vec` and slice/span shapes) without crate-specific rewrites, then rerun the full matrix.
+44. `Leaf 4.15.4.3.3.3.3.3.27.7.1` is complete.
+   - implemented generic runtime container/slice equality hardening in `include/rusty/array.hpp`:
+     - added bidirectional `std::vector`↔`std::span` equality overloads used by transpiled assertion tuple compare scaffolding,
+     - kept shape-gated element comparison (`lhs == rhs` or `rhs == lhs`) and added empty marker-like element fallback when explicit equality operators are absent.
+   - added focused fixture-agnostic runtime regression in `tests/rusty_array_test.cpp` (`test_vector_span_equality_helper_shape`) covering:
+     - `uint8_t` vector/span equality in both directions,
+     - custom comparable element equality,
+     - empty marker-like element equality fallback and size mismatch behavior.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-7-1c-1775511708 --keep-work-dirs`) removed the prior deterministic first hard error family at `runner.cpp:4052/4130/4186` (`std::vector`↔`std::span` assertion equality mismatch).
+   - new deterministic first hard error now starts at `runner.cpp:1636`: `ArrayString::try_from(std::string_view)` auto-return deduction conflict (`Result<std::tuple<>, _>` vs `Result<ArrayString<16>, _>`), with adjacent fallout at `runner.cpp:4239`, `runner.cpp:4262`, and `runner.cpp:4293+`.
+   - verification:
+     - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+     - `ctest --test-dir build-tests --output-on-failure`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fix is runtime-shared and shape-gated, with no crate-specific rewrites and no blanket transpiler callsite rewiring.
+45. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.7.2`.
+   - focus: re-run full seven-crate matrix after 27.7.1, record canonical first deterministic failure head/artifacts, and advance TODO frontier (or mark Leaf 4 complete if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

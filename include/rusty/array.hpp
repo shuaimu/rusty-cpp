@@ -33,6 +33,44 @@ constexpr bool operator==(const std::array<L, N>& lhs, std::span<R, RExtent> rhs
     return rhs == lhs;
 }
 
+// Vec/slice assertion scaffolding often compares owned buffers (`std::vector`)
+// with borrowed slice views (`std::span`). Mirror Rust slice equality semantics
+// for these mixed container/view shapes.
+template<typename L, typename Alloc, typename R, std::size_t RExtent>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(const std::vector<L, Alloc>& lhs, std::span<R, RExtent> rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    if constexpr (requires(const L& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    } else {
+        return true;
+    }
+}
+
+template<typename L, std::size_t LExtent, typename R, typename Alloc>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(std::span<L, LExtent> lhs, const std::vector<R, Alloc>& rhs) {
+    return rhs == lhs;
+}
+
 // Mixed-element std::array equality for transpiled assertion scaffolding.
 // Keep this narrow: only for different element types and only when one-sided
 // element equality is well-formed.
