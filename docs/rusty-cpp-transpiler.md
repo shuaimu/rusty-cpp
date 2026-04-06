@@ -2110,8 +2110,14 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-16-2-1775449410 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-16-2-1775449410/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error remains ownership/copy fallout in `test_into_inner_1`: `use of deleted function` at `runner.cpp:3236` from `_ResultCtorCtx::Err(std::move(u))` where `u` is emitted as `const auto u = v.clone();`, followed by downstream string-conversion/constructor/template-surface cascades.
-17. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.17.1`.
-   - implement a generic ownership-safe constructor-argument lowering fix for context-qualified `Result` constructor paths (`Ok`/`Err`) so tuple/assertion scaffolding does not force invalid moves from const/lvalue-constrained bindings, then reprobe matrix.
+17. `Leaf 4.15.4.3.3.3.3.3.17.1` is complete.
+   - constructor payload lowering for context-qualified `Result` constructor scaffolding now tracks local constness in block scope and avoids forcing `std::move(...)` only for const-local payload path args.
+   - consuming-use pre-scan now treats bare `Ok(...)`/`Err(...)` payload locals as consuming contexts, so those locals are emitted non-const and remain move-constructible for `_ResultCtorCtx::Ok/Err(...)`.
+   - focused transpiler regressions (`leaf41543333333171`) assert both `Err` and `Ok` tuple-match assertion paths emit non-const payload locals and `_ResultCtorCtx::{Err,Ok}(std::move(u))` constructor calls.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-17-1b-1775450609 --keep-work-dirs`) removed the prior deterministic first hard head (`use of deleted function` at `runner.cpp:3236` from `_ResultCtorCtx::Err(std::move(u))` with `const auto u = ...`); canonical artifacts at `/tmp/rusty-parity-matrix-17-1b-1775450609/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3243`: `no match for operator==` on `rusty::Result<...>` equality in assertion scaffolding.
+18. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.17.2`.
+   - re-run the full seven-crate parity matrix after 17.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2213,7 +2219,7 @@ Required approach:
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
-- for constructor payload forwarding, do not force `std::move` from const/lvalue-constrained bindings into context-qualified `Result` constructors; preserve copy semantics when move construction is not valid
+- for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

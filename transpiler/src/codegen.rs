@@ -156,6 +156,10 @@ pub struct CodeGen {
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
     local_cpp_bindings: Vec<HashMap<String, String>>,
+    /// Scoped Rust-local constness as emitted in C++ (`const auto` vs mutable storage).
+    /// Used by value-constructor lowering to avoid forcing invalid moves from
+    /// const-constrained locals in context-qualified constructor paths.
+    local_const_bindings: Vec<HashMap<String, bool>>,
     /// Scoped locals declared with explicit type but without initializer.
     /// Lowered as `std::optional<T>` storage so non-default-constructible
     /// types remain valid until first assignment.
@@ -278,6 +282,7 @@ impl CodeGen {
             local_placeholder_type_hints: Vec::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
+            local_const_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
             local_type_bindings: Vec::new(),
@@ -395,6 +400,7 @@ impl CodeGen {
         self.param_bindings.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
+        self.local_const_bindings.clear();
         self.delayed_init_locals.clear();
         self.local_function_bindings.clear();
         self.local_type_bindings.clear();
@@ -4140,6 +4146,7 @@ impl CodeGen {
         self.local_placeholder_type_hints.push(placeholder_hints);
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
+        self.local_const_bindings.push(HashMap::new());
         self.delayed_init_locals.push(HashSet::new());
         let local_functions: HashSet<String> = block
             .stmts
@@ -4174,6 +4181,7 @@ impl CodeGen {
         self.block_depth -= 1;
         self.local_bindings.pop();
         self.local_cpp_bindings.pop();
+        self.local_const_bindings.pop();
         self.delayed_init_locals.pop();
         self.local_function_bindings.pop();
         self.local_type_bindings.pop();
@@ -4650,12 +4658,25 @@ impl CodeGen {
         ) {
             return None;
         }
-        let arg = self.emit_expr_maybe_move(&call.args[0]);
+        let arg = self.emit_result_ctor_arg_with_peer_context(&call.args[0]);
         let peer = self.emit_expr_to_string(peer_expr);
         Some(format!(
             "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; return _ResultCtorCtx::{}({}); }}()",
             peer, ctor_name, arg
         ))
+    }
+
+    fn emit_result_ctor_arg_with_peer_context(&self, arg: &syn::Expr) -> String {
+        let value_arg = self.extract_value_expr(arg).unwrap_or(arg);
+        if let syn::Expr::Path(path) = value_arg {
+            if path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                if self.is_const_local_binding_in_scope(&name) {
+                    return self.emit_expr_to_string(arg);
+                }
+            }
+        }
+        self.emit_expr_maybe_move(arg)
     }
 
     fn is_binding_only_tuple_arm_pattern(&self, pat: &syn::Pat, arity: usize) -> bool {
@@ -6573,6 +6594,10 @@ impl CodeGen {
                     } else {
                         "const "
                     };
+                self.record_local_const_binding(
+                    &name_str,
+                    qualifier == "const " && local.init.is_some(),
+                );
 
                 if shadows_param {
                     self.local_cpp_bindings
@@ -6717,6 +6742,10 @@ impl CodeGen {
                         } else {
                             "const "
                         };
+                    self.record_local_const_binding(
+                        &name_str,
+                        qualifier == "const " && local.init.is_some(),
+                    );
                     if shadows_param {
                         self.local_cpp_bindings
                             .last_mut()
@@ -6882,6 +6911,20 @@ impl CodeGen {
             .iter()
             .rev()
             .find_map(|scope| scope.get(rust_name).cloned())
+    }
+
+    fn record_local_const_binding(&mut self, name: &str, is_const: bool) {
+        if let Some(scope) = self.local_const_bindings.last_mut() {
+            scope.insert(name.to_string(), is_const);
+        }
+    }
+
+    fn is_const_local_binding_in_scope(&self, name: &str) -> bool {
+        self.local_const_bindings
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+            .unwrap_or(false)
     }
 
     fn update_local_binding_type(&mut self, name: String, ty: syn::Type) {
@@ -15755,6 +15798,16 @@ fn collect_consuming_method_receivers_in_expr(
             }
         }
         syn::Expr::Call(call) => {
+            if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                if path_expr.path.segments.len() == 1 {
+                    let ctor_name = path_expr.path.segments[0].ident.to_string();
+                    if matches!(ctor_name.as_str(), "Ok" | "Err") && call.args.len() == 1 {
+                        if let Some(name) = extract_simple_local_ident(&call.args[0]) {
+                            result.insert(name);
+                        }
+                    }
+                }
+            }
             collect_consuming_method_receivers_in_expr(&call.func, result);
             for arg in &call.args {
                 collect_consuming_method_receivers_in_expr(arg, result);
@@ -22036,6 +22089,66 @@ mod tests {
         );
         assert!(out.contains("_ResultCtorCtx::Ok("));
         assert!(!out.contains("auto _m1_tmp = Ok("));
+    }
+
+    #[test]
+    fn test_leaf41543333333171_tuple_match_err_constructor_consumes_nonconst_local_payload() {
+        let out = transpile_str(
+            r#"
+            struct Payload;
+            impl Payload {
+                fn clone(&self) -> Self { Payload }
+            }
+            struct S;
+            impl S {
+                fn into_inner(&self) -> Result<i32, Payload> {
+                    Ok(1)
+                }
+            }
+            fn f(s: S, p: Payload) {
+                let u = p.clone();
+                match (&s.into_inner(), &Err(u)) {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto u = p.clone();"));
+        assert!(!out.contains("const auto u = p.clone();"));
+        assert!(out.contains("_ResultCtorCtx::Err(std::move(u))"));
+    }
+
+    #[test]
+    fn test_leaf41543333333171_tuple_match_ok_constructor_consumes_nonconst_local_payload() {
+        let out = transpile_str(
+            r#"
+            struct Payload;
+            impl Payload {
+                fn clone(&self) -> Self { Payload }
+            }
+            struct S;
+            impl S {
+                fn into_inner(&self) -> Result<Payload, i32> {
+                    Err(1)
+                }
+            }
+            fn f(s: S, p: Payload) {
+                let u = p.clone();
+                match (&s.into_inner(), &Ok(u)) {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto u = p.clone();"));
+        assert!(!out.contains("const auto u = p.clone();"));
+        assert!(out.contains("_ResultCtorCtx::Ok(std::move(u))"));
     }
 
     #[test]
