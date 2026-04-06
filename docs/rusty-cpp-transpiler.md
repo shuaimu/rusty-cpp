@@ -1978,6 +1978,8 @@ Integrated outcomes:
 - `slice::Iter` / `slice::IterMut` type paths map to runtime iterator wrappers.
 - range/slice/index shapes (`range*`, collect, buffer arg lowering, `map/fold` frontier) are handled incrementally with parity checks.
 - io and string/char path families (`from_utf8*`, `encode_utf8`, boundary checks, formatter/debug chains) are lowered to runtime-safe targets.
+- `MaybeUninit` reference-typed storage access is hardened to avoid pointer-to-reference emission shapes (pointer aliases via `std::add_pointer_t` and laundered storage access).
+- mixed optional-like surfaces in iterator/test-shape lowering now normalize `std::optional` receiver methods (`is_some`/`is_none`/`unwrap` → `has_value`/`!has_value`/`value`) while preserving runtime `Option` surfaces.
 
 Directly supports:
 
@@ -2047,9 +2049,11 @@ Active work items:
 2. `Leaf 4.15.4.3.3.3.3.3.9.3.2` is complete.
    - full matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-9-3-2-1775431204 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-9-3-2-1775431204/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
-3. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.10` (parent).
-   - first deterministic Stage D hard errors now start at `rusty::MaybeUninit<const T&>` reference-storage shape (`pointer to reference` form) and immediate mixed optional-interface fallout (`std::optional` receiving runtime-`Option` API calls like `is_some`).
-   - first-order dependent fallout includes `array_repeat`/`std::array` shape mismatches and `Result` visit/constructor emission mismatch families.
+3. `Leaf 4.15.4.3.3.3.3.3.10.1` is complete.
+   - generic runtime/transpiler hardening removed the prior deterministic Stage D lead diagnostics for `rusty::MaybeUninit<const T&>` reference-storage pointer shape and mixed optional-interface fallout (`std::optional` receiving `.is_some()`).
+   - `arrayvec` reprobe artifact: `/tmp/rusty-parity-matrix-10-1b-1775434421/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+4. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.10.2`.
+   - first deterministic Stage D head now begins with `array_repeat`/`std::array` conversion shape mismatches, followed by dependent `Result` visit/constructor emission mismatch families.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2145,6 +2149,8 @@ Required approach:
 - keep generic literal emission stable; perform conversions only in targeted coercion sites
 - when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
+- for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
+- for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

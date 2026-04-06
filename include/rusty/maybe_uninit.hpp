@@ -40,12 +40,12 @@ public:
     ~MaybeUninit() = default;
 
     // Get pointer to the storage (for placement new)
-    T* as_mut_ptr() noexcept {
-        return reinterpret_cast<T*>(storage_);
+    std::add_pointer_t<T> as_mut_ptr() noexcept {
+        return std::launder(reinterpret_cast<std::add_pointer_t<T>>(storage_));
     }
 
-    const T* as_ptr() const noexcept {
-        return reinterpret_cast<const T*>(storage_);
+    std::add_pointer_t<std::add_const_t<T>> as_ptr() const noexcept {
+        return std::launder(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(storage_));
     }
 
     // Initialize in-place with constructor arguments
@@ -61,24 +61,28 @@ public:
 
     // Assume initialized and get reference (UNSAFE - caller must ensure initialized)
     T& assume_init_ref() noexcept {
-        return *reinterpret_cast<T*>(storage_);
+        return *as_mut_ptr();
     }
 
     const T& assume_init_ref() const noexcept {
-        return *reinterpret_cast<const T*>(storage_);
+        return *as_ptr();
     }
 
     // Assume initialized and move out (UNSAFE - caller must ensure initialized)
     // After this, the storage is uninitialized again
     T assume_init() noexcept(std::is_nothrow_move_constructible_v<T>) {
-        T value = std::move(*reinterpret_cast<T*>(storage_));
-        reinterpret_cast<T*>(storage_)->~T();
+        T value = std::move(*as_mut_ptr());
+        if constexpr (!std::is_reference_v<T>) {
+            as_mut_ptr()->~T();
+        }
         return value;
     }
 
     // Destroy the value (UNSAFE - caller must ensure initialized)
     void destroy() noexcept(std::is_nothrow_destructible_v<T>) {
-        reinterpret_cast<T*>(storage_)->~T();
+        if constexpr (!std::is_reference_v<T>) {
+            as_mut_ptr()->~T();
+        }
     }
 
     // Create with an initial value

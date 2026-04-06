@@ -6966,6 +6966,31 @@ impl CodeGen {
                 syn::ReturnType::Default => None,
             },
             syn::Expr::Call(call) => {
+                if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                    let joined = path_expr
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    if matches!(
+                        joined.as_str(),
+                        "Some" | "Option::Some" | "core::option::Option::Some"
+                    ) && call.args.len() == 1
+                    {
+                        if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            if matches!(arg_ty, syn::Type::Reference(_)) {
+                                return Some(parse_quote!(Option<#arg_ty>));
+                            }
+                            return Some(parse_quote!(std::optional<#arg_ty>));
+                        }
+                        // Preserve optional-like receiver normalization even when payload
+                        // inference is unresolved (e.g., associated constructors with no
+                        // direct local type evidence).
+                        return Some(parse_quote!(std::optional<std::tuple<>>));
+                    }
+                }
                 if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
                     let arg_ty = self.infer_simple_expr_type(ctor_arg)?;
                     match ctor_name.as_str() {
@@ -8259,6 +8284,42 @@ impl CodeGen {
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::take({}, {})", receiver, count);
         }
+        if mc.method == "is_some"
+            && mc.args.is_empty()
+            && self.is_std_optional_like_receiver_expr(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("{}.has_value()", receiver);
+        }
+        if mc.method == "is_none"
+            && mc.args.is_empty()
+            && self.is_std_optional_like_receiver_expr(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("!{}.has_value()", receiver);
+        }
+        if mc.method == "unwrap"
+            && mc.args.is_empty()
+            && self.is_std_optional_like_receiver_expr(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("{}.value()", receiver);
+        }
         if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
             return io_call;
         }
@@ -9470,6 +9531,11 @@ impl CodeGen {
 
     fn is_iterator_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
         self.infer_iter_item_type_from_expr(expr).is_some()
+    }
+
+    fn is_std_optional_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
     }
 
     fn infer_array_capacity_arg_for_expr(&self, expr: &syn::Expr) -> Option<String> {
@@ -12490,6 +12556,14 @@ impl CodeGen {
             }
             syn::Type::Ptr(p) => {
                 let inner = self.map_type(&p.elem);
+                let needs_pointer_trait_hardening = inner.ends_with('&')
+                    || self.type_references_in_scope_type_param(&p.elem);
+                if needs_pointer_trait_hardening {
+                    if p.mutability.is_some() {
+                        return format!("std::add_pointer_t<{}>", inner);
+                    }
+                    return format!("std::add_pointer_t<std::add_const_t<{}>>", inner);
+                }
                 if p.mutability.is_some() {
                     format!("{}*", inner)
                 } else {
@@ -13100,6 +13174,65 @@ impl CodeGen {
             .iter()
             .rev()
             .any(|scope| scope.contains(name))
+    }
+
+    fn type_references_in_scope_type_param(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp
+                    .path
+                    .segments
+                    .iter()
+                    .any(|seg| self.is_type_param_in_scope(&seg.ident.to_string()))
+                {
+                    return true;
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner) => {
+                                self.type_references_in_scope_type_param(inner)
+                            }
+                            _ => false,
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_references_in_scope_type_param(&r.elem),
+            syn::Type::Ptr(p) => self.type_references_in_scope_type_param(&p.elem),
+            syn::Type::Array(a) => self.type_references_in_scope_type_param(&a.elem),
+            syn::Type::Slice(s) => self.type_references_in_scope_type_param(&s.elem),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_references_in_scope_type_param(elem)),
+            syn::Type::Paren(p) => self.type_references_in_scope_type_param(&p.elem),
+            syn::Type::Group(g) => self.type_references_in_scope_type_param(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn is_std_optional_syn_type(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => {
+                let parts: Vec<String> = tp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect();
+                match parts.as_slice() {
+                    [single] => single == "optional",
+                    [std, opt] => std == "std" && opt == "optional",
+                    _ => false,
+                }
+            }
+            syn::Type::Paren(p) => self.is_std_optional_syn_type(&p.elem),
+            syn::Type::Group(g) => self.is_std_optional_syn_type(&g.elem),
+            _ => false,
+        }
     }
 
     fn normalize_qself_base_for_assoc(&self, self_type: &str) -> String {
@@ -21368,6 +21501,61 @@ mod tests {
         );
         assert!(out.contains("s.by_ref()"));
         assert!(!out.contains("rusty::take(s,"));
+    }
+
+    #[test]
+    fn test_leaf41543333333101_pointer_type_mapping_hardens_dependent_and_reference_pointees() {
+        let out = transpile_str(
+            r#"
+            fn f<T>(p: *mut T, q: *const T, r: *mut &i32) -> *mut T {
+                p
+            }
+        "#,
+        );
+        assert!(out.contains("std::add_pointer_t<T> p"));
+        assert!(out.contains("std::add_pointer_t<std::add_const_t<T>> q"));
+        assert!(out.contains("std::add_pointer_t<const int32_t&> r"));
+        assert!(!out.contains("&*"));
+    }
+
+    #[test]
+    fn test_leaf41543333333101_std_optional_like_methods_lower_to_optional_surface() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x = Some(1);
+                let _a = x.is_some();
+                let _b = x.is_none();
+                let _c = x.unwrap();
+            }
+        "#,
+        );
+        assert!(out.contains("x.has_value()"));
+        assert!(out.contains("!x.has_value()"));
+        assert!(out.contains("x.value()"));
+        assert!(!out.contains("x.is_some()"));
+        assert!(!out.contains("x.is_none()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333101_std_optional_like_methods_lower_when_some_payload_type_unresolved()
+    {
+        let out = transpile_str(
+            r#"
+            fn mk() -> i32 {
+                1
+            }
+            fn f() {
+                let x = Some(mk());
+                let _a = x.is_some();
+                let _b = x.is_none();
+                let _c = x.unwrap();
+            }
+        "#,
+        );
+        assert!(out.contains("x.has_value()"));
+        assert!(out.contains("!x.has_value()"));
+        assert!(out.contains("x.value()"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────
