@@ -2317,8 +2317,13 @@ Active work items:
      - constructor-context recovery now handles closure bodies with `?` + `Ok/Err` by deriving result constructor hints from nearby try-result type context (avoids bare `Ok(...)`/`Err(...)` emission).
    - added focused fixture-agnostic transpiler regressions (`leaf4154333333332741`) covering each new shape.
    - guardrail check against wrong-approach checklist (§11): changes stay shape-gated and context-driven; no crate-specific scripts and no blanket call-site rewrites were introduced.
-39. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.4.2`.
-   - focus: rerun the full seven-crate parity matrix after 27.4.1, record the new first deterministic failure head with canonical artifacts, and update frontier status.
+39. `Leaf 4.15.4.3.3.3.3.3.27.4.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-4-2-1775508053 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-4-2-1775508053/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3558`: rvalue address-taking in assertion tuple lowering (`auto _m0 = &std::string_view(tmut)`), followed by adjacent closure result-constructor hint fallout at `runner.cpp:3577` (self-referential `t_shadow1` in `Result<...>::Ok(...)` type synthesis), and then downstream type/runtime-surface diagnostics.
+   - guardrail check against wrong-approach checklist (§11): kept deterministic first-head discipline and recorded frontier movement from canonical matrix artifacts before any broader rewrites.
+40. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.5`.
+   - focus: collapse the post-27.4.2 deterministic expression-lifetime/result-context head family (starting with `std::string_view` temporary address-of and closure `Ok` constructor try-context self-reference), then rerun the full matrix and record canonical first-failure artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
