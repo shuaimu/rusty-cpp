@@ -1600,6 +1600,15 @@ impl CodeGen {
         }
     }
 
+    fn peel_reference_paren_group_type<'a>(&self, ty: &'a syn::Type) -> &'a syn::Type {
+        match ty {
+            syn::Type::Reference(r) => self.peel_reference_paren_group_type(r.elem.as_ref()),
+            syn::Type::Paren(p) => self.peel_reference_paren_group_type(p.elem.as_ref()),
+            syn::Type::Group(g) => self.peel_reference_paren_group_type(g.elem.as_ref()),
+            _ => ty,
+        }
+    }
+
     fn call_targets_callable_type_param(&self, func: &syn::Expr) -> bool {
         let syn::Expr::Path(path_expr) = func else {
             return false;
@@ -8855,13 +8864,16 @@ impl CodeGen {
         if arg_idx != 0 {
             return None;
         }
-        if !matches!(
+        let uses_receiver_elem_slice = matches!(
             method_name,
             "try_extend_from_slice" | "extend_from_slice" | "copy_from_slice" | "clone_from_slice"
-        ) {
+        );
+        let is_write_method = matches!(method_name, "write" | "write_all");
+        if !uses_receiver_elem_slice && !is_write_method {
             return None;
         }
         let receiver_ty = self.infer_simple_expr_type(receiver)?;
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
         let syn::Type::Path(tp) = receiver_ty else {
             return None;
         };
@@ -8873,6 +8885,11 @@ impl CodeGen {
             syn::GenericArgument::Type(t) => Some(t.clone()),
             _ => None,
         })?;
+        // Guardrail: only infer element-type write slices from receiver generics for
+        // byte-write contexts to avoid blanket rewrites across unrelated `write` APIs.
+        if is_write_method && !Self::is_u8_syn_type(&elem_ty) {
+            return None;
+        }
         Some(parse_quote!(&[#elem_ty]))
     }
 
@@ -9421,6 +9438,44 @@ impl CodeGen {
             syn::Type::Paren(p) => self.expected_array_element_type(Some(p.elem.as_ref())),
             syn::Type::Group(g) => self.expected_array_element_type(Some(g.elem.as_ref())),
             _ => None,
+        }
+    }
+
+    fn type_is_u8_slice_like(&self, ty: &syn::Type) -> bool {
+        if self
+            .expected_array_element_type(Some(ty))
+            .is_some_and(Self::is_u8_syn_type)
+        {
+            return true;
+        }
+        // Some normalization paths carry mapped C++ span-like expected types.
+        let compact = normalize_token_text(ty.to_token_stream().to_string())
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>();
+        matches!(
+            compact.as_str(),
+            "std::span<constuint8_t>"
+                | "span<constuint8_t>"
+                | "std::span<uint8_t>"
+                | "span<uint8_t>"
+                | "std::span<constunsignedchar>"
+                | "span<constunsignedchar>"
+                | "std::span<unsignedchar>"
+                | "span<unsignedchar>"
+        )
+    }
+
+    fn is_u8_syn_type(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => tp
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "u8" | "uint8_t")),
+            syn::Type::Paren(p) => Self::is_u8_syn_type(&p.elem),
+            syn::Type::Group(g) => Self::is_u8_syn_type(&g.elem),
+            _ => false,
         }
     }
 
@@ -11615,6 +11670,38 @@ impl CodeGen {
         if mc.args.len() != 1 {
             return None;
         }
+        let declared_expected = self.lookup_method_arg_expected_type(&method, 0);
+        let inferred_expected_from_receiver = self.infer_method_arg_expected_type_from_receiver(
+            &mc.receiver,
+            &method,
+            0,
+            declared_expected,
+        );
+        let inferred_expected =
+            if declared_expected.is_none() && inferred_expected_from_receiver.is_none() {
+                self.infer_slice_arg_expected_type_from_receiver(&mc.receiver, &method, 0)
+                    .or_else(|| {
+                        if matches!(method.as_str(), "write" | "write_all") {
+                            self.infer_byte_write_expected_type_from_receiver_hint(&mc.receiver)
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            };
+        let arg_expected = inferred_expected_from_receiver
+            .as_ref()
+            .or(declared_expected)
+            .or(inferred_expected.as_ref());
+        let byte_write_expected = if matches!(method.as_str(), "write" | "write_all") {
+            match arg_expected {
+                Some(ty) if self.type_is_u8_slice_like(ty) => Some(ty),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let receiver_name = match self.peel_paren_group_expr(&mc.receiver) {
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 Some(path.path.segments[0].ident.to_string())
@@ -11623,11 +11710,20 @@ impl CodeGen {
         };
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let is_self = receiver_name.as_deref() == Some("self");
-        let arg_expr = match mc.args.first()? {
+        let arg = mc.args.first()?;
+        let arg_is_reference = matches!(arg, syn::Expr::Reference(_));
+        let arg_expr = match arg {
             syn::Expr::Reference(arg_ref) => {
-                self.emit_io_read_write_buffer_view_expr(&arg_ref.expr)
+                self.emit_io_read_write_buffer_view_expr(&arg_ref.expr, byte_write_expected)
             }
-            arg => self.emit_expr_maybe_move(arg),
+            _ => self
+                .try_emit_slice_full_buffer_arg_expr(arg, byte_write_expected)
+                .unwrap_or_else(|| {
+                    self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        arg,
+                        byte_write_expected,
+                    )
+                }),
         };
 
         // Leaf 4.39: expanded `for_both`/match-lowered io methods bind payload as `inner`
@@ -11640,8 +11736,14 @@ impl CodeGen {
 
         // Existing normalization for by-reference buffer calls: `read(&buf)`/`write(&buf)` ->
         // `read(rusty::slice_full(buf))`/`write(rusty::slice_full(buf))`.
-        if !matches!(mc.args.first()?, syn::Expr::Reference(_)) {
-            return None;
+        if !arg_is_reference {
+            if !matches!(method.as_str(), "write" | "write_all") || byte_write_expected.is_none() {
+                return None;
+            }
+            if is_self {
+                return Some(format!("{}({})", method, arg_expr));
+            }
+            return Some(format!("{}.{}({})", receiver, method, arg_expr));
         }
         if is_self {
             return Some(format!("{}({})", method, arg_expr));
@@ -11730,13 +11832,58 @@ impl CodeGen {
         Some(format!("rusty::error::description({})", receiver))
     }
 
-    fn emit_io_read_write_buffer_view_expr(&self, expr: &syn::Expr) -> String {
+    fn emit_io_read_write_buffer_view_expr(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
         let target = self.peel_reference_target_expr(expr);
         if self.is_slice_range_index_target_expr(target) {
-            return self.emit_expr_to_string(target);
+            return self.emit_expr_to_string_with_expected(target, expected_ty);
         }
-        let target_expr = self.emit_expr_to_string(target);
+        let target_expr = self.emit_expr_to_string_with_expected(target, expected_ty);
         format!("rusty::slice_full({})", target_expr)
+    }
+
+    fn try_emit_slice_full_buffer_arg_expr(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
+            return None;
+        };
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let path = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(path.as_str(), "slice_full" | "rusty::slice_full") {
+            return None;
+        }
+        let inner = self.emit_expr_to_string_with_expected(&call.args[0], expected_ty);
+        Some(format!("rusty::slice_full({})", inner))
+    }
+
+    fn infer_byte_write_expected_type_from_receiver_hint(
+        &self,
+        receiver: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let name = extract_simple_local_ident(receiver)?;
+        let hint = self.lookup_local_placeholder_type_hint(&name)?;
+        if !Self::is_u8_syn_type(hint) {
+            return None;
+        }
+        let elem_ty = hint.clone();
+        Some(parse_quote!(&[#elem_ty]))
     }
 
     fn is_slice_range_index_expr(&self, index: &syn::Expr) -> bool {
@@ -22202,6 +22349,60 @@ mod tests {
         );
         assert!(out.contains("auto v = ArrayVec<uint8_t, 8>::new_();"));
         assert!(!out.contains("ArrayVec<auto, 8>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333241_write_reference_repeat_uses_u8_seed_in_byte_context() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write(&mut self, _buf: &[u8]) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                (&mut v).write(&[9; 16]);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(static_cast<uint8_t>(9), 16)"));
+        assert!(!out.contains("rusty::array_repeat(9, 16)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333241_write_all_reference_repeat_uses_u8_seed_in_byte_context() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write_all(&mut self, _buf: &[u8]) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                (&mut v).write_all(&[1; 4]);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(static_cast<uint8_t>(1), 4)"));
+        assert!(!out.contains("rusty::array_repeat(1, 4)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333241_non_byte_write_reference_repeat_keeps_original_seed_type() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write(&mut self, _buf: &[i32]) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                (&mut v).write(&[9; 16]);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(9, 16)"));
+        assert!(!out.contains("rusty::array_repeat(static_cast<uint8_t>(9), 16)"));
     }
 
     #[test]

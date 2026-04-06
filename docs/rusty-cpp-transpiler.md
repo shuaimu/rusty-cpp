@@ -2175,9 +2175,14 @@ Active work items:
    - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-23-2-1775464818 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-23-2-1775464818/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error remains at `runner.cpp:3362`: `cannot convert span<const int, ...> to span<const unsigned char, ...>` in `v.write(rusty::slice_full(rusty::array_repeat(9, 16)))`.
-29. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.24.1`.
-   - focus: collapse the first deterministic `write` argument element-shape mismatch family generically (byte-write context expects `u8`-compatible span while emitted repeat path is `int`-shaped).
-   - guardrail (wrong-approach checklist §11): preserve shape-gated fixes in byte-write contexts and do not blanket-rewrite unrelated repeat/slice element typing.
+29. `Leaf 4.15.4.3.3.3.3.3.24.1` is complete.
+   - implemented shape-gated byte-write expected-type propagation in `transpiler/src/codegen.rs` for IO buffer-argument lowering (`write` / `write_all`), including `slice_full(array_repeat(...))` forms.
+   - added focused transpiler regressions (`leaf41543333333241`) for byte-context `write`/`write_all` seed typing and non-byte control behavior.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-24-1c-1775466747 --keep-work-dirs`) removed the prior deterministic first hard head at `runner.cpp:3362` (`span<const int>` to `span<const unsigned char>` write-arg mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-24-1c-1775466747/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:535`: `request for member 'write'` on pointer receiver (`rusty::ptr::add(...)`), followed by downstream `MaybeUninit` pointer/type-shape fallout.
+30. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.24.2`.
+   - focus: re-run full seven-crate parity matrix after 24.1, record canonical artifact paths, and capture the next deterministic matrix head.
+   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to the failing family and avoid blanket rewrites of repeat/slice typing outside byte-write contexts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
