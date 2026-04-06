@@ -2180,9 +2180,13 @@ Active work items:
    - added focused transpiler regressions (`leaf41543333333241`) for byte-context `write`/`write_all` seed typing and non-byte control behavior.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-24-1c-1775466747 --keep-work-dirs`) removed the prior deterministic first hard head at `runner.cpp:3362` (`span<const int>` to `span<const unsigned char>` write-arg mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-24-1c-1775466747/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:535`: `request for member 'write'` on pointer receiver (`rusty::ptr::add(...)`), followed by downstream `MaybeUninit` pointer/type-shape fallout.
-30. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.24.2`.
-   - focus: re-run full seven-crate parity matrix after 24.1, record canonical artifact paths, and capture the next deterministic matrix head.
-   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to the failing family and avoid blanket rewrites of repeat/slice typing outside byte-write contexts.
+30. `Leaf 4.15.4.3.3.3.3.3.24.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-24-2-1775470862 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-24-2-1775470862/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:535`: `request for member 'write'` in `rusty::ptr::add(ptr, 0)` (non-class pointer receiver) in `char_::encode_utf8`, followed by downstream `ArrayVec::to_vec`/omitted-template/`RUSTY_TRY`/`parse` fallout.
+31. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.25.1`.
+   - focus: collapse the pointer write-call shape family generically so pointer-valued expressions do not emit member-call `.write(...)` syntax.
+   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to pointer-valued write-call contexts and avoid blanket rewrites of non-pointer write surfaces.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
