@@ -7553,6 +7553,7 @@ impl CodeGen {
             return hints;
         };
         let if_let_unwrap_method = self.expr_if_let_unwrap_method(expr);
+        let try_result_cpp_ty = self.infer_try_result_cpp_type_from_expr(expr);
 
         if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
             let arg_cpp = self.emit_constructor_hint_arg_cpp(ctor_arg, if_let_unwrap_method);
@@ -7632,9 +7633,129 @@ impl CodeGen {
                 hints.insert("Ok".to_string(), args.clone());
                 hints.insert("Err".to_string(), args);
             }
+
+            if let Some(result_cpp_ty) = try_result_cpp_ty.as_ref() {
+                if !hints.contains_key("Ok") {
+                    if let Some(ok_cpp) = ctor_args.get("Ok") {
+                        let ok_ty = format!("decltype(({}))", ok_cpp);
+                        let err_ty = format!(
+                            "std::remove_cvref_t<decltype(std::declval<{}>().unwrap_err())>",
+                            result_cpp_ty
+                        );
+                        let args = vec![ok_ty, err_ty];
+                        hints.insert("Ok".to_string(), args.clone());
+                        hints.insert("Err".to_string(), args);
+                    }
+                }
+                if !hints.contains_key("Err") {
+                    if let Some(err_cpp) = ctor_args.get("Err") {
+                        let ok_ty = format!(
+                            "std::remove_cvref_t<decltype(std::declval<{}>().unwrap())>",
+                            result_cpp_ty
+                        );
+                        let err_ty = format!("decltype(({}))", err_cpp);
+                        let args = vec![ok_ty, err_ty];
+                        hints.insert("Ok".to_string(), args.clone());
+                        hints.insert("Err".to_string(), args);
+                    }
+                }
+            }
         }
 
         hints
+    }
+
+    fn infer_try_result_cpp_type_from_stmt(&self, stmt: &syn::Stmt) -> Option<String> {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                let init = local.init.as_ref()?;
+                self.infer_try_result_cpp_type_from_expr(&init.expr)
+            }
+            syn::Stmt::Expr(expr, _) => self.infer_try_result_cpp_type_from_expr(expr),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+        }
+    }
+
+    fn infer_try_result_cpp_type_from_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Try(try_expr) => {
+                let inner = self.emit_expr_to_string(&try_expr.expr);
+                Some(format!("std::remove_cvref_t<decltype(({}))>", inner))
+            }
+            syn::Expr::Block(block_expr) => block_expr
+                .block
+                .stmts
+                .iter()
+                .find_map(|stmt| self.infer_try_result_cpp_type_from_stmt(stmt)),
+            syn::Expr::If(if_expr) => self
+                .infer_try_result_cpp_type_from_expr(&if_expr.cond)
+                .or_else(|| {
+                    if_expr
+                        .then_branch
+                        .stmts
+                        .iter()
+                        .find_map(|stmt| self.infer_try_result_cpp_type_from_stmt(stmt))
+                })
+                .or_else(|| {
+                    if_expr
+                        .else_branch
+                        .as_ref()
+                        .and_then(|(_, expr)| self.infer_try_result_cpp_type_from_expr(expr))
+                }),
+            syn::Expr::Match(match_expr) => self
+                .infer_try_result_cpp_type_from_expr(&match_expr.expr)
+                .or_else(|| {
+                    match_expr
+                        .arms
+                        .iter()
+                        .find_map(|arm| self.infer_try_result_cpp_type_from_expr(&arm.body))
+                }),
+            syn::Expr::Call(call) => self
+                .infer_try_result_cpp_type_from_expr(&call.func)
+                .or_else(|| {
+                    call.args
+                        .iter()
+                        .find_map(|arg| self.infer_try_result_cpp_type_from_expr(arg))
+                }),
+            syn::Expr::MethodCall(mc) => self
+                .infer_try_result_cpp_type_from_expr(&mc.receiver)
+                .or_else(|| {
+                    mc.args
+                        .iter()
+                        .find_map(|arg| self.infer_try_result_cpp_type_from_expr(arg))
+                }),
+            syn::Expr::Closure(closure) => self.infer_try_result_cpp_type_from_expr(&closure.body),
+            syn::Expr::Reference(r) => self.infer_try_result_cpp_type_from_expr(&r.expr),
+            syn::Expr::Array(arr) => arr
+                .elems
+                .iter()
+                .find_map(|elem| self.infer_try_result_cpp_type_from_expr(elem)),
+            syn::Expr::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .find_map(|elem| self.infer_try_result_cpp_type_from_expr(elem)),
+            syn::Expr::Struct(struct_expr) => struct_expr
+                .fields
+                .iter()
+                .find_map(|field| self.infer_try_result_cpp_type_from_expr(&field.expr))
+                .or_else(|| {
+                    struct_expr
+                        .rest
+                        .as_ref()
+                        .and_then(|rest| self.infer_try_result_cpp_type_from_expr(rest))
+                }),
+            syn::Expr::Assign(assign) => self
+                .infer_try_result_cpp_type_from_expr(&assign.left)
+                .or_else(|| self.infer_try_result_cpp_type_from_expr(&assign.right)),
+            syn::Expr::Return(ret) => ret
+                .expr
+                .as_ref()
+                .and_then(|expr| self.infer_try_result_cpp_type_from_expr(expr)),
+            syn::Expr::Paren(p) => self.infer_try_result_cpp_type_from_expr(&p.expr),
+            syn::Expr::Group(g) => self.infer_try_result_cpp_type_from_expr(&g.expr),
+            _ => None,
+        }
     }
 
     fn collect_constructor_arg_cpp_strings(
@@ -7643,9 +7764,7 @@ impl CodeGen {
         out: &mut HashMap<String, String>,
         if_let_unwrap_method: Option<&'static str>,
     ) {
-        let Some(expr) = self.extract_value_expr(expr) else {
-            return;
-        };
+        let expr = self.peel_paren_group_expr(expr);
 
         if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
             out.entry(ctor_name).or_insert_with(|| {
@@ -7677,11 +7796,54 @@ impl CodeGen {
                 self.collect_constructor_arg_cpp_strings(&g.expr, out, if_let_unwrap_method)
             }
             syn::Expr::Call(call) => {
+                self.collect_constructor_arg_cpp_strings(&call.func, out, if_let_unwrap_method);
                 for arg in &call.args {
                     self.collect_constructor_arg_cpp_strings(arg, out, if_let_unwrap_method);
                 }
             }
+            syn::Expr::Try(try_expr) => {
+                self.collect_constructor_arg_cpp_strings(&try_expr.expr, out, if_let_unwrap_method)
+            }
+            syn::Expr::Block(block_expr) => {
+                for stmt in &block_expr.block.stmts {
+                    self.collect_constructor_arg_cpp_strings_in_stmt(
+                        stmt,
+                        out,
+                        if_let_unwrap_method,
+                    );
+                }
+            }
+            syn::Expr::Closure(closure) => {
+                self.collect_constructor_arg_cpp_strings(
+                    &closure.body,
+                    out,
+                    if_let_unwrap_method,
+                )
+            }
             _ => {}
+        }
+    }
+
+    fn collect_constructor_arg_cpp_strings_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        out: &mut HashMap<String, String>,
+        if_let_unwrap_method: Option<&'static str>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_constructor_arg_cpp_strings(
+                        &init.expr,
+                        out,
+                        if_let_unwrap_method,
+                    );
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_constructor_arg_cpp_strings(expr, out, if_let_unwrap_method);
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
         }
     }
 
@@ -7924,6 +8086,7 @@ impl CodeGen {
             syn::Expr::Reference(r) => self.infer_expected_type_from_tuple_element(&r.expr),
             syn::Expr::Paren(p) => self.infer_expected_type_from_tuple_element(&p.expr),
             syn::Expr::Group(g) => self.infer_expected_type_from_tuple_element(&g.expr),
+            syn::Expr::Lit(_) => self.infer_simple_expr_type(elem),
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
@@ -8478,6 +8641,30 @@ impl CodeGen {
         )
     }
 
+    fn expected_type_is_string_view(&self, expected_ty: Option<&syn::Type>) -> bool {
+        let Some(expected_ty) = expected_ty else {
+            return false;
+        };
+        let canonical = self.canonical_into_target_cpp_type(&self.map_type(expected_ty));
+        canonical == "std::string_view"
+    }
+
+    fn type_uses_as_str_string_view_coercion(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        matches!(last.ident.to_string().as_str(), "ArrayString" | "String")
+    }
+
+    fn expr_uses_as_str_string_view_coercion(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.type_uses_as_str_string_view_coercion(&ty))
+    }
+
     fn classify_into_receiver_expr(&self, expr: &syn::Expr) -> Option<IntoReceiverKind> {
         let expr = self.peel_paren_group_expr(expr);
         match expr {
@@ -8645,8 +8832,13 @@ impl CodeGen {
         receiver_expr: &syn::Expr,
         method_name: &str,
         args: &[String],
+        receiver_expected_ty: Option<&syn::Type>,
     ) -> String {
-        let raw_receiver = self.emit_expr_to_string(receiver_expr);
+        let raw_receiver = if let Some(expected) = receiver_expected_ty {
+            self.emit_expr_to_string_with_expected(receiver_expr, Some(expected))
+        } else {
+            self.emit_expr_to_string(receiver_expr)
+        };
         let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
             format!("({})", raw_receiver)
         } else {
@@ -8710,13 +8902,20 @@ impl CodeGen {
             return description_call;
         }
         if mc.method == "parse" && mc.args.is_empty() {
-            if let Some(parsed_ty) = self.method_call_single_turbofish_type(mc) {
+            let parsed_ty = self
+                .method_call_single_turbofish_type(mc)
+                .map(|ty| self.peel_reference_paren_group_type(ty))
+                .or_else(|| expected_ty.map(|ty| self.peel_reference_paren_group_type(ty)));
+            if let Some(parsed_ty) = parsed_ty {
                 let receiver = self.emit_expr_to_string(&mc.receiver);
-                return format!(
-                    "rusty::str_runtime::parse<{}>({})",
-                    self.map_type(parsed_ty),
-                    receiver
-                );
+                let parsed_cpp = self.map_type(parsed_ty);
+                let parsed_scalar = self.canonical_into_target_cpp_type(&parsed_cpp);
+                if is_numeric_cpp_scalar_type(parsed_scalar.as_str()) {
+                    return format!("rusty::str_runtime::parse<{}>({})", parsed_cpp, receiver);
+                }
+                // Non-numeric parse targets should use trait-like `from_str`
+                // surfaces when available (for example ArrayString).
+                return format!("{}::from_str({})", parsed_cpp, receiver);
             }
         }
         if mc.method == "iter" && mc.args.is_empty() {
@@ -8866,11 +9065,7 @@ impl CodeGen {
         }
         if method_name == "map_err" && mc.args.len() == 1 {
             if let Some(callable_arg) = self.try_emit_map_err_callable_arg(&mc.args[0]) {
-                return self.emit_receiver_member_call(
-                    &mc.receiver,
-                    &method_name,
-                    &[callable_arg],
-                );
+                return self.emit_receiver_member_call(&mc.receiver, &method_name, &[callable_arg], None);
             }
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
@@ -8984,7 +9179,12 @@ impl CodeGen {
                 format!("{}({})", escape_cpp_keyword(&method_name), args.join(", "))
             }
         } else {
-            self.emit_receiver_member_call(&mc.receiver, &method_name, &args)
+            let receiver_expected = if method_name == "unwrap" && mc.args.is_empty() {
+                expected_ty
+            } else {
+                None
+            };
+            self.emit_receiver_member_call(&mc.receiver, &method_name, &args, receiver_expected)
         }
     }
 
@@ -9215,7 +9415,8 @@ impl CodeGen {
                 self.emit_struct_expr_to_string_with_expected(struct_expr, expected_ty)
             }
             syn::Expr::Index(idx) => {
-                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
+                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx, expected_ty)
+                {
                     return slice_expr;
                 }
                 if let Some(unreachable_expr) =
@@ -9248,6 +9449,9 @@ impl CodeGen {
                     {
                         return assoc_path;
                     }
+                }
+                if self.expected_type_is_string_view(expected_ty) {
+                    return self.emit_from_conversion_to_target(expr, "std::string_view");
                 }
                 self.emit_expr_path_to_string(&path.path)
             }
@@ -10132,6 +10336,10 @@ impl CodeGen {
         match expr {
             syn::Expr::Array(arr) => Some(arr.elems.len().to_string()),
             syn::Expr::Repeat(repeat) => Some(self.emit_expr_to_string(&repeat.len)),
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::ByteStr(bs),
+                ..
+            }) => Some(bs.value().len().to_string()),
             _ => {
                 if let Some(arg_ty) = self.infer_simple_expr_type(expr) {
                     if let syn::Type::Array(arr) = arg_ty {
@@ -10188,6 +10396,19 @@ impl CodeGen {
                     } else {
                         None
                     }
+                } else {
+                    None
+                }
+            }
+            "ArrayString" => {
+                let mut inferred = vec![None];
+                if matches!(method_name, "from" | "try_from" | "from_byte_string") {
+                    if let Some(arg) = call.args.first() {
+                        inferred[0] = self.infer_array_capacity_arg_for_expr(arg);
+                    }
+                }
+                if inferred.iter().any(|arg| arg.is_some()) {
+                    Some(inferred)
                 } else {
                     None
                 }
@@ -11002,6 +11223,25 @@ impl CodeGen {
     }
 
     fn emit_from_conversion_to_target(&self, arg: &syn::Expr, target_cpp_ty: &str) -> String {
+        let canonical_target = self.canonical_into_target_cpp_type(target_cpp_ty);
+        if canonical_target == "std::string_view" {
+            let source_expr = match arg {
+                syn::Expr::Call(call)
+                    if self.is_core_from_path_expr(call.func.as_ref()) && call.args.len() == 1 =>
+                {
+                    call.args.first().expect("checked call arg len above")
+                }
+                _ => arg,
+            };
+            let source = self.emit_expr_to_string(source_expr);
+            let source = if self.expr_uses_as_str_string_view_coercion(source_expr) {
+                format!("{}.as_str()", source)
+            } else {
+                source
+            };
+            return format!("std::string_view({})", source);
+        }
+
         let target_is_ref = target_cpp_ty.contains('&');
         let inner = match arg {
             syn::Expr::Call(call)
@@ -11544,7 +11784,7 @@ impl CodeGen {
                 }
             }
             syn::Expr::Index(idx) => {
-                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx) {
+                if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx, None) {
                     return slice_expr;
                 }
                 if let Some(unreachable_expr) =
@@ -12091,7 +12331,11 @@ impl CodeGen {
         matches!(self.peel_paren_group_expr(index), syn::Expr::Range(_))
     }
 
-    fn try_emit_slice_index_expr_to_string(&self, idx: &syn::ExprIndex) -> Option<String> {
+    fn try_emit_slice_index_expr_to_string(
+        &self,
+        idx: &syn::ExprIndex,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
         let range = match self.peel_paren_group_expr(&idx.index) {
             syn::Expr::Range(r) => r,
             _ => return None,
@@ -12108,7 +12352,13 @@ impl CodeGen {
             (Some(s), None, _) => format!("rusty::slice_from({}, {})", base, s),
             (None, Some(e), false) => format!("rusty::slice_to({}, {})", base, e),
             (None, Some(e), true) => format!("rusty::slice_to_inclusive({}, {})", base, e),
-            (None, None, _) => format!("rusty::slice_full({})", base),
+            (None, None, _) => {
+                if self.expected_type_is_string_view(expected_ty) {
+                    self.emit_from_conversion_to_target(&idx.expr, "std::string_view")
+                } else {
+                    format!("rusty::slice_full({})", base)
+                }
+            }
         };
         Some(emitted)
     }
@@ -12542,7 +12792,14 @@ impl CodeGen {
     }
 
     fn emit_lit_with_expected(&self, lit: &syn::Lit, expected_ty: Option<&syn::Type>) -> String {
-        let _ = expected_ty;
+        if matches!(lit, syn::Lit::Str(_)) {
+            if let Some(expected_ty) = expected_ty {
+                let expected_cpp = self.canonical_into_target_cpp_type(&self.map_type(expected_ty));
+                if expected_cpp == "rusty::String" {
+                    return format!("rusty::String::from({})", self.emit_lit(lit));
+                }
+            }
+        }
         self.emit_lit(lit)
     }
 
@@ -23350,6 +23607,123 @@ mod tests {
         assert!(out.contains("HashMap<ArrayString<16>, int32_t>()"));
         assert!(!out.contains("HashMap::new_()"));
         assert!(!out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_arraystring_path_expected_str_coerces_to_string_view() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn new() -> Self { ArrayString }
+                fn as_str(&self) -> &str { "" }
+            }
+            fn f() {
+                let t = ArrayString::<2>::new();
+                let v: &str = t;
+            }
+        "#,
+        );
+        assert!(out.contains("const std::string_view v = std::string_view(t.as_str());"));
+        assert!(!out.contains("std::move(t)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_arraystring_full_range_in_str_tuple_uses_string_view() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn new() -> Self { ArrayString }
+                fn as_str(&self) -> &str { "" }
+            }
+            fn f() {
+                let s = ArrayString::<8>::new();
+                let _ = ("ab", s[..]);
+            }
+        "#,
+        );
+        assert!(
+            out.contains("std::string_view(s.as_str())"),
+            "expected string_view coercion, output:\n{}",
+            out
+        );
+        assert!(!out.contains("rusty::slice_full(s)"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_parse_without_turbofish_uses_expected_from_str_target() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn from_str(s: &str) -> Result<Self, ()> { todo!() }
+            }
+            fn f() {
+                let text = "hello";
+                let _u: ArrayString<5> = text.parse().unwrap();
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayString<5>::from_str(text)"));
+        assert!(!out.contains("text.parse()"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_arraystring_from_byte_string_omitted_owner_recovers_capacity() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn from_byte_string(bytes: &[u8]) -> Result<Self, ()> { todo!() }
+            }
+            fn f() {
+                let _u = ArrayString::from_byte_string(b"hello");
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayString<5>::from_byte_string("));
+        assert!(!out.contains("ArrayString::from_byte_string("));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_expected_rusty_string_argument_coerces_str_literal() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn new() -> Self { ArrayVec }
+                fn try_insert(&mut self, idx: usize, value: T) -> Result<(), ()> { Ok(()) }
+            }
+            fn f() {
+                let mut v: ArrayVec<String, 8> = ArrayVec::new();
+                let _ = v.try_insert(0, "a");
+            }
+        "#,
+        );
+        assert!(out.contains("v.try_insert(0, rusty::String::from(\"a\"))"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332741_closure_try_ok_constructor_recovers_result_context() {
+        let out = transpile_str(
+            r#"
+            fn g() -> Result<(), i32> { Err(1) }
+            fn f() {
+                let _res = (|| {
+                    g()?;
+                    Ok(())
+                })();
+            }
+        "#,
+        );
+        assert!(out.contains("RUSTY_TRY(g())"));
+        assert!(out.contains("return rusty::Result<"));
+        assert!(
+            !out.contains("return Ok("),
+            "expected contextual Result::Ok lowering, output:\n{}",
+            out
+        );
     }
 
     #[test]

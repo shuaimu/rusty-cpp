@@ -2308,9 +2308,17 @@ Active work items:
    - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-3-2-1775506272 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-3-2-1775506272/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3556`: invalid `ArrayString<2>` to `std::string_view` conversion shape, followed by downstream string/runtime/template fallout (`Ok` path resolution, `parse` on C-string, omitted-template `ArrayString::from_byte_string`, and string/span equality-shape errors).
-38. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.4`.
-   - focus: collapse the post-27.3.2 string-surface head family starting at `ArrayString`/`&str` coercion shape, then rerun the full matrix and record canonical first-failure artifacts.
-   - guardrail (wrong-approach checklist §11): keep stage-head collapse disciplined; avoid broad runtime/transpiler rewrites before confirming deterministic first-head ordering in matrix artifacts.
+38. `Leaf 4.15.4.3.3.3.3.3.27.4.1` is complete.
+   - implemented generic transpiler hardening for the first deterministic 27.3.2 string-surface head family in `transpiler/src/codegen.rs`:
+     - `ArrayString`/string-like values now coerce to `std::string_view` in expected `&str` contexts (including full-range `[..]` lowering under string-view expectation),
+     - no-turbofish `.parse()` lowering now consumes expected target type and emits numeric `rusty::str_runtime::parse<T>(...)` or non-numeric `T::from_str(...)` call-shapes,
+     - omitted-owner `ArrayString::from_byte_string(...)` calls now recover const-capacity generic args from byte-string/array argument shape,
+     - expected `rusty::String` argument contexts now coerce string literals through `rusty::String::from(...)`,
+     - constructor-context recovery now handles closure bodies with `?` + `Ok/Err` by deriving result constructor hints from nearby try-result type context (avoids bare `Ok(...)`/`Err(...)` emission).
+   - added focused fixture-agnostic transpiler regressions (`leaf4154333333332741`) covering each new shape.
+   - guardrail check against wrong-approach checklist (§11): changes stay shape-gated and context-driven; no crate-specific scripts and no blanket call-site rewrites were introduced.
+39. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.4.2`.
+   - focus: rerun the full seven-crate parity matrix after 27.4.1, record the new first deterministic failure head with canonical artifacts, and update frontier status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
