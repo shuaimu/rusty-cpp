@@ -23044,10 +23044,11 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("ArrayVec::from([](auto _seed) {"));
+        // After template-arg recovery, explicit owner args may be present
+        assert!(out.contains("::from([](auto _seed) {"));
         assert!(out.contains("std::array<int32_t, 8> _repeat{};"));
         assert!(out.contains("_repeat.fill(static_cast<int32_t>(_seed));"));
-        assert!(!out.contains("ArrayVec::from(rusty::array_repeat("));
+        assert!(!out.contains("::from(rusty::array_repeat("));
     }
 
     #[test]
@@ -23063,10 +23064,11 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("ArrayVec::try_from([](auto _seed) {"));
+        // After template-arg recovery, explicit owner args may be present
+        assert!(out.contains("::try_from([](auto _seed) {"));
         assert!(out.contains("std::array<int32_t, 8> _repeat{};"));
         assert!(out.contains("_repeat.fill(static_cast<int32_t>(_seed));"));
-        assert!(!out.contains("ArrayVec::try_from(rusty::array_repeat("));
+        assert!(!out.contains("::try_from(rusty::array_repeat("));
     }
 
     #[test]

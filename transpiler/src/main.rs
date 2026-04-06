@@ -1041,11 +1041,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     let should_stop = |stage: &str| -> bool { args.stop_after.as_deref() == Some(stage) };
 
-    // Create work directory
+    // Create work directory and canonicalize
     std::fs::create_dir_all(&args.work_dir)
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
+    let work_dir = std::fs::canonicalize(&args.work_dir)
+        .unwrap_or_else(|_| args.work_dir.clone());
     if !args.dry_run {
-        clear_stage_outputs(&args.work_dir)?;
+        clear_stage_outputs(&work_dir)?;
     }
 
     let project_dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -1084,13 +1086,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 args.package.as_deref(),
                 crate_name,
                 &cargo_flags,
-                &args.work_dir,
+                &work_dir,
             )?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
             // Save baseline output
-            let baseline_path = args.work_dir.join("baseline.txt");
+            let baseline_path = work_dir.join("baseline.txt");
             std::fs::write(&baseline_path, format!("{}\n{}", stdout, stderr))
                 .map_err(|e| format!("Failed to write baseline: {}", e))?;
 
@@ -1115,7 +1117,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         &project_dir,
         args.package.as_deref(),
         crate_name,
-        &args.work_dir,
+        &work_dir,
     )?;
     println!("  Package: {}", pkg_name);
     for t in &targets {
@@ -1130,7 +1132,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let target_dirs = if args.dry_run {
         HashMap::new()
     } else {
-        reset_target_artifacts(&args.work_dir, &targets)?
+        reset_target_artifacts(&work_dir, &targets)?
     };
     println!();
 
@@ -1185,7 +1187,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             crate_name,
             &expand_args,
             &cargo_flags,
-            &args.work_dir,
+            &work_dir,
             &mut expand_isolated_manifest,
         )?;
 
@@ -1291,8 +1293,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         );
     } else {
         // Generate a runner .cpp that includes all transpiled code + test main
-        let runner_path = args.work_dir.join("runner.cpp");
-        let binary_path = args.work_dir.join("runner");
+        let runner_path = work_dir.join("runner.cpp");
+        let binary_path = work_dir.join("runner");
 
         // Compile only artifacts generated in this run to avoid stale file bleed
         // when reusing --work-dir with --keep-work-dir.
@@ -1460,7 +1462,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .map_err(|e| format!("Failed to write runner: {}", e))?;
 
         // Save runner log
-        let build_log_path = args.work_dir.join("build.log");
+        let build_log_path = work_dir.join("build.log");
 
         println!(
             "  Generated runner: {} ({} tests discovered)",
@@ -1502,8 +1504,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // ── Stage E: Run ────────────────────────────────────
     println!("Stage E: Running transpiled tests...");
-    let binary_path = args.work_dir.join("runner");
-    let run_log_path = args.work_dir.join("run.log");
+    let binary_path = work_dir.join("runner");
+    let run_log_path = work_dir.join("run.log");
 
     if args.dry_run {
         println!("  [dry-run] {}", binary_path.display());
@@ -1533,7 +1535,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     println!();
     println!("Parity test pipeline complete for '{}'.", crate_name);
-    println!("Artifacts saved in: {}", args.work_dir.display());
+    println!("Artifacts saved in: {}", work_dir.display());
 
     Ok(())
 }

@@ -263,6 +263,7 @@ fn test_parity_test_no_args_uses_defaults() {
 #[test]
 fn test_parity_test_all_valid_stop_after_values() {
     for stage in &["baseline", "expand", "transpile", "build", "run"] {
+        let work_dir = tempfile::tempdir().unwrap();
         let output = transpiler_bin()
             .arg("parity-test")
             .arg("--manifest-path")
@@ -270,6 +271,8 @@ fn test_parity_test_all_valid_stop_after_values() {
             .arg("--dry-run")
             .arg("--stop-after")
             .arg(stage)
+            .arg("--work-dir")
+            .arg(work_dir.path())
             .output()
             .expect("failed to run");
 
@@ -284,12 +287,15 @@ fn test_parity_test_all_valid_stop_after_values() {
 
 #[test]
 fn test_parity_test_no_baseline_flag() {
+    let work_dir = tempfile::tempdir().unwrap();
     let output = transpiler_bin()
         .arg("parity-test")
         .arg("--manifest-path")
         .arg(either_manifest())
         .arg("--dry-run")
         .arg("--no-baseline")
+        .arg("--work-dir")
+        .arg(work_dir.path())
         .output()
         .expect("failed to run");
 
@@ -304,6 +310,7 @@ fn test_parity_test_no_baseline_flag() {
 
 #[test]
 fn test_parity_discovers_either_lib_target() {
+    let work_dir = tempfile::tempdir().unwrap();
     let output = transpiler_bin()
         .arg("parity-test")
         .arg("--manifest-path")
@@ -311,6 +318,8 @@ fn test_parity_discovers_either_lib_target() {
         .arg("--dry-run")
         .arg("--stop-after")
         .arg("expand")
+        .arg("--work-dir")
+        .arg(work_dir.path())
         .output()
         .expect("failed to run");
 
