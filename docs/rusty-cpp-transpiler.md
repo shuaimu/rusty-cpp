@@ -2171,10 +2171,13 @@ Active work items:
    - focused transpiler regressions were added (`leaf41543333333221`) asserting reference-wrapped receivers emit `->` and non-pointer receivers keep `.`.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-22-1-1775461263 --keep-work-dirs`) removed the prior deterministic first hard head (`(&v).write_fmt(...)` pointer-plus-`.` mismatch at `runner.cpp:3343`); canonical artifacts at `/tmp/rusty-parity-matrix-22-1-1775461263/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3343`: method-surface mismatch (`ArrayVec<uint8_t, 8>` has no `write_fmt` member), followed by downstream method/template/runtime-surface cascades (`write` element-shape mismatch, `to_vec` missing, omitted template args for `ArrayVec`/`ArrayString`/`HashMap`, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout).
-28. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.23.2`.
-   - `Leaf 4.15.4.3.3.3.3.3.23.1` is complete via targeted reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-23-1-1775463871 --keep-work-dirs`), with canonical artifacts at `/tmp/rusty-parity-matrix-23-1-1775463871/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
-   - `write_fmt` call-surface lowering now routes through generic runtime dispatch (`rusty::io::write_fmt`) for method-call and UFCS shapes; runtime gained `io::write_fmt` member-fallback/byte-write dispatch and pointer-receiver forwarding.
-   - deterministic first hard error head moved: prior missing-member `write_fmt` at `runner.cpp:3343` is removed; new first hard head starts at `runner.cpp:3362` (`cannot convert span<const int, ...> to span<const unsigned char, ...>` in `v.write(...)` argument element shape).
+28. `Leaf 4.15.4.3.3.3.3.3.23.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-23-2-1775464818 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-23-2-1775464818/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:3362`: `cannot convert span<const int, ...> to span<const unsigned char, ...>` in `v.write(rusty::slice_full(rusty::array_repeat(9, 16)))`.
+29. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.24.1`.
+   - focus: collapse the first deterministic `write` argument element-shape mismatch family generically (byte-write context expects `u8`-compatible span while emitted repeat path is `int`-shaped).
+   - guardrail (wrong-approach checklist §11): preserve shape-gated fixes in byte-write contexts and do not blanket-rewrite unrelated repeat/slice element typing.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
