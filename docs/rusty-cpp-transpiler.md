@@ -2163,8 +2163,16 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-21-2-1775460145 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-21-2-1775460145/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at `runner.cpp:3343`: reference-wrapped receiver method-call access mismatch in `test_write` (`(&v).write_fmt(...)` emitted as pointer-plus-`.` member access), followed by downstream method/template/runtime-surface cascades (`write` element-shape mismatch, `to_vec` missing, omitted template args for `ArrayVec`/`ArrayString`/`HashMap`, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout).
-27. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.22.1`.
-   - collapse the post-21.2 deterministic Stage D head family by normalizing method-call lowering on reference-wrapped receivers so emitted member access surfaces remain type-correct after pointer/reference lowering, then re-probe the full matrix.
+27. `Leaf 4.15.4.3.3.3.3.3.22.1` is complete.
+   - method-call receiver lowering now selects member access surface from lowered receiver shape (pointer vs value) instead of fixed `.` emission:
+     - added receiver pointer-shape detection for reference-wrapped receivers and existing pointer-like receivers.
+     - centralized receiver member-call emission so generic/default method-call lowering and `map_err` callable lowering use consistent `.`/`->` selection.
+     - updated optional-like and `assume_init` member-call surfaces to respect receiver pointer/value shape.
+   - focused transpiler regressions were added (`leaf41543333333221`) asserting reference-wrapped receivers emit `->` and non-pointer receivers keep `.`.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-22-1-1775461263 --keep-work-dirs`) removed the prior deterministic first hard head (`(&v).write_fmt(...)` pointer-plus-`.` mismatch at `runner.cpp:3343`); canonical artifacts at `/tmp/rusty-parity-matrix-22-1-1775461263/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3343`: method-surface mismatch (`ArrayVec<uint8_t, 8>` has no `write_fmt` member), followed by downstream method/template/runtime-surface cascades (`write` element-shape mismatch, `to_vec` missing, omitted template args for `ArrayVec`/`ArrayString`/`HashMap`, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout).
+28. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.22.2`.
+   - re-run the full seven-crate matrix after 22.1 and record/update the next deterministic first-failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

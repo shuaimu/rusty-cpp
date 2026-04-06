@@ -8489,6 +8489,59 @@ impl CodeGen {
         }
     }
 
+    fn method_receiver_uses_pointer_member_access(&self, receiver: &syn::Expr) -> bool {
+        let receiver = self.peel_paren_group_expr(receiver);
+        if self.is_expr_raw_pointer_like(receiver) {
+            return true;
+        }
+        let syn::Expr::Reference(r) = receiver else {
+            return false;
+        };
+        let ref_inner = self.peel_paren_group_expr(&r.expr);
+        if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
+            return self.method_receiver_uses_pointer_member_access(ref_inner);
+        }
+        if let syn::Expr::Index(idx) = ref_inner {
+            if self.is_slice_range_index_expr(&idx.index) {
+                return self.method_receiver_uses_pointer_member_access(ref_inner);
+            }
+        }
+        if let syn::Expr::Unary(un) = ref_inner {
+            if matches!(un.op, syn::UnOp::Deref(_))
+                && self.should_collapse_reborrow_of_deref_operand(&un.expr)
+            {
+                return self.method_receiver_uses_pointer_member_access(ref_inner);
+            }
+        }
+        true
+    }
+
+    fn emit_receiver_member_call(
+        &self,
+        receiver_expr: &syn::Expr,
+        method_name: &str,
+        args: &[String],
+    ) -> String {
+        let raw_receiver = self.emit_expr_to_string(receiver_expr);
+        let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
+            format!("({})", raw_receiver)
+        } else {
+            raw_receiver
+        };
+        let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr) {
+            "->"
+        } else {
+            "."
+        };
+        format!(
+            "{}{}{}({})",
+            receiver,
+            member_op,
+            escape_cpp_keyword(method_name),
+            args.join(", ")
+        )
+    }
+
     fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
@@ -8510,7 +8563,12 @@ impl CodeGen {
                 } else {
                     raw_receiver
                 };
-                return format!("{}.assume_init()", receiver);
+                let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                    "->"
+                } else {
+                    "."
+                };
+                return format!("{}{}assume_init()", receiver, member_op);
             }
         }
         if mc.method == "len" && mc.args.is_empty() {
@@ -8581,7 +8639,12 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("{}.has_value()", receiver);
+            let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                "->"
+            } else {
+                "."
+            };
+            return format!("{}{}has_value()", receiver, member_op);
         }
         if mc.method == "is_none"
             && mc.args.is_empty()
@@ -8593,7 +8656,12 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("!{}.has_value()", receiver);
+            let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                "->"
+            } else {
+                "."
+            };
+            return format!("!{}{}has_value()", receiver, member_op);
         }
         if mc.method == "unwrap"
             && mc.args.is_empty()
@@ -8605,7 +8673,12 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("{}.value()", receiver);
+            let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                "->"
+            } else {
+                "."
+            };
+            return format!("{}{}value()", receiver, member_op);
         }
         if let Some(io_call) = self.try_emit_io_read_write_buffer_call(mc) {
             return io_call;
@@ -8645,13 +8718,11 @@ impl CodeGen {
         }
         if method_name == "map_err" && mc.args.len() == 1 {
             if let Some(callable_arg) = self.try_emit_map_err_callable_arg(&mc.args[0]) {
-                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                    format!("({})", raw_receiver)
-                } else {
-                    raw_receiver
-                };
-                return format!("{}.{}({})", receiver, method_name, callable_arg);
+                return self.emit_receiver_member_call(
+                    &mc.receiver,
+                    &method_name,
+                    &[callable_arg],
+                );
             }
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
@@ -8762,18 +8833,7 @@ impl CodeGen {
                 format!("{}({})", escape_cpp_keyword(&method_name), args.join(", "))
             }
         } else {
-            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
-            format!(
-                "{}.{}({})",
-                receiver,
-                escape_cpp_keyword(&method_name),
-                args.join(", ")
-            )
+            self.emit_receiver_member_call(&mc.receiver, &method_name, &args)
         }
     }
 
@@ -22138,6 +22198,43 @@ mod tests {
         );
         assert!(out.contains("auto v = ArrayVec<uint8_t, 8>::new_();"));
         assert!(!out.contains("ArrayVec<auto, 8>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333221_reference_wrapped_receiver_method_call_uses_arrow_operator() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write_fmt(&mut self, _s: String) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                (&v).write_fmt(String::new());
+                (&mut v).write_fmt(String::new());
+            }
+        "#,
+        );
+        assert!(out.contains("(&v)->write_fmt("));
+        assert!(!out.contains("(&v).write_fmt("));
+    }
+
+    #[test]
+    fn test_leaf41543333333221_non_pointer_receiver_method_call_keeps_dot_operator() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write_fmt(&mut self, _s: String) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                v.write_fmt(String::new());
+            }
+        "#,
+        );
+        assert!(out.contains("v.write_fmt("));
+        assert!(!out.contains("v->write_fmt("));
     }
 
     #[test]
