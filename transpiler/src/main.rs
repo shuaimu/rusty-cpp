@@ -1314,7 +1314,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
         runner_src.push_str("#include <functional>\n#include <span>\n");
         runner_src.push_str("#include <rusty/rusty.hpp>\n");
-        runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n\n");
+        runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n#include <rusty/try.hpp>\n\n");
         runner_src.push_str("// Overloaded visitor helper\n");
         runner_src.push_str(
             "template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n",
