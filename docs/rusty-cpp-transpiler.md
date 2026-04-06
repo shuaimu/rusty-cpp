@@ -2120,8 +2120,14 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-17-2-1775451587 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-17-2-1775451587/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at `runner.cpp:3243`: `no match for operator==` on `rusty::Result<std::array<int, 2>, arrayvec::ArrayVec<int, 2>>` equality in assertion scaffolding, followed by downstream string-conversion/array-comparison/template/runtime-surface cascades.
-19. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.18.1`.
-   - implement a generic assertion/equality lowering fix for context-qualified `Result` comparisons so transpiled test scaffolding does not depend on missing direct `operator==` surfaces, then reprobe matrix.
+19. `Leaf 4.15.4.3.3.3.3.3.18.1` is complete.
+   - runtime parity surface now includes `operator==` / `operator!=` for `rusty::Result<T, E>` and `rusty::Result<void, E>` in `include/rusty/result.hpp`, comparing variant first and then payload equality for matching variants.
+   - focused regressions were added in `tests/rusty_result_test.cpp` for `Result` equality semantics (`Ok` vs `Ok`, `Err` vs `Err`, variant mismatch, and void-specialization comparisons).
+   - focused transpiler regression (`leaf41543333333181`) asserts Result tuple-match assertion shapes keep direct `*left_val == *right_val` comparisons and context-typed `Result::Ok(...)` constructor emission (no bare `Ok(...)` in tuple scaffolding).
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-18-1-1775452758 --keep-work-dirs`) removed the prior deterministic first hard head (`no match for operator==` on `rusty::Result<...>` at `runner.cpp:3243`); canonical artifacts at `/tmp/rusty-parity-matrix-18-1-1775452758/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3258`: `request for member 'into'` on string literals (`("a").into()`), followed by downstream array/string comparison and template/runtime-surface cascades.
+20. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.18.2`.
+   - re-run the full seven-crate parity matrix after 18.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2224,6 +2230,7 @@ Required approach:
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
 - for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
+- for Result assertion parity, do not add one-off transpiler rewrites that bypass value comparison shape for specific call sites; maintain runtime `rusty::Result` equality surfaces (`operator==`/`operator!=`) so generated assertion scaffolding remains generic
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

@@ -260,6 +260,43 @@ void test_result_void() {
     printf("PASS\n");
 }
 
+void test_result_equality() {
+    printf("test_result_equality: ");
+    {
+        auto ok_a = Result<int, int>::Ok(7);
+        auto ok_b = Result<int, int>::Ok(7);
+        auto ok_c = Result<int, int>::Ok(9);
+        auto err_a = Result<int, int>::Err(7);
+        auto err_b = Result<int, int>::Err(7);
+        auto err_c = Result<int, int>::Err(9);
+
+        assert(ok_a == ok_b);
+        assert(ok_a != ok_c);
+        assert(err_a == err_b);
+        assert(err_a != err_c);
+        assert(ok_a != err_a);
+    }
+    printf("PASS\n");
+}
+
+void test_result_void_equality() {
+    printf("test_result_void_equality: ");
+    {
+        using VoidResult = Result<void, int>;
+        auto ok_a = VoidResult::Ok();
+        auto ok_b = VoidResult::Ok();
+        auto err_a = VoidResult::Err(3);
+        auto err_b = VoidResult::Err(3);
+        auto err_c = VoidResult::Err(4);
+
+        assert(ok_a == ok_b);
+        assert(err_a == err_b);
+        assert(err_a != err_c);
+        assert(ok_a != err_a);
+    }
+    printf("PASS\n");
+}
+
 void test_result_as_ref_as_mut() {
     printf("test_result_as_ref_as_mut: ");
     {
@@ -420,6 +457,8 @@ int main() {
     test_result_bool();
     test_result_complex_chain();
     test_result_void();
+    test_result_equality();
+    test_result_void_equality();
     test_result_as_ref_as_mut();
     test_result_ok_err_helpers();
     test_result_const_unwrap_helpers();

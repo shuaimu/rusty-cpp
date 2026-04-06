@@ -265,6 +265,20 @@ public:
     explicit operator bool() const {
         return is_ok_value;
     }
+
+    bool operator==(const Result& other) const {
+        if (is_ok_value != other.is_ok_value) {
+            return false;
+        }
+        if (is_ok_value) {
+            return ok_ref() == other.ok_ref();
+        }
+        return err_ref() == other.err_ref();
+    }
+
+    bool operator!=(const Result& other) const {
+        return !(*this == other);
+    }
 };
 
 // Specialization for Result<void, E>
@@ -392,6 +406,20 @@ public:
     // Explicit bool conversion - true if Ok
     explicit operator bool() const {
         return is_ok_value;
+    }
+
+    bool operator==(const Result& other) const {
+        if (is_ok_value != other.is_ok_value) {
+            return false;
+        }
+        if (is_ok_value) {
+            return true;
+        }
+        return err_ref() == other.err_ref();
+    }
+
+    bool operator!=(const Result& other) const {
+        return !(*this == other);
     }
 };
 

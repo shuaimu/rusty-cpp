@@ -22152,6 +22152,27 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf41543333333181_result_tuple_match_uses_context_typed_ctor_and_direct_equality() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Result<i32, i32>) {
+                match (&v, &Ok(1)) {
+                    (left_val, right_val) => {
+                        let _same = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("*left_val == *right_val"));
+        assert!(
+            out.contains("_ResultCtorCtx::Ok(1)")
+                || out.contains("rusty::Result<int32_t, int32_t>::Ok(1)")
+        );
+        assert!(!out.contains("auto _m1_tmp = Ok("));
+    }
+
+    #[test]
     fn test_leaf41543333333101_pointer_type_mapping_hardens_dependent_and_reference_pointees() {
         let out = transpile_str(
             r#"
