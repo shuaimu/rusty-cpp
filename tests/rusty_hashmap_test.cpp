@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cassert>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 using namespace rusty;
@@ -363,6 +364,59 @@ void test_with_string_keys() {
     std::cout << "✓ String keys tests passed" << std::endl;
 }
 
+void test_index_operator_lookup_only() {
+    std::cout << "Testing index operator lookup semantics..." << std::endl;
+
+    HashMap<std::string, int> map;
+    map.insert("apple", 1);
+    map.insert("banana", 2);
+
+    // Existing keys are readable via operator[]
+    assert(map["apple"] == 1);
+    assert(map["banana"] == 2);
+
+    // Heterogeneous borrowed key lookup (const char* against std::string key)
+    assert(map["apple"] == *map.get("apple").unwrap());
+
+    // Missing keys must not insert; Rust indexing semantics panic/throw.
+    const size_t before_len = map.len();
+    bool threw = false;
+    try {
+        (void)map["missing"];
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    assert(threw);
+    assert(map.len() == before_len);
+    assert(!map.contains_key("missing"));
+
+    const HashMap<std::string, int>& const_map = map;
+    assert(const_map["apple"] == 1);
+
+    std::cout << "✓ Index operator lookup semantics tests passed" << std::endl;
+}
+
+void test_heterogeneous_lookup_with_rusty_string_keys() {
+    std::cout << "Testing heterogeneous lookup with rusty::String keys..." << std::endl;
+
+    HashMap<String, int> map;
+    map.insert(String::from("hello"), 7);
+    map.insert(String::from("world"), 11);
+
+    // Borrowed string lookup should work across get/contains/index surfaces.
+    assert(map.contains_key("hello"));
+    assert(map.get("hello").is_some());
+    assert(*map.get("hello").unwrap() == 7);
+    assert(map["hello"] == 7);
+
+    auto removed = map.remove("world");
+    assert(removed.is_some());
+    assert(removed.unwrap() == 11);
+    assert(!map.contains_key("world"));
+
+    std::cout << "✓ Heterogeneous lookup tests passed" << std::endl;
+}
+
 void test_with_rusty_string() {
     std::cout << "Testing with rusty::String..." << std::endl;
     
@@ -434,6 +488,8 @@ int main() {
     test_with_capacity();
     test_stress();
     test_with_string_keys();
+    test_index_operator_lookup_only();
+    test_heterogeneous_lookup_with_rusty_string_keys();
     test_with_rusty_string();
     test_collision_handling();
     

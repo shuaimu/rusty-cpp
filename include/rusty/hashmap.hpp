@@ -6,6 +6,8 @@
 #include <cstring>
 #include <utility>
 #include <functional>
+#include <stdexcept>
+#include <type_traits>
 #include <immintrin.h>  // For SSE2/AVX2 intrinsics
 #include "option.hpp"
 #include "vec.hpp"
@@ -191,6 +193,7 @@ private:
     size_t growth_left_;     // Number of elements we can add before resize
     Hash hasher_;
     KeyEqual key_eq_;
+    static constexpr size_t NPOS = static_cast<size_t>(-1);
     
     // Find the insert position for a key
     struct FindResult {
@@ -233,7 +236,7 @@ private:
     
     // Find existing key
     size_t find_key(const K& key) const {
-        if (size_ == 0) return static_cast<size_t>(-1);
+        if (size_ == 0) return NPOS;
         
         size_t hash = hasher_(key);
         uint8_t h2 = h2_hash(hash);
@@ -257,11 +260,42 @@ private:
             
             // If we see any empty (not deleted), key doesn't exist
             if (g.match_byte(EMPTY)) {
-                return static_cast<size_t>(-1);
+                return NPOS;
             }
             
             seq.next();
         }
+    }
+
+    // Find existing key using heterogeneous borrowed key lookup.
+    // This keeps HashMap lookups usable for Rust-style borrowed key access
+    // (for example map[&str] when K is a string-like owned key type).
+    template<typename Q>
+    size_t find_key_heterogeneous(const Q& key) const {
+        if (size_ == 0) return NPOS;
+
+        size_t capacity = bucket_mask_ + 1;
+        for (size_t i = 0; i < capacity; i++) {
+            if (!is_full(ctrl_[i])) {
+                continue;
+            }
+
+            if constexpr (requires(const KeyEqual& eq, const K& lhs, const Q& rhs) { eq(lhs, rhs); }) {
+                if (static_cast<bool>(key_eq_(keys_[i], key))) {
+                    return i;
+                }
+            } else if constexpr (requires(const K& lhs, const Q& rhs) { lhs == rhs; }) {
+                if (static_cast<bool>(keys_[i] == key)) {
+                    return i;
+                }
+            } else if constexpr (requires(const K& lhs, const Q& rhs) { rhs == lhs; }) {
+                if (static_cast<bool>(key == keys_[i])) {
+                    return i;
+                }
+            }
+        }
+
+        return NPOS;
     }
     
     // Allocate storage for given capacity
@@ -494,7 +528,17 @@ public:
     // @lifetime: (&'a) -> &'a
     Option<V*> get(const K& key) {
         size_t index = find_key(key);
-        if (index != static_cast<size_t>(-1)) {
+        if (index != NPOS) {
+            return Some(&values_[index]);
+        }
+        return None;
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V*>>
+    get(const Q& key) {
+        size_t index = find_key_heterogeneous(key);
+        if (index != NPOS) {
             return Some(&values_[index]);
         }
         return None;
@@ -503,7 +547,17 @@ public:
     // @lifetime: (&'a) -> &'a
     Option<const V*> get(const K& key) const {
         size_t index = find_key(key);
-        if (index != static_cast<size_t>(-1)) {
+        if (index != NPOS) {
+            return Option<const V*>(Some(const_cast<const V*>(&values_[index])));
+        }
+        return Option<const V*>(None);
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<const V*>>
+    get(const Q& key) const {
+        size_t index = find_key_heterogeneous(key);
+        if (index != NPOS) {
             return Option<const V*>(Some(const_cast<const V*>(&values_[index])));
         }
         return Option<const V*>(None);
@@ -513,7 +567,17 @@ public:
     // @lifetime: (&'a mut) -> &'a mut
     Option<V*> get_mut(const K& key) {
         size_t index = find_key(key);
-        if (index != static_cast<size_t>(-1)) {
+        if (index != NPOS) {
+            return Some(&values_[index]);
+        }
+        return None;
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V*>>
+    get_mut(const Q& key) {
+        size_t index = find_key_heterogeneous(key);
+        if (index != NPOS) {
             return Some(&values_[index]);
         }
         return None;
@@ -523,7 +587,7 @@ public:
     // @lifetime: owned
     Option<V> remove(const K& key) {
         size_t index = find_key(key);
-        if (index != static_cast<size_t>(-1)) {
+        if (index != NPOS) {
             V value = std::move(values_[index]);
             keys_[index].~K();
             values_[index].~V();
@@ -539,10 +603,74 @@ public:
         }
         return None;
     }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V>>
+    remove(const Q& key) {
+        size_t index = find_key_heterogeneous(key);
+        if (index != NPOS) {
+            V value = std::move(values_[index]);
+            keys_[index].~K();
+            values_[index].~V();
+            ctrl_[index] = DELETED;
+
+            if (index < GROUP_SIZE) {
+                ctrl_[index + bucket_mask_ + 1] = DELETED;
+            }
+
+            size_--;
+            return Some(std::move(value));
+        }
+        return None;
+    }
     
     // Check if key exists
     bool contains_key(const K& key) const {
-        return find_key(key) != static_cast<size_t>(-1);
+        return find_key(key) != NPOS;
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, bool>
+    contains_key(const Q& key) const {
+        return find_key_heterogeneous(key) != NPOS;
+    }
+
+    // Rust-style index operation: lookup-only (no implicit insertion).
+    // Missing keys throw to match Rust's indexing panic semantics.
+    V& operator[](const K& key) {
+        auto value = get(key);
+        if (value.is_some()) {
+            return *value.unwrap();
+        }
+        throw std::out_of_range("rusty::HashMap index: key not found");
+    }
+
+    const V& operator[](const K& key) const {
+        auto value = get(key);
+        if (value.is_some()) {
+            return *value.unwrap();
+        }
+        throw std::out_of_range("rusty::HashMap index: key not found");
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, V&>
+    operator[](const Q& key) {
+        auto value = get(key);
+        if (value.is_some()) {
+            return *value.unwrap();
+        }
+        throw std::out_of_range("rusty::HashMap index: key not found");
+    }
+
+    template<typename Q>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, const V&>
+    operator[](const Q& key) const {
+        auto value = get(key);
+        if (value.is_some()) {
+            return *value.unwrap();
+        }
+        throw std::out_of_range("rusty::HashMap index: key not found");
     }
     
     // Entry API for get-or-insert

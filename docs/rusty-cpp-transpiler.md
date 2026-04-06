@@ -2298,8 +2298,18 @@ Active work items:
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-1b-1775495221 --keep-work-dirs`) removed the prior deterministic omitted-template head family (`ArrayString::new_()` / `HashMap::new_()` missing owner args); canonical artifacts: `/tmp/rusty-parity-matrix-27-1b-1775495221/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3514`: `rusty::HashMap<ArrayString<16>, int>` key-hash/moveability surface failures (`std::hash` and move-ctor constraints for key type), followed by downstream runtime-surface/type-shape fallout.
    - guardrail check against wrong-approach checklist (§11): kept fixes root-cause-first and shape-gated; no blanket associated-call rewrites were introduced.
-36. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.2`.
-   - focus: rerun full seven-crate parity matrix after 27.1, record canonical first-failure artifacts, and capture the next deterministic head family (or mark parent complete if all seven pass).
+36. `Leaf 4.15.4.3.3.3.3.3.27.3.1` is complete.
+   - implemented generic runtime HashMap indexing/lookup hardening in `include/rusty/hashmap.hpp`:
+     - added lookup-only `operator[]` (missing key throws) to match Rust index read semantics (no implicit insertion),
+     - added heterogeneous borrowed-key lookup overloads (`get/get_mut/remove/contains_key/operator[]`) with shape-gated key comparability (`KeyEqual` when available, else `lhs == rhs` / `rhs == lhs`).
+   - added focused fixture-agnostic runtime regressions in `tests/rusty_hashmap_test.cpp` for lookup-only index semantics and heterogeneous borrowed-key lookup on `HashMap<rusty::String, int>`.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-3-1-1775506238 --keep-work-dirs`) removed the prior first deterministic head at `runner.cpp:3518` (`map[text]` index shape mismatch on `HashMap<ArrayString<16>, int>`).
+37. `Leaf 4.15.4.3.3.3.3.3.27.3.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-3-2-1775506272 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-3-2-1775506272/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3556`: invalid `ArrayString<2>` to `std::string_view` conversion shape, followed by downstream string/runtime/template fallout (`Ok` path resolution, `parse` on C-string, omitted-template `ArrayString::from_byte_string`, and string/span equality-shape errors).
+38. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.4`.
+   - focus: collapse the post-27.3.2 string-surface head family starting at `ArrayString`/`&str` coercion shape, then rerun the full matrix and record canonical first-failure artifacts.
    - guardrail (wrong-approach checklist §11): keep stage-head collapse disciplined; avoid broad runtime/transpiler rewrites before confirming deterministic first-head ordering in matrix artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
