@@ -2482,8 +2482,22 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-12-2-1775517571 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-56. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.13.1`.
-   - focus: collapse the post-27.12.2 first deterministic string-assertion equality head generically, then verify matrix-head movement.
+56. `Leaf 4.15.4.3.3.3.3.3.27.13.1` is complete.
+   - plan/scope check: fix stayed under the small-change budget (<1000 LOC), so no additional leaf decomposition was required.
+   - implemented generic assertion tuple string-literal deref coercion hardening in `transpiler/src/codegen.rs`:
+     - tuple binding reference targets shaped as `*"..."` now lower to materialized `std::string_view("...")` temporaries before address-taking in tuple scaffolding,
+     - this keeps downstream `*left_val == *right_val` comparisons string-like and removes scalar `const char` comparison fallout from `&*"hello"` RHS shapes.
+   - added fixture-agnostic transpiler regressions:
+     - `test_leaf41543333333327131_tuple_assertion_string_literal_deref_rhs_materializes_string_view_temp`
+     - `test_leaf41543333333327131_tuple_assertion_non_string_deref_keeps_pointer_shape`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-13-1-1775518197 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:4375` (`ArrayString<10>` vs `const char` assertion tuple mismatch), with generated `runner.cpp` now emitting `_m1_tmp = std::string_view("hello")` in `test_arraystring_const_constructible`.
+   - new deterministic first hard error now starts at `runner.cpp:1060`: `use of deleted function arrayvec::ArrayVec<rusty::Vec<int>, 3>::ArrayVec(const ...)`, with canonical artifacts at `/tmp/rusty-parity-matrix-27-13-1-1775518197/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-13-1-1775518197 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): kept the fix shared and shape-gated in AST-aware tuple lowering, with no crate-specific scripts and no assertion callsite special-casing.
+57. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.13.2`.
+   - focus: re-run the full seven-crate parity matrix after 27.13.1 and record the deterministic first failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2596,6 +2610,7 @@ Required approach:
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking
 - for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
 - for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
+- for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

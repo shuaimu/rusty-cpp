@@ -4569,6 +4569,16 @@ impl CodeGen {
                     } else {
                         inner_raw = inner;
                     }
+                    if let Some(string_view_expr) =
+                        self.try_emit_tuple_reference_string_literal_deref_as_string_view(
+                            reference_target,
+                        )
+                    {
+                        // Expanded assertion tuple matches may bind `&*"literal"` (Rust `&str`)
+                        // on one side. Materialize the borrowed literal as string_view so
+                        // downstream `*right_val` compares stay string-like instead of scalar.
+                        inner_raw = string_view_expr;
+                    }
 
                     let reference_target_raw = self.emit_expr_to_string(reference_target);
                     let can_take_address_directly = self.is_stable_reference_lvalue_expr(reference_target)
@@ -4797,6 +4807,29 @@ impl CodeGen {
             _ => return false,
         };
         self.is_slice_range_index_target_expr(reference_target)
+    }
+
+    fn try_emit_tuple_reference_string_literal_deref_as_string_view(
+        &self,
+        reference_target: &syn::Expr,
+    ) -> Option<String> {
+        let reference_target = self.peel_paren_group_expr(reference_target);
+        let syn::Expr::Unary(unary) = reference_target else {
+            return None;
+        };
+        if !matches!(unary.op, syn::UnOp::Deref(_)) {
+            return None;
+        }
+        let inner = self.peel_paren_group_expr(&unary.expr);
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        }) = inner
+        else {
+            return None;
+        };
+        let literal = self.emit_expr_to_string(inner);
+        Some(format!("std::string_view({})", literal))
     }
 
     fn is_slice_range_index_target_expr(&self, expr: &syn::Expr) -> bool {
@@ -24280,6 +24313,49 @@ mod tests {
             out
         );
         assert!(!out.contains("auto _m0_tmp = std::string_view(v);"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327131_tuple_assertion_string_literal_deref_rhs_materializes_string_view_temp(
+    ) {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn as_str(&self) -> &str { "" }
+            }
+            fn f(var: ArrayString<10>) {
+                match (&var, &*"hello") {
+                    (left_val, right_val) => {
+                        let _same = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(
+            out.contains("auto _m1_tmp = std::string_view(\"hello\");"),
+            "expected borrowed string literal deref to materialize string_view temp, output:\n{}",
+            out
+        );
+        assert!(!out.contains("auto _m1 = &*\"hello\";"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327131_tuple_assertion_non_string_deref_keeps_pointer_shape() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *const i32, rhs: i32) {
+                match (&*p, &rhs) {
+                    (left, right) => {
+                        let _same = *left == *right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto _m0 = &*p;"));
+        assert!(!out.contains("std::string_view(*p)"));
     }
 
     #[test]
