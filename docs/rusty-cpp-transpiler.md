@@ -2496,8 +2496,15 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-13-1-1775518197 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): kept the fix shared and shape-gated in AST-aware tuple lowering, with no crate-specific scripts and no assertion callsite special-casing.
-57. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.13.2`.
-   - focus: re-run the full seven-crate parity matrix after 27.13.1 and record the deterministic first failure head with canonical artifacts.
+57. `Leaf 4.15.4.3.3.3.3.3.27.13.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-13-2-1775518425 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-13-2-1775518425/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:1060`: `use of deleted function arrayvec::ArrayVec<rusty::Vec<int>, 3>::ArrayVec(const ...)` in `ArrayVec::into_iter()` return lowering (`IntoIter<T, CAP>(0, (*this))`), followed by adjacent move/copy-surface diagnostics.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-13-2-1775518425 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+58. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.14.1`.
+   - focus: collapse the post-27.13.2 first deterministic move-only constructor/iterator-consumption head generically, then verify matrix-head movement.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2611,6 +2618,7 @@ Required approach:
 - for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
 - for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
 - for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
+- for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
