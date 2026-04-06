@@ -2139,8 +2139,12 @@ Active work items:
    - focused regressions were added (`leaf41543333333191`) covering string-literal typed `.into()`, scalar typed `.into()`, and non-primitive `.into()` non-rewrite behavior.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-19-1-1775455372 --keep-work-dirs`) removed the prior deterministic first hard head (`("a").into()` member-call failure at `runner.cpp:3258`); canonical artifacts at `/tmp/rusty-parity-matrix-19-1-1775455372/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3272`: `no match for operator==` between `std::array<rusty::String, 4>` and `std::array<const char*, 4>`.
-22. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.19.2`.
-   - re-run the full seven-crate parity matrix after 19.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
+22. `Leaf 4.15.4.3.3.3.3.3.19.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-19-2-1775456311 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-19-2-1775456311/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains array/string equality surface mismatch in `test_into_inner_2`: `no match for operator==` at `runner.cpp:3272` between `std::array<rusty::String, 4>` and `std::array<const char*, 4>`, followed by downstream template/runtime-surface cascades.
+23. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.20.1`.
+   - collapse the post-19.2 deterministic Stage D head family with generic assertion/equality-shape normalization for typed array/string comparisons, then re-probe the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2246,6 +2250,7 @@ Required approach:
 - for Result assertion parity, do not add one-off transpiler rewrites that bypass value comparison shape for specific call sites; maintain runtime `rusty::Result` equality surfaces (`operator==`/`operator!=`) so generated assertion scaffolding remains generic
 - for `Into` conversion lowering, do not emit Rust trait-style member calls directly on literals/primitives (for example `("a").into()` in C++); lower through valid helper/context conversion surfaces instead
 - for receiver-gated generic method args (`push(T)`/`insert(_, T)`/`set(T)`), do not block receiver-driven expected-type recovery just because the declared arg type placeholder is not in current scope; resolve concrete arg type from receiver context before conversion-lowering decisions
+- for assertion/equality array-shape fallout, do not add fixture-specific `std::array` equality hacks or crate-local rewrites; normalize compared element/container shapes through generic transpiler/runtime surfaces with explicit type/context gating
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
