@@ -8716,6 +8716,15 @@ impl CodeGen {
                 .or(inferred_expected.as_ref());
             args.push(self.emit_call_arg_with_pass_style(arg, style, arg_expected, false));
         }
+        if method_name == "write_fmt" && args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+        }
         if method_name == "map_err" && mc.args.len() == 1 {
             if let Some(callable_arg) = self.try_emit_map_err_callable_arg(&mc.args[0]) {
                 return self.emit_receiver_member_call(
@@ -10395,6 +10404,9 @@ impl CodeGen {
                         _ => self.emit_expr_maybe_move(a),
                     })
                     .collect();
+                if self.is_ufcs_io_write_fmt_call_path(&ufcs.function_path) && args.len() == 1 {
+                    return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+                }
                 let is_self = matches!(
                     receiver_ref.expr.as_ref(),
                     syn::Expr::Path(p)
@@ -10928,6 +10940,13 @@ impl CodeGen {
             receiver_is_mut: receiver_ref.mutability.is_some(),
             non_receiver_arg_count: call.args.len().saturating_sub(1),
         })
+    }
+
+    fn is_ufcs_io_write_fmt_call_path(&self, function_path: &str) -> bool {
+        if !function_path.ends_with("::Write::write_fmt") {
+            return false;
+        }
+        function_path.starts_with("io::") || function_path.contains("::io::")
     }
 
     /// If this is a variant-constructor call like `Left(2)` and the expected type
@@ -22206,17 +22225,17 @@ mod tests {
             r#"
             struct Writer;
             impl Writer {
-                fn write_fmt(&mut self, _s: String) {}
+                fn flush(&mut self) {}
             }
             fn f() {
                 let mut v = Writer;
-                (&v).write_fmt(String::new());
-                (&mut v).write_fmt(String::new());
+                (&v).flush();
+                (&mut v).flush();
             }
         "#,
         );
-        assert!(out.contains("(&v)->write_fmt("));
-        assert!(!out.contains("(&v).write_fmt("));
+        assert!(out.contains("(&v)->flush()"));
+        assert!(!out.contains("(&v).flush()"));
     }
 
     #[test]
@@ -22225,16 +22244,35 @@ mod tests {
             r#"
             struct Writer;
             impl Writer {
-                fn write_fmt(&mut self, _s: String) {}
+                fn flush(&mut self) {}
             }
             fn f() {
                 let mut v = Writer;
-                v.write_fmt(String::new());
+                v.flush();
             }
         "#,
         );
-        assert!(out.contains("v.write_fmt("));
-        assert!(!out.contains("v->write_fmt("));
+        assert!(out.contains("v.flush()"));
+        assert!(!out.contains("v->flush()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333231_method_write_fmt_uses_io_dispatch_helper() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write(&mut self, _s: &[u8]) {}
+            }
+            fn f() {
+                let mut v = Writer;
+                (&mut v).write_fmt(String::new());
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::io::write_fmt("));
+        assert!(out.contains("rusty::String::new_()"));
+        assert!(!out.contains("(&v)->write_fmt("));
     }
 
     #[test]
@@ -23457,6 +23495,19 @@ mod tests {
         let cg = CodeGen::new();
         let out = cg.emit_call_expr_to_string(&call, None);
         assert_eq!(out, "writer.write(buf)");
+    }
+
+    #[test]
+    fn test_leaf41543333333231_emit_ufcs_io_write_fmt_uses_io_dispatch_helper() {
+        let expr: syn::Expr =
+            syn::parse_str("io::Write::write_fmt(&mut writer, std::string{})").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "rusty::io::write_fmt(writer, std::string{})");
     }
 
     #[test]

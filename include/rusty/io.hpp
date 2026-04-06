@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
@@ -25,7 +26,9 @@
 #include <sstream>
 #include <span>
 #include <type_traits>
+#include <tuple>
 #include <utility>
+#include "rusty/result.hpp"
 
 namespace rusty {
 namespace io {
@@ -56,6 +59,8 @@ public:
         OutOfMemory,
         Other,
     };
+
+    Error() : kind_(Kind::Other), message_("") {}
 
     Error(Kind kind, const std::string& message)
         : kind_(kind), message_(message) {}
@@ -431,6 +436,36 @@ requires(
 {
     return Result<size_t>::err(
         Error(Error::Kind::Unsupported, "type does not implement io::write"));
+}
+
+template<typename Writer, typename FmtArg>
+auto write_fmt(Writer& writer, FmtArg&& fmt_arg) {
+    if constexpr (requires(Writer& w, FmtArg&& arg) { w.write_fmt(std::forward<FmtArg>(arg)); }) {
+        return writer.write_fmt(std::forward<FmtArg>(fmt_arg));
+    } else if constexpr (std::is_convertible_v<FmtArg, std::string_view>) {
+        const auto view = std::string_view(std::forward<FmtArg>(fmt_arg));
+        auto write_result = write(
+            writer,
+            std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(view.data()),
+                view.size()));
+        if (write_result.is_err()) {
+            return rusty::Result<std::tuple<>, Error>::Err(write_result.unwrap_err());
+        }
+        return rusty::Result<std::tuple<>, Error>::Ok(std::make_tuple());
+    } else {
+        return rusty::Result<std::tuple<>, Error>::Err(
+            Error(Error::Kind::Unsupported, "type does not implement io::write_fmt"));
+    }
+}
+
+template<typename Writer, typename FmtArg>
+auto write_fmt(Writer* writer, FmtArg&& fmt_arg) {
+    if (writer == nullptr) {
+        return rusty::Result<std::tuple<>, Error>::Err(
+            Error(Error::Kind::InvalidInput, "io::write_fmt null writer"));
+    }
+    return write_fmt(*writer, std::forward<FmtArg>(fmt_arg));
 }
 
 // ── copy ───────────────────────────────────────────────

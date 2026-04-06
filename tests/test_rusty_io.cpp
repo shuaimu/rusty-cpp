@@ -280,6 +280,52 @@ void test_write_dispatch_rejects_read_only_span() {
     std::cout << "  test_write_dispatch_rejects_read_only_span PASSED" << std::endl;
 }
 
+void test_write_fmt_dispatch_falls_back_to_write() {
+    std::vector<uint8_t> storage(8, 0);
+    auto writer = Cursor<std::vector<uint8_t>>::new_(std::move(storage));
+
+    auto result = write_fmt(writer, std::string("abc"));
+    assert(result.is_ok());
+    result.unwrap();
+    assert(writer.get_ref()[0] == static_cast<uint8_t>('a'));
+    assert(writer.get_ref()[1] == static_cast<uint8_t>('b'));
+    assert(writer.get_ref()[2] == static_cast<uint8_t>('c'));
+
+    std::cout << "  test_write_fmt_dispatch_falls_back_to_write PASSED" << std::endl;
+}
+
+void test_write_fmt_dispatch_accepts_pointer_receiver() {
+    std::vector<uint8_t> storage(8, 0);
+    auto writer = Cursor<std::vector<uint8_t>>::new_(std::move(storage));
+    auto* writer_ptr = &writer;
+
+    auto result = write_fmt(writer_ptr, "xy");
+    assert(result.is_ok());
+    result.unwrap();
+    assert(writer.get_ref()[0] == static_cast<uint8_t>('x'));
+    assert(writer.get_ref()[1] == static_cast<uint8_t>('y'));
+
+    std::cout << "  test_write_fmt_dispatch_accepts_pointer_receiver PASSED" << std::endl;
+}
+
+void test_write_fmt_dispatch_prefers_member_surface() {
+    struct WriterWithMember {
+        int calls = 0;
+        rusty::Result<std::tuple<>, Error> write_fmt(std::string_view) {
+            ++calls;
+            return rusty::Result<std::tuple<>, Error>::Ok(std::make_tuple());
+        }
+    };
+
+    WriterWithMember writer;
+    auto result = write_fmt(writer, std::string_view("ok"));
+    assert(result.is_ok());
+    result.unwrap();
+    assert(writer.calls == 1);
+
+    std::cout << "  test_write_fmt_dispatch_prefers_member_surface PASSED" << std::endl;
+}
+
 // ── Main ───────────────────────────────────────────────
 
 int main() {
@@ -301,7 +347,10 @@ int main() {
     test_read_dispatch_for_integral_span();
     test_write_dispatch_for_integral_span();
     test_write_dispatch_rejects_read_only_span();
+    test_write_fmt_dispatch_falls_back_to_write();
+    test_write_fmt_dispatch_accepts_pointer_receiver();
+    test_write_fmt_dispatch_prefers_member_surface();
 
-    std::cout << "\nAll 16 rusty::io tests PASSED" << std::endl;
+    std::cout << "\nAll 19 rusty::io tests PASSED" << std::endl;
     return 0;
 }
