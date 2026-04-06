@@ -2331,8 +2331,13 @@ Active work items:
      - tuple string-view coercion reference materialization (no `&std::string_view(...)` emission),
      - closure `Ok(...)` constructor context recovery without self-referential shadow bindings.
    - guardrail check against wrong-approach checklist (§11): fixes are shape-gated in shared lowering paths and avoid crate-specific scripts or callsite-only rewrites.
-41. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.5.2`.
-   - focus: rerun the full seven-crate matrix after 27.5.1, record canonical first-failure artifacts, and update frontier status (or close Leaf 4 if all seven crates pass).
+41. `Leaf 4.15.4.3.3.3.3.3.27.5.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-5-2-1775509389 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-5-2-1775509389/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3940` in `test_pop_at`: function-item binding lowered as `const auto s = rusty::String::from;` and fails C++ deduction (`unable to deduce const auto from rusty::String::from`), followed by adjacent unresolved Rust-path/default-surface fallout (`alloc::vec::from_elem` at `runner.cpp:4043`, `Default::default_`/`std::net` at `runner.cpp:4066-4068`) and downstream container-shape/type/runtime diagnostics.
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts before opening the next fix leaf.
+42. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.6.1`.
+   - focus: collapse the post-27.5.2 callable-path/default-surface first head generically (starting with function-item value-path lowering for `String::from` and adjacent unresolved Rust namespace/default call-shapes), then rerun the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2444,6 +2449,7 @@ Required approach:
 - for method-call lowering on reference-wrapped receivers, do not emit fixed member-access operators from surface syntax (`expr.method(...)`) without post-lowering receiver-shape validation; select `.`/`->` from the lowered receiver type so `(&v)`-style forms remain type-correct
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking
 - for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
+- for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
