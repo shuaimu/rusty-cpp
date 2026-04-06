@@ -2411,8 +2411,13 @@ Active work items:
      - `ctest --test-dir build-tests --output-on-failure`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-9-1-1775514182 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and used shared shape-gated fixes only (no crate-specific rewrites/scripts).
-49. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.9.2`.
-   - focus: rerun the full seven-crate matrix after 27.9.1 and record next deterministic frontier movement (or close Leaf 4 if all crates pass).
+49. `Leaf 4.15.4.3.3.3.3.3.27.9.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-9-2-1775514496 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-9-2-1775514496/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts from the max-capacity tuple family rooted at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` shape; first compiler diagnostic emitted via `/usr/include/c++/14/array:61`), followed by adjacent fallout at `runner.cpp:4293+` (`constexpr`/template-shape diagnostics).
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+50. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.10.1`.
+   - focus: collapse the post-27.9.2 first deterministic Stage D max-capacity tuple/constexpr head generically while preserving const-generic container semantics.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
