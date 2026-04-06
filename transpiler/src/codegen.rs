@@ -4531,10 +4531,14 @@ impl CodeGen {
                         inner_raw = inner;
                     }
 
-                    if self.is_stable_reference_lvalue_expr(reference_target)
+                    let reference_target_raw = self.emit_expr_to_string(reference_target);
+                    let can_take_address_directly = self.is_stable_reference_lvalue_expr(reference_target)
                         && !is_slice_range_target
                         && !should_normalize_to_slice_full
-                    {
+                        // Coercions like `std::string_view(t)` produce temporaries; they must
+                        // be materialized before taking an address in tuple assertion scaffolding.
+                        && inner_raw == reference_target_raw;
+                    if can_take_address_directly {
                         self.writeln(&format!("auto {} = &{};", elem_name, inner_raw));
                     } else {
                         let tmp_name = format!("_m{}_tmp", idx);
@@ -6655,8 +6659,22 @@ impl CodeGen {
                         }
                     } else {
                         // For `let y = x` where x is a local variable → insert std::move
+                        //
+                        // Constructor-hint recovery walks nested expressions before we emit the
+                        // initializer itself. Temporarily hide the current binding so closures
+                        // like `let t = || Ok(t.do_thing()?)` don't resolve `t` to the outer
+                        // `t_shadowN` local and create self-referential `decltype` hints.
+                        let hidden_current_binding = self
+                            .local_cpp_bindings
+                            .last_mut()
+                            .and_then(|scope| scope.remove(&name_str));
                         let recovered_hints =
                             self.recover_constructor_template_hints_from_expr(&init.expr);
+                        if let Some(current_cpp_name) = hidden_current_binding {
+                            if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                                scope.insert(name_str.clone(), current_cpp_name);
+                            }
+                        }
                         let pushed_hints = !recovered_hints.is_empty();
                         if pushed_hints {
                             self.constructor_template_hints.push(recovered_hints);
@@ -13920,11 +13938,13 @@ impl CodeGen {
 
         let params_str = params.join(", ");
 
+        let mut inner = self.new_inner_for_block();
+        inner.bind_closure_params_for_emission(closure);
+
         // Determine if the body is a block or a single expression
         match closure.body.as_ref() {
             syn::Expr::Block(block) => {
                 // Multi-statement body
-                let mut inner = self.new_inner_for_block();
                 // Closure blocks are expression bodies even when emitted inside
                 // surrounding void-return contexts; keep tail-expression return
                 // behavior local to the lambda body.
@@ -13938,9 +13958,52 @@ impl CodeGen {
             }
             _ => {
                 // Single expression body → return it
-                let body = self.emit_expr_to_string(&closure.body);
+                let body = inner.emit_expr_to_string(&closure.body);
                 format!("[{}]({}) {{ return {}; }}", capture, params_str, body)
             }
+        }
+    }
+
+    fn bind_closure_params_for_emission(&mut self, closure: &syn::ExprClosure) {
+        for input in &closure.inputs {
+            self.bind_closure_param_for_emission(input);
+        }
+    }
+
+    fn bind_closure_param_for_emission(&mut self, pat: &syn::Pat) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                self.bind_closure_param_name(&pi.ident.to_string(), None);
+            }
+            syn::Pat::Type(pt) => {
+                if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
+                    self.bind_closure_param_name(
+                        &pi.ident.to_string(),
+                        Some((*pt.ty).clone()),
+                    );
+                }
+            }
+            syn::Pat::Reference(pr) => {
+                if let syn::Pat::Ident(pi) = pr.pat.as_ref() {
+                    self.bind_closure_param_name(&pi.ident.to_string(), None);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_closure_param_name(&mut self, rust_name: &str, ty: Option<syn::Type>) {
+        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+            scope.insert(
+                rust_name.to_string(),
+                escape_cpp_keyword(rust_name),
+            );
+        }
+        if let Some(scope) = self.local_bindings.last_mut() {
+            scope.insert(rust_name.to_string(), ty);
+        }
+        if let Some(scope) = self.local_const_bindings.last_mut() {
+            scope.insert(rust_name.to_string(), false);
         }
     }
 
@@ -23722,6 +23785,60 @@ mod tests {
         assert!(
             !out.contains("return Ok("),
             "expected contextual Result::Ok lowering, output:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf4154333333332751_tuple_reference_string_view_coercion_materializes_temp() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn as_str(&self) -> &str { "" }
+            }
+            fn f(tmut: ArrayString<3>) {
+                match (&"abc", &tmut) {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(
+            out.contains("std::string_view(tmut.as_str())"),
+            "expected string_view coercion for tuple reference target, output:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(" = &std::string_view("),
+            "must not take address of temporary string_view expression, output:\n{}",
+            out
+        );
+        assert!(out.contains("_tmp = std::string_view(tmut.as_str());"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332751_closure_ok_hint_avoids_self_referential_shadow_binding() {
+        let out = transpile_str(
+            r#"
+            fn g() -> Result<i32, i32> { Ok(1) }
+            fn f() {
+                let t = 0;
+                let t = |t: i32| -> Result<i32, i32> {
+                    let v = g()?;
+                    Ok(t + v)
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto t_shadow1 = [&](int32_t t)"));
+        assert!(!out.contains("decltype((t_shadow1"));
+        assert!(
+            !out.contains("::Ok(t_shadow1"),
+            "closure constructor payload should not resolve to outer shadow binding, output:\n{}",
             out
         );
     }

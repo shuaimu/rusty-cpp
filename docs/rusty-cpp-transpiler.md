@@ -2322,8 +2322,17 @@ Active work items:
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-4-2-1775508053/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3558`: rvalue address-taking in assertion tuple lowering (`auto _m0 = &std::string_view(tmut)`), followed by adjacent closure result-constructor hint fallout at `runner.cpp:3577` (self-referential `t_shadow1` in `Result<...>::Ok(...)` type synthesis), and then downstream type/runtime-surface diagnostics.
    - guardrail check against wrong-approach checklist (§11): kept deterministic first-head discipline and recorded frontier movement from canonical matrix artifacts before any broader rewrites.
-40. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.5`.
-   - focus: collapse the post-27.4.2 deterministic expression-lifetime/result-context head family (starting with `std::string_view` temporary address-of and closure `Ok` constructor try-context self-reference), then rerun the full matrix and record canonical first-failure artifacts.
+40. `Leaf 4.15.4.3.3.3.3.3.27.5.1` is complete.
+   - implemented generic transpiler hardening in `transpiler/src/codegen.rs` for the first deterministic 27.4.2 head family:
+     - tuple binding/reference match lowering now treats coerced/non-lvalue reference targets as non-addressable and materializes them into `_m*_tmp` temporaries before taking addresses (preventing `&std::string_view(...)` rvalue-address emission),
+     - closure emission now binds closure parameter names in nested emission scope so payload/hint expressions resolve to closure locals instead of outer shadow bindings,
+     - local-initializer constructor-hint recovery now temporarily hides the in-progress local binding while scanning initializer expressions, preventing self-referential `decltype`/constructor-context synthesis.
+   - added focused fixture-agnostic transpiler regressions (`leaf4154333333332751`) covering:
+     - tuple string-view coercion reference materialization (no `&std::string_view(...)` emission),
+     - closure `Ok(...)` constructor context recovery without self-referential shadow bindings.
+   - guardrail check against wrong-approach checklist (§11): fixes are shape-gated in shared lowering paths and avoid crate-specific scripts or callsite-only rewrites.
+41. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.5.2`.
+   - focus: rerun the full seven-crate matrix after 27.5.1, record canonical first-failure artifacts, and update frontier status (or close Leaf 4 if all seven crates pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2433,6 +2442,8 @@ Required approach:
 - for omitted-template owner constructor fallout (`Type<auto, ...>::new_()`), do not hardcode crate/type-specific constructor rewrites or globally strip placeholder args; recover owner template args through explicit expected-type/scope inference gates so unaffected constructor sites keep their existing behavior
 - for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies
 - for method-call lowering on reference-wrapped receivers, do not emit fixed member-access operators from surface syntax (`expr.method(...)`) without post-lowering receiver-shape validation; select `.`/`->` from the lowered receiver type so `(&v)`-style forms remain type-correct
+- for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking
+- for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
