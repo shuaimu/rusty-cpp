@@ -2432,8 +2432,15 @@ Active work items:
      - `ctest --test-dir build-tests --output-on-failure`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-10-1-1775515473 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): changes are shared and shape-gated in core mapping/runtime logic, deterministic first-head discipline is preserved, and no crate-specific rewrites/scripts were introduced.
-51. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.10.2`.
-   - focus: run the full seven-crate matrix after 27.10.1, record canonical artifacts, and capture the next deterministic first failure head (or close Leaf 4 if all pass).
+51. `Leaf 4.15.4.3.3.3.3.3.27.10.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-10-2-1775515714 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-10-2-1775515714/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:4293`: `constexpr ArrayVec<rusty::Vec<uint8_t>, 10> OF_U8 = ArrayVec<...>::new_const();` fails because `ArrayVec<rusty::Vec<uint8_t>, 10>` is non-literal / non-copyable in this surface, with adjacent fallout at `runner.cpp:4294+` and neighboring `ArrayString::new_const`/template-surface diagnostics.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-10-2-1775515714 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+52. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.11.1`.
+   - focus: collapse the new post-27.10.2 first deterministic constexpr constructor/template head generically, then verify matrix-head movement.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
