@@ -11320,6 +11320,13 @@ impl CodeGen {
             } else {
                 source
             };
+            // When local-path type inference is unavailable in expanded assertion tuple
+            // scaffolding, use a runtime helper that prefers `.as_str()` if available.
+            if self.infer_simple_expr_type(source_expr).is_none()
+                && matches!(source_expr, syn::Expr::Path(path) if path.path.segments.len() == 1)
+            {
+                return format!("rusty::to_string_view({})", source);
+            }
             return format!("std::string_view({})", source);
         }
 
@@ -24005,6 +24012,34 @@ mod tests {
             out
         );
         assert!(out.contains("_tmp = std::string_view(tmut.as_str());"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332791_untyped_arraystring_path_uses_string_view_helper() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn try_from(_s: String) -> Result<Self, ()> { Ok(ArrayString) }
+                fn as_str(&self) -> &str { "" }
+            }
+            fn f() {
+                let v = ArrayString::<16>::try_from(String::from("x")).unwrap();
+                match (&v, &"x") {
+                    (left, right) => {
+                        let _ = left;
+                        let _ = right;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(
+            out.contains("auto _m0_tmp = rusty::to_string_view(v);"),
+            "expected unresolved local path to use string-view helper, output:\n{}",
+            out
+        );
+        assert!(!out.contains("auto _m0_tmp = std::string_view(v);"));
     }
 
     #[test]

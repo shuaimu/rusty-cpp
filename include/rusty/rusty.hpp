@@ -129,6 +129,18 @@ namespace rusty {
         return T{};
     }
 
+    // String-view compatibility helper for transpiled Rust `&str` coercions.
+    // Prefer `.as_str()` surfaces when present (ArrayString, rusty::String, etc.),
+    // otherwise rely on direct `std::string_view` construction.
+    template<typename T>
+    std::string_view to_string_view(T&& value) {
+        if constexpr (requires { value.as_str(); }) {
+            return std::string_view(value.as_str());
+        } else {
+            return std::string_view(std::forward<T>(value));
+        }
+    }
+
     namespace boxed {
 
     template<typename T>
