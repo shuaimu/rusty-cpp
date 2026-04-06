@@ -2350,8 +2350,14 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf4154333333332761 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): fixes remain shape-gated in shared lowering/mapping paths; no crate-specific scripts and no blanket namespace rewrites were introduced.
-43. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.6.2`.
-   - focus: re-run full seven-crate parity matrix after 27.6.1, record canonical first deterministic failure head/artifacts, and advance TODO frontier (or mark Leaf 4 complete if all seven pass).
+43. `Leaf 4.15.4.3.3.3.3.3.27.6.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-6-2-1775510882 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-6-2-1775510882/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:4052` in `test_sizes`: assertion tuple compare emits `operator==` between `std::vector<unsigned char>` and `std::span<const unsigned char>`, which has no viable overload.
+   - adjacent deterministic fallout in the same family appears at `runner.cpp:4130` and `runner.cpp:4186` (`std::span<Z>` compared with `std::vector<Z>`), indicating a shared container/slice equality-shape gap.
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts/failure-family evidence before opening the next implementation leaf.
+44. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.7.1`.
+   - focus: collapse the post-27.6.2 container/slice equality first head generically (assertion/equality lowering across `Vec` and slice/span shapes) without crate-specific rewrites, then rerun the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
