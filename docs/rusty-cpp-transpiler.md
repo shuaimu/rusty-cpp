@@ -2087,8 +2087,12 @@ Active work items:
    - focused regressions were added (`leaf41543333333141` + runtime probe coverage in `tests/rusty_array_test.cpp`) to assert mutability-preserving lowering and writable element access through `rusty::enumerate(rusty::iter_mut(...))`.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-14-1b-1775444041 --keep-work-dirs`) removed the prior first deterministic head (`test_retain` read-only assignment on `*elt = i` from iterator mutability loss); canonical artifacts at `/tmp/rusty-parity-matrix-14-1b-1775444041/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now begins with `Result` visit/call-shape mismatch in `test_insert` (`std::visit(..., rusty::Result<...>)`).
-12. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.14.2`.
-   - re-run full seven-crate matrix after 14.1 and record the next deterministic first failure head with canonical artifact paths.
+12. `Leaf 4.15.4.3.3.3.3.3.14.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-14-2-1775444973 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-14-2-1775444973/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains `Result` visit/call-shape mismatch in `test_insert`: `std::visit(..., rusty::Result<std::tuple<>, errors::CapacityError<int>>)` at `runner.cpp:3204` / `3219`, followed by existing downstream constructor/trait/string/template-surface cascades.
+13. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.15.1`.
+   - implement a generic `Result` match-dispatch lowering fix so `Result`-shaped matches are routed through `rusty::Result` helper dispatch instead of `std::visit` variant dispatch, then reprobe matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
