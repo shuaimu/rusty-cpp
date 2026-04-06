@@ -6679,7 +6679,11 @@ impl CodeGen {
                         if pushed_hints {
                             self.constructor_template_hints.push(recovered_hints);
                         }
-                        let expr_str = if get_local_type(local).is_none() {
+                        let expr_str = if let Some(callable_item_expr) =
+                            self.emit_callable_path_item_expr(&init.expr)
+                        {
+                            callable_item_expr
+                        } else if get_local_type(local).is_none() {
                             if let syn::Expr::Repeat(repeat) = init.expr.as_ref() {
                                 if let Some(elem_hint) = self.repeat_elem_type_hints.get(&name_str)
                                 {
@@ -6785,8 +6789,13 @@ impl CodeGen {
                             .and_then(|scope| scope.remove(&name_str));
                     }
                     if let Some(init) = &local.init {
-                        let expr_str =
-                            self.emit_expr_to_string_with_expected(&init.expr, Some(&resolved_ty));
+                        let expr_str = if let Some(callable_item_expr) =
+                            self.emit_callable_path_item_expr(&init.expr)
+                        {
+                            callable_item_expr
+                        } else {
+                            self.emit_expr_to_string_with_expected(&init.expr, Some(&resolved_ty))
+                        };
                         self.writeln(&format!("{}{} {} = {};", qualifier, ty, cpp_name, expr_str));
                     } else {
                         // `let x: T;` can be initialized later; emit mutable storage.
@@ -11036,6 +11045,12 @@ impl CodeGen {
             }
             return self.emit_expr_maybe_move(&call.args[0]);
         }
+        if self.is_default_trait_default_path_expr(call.func.as_ref()) && call.args.is_empty() {
+            if let Some(expected) = expected_ty {
+                let expected_cpp = self.map_type(expected);
+                return format!("rusty::default_value<{}>()", expected_cpp);
+            }
+        }
         // Map Ok(x) and Err(x) for Result
         if func == "Ok" && call.args.len() == 1 {
             let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
@@ -11204,6 +11219,54 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
         joined == "core::convert::From::from" || joined == "std::convert::From::from"
+    }
+
+    fn is_default_trait_default_path_expr(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = expr else {
+            return false;
+        };
+        let joined = path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "Default::default" | "core::default::Default::default" | "std::default::Default::default"
+        )
+    }
+
+    fn emit_callable_path_item_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Path(path_expr) = expr else {
+            return None;
+        };
+        let path = &path_expr.path;
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let last = path.segments.last()?.ident.to_string();
+        let is_probably_callable = types::map_function_path(&joined).is_some()
+            || last
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+        if !is_probably_callable {
+            return None;
+        }
+        let target = self.emit_path_to_string(path);
+        Some(format!(
+            "[&](auto&&... _args) -> decltype(auto) {{ return {}(std::forward<decltype(_args)>(_args)...); }}",
+            target
+        ))
     }
 
     fn is_noreturn_panic_like_call_path(&self, path: &str) -> bool {
@@ -15597,6 +15660,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_net_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_any_import(normalized) {
         return action;
     }
@@ -15827,6 +15893,21 @@ fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
         return Some(UseImportAction::Using("rusty::String".to_string()));
     }
     None
+}
+
+fn rewrite_std_net_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::net" {
+        // Rust `std::net` has no direct C++ namespace twin; concrete item paths
+        // are lowered through dedicated type/function mappings instead.
+        return Some(UseImportAction::RustOnly);
+    }
+
+    let item = path.strip_prefix("std::net::")?;
+    let action = match item {
+        "TcpStream" => UseImportAction::Using("rusty::net::TcpStream".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 fn rewrite_std_any_import(path: &str) -> Option<UseImportAction> {
@@ -22728,6 +22809,13 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154333333332761_std_net_import_is_rust_only() {
+        let out = transpile_str("use std::net;");
+        assert!(out.contains("// Rust-only: using std::net;"));
+        assert!(!out.contains("\nusing std::net;"));
+    }
+
+    #[test]
     fn test_std_io_function_import_remapped_to_underscore_variant() {
         let out = transpile_str("use std::io::stdin;");
         assert!(out.contains("using rusty::io::stdin_;"));
@@ -23841,6 +23929,65 @@ mod tests {
             "closure constructor payload should not resolve to outer shadow binding, output:\n{}",
             out
         );
+    }
+
+    #[test]
+    fn test_leaf4154333333332761_function_item_binding_lowers_to_callable_wrapper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let s = String::from;
+                let _x = s("a");
+            }
+        "#,
+        );
+        assert!(
+            out.contains("const auto s = [&](auto&&... _args) -> decltype(auto)"),
+            "expected callable wrapper for function-item binding, output:\n{}",
+            out
+        );
+        assert!(out.contains("return rusty::String::from("));
+        assert!(!out.contains("const auto s = rusty::String::from;"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332761_default_trait_call_uses_expected_default_value_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x: i32 = Default::default();
+            }
+        "#,
+        );
+        assert!(out.contains("const int32_t x = rusty::default_value<int32_t>();"));
+        assert!(!out.contains("Default::default_()"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332761_alloc_vec_from_elem_lowers_to_array_repeat() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<u8>) {
+                let _x = alloc::vec::from_elem(0u8, v.len());
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(static_cast<uint8_t>(0), rusty::len(v))"));
+        assert!(!out.contains("alloc::vec::from_elem"));
+    }
+
+    #[test]
+    fn test_leaf4154333333332761_net_tcpstream_type_maps_and_default_call_is_contextual() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                use std::net;
+                let _v: Vec<net::TcpStream> = Default::default();
+            }
+        "#,
+        );
+        assert!(out.contains("// Rust-only: using std::net;"));
+        assert!(out.contains("const rusty::Vec<rusty::net::TcpStream> _v = rusty::default_value<rusty::Vec<rusty::net::TcpStream>>();"));
     }
 
     #[test]

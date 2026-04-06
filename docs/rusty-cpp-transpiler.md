@@ -2336,8 +2336,22 @@ Active work items:
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-5-2-1775509389/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3940` in `test_pop_at`: function-item binding lowered as `const auto s = rusty::String::from;` and fails C++ deduction (`unable to deduce const auto from rusty::String::from`), followed by adjacent unresolved Rust-path/default-surface fallout (`alloc::vec::from_elem` at `runner.cpp:4043`, `Default::default_`/`std::net` at `runner.cpp:4066-4068`) and downstream container-shape/type/runtime diagnostics.
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts before opening the next fix leaf.
-42. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.6.1`.
-   - focus: collapse the post-27.5.2 callable-path/default-surface first head generically (starting with function-item value-path lowering for `String::from` and adjacent unresolved Rust namespace/default call-shapes), then rerun the full matrix.
+42. `Leaf 4.15.4.3.3.3.3.3.27.6.1` is complete.
+   - implemented generic callable/default/path-surface hardening across transpiler/runtime surfaces:
+     - local initializer function-item path values now lower to callable wrappers (generic forwarding lambdas), removing invalid direct value binding of associated methods (`const auto s = rusty::String::from;`),
+     - zero-arg trait-path `Default::default()` now lowers contextually to `rusty::default_value<T>()` when expected type is known,
+     - `alloc::vec::from_elem` now maps to `rusty::array_repeat`,
+     - `std::net` import/type surfaces now lower without unresolved Rust namespace emission (`use std::net;` is Rust-only; `std::net::TcpStream` maps to `rusty::net::TcpStream`).
+   - runtime additions:
+     - `include/rusty/rusty.hpp`: `rusty::default_value<T>()` helper that prefers `T::default_()` and otherwise value-initializes,
+     - `include/rusty/net.hpp`: minimal `rusty::net::TcpStream` compatibility surface.
+   - added focused fixture-agnostic regressions in `transpiler/src/codegen.rs` (`leaf4154333333332761` tests) and `transpiler/src/types.rs` mapping tests.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf4154333333332761 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fixes remain shape-gated in shared lowering/mapping paths; no crate-specific scripts and no blanket namespace rewrites were introduced.
+43. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.6.2`.
+   - focus: re-run full seven-crate parity matrix after 27.6.1, record canonical first deterministic failure head/artifacts, and advance TODO frontier (or mark Leaf 4 complete if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

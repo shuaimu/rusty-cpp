@@ -46,6 +46,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Strings
         "String" | "std::string::String" => Some(("rusty::String", false)),
+        "net::TcpStream" | "std::net::TcpStream" => Some(("rusty::net::TcpStream", false)),
 
         // Error handling
         "Option" | "std::option::Option" => Some(("rusty::Option", true)),
@@ -127,6 +128,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "String::new" => Some("rusty::String::new_"),
         // Vec::new
         "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" => Some("rusty::Vec::new_"),
+        "vec::from_elem" | "std::vec::from_elem" | "alloc::vec::from_elem" => {
+            Some("rusty::array_repeat")
+        }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         // thread::spawn
         "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
@@ -386,6 +390,10 @@ mod tests {
             map_std_type("std::collections::HashMap"),
             Some(("rusty::HashMap", true))
         );
+        assert_eq!(
+            map_std_type("std::net::TcpStream"),
+            Some(("rusty::net::TcpStream", false))
+        );
     }
 
     #[test]
@@ -446,6 +454,10 @@ mod tests {
             Some("rusty::String::new_")
         );
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
+        assert_eq!(
+            map_function_path("alloc::vec::from_elem"),
+            Some("rusty::array_repeat")
+        );
         assert_eq!(
             map_function_path("std::vec::Vec::new"),
             Some("rusty::Vec::new_")

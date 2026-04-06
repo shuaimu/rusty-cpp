@@ -43,6 +43,7 @@
 
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
+#include "rusty/net.hpp"
 
 // Error trait-shape helpers used by transpiled expanded output
 #include "rusty/error.hpp"
@@ -112,6 +113,21 @@ namespace rusty {
     
     template<typename T>
     using RefCounted = Rc<T>;
+
+    // Rust `Default::default()` compatibility helper.
+    // Prefer a type's `T::default_()` surface when it exists; otherwise
+    // fall back to value-initialization.
+    template<typename T>
+    requires requires { T::default_(); }
+    auto default_value() {
+        return T::default_();
+    }
+
+    template<typename T>
+    requires (!requires { T::default_(); })
+    T default_value() {
+        return T{};
+    }
 
     namespace boxed {
 
