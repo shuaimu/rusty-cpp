@@ -10725,10 +10725,12 @@ impl CodeGen {
             syn::Expr::Cast(c) => {
                 let expr = self.emit_expr_to_string(&c.expr);
                 let ty = self.map_type(&c.ty);
+                let target_is_pointer_type =
+                    matches!(c.ty.as_ref(), syn::Type::Ptr(_)) || ty.ends_with('*');
                 let source_is_explicit_reference =
                     matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
                 if type_string_has_auto_placeholder(&ty) {
-                    if ty.ends_with('*')
+                    if target_is_pointer_type
                         && self.is_expr_reference_like(&c.expr)
                         && !source_is_explicit_reference
                     {
@@ -10736,7 +10738,7 @@ impl CodeGen {
                     } else {
                         expr
                     }
-                } else if ty.ends_with('*')
+                } else if target_is_pointer_type
                     && self.is_expr_reference_like(&c.expr)
                     && !source_is_explicit_reference
                 {
@@ -20411,6 +20413,32 @@ mod tests {
         assert!(!out.contains("static_cast<auto*>"));
         assert!(!out.contains("static_cast<const auto*>"));
         assert!(out.contains("const auto p = &x;"));
+    }
+
+    #[test]
+    fn test_leaf41543333333111_generic_cast_to_raw_pointer_preserves_address_of_for_pointer_alias() {
+        let out = transpile_str(
+            r#"
+            fn f<T>(x: &mut T) {
+                let p = x as *mut T;
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<std::add_pointer_t<T>>(&x)"));
+        assert!(!out.contains("static_cast<std::add_pointer_t<T>>(x)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333111_ptr_read_cast_uses_address_of_for_pointer_alias() {
+        let out = transpile_str(
+            r#"
+            fn f<T>(mut_ref: &mut T) {
+                let _ = std::ptr::read(mut_ref as *mut T);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(&mut_ref))"));
+        assert!(!out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(mut_ref))"));
     }
 
     #[test]

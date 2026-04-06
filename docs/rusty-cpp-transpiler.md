@@ -1980,6 +1980,7 @@ Integrated outcomes:
 - io and string/char path families (`from_utf8*`, `encode_utf8`, boundary checks, formatter/debug chains) are lowered to runtime-safe targets.
 - `MaybeUninit` reference-typed storage access is hardened to avoid pointer-to-reference emission shapes (pointer aliases via `std::add_pointer_t` and laundered storage access).
 - mixed optional-like surfaces in iterator/test-shape lowering now normalize `std::optional` receiver methods (`is_some`/`is_none`/`unwrap` → `has_value`/`!has_value`/`value`) while preserving runtime `Option` surfaces.
+- pointer-helper cast lowering now preserves reference payload address semantics even when pointer target types are emitted as alias forms (`std::add_pointer_t<...>`): reference-like cast sources are emitted as `&expr` before pointer-typed adaptation in generic cast/read paths.
 
 Directly supports:
 
@@ -2055,8 +2056,12 @@ Active work items:
 4. `Leaf 4.15.4.3.3.3.3.3.10.2` is complete.
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-2-1775435353 --keep-work-dirs`) now fails earlier at `take_mut` Stage D (`total=4`, `pass=3`, `fail=1`), with canonical artifacts at `/tmp/rusty-parity-matrix-10-2-1775435353/take_mut/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard errors now begin with scoped `take_or_recover` pointer-cast lowering shape (`static_cast<std::add_pointer_t<T>>(mut_ref)`), yielding invalid `T`→`T*` casts in pointer helper calls.
-5. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.11.1`.
-   - collapse the new `take_mut` Stage D pointer-cast head generically, then rerun matrix.
+5. `Leaf 4.15.4.3.3.3.3.3.11.1` is complete.
+   - generic cast lowering now treats AST pointer targets (`syn::Type::Ptr`) as pointer-typed even when rendered C++ type text is alias-based (`std::add_pointer_t<...>`), preserving address-of emission for reference-like sources.
+   - focused transpiler regressions (`leaf41543333333111`) cover both direct generic casts and `std::ptr::read(...)` cast paths and assert the `static_cast<std::add_pointer_t<T>>(&...)` shape.
+   - `take_mut` single-crate reprobe after 11.1 (`tests/transpile_tests/run_parity_matrix.sh --crate take_mut --work-root /tmp/rusty-parity-matrix-11-1-1775436329 --keep-work-dirs`) now passes.
+6. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.11.2`.
+   - rerun the full seven-crate matrix and capture the next deterministic first-failure head (or close the parent if all pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
