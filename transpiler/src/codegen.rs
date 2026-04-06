@@ -8625,6 +8625,13 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::len({})", receiver);
         }
+        if mc.method == "to_vec"
+            && mc.args.is_empty()
+            && self.is_to_vec_runtime_receiver_expr(&mc.receiver)
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::to_vec({})", receiver);
+        }
         if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
             return description_call;
         }
@@ -8746,7 +8753,15 @@ impl CodeGen {
         let method_name = mc.method.to_string();
         let mut args = Vec::with_capacity(mc.args.len());
         for (idx, arg) in mc.args.iter().enumerate() {
-            let style = self.lookup_method_arg_pass_style(&method_name, idx);
+            let style = self
+                .lookup_method_arg_pass_style(&method_name, idx)
+                .or_else(|| {
+                    if method_name == "clone_from" && idx == 0 {
+                        Some(ArgPassStyle::Reference)
+                    } else {
+                        None
+                    }
+                });
             let expected_ty = self.lookup_method_arg_expected_type(&method_name, idx);
             let inferred_expected_from_receiver =
                 self.infer_method_arg_expected_type_from_receiver(
@@ -10012,6 +10027,24 @@ impl CodeGen {
     fn is_std_optional_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
         self.infer_simple_expr_type(expr)
             .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
+    }
+
+    fn is_to_vec_runtime_receiver_expr(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.is_to_vec_runtime_receiver_type(&ty))
+    }
+
+    fn is_to_vec_runtime_receiver_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Array(_) | syn::Type::Slice(_) => true,
+            syn::Type::Path(tp) => tp
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "ArrayVec"),
+            _ => false,
+        }
     }
 
     fn infer_array_capacity_arg_for_expr(&self, expr: &syn::Expr) -> Option<String> {
@@ -15670,9 +15703,15 @@ fn collect_local_generic_placeholder_hints(stmts: &[syn::Stmt]) -> HashMap<Strin
         return HashMap::new();
     }
 
+    let known_local_types = collect_known_local_type_hints(stmts);
     let mut hints = HashMap::new();
     for stmt in stmts {
-        collect_local_generic_placeholder_hints_in_stmt(stmt, &candidates, &mut hints);
+        collect_local_generic_placeholder_hints_in_stmt(
+            stmt,
+            &candidates,
+            &known_local_types,
+            &mut hints,
+        );
     }
     hints
 }
@@ -15743,19 +15782,243 @@ fn call_owner_has_placeholder_generic(expr: &syn::Expr) -> bool {
     }
 }
 
+fn collect_known_local_type_hints(stmts: &[syn::Stmt]) -> HashMap<String, syn::Type> {
+    let mut known = HashMap::new();
+    for stmt in stmts {
+        collect_known_local_type_hints_in_stmt(stmt, &mut known);
+    }
+    known
+}
+
+fn collect_known_local_type_hints_in_stmt(
+    stmt: &syn::Stmt,
+    known: &mut HashMap<String, syn::Type>,
+) {
+    match stmt {
+        syn::Stmt::Local(local) => {
+            if let Some(name) = local_binding_name(local) {
+                if let Some(ty) = infer_known_local_type_for_placeholder_scan(local) {
+                    known.insert(name, ty);
+                }
+            }
+            if let Some(init) = &local.init {
+                collect_known_local_type_hints_in_expr(&init.expr, known);
+            }
+        }
+        syn::Stmt::Expr(expr, _) => collect_known_local_type_hints_in_expr(expr, known),
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+    }
+}
+
+fn collect_known_local_type_hints_in_expr(expr: &syn::Expr, known: &mut HashMap<String, syn::Type>) {
+    match expr {
+        syn::Expr::Block(block) => {
+            for stmt in &block.block.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+        }
+        syn::Expr::If(if_expr) => {
+            collect_known_local_type_hints_in_expr(&if_expr.cond, known);
+            for stmt in &if_expr.then_branch.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+            if let Some((_, else_expr)) = &if_expr.else_branch {
+                collect_known_local_type_hints_in_expr(else_expr, known);
+            }
+        }
+        syn::Expr::While(while_expr) => {
+            collect_known_local_type_hints_in_expr(&while_expr.cond, known);
+            for stmt in &while_expr.body.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+        }
+        syn::Expr::Loop(loop_expr) => {
+            for stmt in &loop_expr.body.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+        }
+        syn::Expr::ForLoop(for_expr) => {
+            collect_known_local_type_hints_in_expr(&for_expr.expr, known);
+            for stmt in &for_expr.body.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+        }
+        syn::Expr::Match(match_expr) => {
+            collect_known_local_type_hints_in_expr(&match_expr.expr, known);
+            for arm in &match_expr.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    collect_known_local_type_hints_in_expr(guard, known);
+                }
+                collect_known_local_type_hints_in_expr(&arm.body, known);
+            }
+        }
+        syn::Expr::Unsafe(unsafe_expr) => {
+            for stmt in &unsafe_expr.block.stmts {
+                collect_known_local_type_hints_in_stmt(stmt, known);
+            }
+        }
+        syn::Expr::Call(call) => {
+            collect_known_local_type_hints_in_expr(&call.func, known);
+            for arg in &call.args {
+                collect_known_local_type_hints_in_expr(arg, known);
+            }
+        }
+        syn::Expr::MethodCall(method_call) => {
+            collect_known_local_type_hints_in_expr(&method_call.receiver, known);
+            for arg in &method_call.args {
+                collect_known_local_type_hints_in_expr(arg, known);
+            }
+        }
+        syn::Expr::Assign(assign) => {
+            collect_known_local_type_hints_in_expr(&assign.left, known);
+            collect_known_local_type_hints_in_expr(&assign.right, known);
+        }
+        syn::Expr::Unary(unary) => collect_known_local_type_hints_in_expr(&unary.expr, known),
+        syn::Expr::Reference(reference) => {
+            collect_known_local_type_hints_in_expr(&reference.expr, known)
+        }
+        syn::Expr::Paren(paren) => collect_known_local_type_hints_in_expr(&paren.expr, known),
+        syn::Expr::Group(group) => collect_known_local_type_hints_in_expr(&group.expr, known),
+        syn::Expr::Array(array) => {
+            for elem in &array.elems {
+                collect_known_local_type_hints_in_expr(elem, known);
+            }
+        }
+        syn::Expr::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_known_local_type_hints_in_expr(elem, known);
+            }
+        }
+        syn::Expr::Struct(struct_expr) => {
+            for field in &struct_expr.fields {
+                collect_known_local_type_hints_in_expr(&field.expr, known);
+            }
+            if let Some(rest) = &struct_expr.rest {
+                collect_known_local_type_hints_in_expr(rest, known);
+            }
+        }
+        syn::Expr::Closure(closure) => collect_known_local_type_hints_in_expr(&closure.body, known),
+        syn::Expr::Await(await_expr) => collect_known_local_type_hints_in_expr(&await_expr.base, known),
+        syn::Expr::Try(try_expr) => collect_known_local_type_hints_in_expr(&try_expr.expr, known),
+        syn::Expr::Break(brk) => {
+            if let Some(value) = &brk.expr {
+                collect_known_local_type_hints_in_expr(value, known);
+            }
+        }
+        syn::Expr::Return(ret) => {
+            if let Some(value) = &ret.expr {
+                collect_known_local_type_hints_in_expr(value, known);
+            }
+        }
+        syn::Expr::Let(let_expr) => collect_known_local_type_hints_in_expr(&let_expr.expr, known),
+        _ => {}
+    }
+}
+
+fn infer_known_local_type_for_placeholder_scan(local: &syn::Local) -> Option<syn::Type> {
+    if let Some(ty) = get_local_type(local) {
+        if !type_has_generic_placeholder(ty) {
+            return Some(ty.clone());
+        }
+    }
+    let init = local.init.as_ref()?;
+    infer_known_local_type_from_expr(&init.expr)
+}
+
+fn infer_known_local_type_from_expr(expr: &syn::Expr) -> Option<syn::Type> {
+    let expr = peel_paren_group_expr(expr);
+    match expr {
+        syn::Expr::Reference(reference) => infer_known_local_type_from_expr(&reference.expr),
+        syn::Expr::Call(call) => infer_known_arrayvec_type_from_call(call),
+        _ => None,
+    }
+}
+
+fn infer_known_arrayvec_type_from_call(call: &syn::ExprCall) -> Option<syn::Type> {
+    let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+        return None;
+    };
+    if path_expr.path.segments.len() < 2 {
+        return None;
+    }
+    let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+    if owner_seg.ident != "ArrayVec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &owner_seg.arguments else {
+        return None;
+    };
+
+    let mut elem_ty: Option<syn::Type> = None;
+    let mut cap_expr: Option<syn::Expr> = None;
+    for arg in &args.args {
+        match arg {
+            syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
+                elem_ty = Some(ty.clone());
+            }
+            syn::GenericArgument::Const(c) => {
+                cap_expr = Some(c.clone());
+            }
+            _ => {}
+        }
+    }
+    let (elem_ty, cap_expr) = (elem_ty?, cap_expr?);
+    Some(parse_quote!(ArrayVec<#elem_ty, #cap_expr>))
+}
+
+fn peel_reference_paren_group_type_hint<'a>(mut ty: &'a syn::Type) -> &'a syn::Type {
+    loop {
+        match ty {
+            syn::Type::Reference(r) => ty = &r.elem,
+            syn::Type::Paren(p) => ty = &p.elem,
+            syn::Type::Group(g) => ty = &g.elem,
+            _ => return ty,
+        }
+    }
+}
+
+fn extract_arrayvec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "ArrayVec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner.clone()),
+        _ => None,
+    })
+}
+
 fn collect_local_generic_placeholder_hints_in_stmt(
     stmt: &syn::Stmt,
     candidates: &std::collections::HashSet<String>,
+    known_local_types: &HashMap<String, syn::Type>,
     hints: &mut HashMap<String, syn::Type>,
 ) {
     match stmt {
         syn::Stmt::Local(local) => {
             if let Some(init) = &local.init {
-                collect_local_generic_placeholder_hints_in_expr(&init.expr, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    &init.expr,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Stmt::Expr(expr, _) => {
-            collect_local_generic_placeholder_hints_in_expr(expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
     }
@@ -15764,6 +16027,7 @@ fn collect_local_generic_placeholder_hints_in_stmt(
 fn collect_local_generic_placeholder_hints_in_expr(
     expr: &syn::Expr,
     candidates: &std::collections::HashSet<String>,
+    known_local_types: &HashMap<String, syn::Type>,
     hints: &mut HashMap<String, syn::Type>,
 ) {
     match expr {
@@ -15778,11 +16042,23 @@ fn collect_local_generic_placeholder_hints_in_expr(
                         let arg_idx = match method.as_str() {
                             "push" | "try_push" | "set" => Some(0usize),
                             "insert" | "try_insert" => Some(1usize),
+                            "clone_from" => Some(0usize),
                             _ => None,
                         };
                         if let Some(arg_idx) = arg_idx {
                             if let Some(arg) = mc.args.iter().nth(arg_idx) {
-                                if let Some(inferred) = infer_hint_type_for_local_placeholder(arg) {
+                                let inferred =
+                                    infer_hint_type_for_local_placeholder(arg, known_local_types);
+                                if method == "clone_from" {
+                                    let inferred_elem = inferred
+                                        .as_ref()
+                                        .and_then(extract_arrayvec_element_type_for_hint);
+                                    let source_elem = extract_simple_local_ident(arg)
+                                        .and_then(|source_name| hints.get(&source_name).cloned());
+                                    if let Some(elem_ty) = inferred_elem.or(source_elem) {
+                                        hints.insert(name, elem_ty);
+                                    }
+                                } else if let Some(inferred) = inferred {
                                     hints.insert(name, inferred);
                                 }
                             }
@@ -15790,131 +16066,307 @@ fn collect_local_generic_placeholder_hints_in_expr(
                     }
                 }
             }
-            collect_local_generic_placeholder_hints_in_expr(&mc.receiver, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &mc.receiver,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for arg in &mc.args {
-                collect_local_generic_placeholder_hints_in_expr(arg, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    arg,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Call(call) => {
-            collect_local_generic_placeholder_hints_in_expr(&call.func, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &call.func,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for arg in &call.args {
-                collect_local_generic_placeholder_hints_in_expr(arg, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    arg,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Assign(assign) => {
-            collect_local_generic_placeholder_hints_in_expr(&assign.left, candidates, hints);
-            collect_local_generic_placeholder_hints_in_expr(&assign.right, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &assign.left,
+                candidates,
+                known_local_types,
+                hints,
+            );
+            collect_local_generic_placeholder_hints_in_expr(
+                &assign.right,
+                candidates,
+                known_local_types,
+                hints,
+            );
         }
         syn::Expr::Block(block) => {
             for stmt in &block.block.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::If(if_expr) => {
-            collect_local_generic_placeholder_hints_in_expr(&if_expr.cond, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &if_expr.cond,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for stmt in &if_expr.then_branch.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
             if let Some((_, else_expr)) = &if_expr.else_branch {
-                collect_local_generic_placeholder_hints_in_expr(else_expr, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    else_expr,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::While(w) => {
-            collect_local_generic_placeholder_hints_in_expr(&w.cond, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &w.cond,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for stmt in &w.body.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Loop(l) => {
             for stmt in &l.body.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::ForLoop(f) => {
-            collect_local_generic_placeholder_hints_in_expr(&f.expr, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &f.expr,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for stmt in &f.body.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Match(match_expr) => {
-            collect_local_generic_placeholder_hints_in_expr(&match_expr.expr, candidates, hints);
+            collect_local_generic_placeholder_hints_in_expr(
+                &match_expr.expr,
+                candidates,
+                known_local_types,
+                hints,
+            );
             for arm in &match_expr.arms {
                 if let Some((_, guard)) = &arm.guard {
-                    collect_local_generic_placeholder_hints_in_expr(guard, candidates, hints);
+                    collect_local_generic_placeholder_hints_in_expr(
+                        guard,
+                        candidates,
+                        known_local_types,
+                        hints,
+                    );
                 }
-                collect_local_generic_placeholder_hints_in_expr(&arm.body, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    &arm.body,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Unary(unary) => {
-            collect_local_generic_placeholder_hints_in_expr(&unary.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &unary.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Reference(reference) => {
-            collect_local_generic_placeholder_hints_in_expr(&reference.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &reference.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Paren(paren) => {
-            collect_local_generic_placeholder_hints_in_expr(&paren.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &paren.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Group(group) => {
-            collect_local_generic_placeholder_hints_in_expr(&group.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &group.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Array(arr) => {
             for elem in &arr.elems {
-                collect_local_generic_placeholder_hints_in_expr(elem, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    elem,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Tuple(tuple) => {
             for elem in &tuple.elems {
-                collect_local_generic_placeholder_hints_in_expr(elem, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    elem,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Struct(struct_expr) => {
             for field in &struct_expr.fields {
-                collect_local_generic_placeholder_hints_in_expr(&field.expr, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    &field.expr,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
             if let Some(rest) = &struct_expr.rest {
-                collect_local_generic_placeholder_hints_in_expr(rest, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    rest,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Unsafe(unsafe_expr) => {
             for stmt in &unsafe_expr.block.stmts {
-                collect_local_generic_placeholder_hints_in_stmt(stmt, candidates, hints);
+                collect_local_generic_placeholder_hints_in_stmt(
+                    stmt,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Closure(closure) => {
-            collect_local_generic_placeholder_hints_in_expr(&closure.body, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &closure.body,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Await(await_expr) => {
-            collect_local_generic_placeholder_hints_in_expr(&await_expr.base, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &await_expr.base,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Try(try_expr) => {
-            collect_local_generic_placeholder_hints_in_expr(&try_expr.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &try_expr.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         syn::Expr::Break(brk) => {
             if let Some(value) = &brk.expr {
-                collect_local_generic_placeholder_hints_in_expr(value, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    value,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Return(ret) => {
             if let Some(value) = &ret.expr {
-                collect_local_generic_placeholder_hints_in_expr(value, candidates, hints);
+                collect_local_generic_placeholder_hints_in_expr(
+                    value,
+                    candidates,
+                    known_local_types,
+                    hints,
+                );
             }
         }
         syn::Expr::Let(let_expr) => {
-            collect_local_generic_placeholder_hints_in_expr(&let_expr.expr, candidates, hints)
+            collect_local_generic_placeholder_hints_in_expr(
+                &let_expr.expr,
+                candidates,
+                known_local_types,
+                hints,
+            )
         }
         _ => {}
     }
 }
 
-fn infer_hint_type_for_local_placeholder(expr: &syn::Expr) -> Option<syn::Type> {
+fn infer_hint_type_for_local_placeholder(
+    expr: &syn::Expr,
+    known_local_types: &HashMap<String, syn::Type>,
+) -> Option<syn::Type> {
     let expr = peel_paren_group_expr(expr);
     match expr {
         syn::Expr::Lit(syn::ExprLit { lit, .. }) => infer_literal_type_for_hint(lit),
-        syn::Expr::Path(path) => Some(syn::Type::Path(syn::TypePath {
-            qself: None,
-            path: path.path.clone(),
-        })),
-        syn::Expr::Reference(r) => infer_hint_type_for_local_placeholder(&r.expr),
+        syn::Expr::Path(path) => {
+            if path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                if let Some(ty) = known_local_types.get(&name) {
+                    return Some(ty.clone());
+                }
+            }
+            Some(syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: path.path.clone(),
+            }))
+        }
+        syn::Expr::Reference(r) => infer_hint_type_for_local_placeholder(&r.expr, known_local_types),
         syn::Expr::Call(call) => {
             if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                 let joined = path_expr
@@ -15932,7 +16384,9 @@ fn infer_hint_type_for_local_placeholder(expr: &syn::Expr) -> Option<syn::Type> 
                         | "std::boxed::into_vec"
                 ) && call.args.len() == 1
                 {
-                    if let Some(inner) = infer_boxed_array_inner_type_for_hint(&call.args[0]) {
+                    if let Some(inner) =
+                        infer_boxed_array_inner_type_for_hint(&call.args[0], known_local_types)
+                    {
                         let ty: syn::Type = parse_quote!(rusty::Vec<#inner>);
                         return Some(ty);
                     }
@@ -15972,7 +16426,10 @@ fn infer_hint_type_for_local_placeholder(expr: &syn::Expr) -> Option<syn::Type> 
     }
 }
 
-fn infer_boxed_array_inner_type_for_hint(expr: &syn::Expr) -> Option<syn::Type> {
+fn infer_boxed_array_inner_type_for_hint(
+    expr: &syn::Expr,
+    known_local_types: &HashMap<String, syn::Type>,
+) -> Option<syn::Type> {
     let expr = peel_paren_group_expr(expr);
     if let syn::Expr::Call(call) = expr {
         if let syn::Expr::Path(path_expr) = call.func.as_ref() {
@@ -15988,22 +16445,27 @@ fn infer_boxed_array_inner_type_for_hint(expr: &syn::Expr) -> Option<syn::Type> 
                 "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
             ) && call.args.len() == 1
             {
-                return infer_array_inner_type_for_hint(&call.args[0]);
+                return infer_array_inner_type_for_hint(&call.args[0], known_local_types);
             }
         }
     }
-    infer_array_inner_type_for_hint(expr)
+    infer_array_inner_type_for_hint(expr, known_local_types)
 }
 
-fn infer_array_inner_type_for_hint(expr: &syn::Expr) -> Option<syn::Type> {
+fn infer_array_inner_type_for_hint(
+    expr: &syn::Expr,
+    known_local_types: &HashMap<String, syn::Type>,
+) -> Option<syn::Type> {
     let expr = peel_paren_group_expr(expr);
     match expr {
         syn::Expr::Array(arr) => arr
             .elems
             .first()
-            .and_then(infer_hint_type_for_local_placeholder),
-        syn::Expr::Repeat(repeat) => infer_hint_type_for_local_placeholder(&repeat.expr),
-        syn::Expr::Reference(r) => infer_array_inner_type_for_hint(&r.expr),
+            .and_then(|elem| infer_hint_type_for_local_placeholder(elem, known_local_types)),
+        syn::Expr::Repeat(repeat) => {
+            infer_hint_type_for_local_placeholder(&repeat.expr, known_local_types)
+        }
+        syn::Expr::Reference(r) => infer_array_inner_type_for_hint(&r.expr, known_local_types),
         _ => None,
     }
 }
@@ -22527,6 +22989,56 @@ mod tests {
         );
         assert!(out.contains("auto v = ArrayVec<uint8_t, 8>::new_();"));
         assert!(!out.contains("ArrayVec<auto, 8>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333261_arrayvec_to_vec_method_uses_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            fn f(v: ArrayVec<i32, 4>) {
+                let _r = v.to_vec();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::to_vec(v)"));
+        assert!(!out.contains("v.to_vec()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333261_non_arrayvec_to_vec_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn to_vec(&self) {}
+            }
+            fn f(s: S) {
+                s.to_vec();
+            }
+        "#,
+        );
+        assert!(out.contains("s.to_vec()"));
+        assert!(!out.contains("rusty::to_vec(s)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333261_untyped_arrayvec_new_recovers_type_from_clone_from_usage() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            fn f() {
+                let mut source = ArrayVec::<i32, 4>::new();
+                let mut target = ArrayVec::<_, 4>::new();
+                target.clone_from(&source);
+            }
+        "#,
+        );
+        assert!(out.contains("auto source = ArrayVec<int32_t, 4>::new_();"));
+        assert!(out.contains("auto target = ArrayVec<int32_t, 4>::new_();"));
+        assert!(out.contains("target.clone_from(source);"));
+        assert!(!out.contains("target.clone_from(&source)"));
+        assert!(!out.contains("ArrayVec<auto, 4>::new_()"));
     }
 
     #[test]

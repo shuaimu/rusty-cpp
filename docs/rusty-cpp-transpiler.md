@@ -2197,9 +2197,21 @@ Active work items:
    - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-25-2-1775480817 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-25-2-1775480817/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error remains at `runner.cpp:3408`: `ArrayVec<rusty::Vec<int>, 4>` has no member `to_vec` in `array_clone_from`, followed by downstream omitted-template and call-shape fallout (`ArrayVec<auto,4>` arity, `clone_from(&v)` pointer arg mismatch, `ArrayString`/`HashMap` missing template args, `RUSTY_TRY`/`Ok`, `parse`, and related type/runtime-surface diagnostics).
-33. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.26.1`.
-   - focus: collapse the deterministic `ArrayVec` call-surface head family led by missing `to_vec`/`clone_from` shape mismatches, using generic lowering/runtime fixes only.
-   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to the leading family and avoid blanket rewrites of unrelated template/method surfaces.
+33. `Leaf 4.15.4.3.3.3.3.3.26.1` is complete.
+   - implemented shape-gated `ArrayVec` call-surface fixes in `transpiler/src/codegen.rs`:
+     - `.to_vec()` on `ArrayVec`/slice-like receiver shapes now lowers to `rusty::to_vec(receiver)` (non-`ArrayVec` `to_vec` methods remain unchanged),
+     - `clone_from` now uses reference-style argument fallback when method-signature pass-style metadata is unavailable, avoiding pointer-arg emission (`clone_from(&src)` -> `clone_from(src)`),
+     - local placeholder hint recovery now accepts `clone_from` source shapes (including reuse of earlier in-block placeholder hints) so omitted owner placeholders recover concrete `ArrayVec` element types.
+   - added runtime helper support in `include/rusty/array.hpp`:
+     - `rusty::to_vec(const Container&)` uses `slice_full` surfaces and clone-aware element forwarding (`.clone()` when available) to support non-copy element types.
+   - added focused regressions:
+     - transpiler tests (`leaf41543333333261`) for `to_vec` helper lowering, non-ArrayVec control behavior, and `clone_from`-driven omitted-owner recovery,
+     - runtime regression in `tests/rusty_array_test.cpp` for `rusty::to_vec` slice-surface behavior.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-26-1c-1775484823 --keep-work-dirs`) removed the prior deterministic first hard head family in `array_clone_from` (`to_vec` missing + `ArrayVec<auto,4>` + `clone_from(&v)` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-26-1c-1775484823/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3480`: `ArrayString` used without template arguments, followed by downstream template/runtime-surface diagnostics (`HashMap` omitted args, `RUSTY_TRY`/`Ok`, parse-surface and related fallout).
+34. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.26.2`.
+   - focus: re-run full seven-crate matrix after 26.1, capture canonical artifact paths for the next deterministic head, and update frontier status.
+   - guardrail (wrong-approach checklist §11): continue root-cause-first collapse and keep rewrites shape-gated; avoid blanket method/template rewrites across unrelated surfaces.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

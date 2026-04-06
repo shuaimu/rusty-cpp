@@ -172,6 +172,28 @@ void test_slice_full_prefers_as_slice_helpers_shape() {
     printf("PASS\n");
 }
 
+void test_to_vec_helper_uses_slice_surface_shape() {
+    printf("test_to_vec_helper_uses_slice_surface_shape: ");
+    SliceOnlyContainer container{};
+    const SliceOnlyContainer& const_container = container;
+
+    auto vec = rusty::to_vec(const_container);
+    static_assert(std::is_same_v<decltype(vec), rusty::Vec<int>>);
+    assert(vec.len() == 4);
+    assert(vec[0] == 1);
+    assert(vec[1] == 2);
+    assert(vec[2] == 3);
+    assert(vec[3] == 4);
+
+    auto arr_vec = rusty::to_vec(std::array<int, 3>{9, 8, 7});
+    assert(arr_vec.len() == 3);
+    assert(arr_vec[0] == 9);
+    assert(arr_vec[1] == 8);
+    assert(arr_vec[2] == 7);
+
+    printf("PASS\n");
+}
+
 void test_len_helper_shapes() {
     printf("test_len_helper_shapes: ");
     std::vector<uint8_t> data{1, 2, 3, 4};
@@ -472,6 +494,7 @@ int main() {
     test_saturating_math_helpers_shape();
     test_slice_helpers_basic_shapes();
     test_slice_full_prefers_as_slice_helpers_shape();
+    test_to_vec_helper_uses_slice_surface_shape();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
     test_array_cross_element_equality_shape();

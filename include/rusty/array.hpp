@@ -353,6 +353,23 @@ auto slice_full(const Container& container) {
     }
 }
 
+// Collect a slice-like container into rusty::Vec by value-cloning elements.
+// Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
+template<typename Container>
+auto to_vec(const Container& container) {
+    auto span = slice_full(container);
+    using Elem = std::remove_cv_t<std::remove_reference_t<decltype(*span.data())>>;
+    Vec<Elem> out = Vec<Elem>::new_();
+    for (const auto& item : span) {
+        if constexpr (requires(const Elem& e) { e.clone(); }) {
+            out.push(item.clone());
+        } else {
+            out.push(item);
+        }
+    }
+    return out;
+}
+
 template<typename Container, typename End>
 auto slice_to(Container& container, End end) {
     auto span = slice_full(container);
