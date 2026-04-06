@@ -8748,6 +8748,19 @@ impl CodeGen {
         canonical == "std::string_view"
     }
 
+    fn expected_raw_pointer_cpp_type(&self, expected_ty: Option<&syn::Type>) -> Option<String> {
+        let expected_ty = expected_ty?;
+        let peeled = self.peel_reference_paren_group_type(expected_ty);
+        if !matches!(peeled, syn::Type::Ptr(_)) {
+            return None;
+        }
+        let mapped = self.map_type(peeled);
+        if mapped.contains("/* TODO") || type_string_has_auto_placeholder(&mapped) {
+            return None;
+        }
+        Some(mapped)
+    }
+
     fn type_uses_as_str_string_view_coercion(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
@@ -9179,7 +9192,13 @@ impl CodeGen {
             } else {
                 "rusty::as_ptr"
             };
-            return format!("{}({})", helper, receiver);
+            let helper_call = format!("{}({})", helper, receiver);
+            if let Some(expected_ptr_cpp) = self.expected_raw_pointer_cpp_type(expected_ty) {
+                // Raw-pointer surfaces can carry storage wrappers (`MaybeUninit<T>*`)
+                // while call context expects payload pointers (`T*`).
+                return format!("reinterpret_cast<{}>({})", expected_ptr_cpp, helper_call);
+            }
+            return helper_call;
         }
         if method_name == "chars" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -9240,7 +9259,14 @@ impl CodeGen {
             && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
-            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver_expected = expected_ty
+                .map(|ty| self.peel_reference_paren_group_type(ty))
+                .filter(|ty| matches!(ty, syn::Type::Ptr(_)));
+            let raw_receiver = if let Some(receiver_expected) = receiver_expected {
+                self.emit_expr_to_string_with_expected(&mc.receiver, Some(receiver_expected))
+            } else {
+                self.emit_expr_to_string(&mc.receiver)
+            };
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                 format!("({})", raw_receiver)
             } else {
@@ -11070,9 +11096,40 @@ impl CodeGen {
                         }
                     }
                     self.emit_expr_maybe_move(arg)
-                })
-                .collect();
+            })
+            .collect();
             return format!("{}({})", func, args.join(", "));
+        }
+        if matches!(
+            func.as_str(),
+            "rusty::ptr::add"
+                | "rusty::ptr::offset"
+                | "core::ptr::mut_ptr::add"
+                | "std::ptr::mut_ptr::add"
+                | "ptr::mut_ptr::add"
+                | "core::ptr::mut_ptr::offset"
+                | "std::ptr::mut_ptr::offset"
+                | "ptr::mut_ptr::offset"
+                | "core::ptr::const_ptr::add"
+                | "std::ptr::const_ptr::add"
+                | "ptr::const_ptr::add"
+                | "core::ptr::const_ptr::offset"
+                | "std::ptr::const_ptr::offset"
+                | "ptr::const_ptr::offset"
+        ) && call.args.len() == 2
+        {
+            let ptr_expected = expected_ty
+                .map(|ty| self.peel_reference_paren_group_type(ty))
+                .filter(|ty| matches!(ty, syn::Type::Ptr(_)));
+            let ptr_arg = if let Some(ptr_expected) = ptr_expected {
+                self.emit_expr_to_string_with_expected(&call.args[0], Some(ptr_expected))
+            } else if let Some(raw) = self.emit_raw_pointer_call_arg(&call.args[0]) {
+                raw
+            } else {
+                self.emit_expr_maybe_move(&call.args[0])
+            };
+            let offset_arg = self.emit_expr_maybe_move(&call.args[1]);
+            return format!("{}({}, {})", func, ptr_arg, offset_arg);
         }
         if func == "rusty::mem::replace" && !call.args.is_empty() {
             let args: Vec<String> = call
@@ -22553,6 +22610,64 @@ mod tests {
         );
         assert!(out.contains("rusty::ptr::add(rusty::as_mut_ptr(b),"));
         assert!(!out.contains("b.as_mut_ptr().add("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327151_as_mut_ptr_chain_add_adapts_expected_pointer_pointee() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+
+            struct Buf<T> {
+                xs: [MaybeUninit<T>; 4],
+            }
+
+            impl<T> Buf<T> {
+                fn as_mut_ptr(&mut self) -> *mut T {
+                    self.xs.as_mut_ptr() as _
+                }
+
+                unsafe fn get_unchecked_ptr(&mut self, index: usize) -> *mut T {
+                    self.as_mut_ptr().add(index)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this)))"
+        ));
+        assert!(!out.contains("rusty::ptr::add(rusty::as_mut_ptr((*this)),"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327151_as_mut_ptr_argument_adapts_to_expected_pointer_shape() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+
+            fn raw_ptr_add<T>(ptr: *mut T, offset: usize) -> *mut T {
+                ptr.add(offset)
+            }
+
+            struct Buf<T> {
+                xs: [MaybeUninit<T>; 4],
+            }
+
+            impl<T> Buf<T> {
+                fn as_mut_ptr(&mut self) -> *mut T {
+                    self.xs.as_mut_ptr() as _
+                }
+
+                unsafe fn at_offset(&mut self, index: usize) -> *mut T {
+                    raw_ptr_add(self.as_mut_ptr(), index)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "raw_ptr_add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
+        ));
+        assert!(!out.contains("raw_ptr_add(rusty::as_mut_ptr((*this)),"));
     }
 
     #[test]

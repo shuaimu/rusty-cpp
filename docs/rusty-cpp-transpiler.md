@@ -2518,8 +2518,28 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-14-1b-1775519130 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): kept changes shared and receiver-shape-gated in AST-aware lowering, avoided crate-specific scripts, and avoided one-off callsite rewrites.
-59. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.14.2`.
-   - focus: re-run full seven-crate parity matrix after 27.14.1 and record the deterministic first failure head with canonical artifacts.
+59. `Leaf 4.15.4.3.3.3.3.3.27.14.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-14-2-1775519325 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-14-2-1775519325/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:838`: `cannot convert rusty::MaybeUninit<...>* to std::add_pointer_t<T>` in `ArrayVec::get_unchecked_ptr` via `rusty::ptr::add(rusty::as_mut_ptr((*this)), ...)`; prior `runner.cpp:1060` consuming-self constructor head remains collapsed.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-14-2-1775519325 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+60. `Leaf 4.15.4.3.3.3.3.3.27.15.1` is complete.
+   - plan/scope check: fix stayed under the small-change budget (<1000 LOC), so no additional leaf decomposition was required.
+   - implemented expected-pointer-aware raw-pointer lowering in `transpiler/src/codegen.rs`:
+     - added `expected_raw_pointer_cpp_type(...)` to detect concrete expected raw-pointer context and avoid placeholder-based casts,
+     - `as_ptr`/`as_mut_ptr` helper lowering now adapts pointee shape to expected pointer type for contexts that require payload pointer form (`T*`) instead of storage pointer form (`MaybeUninit<T>*`),
+     - pointer arithmetic lowering (`add`/`offset`, method and function call surfaces) now propagates pointer expected-type context into receiver emission.
+   - added fixture-agnostic transpiler regressions:
+     - `test_leaf41543333333327151_as_mut_ptr_chain_add_adapts_expected_pointer_pointee`
+     - `test_leaf41543333333327151_as_mut_ptr_argument_adapts_to_expected_pointer_shape`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327151 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): kept changes shared and type-context-gated in AST-aware lowering, with no crate-specific scripts or fixture-specific rewrites.
+61. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.15.2`.
+   - focus: re-run full seven-crate parity matrix after 27.15.1 and record the deterministic first failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2619,6 +2639,7 @@ Required approach:
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
+- for raw-pointer helper/receiver lowering (`as_ptr`/`as_mut_ptr`, `ptr::add`/`ptr::offset`), do not preserve storage-pointer pointee shapes when call context expects payload pointers; propagate expected pointer context and adapt pointee shape explicitly
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
 - for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
