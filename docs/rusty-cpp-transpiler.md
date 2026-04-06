@@ -2097,8 +2097,12 @@ Active work items:
    - focused transpiler regressions were added (`leaf41543333333151`) covering statement and expression runtime dispatch for `Err(CapacityError { .. })` plus nested field binding extraction from unwrapped payloads.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-15-1b-1775446136 --keep-work-dirs`) removed the prior deterministic first hard head (`std::visit(..., rusty::Result<...>)` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-15-1b-1775446136/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at unqualified Result constructor emission in `test_into_inner_1` (`Err` not declared at `runner.cpp:3236`), followed by downstream string/constructor/template-surface diagnostics.
-14. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.15.2`.
-   - re-run the full seven-crate parity matrix after 15.1 and record the next deterministic first failure head with canonical artifact paths.
+14. `Leaf 4.15.4.3.3.3.3.3.15.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-15-2-1775447107 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-15-2-1775447107/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at unqualified `Result` constructor emission in `test_into_inner_1` (`Err` not declared at `runner.cpp:3236`; generated shape `auto _m1_tmp = Err(std::move(u));`), followed by downstream string-conversion/constructor/template-surface cascades.
+15. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.16.1`.
+   - implement a generic constructor-qualification fix for `Result`-shaped `Ok`/`Err` emission in tuple/assertion/match scaffolding so generated C++ stays fully qualified and context-typed, then reprobe matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
