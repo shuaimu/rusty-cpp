@@ -2038,7 +2038,7 @@ Crate-focused progress integrated from former appendices:
 
 ### 10.6 Active Frontier and Next Work
 
-From the active TODO frontier, the currently active leaf work is now in the `take_mut` Stage D chain.
+From the active TODO frontier, the currently active leaf work is now in the `arrayvec` Stage D chain.
 
 Active work items:
 
@@ -2063,8 +2063,13 @@ Active work items:
 6. `Leaf 4.15.4.3.3.3.3.3.11.2` is complete.
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-11-2-1775437753 --keep-work-dirs`) now fails first at `arrayvec` Stage D (`total=5`, `pass=4`, `fail=1`), with canonical artifacts at `/tmp/rusty-parity-matrix-11-2-1775437753/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard errors now begin with fixed-capacity constructor shape mismatch (`ArrayVec::<T, N>::from(rusty::array_repeat(..., N))`), where emitted repeat shape is `std::vector<T>` while `from` expects `std::array<T, N>`.
-7. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.12.1`.
-   - collapse the new `arrayvec` Stage D fixed-array repeat/constructor mismatch generically, then rerun matrix.
+7. `Leaf 4.15.4.3.3.3.3.3.12.1` is complete.
+   - implemented context-gated fixed-array repeat lowering for fixed-capacity constructor contexts, including `ArrayVec::from/try_from([val; N])` when owner generics are explicit, inferred, or recovered from expected/scope hints.
+   - fixed-array repeat materialization now uses a non-capturing lambda form (`[](auto _seed){...}(<expr>)`) to stay valid in non-local contexts; dynamic repeat lowering remains unchanged outside explicit fixed-array contexts (aligned with §11.3 no-blanket-rewrite rule).
+   - focused regressions (`leaf41543333333121`) cover explicit-owner and omitted-owner `ArrayVec` repeat constructors plus non-capturing fixed-array lambda shape and dynamic-repeat preservation.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-12-1-fix-1775439781 --keep-work-dirs`) removed the prior first deterministic head (`ArrayVec::<T,N>::from(rusty::array_repeat(...))` mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-12-1-fix-1775439781/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+8. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.12.2`.
+   - re-run full seven-crate matrix after 12.1 and record the next deterministic first failure head with canonical artifact paths.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

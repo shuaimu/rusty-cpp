@@ -6680,6 +6680,21 @@ impl CodeGen {
         )
     }
 
+    fn emit_repeat_expr_with_fixed_array_hint(
+        &self,
+        repeat: &syn::ExprRepeat,
+        elem_hint: &syn::Type,
+        len_hint: &syn::Expr,
+    ) -> String {
+        let val = self.emit_expr_to_string_with_expected(&repeat.expr, Some(elem_hint));
+        let elem_ty = self.map_type(elem_hint);
+        let len = self.emit_expr_to_string(len_hint);
+        format!(
+            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
+            elem_ty, len, elem_ty, val
+        )
+    }
+
     /// Register local bindings in the current scope for expected-type lookup.
     fn register_local_binding_pattern(&mut self, pat: &syn::Pat) {
         match pat {
@@ -8689,7 +8704,9 @@ impl CodeGen {
                 self.emit_array_expr_to_string_with_expected(array_expr, expected_ty)
             }
             syn::Expr::Repeat(repeat_expr) => {
-                if let Some(elem_ty) = self.expected_array_element_type(expected_ty) {
+                if let Some((elem_ty, len_ty)) = self.expected_fixed_array_type(expected_ty) {
+                    self.emit_repeat_expr_with_fixed_array_hint(repeat_expr, elem_ty, len_ty)
+                } else if let Some(elem_ty) = self.expected_array_element_type(expected_ty) {
                     self.emit_repeat_expr_with_element_hint(repeat_expr, elem_ty)
                 } else {
                     let val = self.emit_expr_to_string(&repeat_expr.expr);
@@ -9056,6 +9073,19 @@ impl CodeGen {
             syn::Type::Reference(r) => self.expected_array_element_type(Some(r.elem.as_ref())),
             syn::Type::Paren(p) => self.expected_array_element_type(Some(p.elem.as_ref())),
             syn::Type::Group(g) => self.expected_array_element_type(Some(g.elem.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn expected_fixed_array_type<'a>(
+        &self,
+        expected_ty: Option<&'a syn::Type>,
+    ) -> Option<(&'a syn::Type, &'a syn::Expr)> {
+        let ty = expected_ty?;
+        match ty {
+            syn::Type::Array(arr) => Some((arr.elem.as_ref(), &arr.len)),
+            syn::Type::Paren(p) => self.expected_fixed_array_type(Some(p.elem.as_ref())),
+            syn::Type::Group(g) => self.expected_fixed_array_type(Some(g.elem.as_ref())),
             _ => None,
         }
     }
@@ -9826,12 +9856,123 @@ impl CodeGen {
         expected_ty.clone()
     }
 
+    fn try_emit_arrayvec_from_repeat_with_fixed_array_arg(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 || call.args.len() != 1 {
+            return None;
+        }
+        let owner_idx = path_expr.path.segments.len() - 2;
+        let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+        if owner_seg.ident != "ArrayVec" {
+            return None;
+        }
+        let method_name = path_expr.path.segments.last()?.ident.to_string();
+        if !matches!(method_name.as_str(), "from" | "try_from") {
+            return None;
+        }
+        let repeat_expr = match self.peel_paren_group_expr(&call.args[0]) {
+            syn::Expr::Repeat(repeat_expr) => repeat_expr,
+            syn::Expr::Cast(cast_expr) => match self.peel_paren_group_expr(&cast_expr.expr) {
+                syn::Expr::Repeat(repeat_expr) => repeat_expr,
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        let mut elem_cpp: Option<String> = None;
+        let mut cap_cpp: Option<String> = None;
+        if let syn::PathArguments::AngleBracketed(owner_args) = &owner_seg.arguments {
+            for arg in &owner_args.args {
+                match arg {
+                    syn::GenericArgument::Type(t) if !matches!(t, syn::Type::Infer(_)) => {
+                        elem_cpp = Some(self.map_type(t));
+                    }
+                    syn::GenericArgument::Const(c) => {
+                        cap_cpp = Some(self.emit_expr_to_string(c));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let expected_owner_args = expected_ty.and_then(|ty| self.expected_type_generic_args(ty));
+        if elem_cpp.is_none() {
+            elem_cpp = expected_owner_args
+                .as_ref()
+                .and_then(|args| args.first())
+                .filter(|arg| *arg != "auto")
+                .cloned();
+        }
+        if cap_cpp.is_none() {
+            cap_cpp = expected_owner_args
+                .as_ref()
+                .and_then(|args| args.get(1))
+                .filter(|arg| *arg != "auto")
+                .cloned();
+        }
+        if elem_cpp.is_none() || cap_cpp.is_none() {
+            if let Some(inferred_owner_args) =
+                self.infer_owner_template_args_for_call("ArrayVec", &method_name, call)
+            {
+                if elem_cpp.is_none() {
+                    elem_cpp = inferred_owner_args
+                        .first()
+                        .and_then(|entry| entry.as_ref())
+                        .cloned();
+                }
+                if cap_cpp.is_none() {
+                    cap_cpp = inferred_owner_args
+                        .get(1)
+                        .and_then(|entry| entry.as_ref())
+                        .cloned();
+                }
+            }
+        }
+        if elem_cpp.is_none() || cap_cpp.is_none() {
+            let mut owner_path = syn::Path {
+                leading_colon: path_expr.path.leading_colon,
+                segments: syn::punctuated::Punctuated::new(),
+            };
+            for seg in path_expr.path.segments.iter().take(owner_idx + 1) {
+                owner_path.segments.push(seg.clone());
+            }
+            if let Some(scoped_owner_args) =
+                self.recover_omitted_owner_generic_args_from_scope(&owner_path)
+            {
+                if elem_cpp.is_none() {
+                    elem_cpp = scoped_owner_args.first().cloned();
+                }
+                if cap_cpp.is_none() {
+                    cap_cpp = scoped_owner_args.get(1).cloned();
+                }
+            }
+        }
+
+        let (elem_cpp, cap_cpp) = (elem_cpp?, cap_cpp?);
+        let value = self.emit_expr_to_string(&repeat_expr.expr);
+        let fixed_array_arg = format!(
+            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
+            elem_cpp, cap_cpp, elem_cpp, value
+        );
+        let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
+        Some(format!("{}({})", func, fixed_array_arg))
+    }
+
     /// Emit a call expression, optionally using expected type context from parent.
     fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if let Some(emitted) = self.try_emit_arrayvec_from_repeat_with_fixed_array_arg(call, expected_ty)
+        {
+            return emitted;
+        }
         if let Some(ty) = expected_ty {
             if let Some(emitted) = self.try_emit_iter_either_new_call_with_expected(call, ty) {
                 return emitted;
@@ -21403,6 +21544,90 @@ mod tests {
         );
         assert!(out.contains("auto iter = ArrayVec<int32_t, 3>::from(std::array{1, 2, 3}).into_iter();"));
         assert!(!out.contains("ArrayVec::from(std::array"));
+    }
+
+    #[test]
+    fn test_leaf41543333333121_arrayvec_from_repeat_uses_fixed_array_materialization() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn from(_xs: [T; CAP]) -> Self { ArrayVec }
+            }
+            fn f() {
+                let _ = ArrayVec::<i32, 8>::from([0; 8]);
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayVec::from([](auto _seed) {"));
+        assert!(out.contains("std::array<int32_t, 8> _repeat{};"));
+        assert!(out.contains("_repeat.fill(static_cast<int32_t>(_seed));"));
+        assert!(!out.contains("ArrayVec::from(rusty::array_repeat("));
+    }
+
+    #[test]
+    fn test_leaf41543333333121_arrayvec_try_from_repeat_uses_fixed_array_materialization() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn try_from(_xs: [T; CAP]) -> Self { ArrayVec }
+            }
+            fn f() {
+                let _ = ArrayVec::<i32, 8>::try_from([0; 8]);
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayVec::try_from([](auto _seed) {"));
+        assert!(out.contains("std::array<int32_t, 8> _repeat{};"));
+        assert!(out.contains("_repeat.fill(static_cast<int32_t>(_seed));"));
+        assert!(!out.contains("ArrayVec::try_from(rusty::array_repeat("));
+    }
+
+    #[test]
+    fn test_leaf41543333333121_untyped_repeat_without_fixed_array_context_stays_dynamic() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let local = [0; 4];
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(0, 4)"));
+        assert!(!out.contains("std::array<int32_t, 4> _repeat{};"));
+    }
+
+    #[test]
+    fn test_leaf41543333333121_arrayvec_from_repeat_with_omitted_owner_uses_fixed_array_materialization() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn from(_xs: [T; CAP]) -> Self { ArrayVec }
+                fn pop(&mut self) {}
+            }
+            fn f() {
+                let mut v = ArrayVec::from([0; 8]);
+                v.pop();
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayVec<int32_t, 8>::from([](auto _seed) {"));
+        assert!(out.contains("std::array<int32_t, 8> _repeat{};"));
+        assert!(!out.contains("ArrayVec<int32_t, 8>::from(rusty::array_repeat("));
+    }
+
+    #[test]
+    fn test_leaf41543333333121_fixed_array_repeat_lambda_is_non_capturing() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let data: [i32; 4] = [0; 4];
+            }
+        "#,
+        );
+        assert!(out.contains("[](auto _seed) { std::array<int32_t, 4> _repeat{};"));
+        assert!(!out.contains("[&]() { std::array<int32_t, 4> _repeat{};"));
     }
 
     #[test]
