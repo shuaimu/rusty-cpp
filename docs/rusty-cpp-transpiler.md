@@ -2393,8 +2393,13 @@ Active work items:
      - `ctest --test-dir build-tests --output-on-failure`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-8-1-1775513113 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, used shared shape-gated fixes only, and introduced no crate-specific scripts or blanket rewrites.
-47. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.8.2`.
-   - focus: rerun the full seven-crate parity matrix after 27.8.1 and record the next deterministic frontier movement (or close Leaf 4 if all crates pass).
+47. `Leaf 4.15.4.3.3.3.3.3.27.8.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-8-2-1775513306 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-8-2-1775513306/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:4239`: `std::string_view` construction from `const ArrayString<16>&` in `test_try_from_argument`, followed by adjacent fallout at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` shape) and `runner.cpp:4293+` (`constexpr`/template-shape diagnostics).
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+48. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.9.1`.
+   - focus: collapse the post-27.8.2 first deterministic Stage D head generically (`ArrayString` to `std::string_view` coercion in assertion tuple materialization) while preserving adjacent result/type-shape correctness.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
