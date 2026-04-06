@@ -2378,8 +2378,23 @@ Active work items:
    - verification:
      - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical full-matrix artifacts before opening the next implementation leaf; no crate-specific rewrites were introduced.
-46. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.8.1`.
-   - focus: collapse the post-27.7.2 `ArrayString::try_from`/result-type first head generically (stabilize `try_from` + `RUSTY_TRY` result typing and adjacent tuple/string-view fallout), then rerun the full matrix.
+46. `Leaf 4.15.4.3.3.3.3.3.27.8.1` is complete.
+   - implemented generic typed-Result `?` propagation in shared runtime/transpiler paths:
+     - `include/rusty/try.hpp`: added `RUSTY_TRY_INTO(expr, ReturnResultType)` and `RUSTY_CO_TRY_INTO(expr, ReturnResultType)` so `?` can propagate `Err(E)` into explicit `Result<U, E>` return shapes.
+     - `transpiler/src/codegen.rs`: `Expr::Try` lowering now emits typed try macros in known `Result` return contexts, keeps `RUSTY_*_TRY_OPT` behavior for `Option`, and preserves legacy `RUSTY_TRY`/`RUSTY_CO_TRY` fallback when return type hints are unavailable.
+   - added fixture-agnostic regressions (`leaf415433333333281`) covering:
+     - sync/async `Result<(), E>` `?` propagation uses typed try macros,
+     - `try_from`-like `Result<Self, E>` body keeps `Self` in return typing (no `std::tuple<>` collapse).
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-8-1-1775513113 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1636` (`ArrayString::try_from(std::string_view)` auto-return mismatch between `Result<std::tuple<>, _>` and `Result<ArrayString<16>, _>`).
+   - new deterministic first hard error now starts at `runner.cpp:4239` (`std::string_view` construction from `const ArrayString<16>&`), followed by adjacent fallout at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` shape) and `runner.cpp:4293+` (`constexpr`/template-shape diagnostics).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-8-1-1775513113/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `ctest --test-dir build-tests --output-on-failure`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-8-1-1775513113 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, used shared shape-gated fixes only, and introduced no crate-specific scripts or blanket rewrites.
+47. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.8.2`.
+   - focus: rerun the full seven-crate parity matrix after 27.8.1 and record the next deterministic frontier movement (or close Leaf 4 if all crates pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

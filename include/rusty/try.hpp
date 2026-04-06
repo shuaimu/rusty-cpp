@@ -32,12 +32,33 @@
         _rusty_try_result.unwrap(); \
     })
 
+// ? on Result<T, E> in a function returning a different Result<U, E>.
+// `__VA_ARGS__` carries the full return Result type (may include commas).
+#define RUSTY_TRY_INTO(expr, ...) \
+    ({ \
+        auto _rusty_try_result = (expr); \
+        if (_rusty_try_result.is_err()) { \
+            return __VA_ARGS__::Err(_rusty_try_result.unwrap_err()); \
+        } \
+        _rusty_try_result.unwrap(); \
+    })
+
 // ? on Result<T, E> in async context — uses co_return
 #define RUSTY_CO_TRY(expr) \
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
             co_return std::move(_rusty_try_result); \
+        } \
+        _rusty_try_result.unwrap(); \
+    })
+
+// ? on Result<T, E> in async context with explicit Result<U, E> return type.
+#define RUSTY_CO_TRY_INTO(expr, ...) \
+    ({ \
+        auto _rusty_try_result = (expr); \
+        if (_rusty_try_result.is_err()) { \
+            co_return __VA_ARGS__::Err(_rusty_try_result.unwrap_err()); \
         } \
         _rusty_try_result.unwrap(); \
     })

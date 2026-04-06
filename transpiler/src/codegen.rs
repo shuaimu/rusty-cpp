@@ -11916,8 +11916,7 @@ impl CodeGen {
                 // Rust `expr?` → C++ try macro variant selected by return context.
                 // Option-returning contexts use *_TRY_OPT and others use *_TRY.
                 let inner = self.emit_expr_to_string(&try_expr.expr);
-                let try_macro = self.current_try_macro();
-                format!("{}({})", try_macro, inner)
+                self.emit_try_macro_invocation(&inner)
             }
             syn::Expr::Repeat(rep) => {
                 // [val; N] → std::array filled with val
@@ -14357,6 +14356,49 @@ impl CodeGen {
             (false, true) => "RUSTY_TRY_OPT",
             (false, false) => "RUSTY_TRY",
         }
+    }
+
+    fn current_try_result_return_cpp_type(&self) -> Option<String> {
+        let return_hint = self.current_return_type_hint()?;
+        if is_option_type_hint(return_hint) {
+            return None;
+        }
+        let mapped = self.map_type(return_hint);
+        if mapped.starts_with("rusty::Result<")
+            || mapped.starts_with("rusty::io::Result<")
+            || mapped.starts_with("io::Result<")
+        {
+            Some(mapped)
+        } else {
+            None
+        }
+    }
+
+    fn emit_try_macro_invocation(&self, inner: &str) -> String {
+        let returns_option = self
+            .current_return_type_hint()
+            .map(is_option_type_hint)
+            .unwrap_or(false);
+        if returns_option {
+            let try_macro = if self.in_async {
+                "RUSTY_CO_TRY_OPT"
+            } else {
+                "RUSTY_TRY_OPT"
+            };
+            return format!("{}({})", try_macro, inner);
+        }
+
+        if let Some(return_cpp_ty) = self.current_try_result_return_cpp_type() {
+            let try_macro = if self.in_async {
+                "RUSTY_CO_TRY_INTO"
+            } else {
+                "RUSTY_TRY_INTO"
+            };
+            return format!("{}({}, {})", try_macro, inner, return_cpp_ty);
+        }
+
+        let try_macro = self.current_try_macro();
+        format!("{}({})", try_macro, inner)
     }
 
     /// Best-effort lowering of a Rust block used in expression position.
@@ -21121,7 +21163,7 @@ mod tests {
     #[test]
     fn test_try_on_result() {
         let out = transpile_str("fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }");
-        assert!(out.contains("RUSTY_TRY(parse())"));
+        assert!(out.contains("RUSTY_TRY_INTO(parse(), rusty::Result<int32_t, rusty::String>)"));
     }
 
     #[test]
@@ -21140,13 +21182,13 @@ mod tests {
     #[test]
     fn test_try_on_method_call() {
         let out = transpile_str("fn f() -> Result<i32, String> { let x = foo.bar()?; Ok(x) }");
-        assert!(out.contains("RUSTY_TRY(foo.bar())"));
+        assert!(out.contains("RUSTY_TRY_INTO(foo.bar(), rusty::Result<int32_t, rusty::String>)"));
     }
 
     #[test]
     fn test_try_in_async() {
         let out = transpile_str("async fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }");
-        assert!(out.contains("RUSTY_CO_TRY(parse())"));
+        assert!(out.contains("RUSTY_CO_TRY_INTO(parse(), rusty::Result<int32_t, rusty::String>)"));
     }
 
     #[test]
@@ -21162,22 +21204,79 @@ mod tests {
         let out = transpile_str(
             "async fn f() -> Result<String, String> { let x = fetch().await?; Ok(x) }",
         );
-        assert!(out.contains("RUSTY_CO_TRY(co_await fetch())"));
+        assert!(
+            out.contains("RUSTY_CO_TRY_INTO(co_await fetch(), rusty::Result<rusty::String, rusty::String>)")
+        );
     }
 
     #[test]
     fn test_try_chained() {
         let out = transpile_str("fn f() -> Result<i32, String> { let x = a()?.b()?; Ok(x) }");
-        // Inner ? → RUSTY_TRY, outer ? wraps the method call on the result
-        assert!(out.contains("RUSTY_TRY("));
+        // Inner/outer `?` in Result context should use typed try propagation.
+        assert!(out.contains("RUSTY_TRY_INTO("));
     }
 
     #[test]
     fn test_try_not_in_sync() {
-        // In sync context, should use RUSTY_TRY not RUSTY_CO_TRY
+        // In sync context, should not use coroutine try macro variants.
         let out = transpile_str("fn f() -> Result<i32, String> { let x = g()?; Ok(x) }");
-        assert!(out.contains("RUSTY_TRY("));
+        assert!(out.contains("RUSTY_TRY"));
         assert!(!out.contains("RUSTY_CO_TRY"));
+    }
+
+    #[test]
+    fn test_leaf415433333333281_result_unit_question_uses_typed_try_macro() {
+        let out = transpile_str(
+            r#"
+            fn g() -> Result<(), String> { Ok(()) }
+            fn f() -> Result<i32, String> {
+                g()?;
+                Ok(1)
+            }
+        "#,
+        );
+        assert!(out.contains("RUSTY_TRY_INTO(g(), rusty::Result<int32_t, rusty::String>)"));
+        assert!(!out.contains("RUSTY_TRY(g())"));
+    }
+
+    #[test]
+    fn test_leaf415433333333281_async_result_unit_question_uses_typed_co_try_macro() {
+        let out = transpile_str(
+            r#"
+            async fn g() -> Result<(), String> { Ok(()) }
+            async fn f() -> Result<i32, String> {
+                g().await?;
+                Ok(1)
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "RUSTY_CO_TRY_INTO(co_await g(), rusty::Result<int32_t, rusty::String>)"
+        ));
+        assert!(!out.contains("RUSTY_CO_TRY(co_await g())"));
+    }
+
+    #[test]
+    fn test_leaf415433333333281_try_from_like_result_body_uses_typed_try_macro() {
+        let out = transpile_str(
+            r#"
+            struct CapErr;
+            struct ArrayString;
+            impl ArrayString {
+                fn new() -> Self { ArrayString }
+                fn try_push_str(&mut self, _s: &str) -> Result<(), CapErr> { Ok(()) }
+                fn try_from_str(s: &str) -> Result<Self, CapErr> {
+                    let mut v = Self::new();
+                    v.try_push_str(s)?;
+                    Ok(v)
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::Result<ArrayString, CapErr> try_from_str(std::string_view s)"));
+        assert!(out.contains("RUSTY_TRY_INTO(v.try_push_str("));
+        assert!(out.contains(", rusty::Result<ArrayString, CapErr>)"));
+        assert!(!out.contains("rusty::Result<std::tuple<>, CapErr> try_from_str"));
     }
 
     // ── Phase 11: Doc comments, tests, build integration ────────
@@ -23868,7 +23967,7 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("RUSTY_TRY(g())"));
+        assert!(out.contains("RUSTY_TRY"));
         assert!(out.contains("return rusty::Result<"));
         assert!(
             !out.contains("return Ok("),

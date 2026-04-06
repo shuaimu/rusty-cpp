@@ -1137,7 +1137,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                               - [x] *done* Verification for 27.7.2 status update:
                                 - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness`
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.8: Collapse the post-27.7.2 deterministic Stage D `ArrayString::try_from`/result-type head family generically (starting with `try_from(std::string_view)` auto-return type stabilization and adjacent tuple/string-view fallout), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.8.1: Implement generic transpiler/runtime fixes for the first deterministic 27.7.2 head (no crate-specific scripts): stabilize `try_from`/`RUSTY_TRY` return-shape inference so `Result` error paths do not collapse to `std::tuple<>` and downstream string-view conversions stay type-correct.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.8.1: Implement generic transpiler/runtime fixes for the first deterministic 27.7.2 head (no crate-specific scripts): stabilize `try_from`/`RUSTY_TRY` return-shape inference so `Result` error paths do not collapse to `std::tuple<>` and downstream string-view conversions stay type-correct.
+                              - [x] *done* Implemented generic typed-Result `?` propagation in shared runtime/transpiler surfaces (no crate-specific scripts):
+                                - `include/rusty/try.hpp`: added `RUSTY_TRY_INTO(expr, ReturnResultType)` and `RUSTY_CO_TRY_INTO(expr, ReturnResultType)` so error propagation can target explicit `Result<U, E>` return shapes instead of returning the inner `Result<T, E>` unchanged.
+                                - `transpiler/src/codegen.rs`: `Expr::Try` lowering now routes through a typed macro selector; in `Result` return contexts it emits `RUSTY_TRY_INTO`/`RUSTY_CO_TRY_INTO`, keeps `RUSTY_*_TRY_OPT` for `Option`, and falls back to legacy `RUSTY_TRY`/`RUSTY_CO_TRY` when return type hints are unavailable.
+                              - [x] *done* Added focused fixture-agnostic transpiler regressions in `transpiler/src/codegen.rs` (`leaf415433333333281` cases):
+                                - sync and async `Result<(), E>` `?` propagation now emits typed try macros with explicit return `Result` type,
+                                - `ArrayString::try_from`-like body regression ensures `?` in `Result<Self, E>` context keeps `Self` in the return type and avoids tuple collapse.
+                              - [x] *done* Re-probed `arrayvec` parity after 27.8.1 (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-8-1-1775513113 --keep-work-dirs`):
+                                - prior deterministic first hard error family at `runner.cpp:1636` (`ArrayString::try_from(std::string_view)` auto-return mismatch `Result<std::tuple<>, _>` vs `Result<ArrayString<16>, _>`) is removed from first slot.
+                                - new deterministic Stage D first hard error now starts at `runner.cpp:4239` (`std::string_view` construction from `const ArrayString<16>&`), followed by adjacent fallout at `runner.cpp:4262` (`ArrayVec<std::tuple<>, usize::MAX>` shape) and `runner.cpp:4293+` (`constexpr`/template-shape diagnostics).
+                                - canonical artifacts: `/tmp/rusty-parity-matrix-27-8-1-1775513113/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Verification for 27.8.1:
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `ctest --test-dir build-tests --output-on-failure`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-8-1-1775513113 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): preserved deterministic first-head discipline, used shared shape-gated lowering/runtime changes only, and avoided crate-specific rewrites/scripts.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.8.2: Re-run full seven-crate parity matrix after 27.8.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
