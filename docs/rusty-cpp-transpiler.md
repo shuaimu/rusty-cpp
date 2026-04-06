@@ -2077,8 +2077,12 @@ Active work items:
    - runtime `include/rusty/slice.hpp` now provides shared next-adapter surfaces for `rev` and `enumerate` with option-like iterator constraints and `next_back()` enforcement for reverse iteration.
    - focused transpiler/runtime regressions were added (`leaf41543333333131` + `tests/rusty_array_test.cpp` adapter-shape coverage).
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-13-1-1775441890 --keep-work-dirs`) removed the prior first deterministic head (`Drain<...>.rev()` / `Iter<...>.enumerate()` missing members); canonical artifacts at `/tmp/rusty-parity-matrix-13-1-1775441890/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
-10. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.13.2`.
-   - re-run full seven-crate matrix after 13.1 and record the next deterministic first failure head with canonical artifact paths.
+10. `Leaf 4.15.4.3.3.3.3.3.13.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-13-2-1775442875 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-13-2-1775442875/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains iterator mutability/constness fallout in `test_retain`: `assignment of read-only location` at `runner.cpp:3007` on `*elt = i` in the `rusty::enumerate(rusty::iter(v))` loop, followed by existing downstream `Result` visit/call-shape and constructor/trait-surface cascades.
+11. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.14.1`.
+   - implement a generic mutability-preserving iterator/enumerate adaptation fix for mutable iteration contexts (no crate-specific scripts; keep §11.3 no-blanket-rewrite discipline), then reprobe matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
