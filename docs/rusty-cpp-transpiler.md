@@ -2193,9 +2193,13 @@ Active work items:
    - expanded function-path mapping in `transpiler/src/types.rs` for pointer UFCS arithmetic helpers (`core/std/ptr::mut_ptr::{add,offset}` and `core/std/ptr::const_ptr::{add,offset}` to `rusty::ptr::{add,offset}`).
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-25-1b-1775476125 --keep-work-dirs`) removed the prior deterministic first hard head at `runner.cpp:535` (`rusty::ptr::add(...).write(...)` member-call pointer mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-25-1b-1775476125/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts at `runner.cpp:3408`: `ArrayVec<rusty::Vec<int>, 4>` has no `to_vec`, followed by downstream omitted-template/`clone_from` pointer-arg/`ArrayString`/`HashMap`/`RUSTY_TRY`/`parse` fallout.
-32. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.25.2`.
-   - focus: re-run the full seven-crate matrix after 25.1, capture canonical artifacts, and record the next deterministic matrix head.
-   - guardrail (wrong-approach checklist §11): keep frontier updates deterministic (first hard error by source order) and avoid conflating downstream fallout with the leading head family.
+32. `Leaf 4.15.4.3.3.3.3.3.25.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-25-2-1775480817 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-25-2-1775480817/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:3408`: `ArrayVec<rusty::Vec<int>, 4>` has no member `to_vec` in `array_clone_from`, followed by downstream omitted-template and call-shape fallout (`ArrayVec<auto,4>` arity, `clone_from(&v)` pointer arg mismatch, `ArrayString`/`HashMap` missing template args, `RUSTY_TRY`/`Ok`, `parse`, and related type/runtime-surface diagnostics).
+33. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.26.1`.
+   - focus: collapse the deterministic `ArrayVec` call-surface head family led by missing `to_vec`/`clone_from` shape mismatches, using generic lowering/runtime fixes only.
+   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to the leading family and avoid blanket rewrites of unrelated template/method surfaces.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
