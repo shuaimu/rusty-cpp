@@ -8279,20 +8279,61 @@ impl CodeGen {
                 let syn::Expr::Path(path) = call.func.as_ref() else {
                     return false;
                 };
-                let joined = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|s| s.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                matches!(
-                    joined.as_str(),
-                    "rusty::ptr::add" | "rusty::ptr::offset" | "ptr::add" | "ptr::offset"
-                )
+                Self::is_ptr_add_or_offset_call_path(&path.path)
             }
             _ => false,
         }
+    }
+
+    fn is_ptr_add_or_offset_call_path(path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "rusty::ptr::add"
+                | "rusty::ptr::offset"
+                | "ptr::add"
+                | "ptr::offset"
+                | "core::ptr::mut_ptr::add"
+                | "std::ptr::mut_ptr::add"
+                | "ptr::mut_ptr::add"
+                | "core::ptr::mut_ptr::offset"
+                | "std::ptr::mut_ptr::offset"
+                | "ptr::mut_ptr::offset"
+                | "core::ptr::const_ptr::add"
+                | "std::ptr::const_ptr::add"
+                | "ptr::const_ptr::add"
+                | "core::ptr::const_ptr::offset"
+                | "std::ptr::const_ptr::offset"
+                | "ptr::const_ptr::offset"
+        )
+    }
+
+    fn emitted_pointer_add_or_offset_call(receiver_cpp: &str) -> bool {
+        let receiver_cpp = receiver_cpp.trim();
+        matches!(
+            receiver_cpp,
+            s if s.starts_with("rusty::ptr::add(")
+                || s.starts_with("rusty::ptr::offset(")
+                || s.starts_with("ptr::add(")
+                || s.starts_with("ptr::offset(")
+                || s.starts_with("core::ptr::mut_ptr::add(")
+                || s.starts_with("std::ptr::mut_ptr::add(")
+                || s.starts_with("ptr::mut_ptr::add(")
+                || s.starts_with("core::ptr::mut_ptr::offset(")
+                || s.starts_with("std::ptr::mut_ptr::offset(")
+                || s.starts_with("ptr::mut_ptr::offset(")
+                || s.starts_with("core::ptr::const_ptr::add(")
+                || s.starts_with("std::ptr::const_ptr::add(")
+                || s.starts_with("ptr::const_ptr::add(")
+                || s.starts_with("core::ptr::const_ptr::offset(")
+                || s.starts_with("std::ptr::const_ptr::offset(")
+                || s.starts_with("ptr::const_ptr::offset(")
+        )
     }
 
     fn is_known_integer_like_type(&self, ty: &syn::Type) -> bool {
@@ -8799,15 +8840,18 @@ impl CodeGen {
             };
             return format!("rusty::zip({}, {})", receiver, rhs);
         }
-        if method_name == "write" && args.len() == 1 && self.is_expr_raw_pointer_like(&mc.receiver)
-        {
+        if method_name == "write" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
-            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
-                format!("({})", raw_receiver)
-            } else {
-                raw_receiver
-            };
-            return format!("rusty::ptr::write({}, {})", receiver, args[0]);
+            let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
+                || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
+            if receiver_is_raw_pointer {
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("rusty::ptr::write({}, {})", receiver, args[0]);
+            }
         }
         if matches!(method_name.as_str(), "add" | "offset")
             && args.len() == 1
@@ -11668,6 +11712,14 @@ impl CodeGen {
             return None;
         }
         if mc.args.len() != 1 {
+            return None;
+        }
+        // Guardrail: pointer-valued receiver writes (for example `ptr.add(i).write(v)`)
+        // must be lowered via `rusty::ptr::*` helpers, not IO buffer member surfaces.
+        let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+        if self.is_expr_raw_pointer_like(&mc.receiver)
+            || Self::emitted_pointer_add_or_offset_call(&raw_receiver)
+        {
             return None;
         }
         let declared_expected = self.lookup_method_arg_expected_type(&method, 0);
@@ -21003,6 +21055,63 @@ mod tests {
         let out = transpile_str("fn f(p: *mut i32, v: i32) { unsafe { p.write(v); } }");
         assert!(out.contains("rusty::ptr::write(p,"));
         assert!(!out.contains("p.write(v)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333251_ufcs_ptr_add_receiver_write_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(ptr: *mut u8, code: u8) {
+                unsafe {
+                    core::ptr::mut_ptr::add(ptr, 0).write(code);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::write("));
+        assert!(out.contains("rusty::ptr::add("));
+        assert!(!out.contains("core::ptr::mut_ptr::add(std::move(ptr), 0).write("));
+        assert!(!out.contains("rusty::ptr::add(std::move(ptr), 0).write("));
+    }
+
+    #[test]
+    fn test_leaf41543333333251_non_pointer_write_call_is_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct Writer;
+            impl Writer {
+                fn write(&mut self, _b: u8) {}
+            }
+
+            fn f(mut w: Writer, code: u8) {
+                w.write(code);
+            }
+            "#,
+        );
+        assert!(out.contains("w.write("));
+        assert!(!out.contains("rusty::ptr::write(w"));
+    }
+
+    #[test]
+    fn test_leaf41543333333251_pointer_write_is_not_captured_by_io_write_hints() {
+        let out = transpile_str(
+            r#"
+            struct Sink;
+            impl Sink {
+                fn write(&mut self, _buf: &[u8]) {}
+            }
+
+            fn f(ptr: *mut u8, code: u8, mut sink: Sink) {
+                sink.write(&[code]);
+                unsafe {
+                    ptr.add(0).write(code);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("sink.write(rusty::slice_full("));
+        assert!(out.contains("rusty::ptr::write(rusty::ptr::add(ptr, 0),"));
+        assert!(!out.contains("rusty::ptr::add(ptr, 0).write("));
     }
 
     #[test]

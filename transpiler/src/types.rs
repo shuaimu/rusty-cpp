@@ -144,6 +144,18 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
+        "core::ptr::mut_ptr::add" | "std::ptr::mut_ptr::add" | "ptr::mut_ptr::add" => {
+            Some("rusty::ptr::add")
+        }
+        "core::ptr::const_ptr::add" | "std::ptr::const_ptr::add" | "ptr::const_ptr::add" => {
+            Some("rusty::ptr::add")
+        }
+        "core::ptr::mut_ptr::offset" | "std::ptr::mut_ptr::offset" | "ptr::mut_ptr::offset" => {
+            Some("rusty::ptr::offset")
+        }
+        "core::ptr::const_ptr::offset"
+        | "std::ptr::const_ptr::offset"
+        | "ptr::const_ptr::offset" => Some("rusty::ptr::offset"),
         "std::ptr::copy" | "ptr::copy" => Some("rusty::ptr::copy"),
         "std::ptr::copy_nonoverlapping" | "ptr::copy_nonoverlapping" => {
             Some("rusty::ptr::copy_nonoverlapping")
@@ -506,6 +518,22 @@ mod tests {
             Some("rusty::ptr::read")
         );
         assert_eq!(map_function_path("ptr::write"), Some("rusty::ptr::write"));
+        assert_eq!(
+            map_function_path("core::ptr::mut_ptr::add"),
+            Some("rusty::ptr::add")
+        );
+        assert_eq!(
+            map_function_path("std::ptr::const_ptr::add"),
+            Some("rusty::ptr::add")
+        );
+        assert_eq!(
+            map_function_path("ptr::mut_ptr::offset"),
+            Some("rusty::ptr::offset")
+        );
+        assert_eq!(
+            map_function_path("core::ptr::const_ptr::offset"),
+            Some("rusty::ptr::offset")
+        );
         assert_eq!(map_function_path("ptr::copy"), Some("rusty::ptr::copy"));
         assert_eq!(
             map_function_path("std::ptr::copy_nonoverlapping"),

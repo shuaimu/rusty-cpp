@@ -2184,9 +2184,18 @@ Active work items:
    - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-24-2-1775470862 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-24-2-1775470862/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at `runner.cpp:535`: `request for member 'write'` in `rusty::ptr::add(ptr, 0)` (non-class pointer receiver) in `char_::encode_utf8`, followed by downstream `ArrayVec::to_vec`/omitted-template/`RUSTY_TRY`/`parse` fallout.
-31. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.25.1`.
-   - focus: collapse the pointer write-call shape family generically so pointer-valued expressions do not emit member-call `.write(...)` syntax.
-   - guardrail (wrong-approach checklist §11): keep fixes shape-gated to pointer-valued write-call contexts and avoid blanket rewrites of non-pointer write surfaces.
+31. `Leaf 4.15.4.3.3.3.3.3.25.1` is complete.
+   - implemented shape-gated pointer write-call hardening in `transpiler/src/codegen.rs`:
+     - expanded pointer-valued receiver detection for `add`/`offset` call-path families (`rusty::ptr`, `ptr`, and `core/std::ptr::{mut_ptr,const_ptr}` forms),
+     - prevented IO buffer-call normalization from capturing raw-pointer receiver writes,
+     - kept non-pointer `write` calls on standard member-call lowering.
+   - added focused regressions (`leaf41543333333251`) covering UFCS pointer-add receivers, non-pointer write control behavior, and pointer-write behavior under competing IO write hints.
+   - expanded function-path mapping in `transpiler/src/types.rs` for pointer UFCS arithmetic helpers (`core/std/ptr::mut_ptr::{add,offset}` and `core/std/ptr::const_ptr::{add,offset}` to `rusty::ptr::{add,offset}`).
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-25-1b-1775476125 --keep-work-dirs`) removed the prior deterministic first hard head at `runner.cpp:535` (`rusty::ptr::add(...).write(...)` member-call pointer mismatch); canonical artifacts at `/tmp/rusty-parity-matrix-25-1b-1775476125/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3408`: `ArrayVec<rusty::Vec<int>, 4>` has no `to_vec`, followed by downstream omitted-template/`clone_from` pointer-arg/`ArrayString`/`HashMap`/`RUSTY_TRY`/`parse` fallout.
+32. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.25.2`.
+   - focus: re-run the full seven-crate matrix after 25.1, capture canonical artifacts, and record the next deterministic matrix head.
+   - guardrail (wrong-approach checklist §11): keep frontier updates deterministic (first hard error by source order) and avoid conflating downstream fallout with the leading head family.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
