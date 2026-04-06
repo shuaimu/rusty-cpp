@@ -1600,6 +1600,136 @@ pro::proxy<IteratorFacade> make_iter() {
 
 In module-expanded builds, when a required external facade symbol is not emitted/available, use a guarded fallback strategy (placeholder-safe type + explicit Rust-only marker) rather than emitting unresolved proxy symbols that break whole-module compilation.
 
+### 4.9 Failure Taxonomy and Canonical Solutions
+
+This section is the missing system-level bridge between:
+
+1. the language mapping rules in Sections 1-4, and
+2. the implementation notes/frontier logs in Section 10.
+
+It describes recurring failure classes as a textbook playbook:
+`symptom -> root cause -> canonical transpilation solution`.
+
+#### 4.9.1 Core Principle
+
+Do not fix compiler noise by ad-hoc text rewrites.
+Classify the failure first, then apply the corresponding lowering rule.
+
+#### 4.9.2 Problem-Class Matrix
+
+| Problem class | Typical compiler symptom | Root cause | Canonical solution |
+|---|---|---|---|
+| A. Omitted owner template args | `Type::new_()` / `Type<auto,...>::...` wrong arity | Rust omitted generic owner context not recovered in C++ emission | recover owner template args from expected type + local usage context; emit fully specialized owner before associated call |
+| B. Receiver-shape mismatch | `request for member ...` on pointer/non-class | Rust receiver shape lowered as wrong C++ category (`ptr` vs ref vs value) | normalize receiver category before call emission (`obj.m()`, `ptr->m()`, or helper function) |
+| C. Iterator-adapter surface gaps | missing `.rev()`, `.enumerate()`, `.map()` members | iterator-like values are not native C++ ranges/classes with those members | lower adapters to shared runtime helpers (adapter chain lowering), not direct member calls |
+| D. Match-expression return/capture fallout | `return return ...`, missing return, unbound pattern vars | statement/expression match lowering mixed incorrectly; insufficient binding/capture generation | expression-position match via typed IIFE/visit; recursive binding materialization; explicit arm return type |
+| E. Path/import/runtime namespace mismatch | unresolved `core::...`, `std::io::...`, `using ::Type` | Rust path families emitted as literal C++ namespaces | central path table rewrite + rust-only import comments when no C++ symbol exists |
+| F. Move/ownership constructor mismatch | deleted copy ctor, invalid move from const local | Rust by-value construction lowered without ownership-sensitive payload rules | move-aware ctor payload lowering with constness/scope checks |
+| G. Assertion/equality shape mismatch | no `operator==` for generated comparison operands | assertion scaffolding compared non-isomorphic types | normalize assertion lowering to compare canonicalized typed values (or helper-based equality) |
+| H. Trait/UFCS call-shape mismatch | unresolved static call or wrong receiver form | UFCS/static-trait call left in Rust form where C++ expects receiver/member or helper | detect UFCS shape, rewrite to receiver/helper form with guarded arg normalization |
+
+#### 4.9.3 Canonical Decision Procedure
+
+When a new parity failure appears, apply this fixed procedure:
+
+1. Capture the first deterministic hard error only.
+2. Classify it into exactly one class in §4.9.2.
+3. Apply the canonical lowering strategy for that class only.
+4. Add fixture-agnostic regression tests for that strategy.
+5. Re-run parity and confirm the first deterministic head moved.
+
+This is the same root-cause-first policy enforced operationally in §11.
+
+#### 4.9.4 Worked Example: Current `ArrayString::new_()` Frontier
+
+Current head (arrayvec Stage D) is class **A (omitted owner template args)**:
+
+```cpp
+// Failing shape
+auto s = ArrayString::new_();
+```
+
+C++ needs owner specialization:
+
+```cpp
+// Canonical emitted shape (example)
+auto s = ArrayString<32>::new_();
+```
+
+How to recover `<32>` (or `<K,V>` for `HashMap`) without blanket rewrites:
+
+1. expected-type context at assignment/argument/return sites,
+2. local usage hints (`push`, `insert`, constructor arg shape),
+3. in-scope generic/default parameters.
+
+This exact strategy is the active fix path in the current parity frontier.
+
+#### 4.9.5 Worked Example: UFCS Trait Calls
+
+Rust UFCS:
+
+```rust
+Read::read(&mut cursor, &mut buf)
+```
+
+If emitted literally, C++ often fails class **H**.
+Canonical rewrite:
+
+```cpp
+cursor.read(buf)
+```
+
+Rule:
+
+- rewrite only when call shape is verified as UFCS trait method form,
+- do not globally rewrite namespaced free functions,
+- do not rewrite constructor-like paths (`Type::new(...)`).
+
+#### 4.9.6 Worked Example: Iterator Adapter Chains
+
+Rust:
+
+```rust
+iter.by_ref().take(n).map(f)
+```
+
+Direct member lowering often fails class **C**.
+Canonical helper-based lowering:
+
+```cpp
+rusty::map(rusty::take(iter, n), f)
+```
+
+or equivalent adapter chain surface from the runtime library.
+
+#### 4.9.7 Worked Example: Match-as-Expression
+
+Rust:
+
+```rust
+let y = match e {
+    Left(x) => x + 1,
+    Right(x) => x - 1,
+};
+```
+
+Naive statement lowering causes class **D** failures.
+Canonical expression lowering:
+
+```cpp
+auto y = [&]() -> int32_t {
+    return std::visit(overloaded{
+        [&](const LeftT& v) -> int32_t { return v._0 + 1; },
+        [&](const RightT& v) -> int32_t { return v._0 - 1; },
+    }, e);
+}();
+```
+
+#### 4.9.8 What This Section Replaces
+
+Use this taxonomy as the conceptual source of truth.
+Use Section 10 only for status/frontier tracking of which class is currently active.
+
 ---
 
 ## 5. Complete Feature Matrix
