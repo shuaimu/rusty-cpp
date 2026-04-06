@@ -8268,9 +8268,13 @@ impl CodeGen {
                 );
             }
         }
-        if (mc.method == "iter" || mc.method == "iter_mut") && mc.args.is_empty() {
+        if mc.method == "iter" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::iter({})", receiver);
+        }
+        if mc.method == "iter_mut" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::iter_mut({})", receiver);
         }
         if mc.method == "collect" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -21820,6 +21824,23 @@ mod tests {
         assert!(out.contains("s.enumerate()"));
         assert!(!out.contains("rusty::rev(s)"));
         assert!(!out.contains("rusty::enumerate(s)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333141_iter_mut_enumerate_preserves_mutability_surface() {
+        let out = transpile_str(
+            r#"
+            fn f(mut v: Vec<i32>) {
+                let _ = v.iter_mut();
+                let _ = v.iter_mut().enumerate();
+                let _ = v.iter();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::iter_mut(v)"));
+        assert!(out.contains("rusty::enumerate(rusty::iter_mut(v))"));
+        assert!(out.contains("rusty::iter(v)"));
+        assert!(!out.contains("rusty::enumerate(rusty::iter(v))"));
     }
 
     #[test]

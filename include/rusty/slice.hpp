@@ -379,6 +379,41 @@ decltype(auto) iter(Range&& range) {
 }
 
 template<typename Range>
+decltype(auto) iter_mut(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).iter_mut(); }) {
+        return std::forward<Range>(range).iter_mut();
+    } else if constexpr (requires { std::forward<Range>(range).as_mut_slice(); }) {
+        return iter_mut(std::forward<Range>(range).as_mut_slice());
+    } else if constexpr (requires { std::forward<Range>(range).deref_mut(); }) {
+        return iter_mut(std::forward<Range>(range).deref_mut());
+    } else if constexpr (requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }) {
+        auto&& view = std::forward<Range>(range);
+        using elem_ptr = decltype(view.data());
+        using elem_type = std::remove_pointer_t<elem_ptr>;
+        static_assert(
+            !std::is_const_v<elem_type>,
+            "rusty::iter_mut requires mutable element access"
+        );
+        auto* data = view.data();
+        return slice_iter::Iter<elem_type>(data, data + view.size());
+    } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {
+        using iter_ref = decltype(*std::begin(std::forward<Range>(range)));
+        static_assert(
+            !std::is_const_v<std::remove_reference_t<iter_ref>>,
+            "rusty::iter_mut requires mutable iterator items"
+        );
+        return std::forward<Range>(range);
+    } else if constexpr (requires { *std::forward<Range>(range); }) {
+        return iter_mut(*std::forward<Range>(range));
+    } else {
+        static_assert(
+            detail::dependent_false_v<Range>,
+            "rusty::iter_mut requires iter_mut(), mutable data()/size(), or dereferenceable receiver"
+        );
+    }
+}
+
+template<typename Range>
 decltype(auto) for_in(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_next_iter_range(std::forward<Range>(range));

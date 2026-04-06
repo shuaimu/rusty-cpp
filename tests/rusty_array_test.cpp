@@ -399,6 +399,28 @@ void test_rev_enumerate_iterator_adapter_shape() {
     printf("PASS\n");
 }
 
+void test_iter_mut_enumerate_preserves_mutability_shape() {
+    printf("test_iter_mut_enumerate_preserves_mutability_shape: ");
+    struct Probe {
+        std::array<int, 3> values{{4, 5, 6}};
+
+        auto iter() const {
+            return rusty::slice_iter::Iter<const int>(values.data(), values.data() + values.size());
+        }
+
+        auto iter_mut() {
+            return rusty::slice_iter::Iter<int>(values.data(), values.data() + values.size());
+        }
+    };
+
+    Probe probe{};
+    for (auto&& [i, elt] : rusty::for_in(rusty::enumerate(rusty::iter_mut(probe)))) {
+        *elt += static_cast<int>(i);
+    }
+    assert((probe.values == std::array<int, 3>{{4, 6, 8}}));
+    printf("PASS\n");
+}
+
 void test_maybe_uninit_reference_pointer_shape() {
     printf("test_maybe_uninit_reference_pointer_shape: ");
     using RefSlot = rusty::MaybeUninit<const int&>;
@@ -434,6 +456,7 @@ int main() {
     test_for_in_map_fold_rusty_option_next_shape();
     test_take_iterator_adapter_shape();
     test_rev_enumerate_iterator_adapter_shape();
+    test_iter_mut_enumerate_preserves_mutability_shape();
     test_maybe_uninit_reference_pointer_shape();
     test_io_print_shim_shape();
 
