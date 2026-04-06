@@ -2106,8 +2106,12 @@ Active work items:
    - focused transpiler regressions were added (`leaf41543333333161`) covering both `Err(id(u))` and `Ok(id(u))` unresolved-payload tuple-match assertions, asserting context-qualified emission and absence of bare constructor calls.
    - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-16-1-1775448430 --keep-work-dirs`) removed the prior deterministic first hard head (`Err` not declared from `auto _m1_tmp = Err(...)`); canonical artifacts at `/tmp/rusty-parity-matrix-16-1-1775448430/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - new deterministic first hard error now starts with ownership/copy fallout in `test_into_inner_1` (`use of deleted function` at `runner.cpp:3236`) from `_ResultCtorCtx::Err(std::move(u))` where `u` is emitted as `const auto u = v.clone();`.
-16. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.16.2`.
-   - re-run full seven-crate matrix after 16.1, record the next deterministic failure head with canonical artifacts, and update frontier status.
+16. `Leaf 4.15.4.3.3.3.3.3.16.2` is complete.
+   - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-16-2-1775449410 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-16-2-1775449410/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains ownership/copy fallout in `test_into_inner_1`: `use of deleted function` at `runner.cpp:3236` from `_ResultCtorCtx::Err(std::move(u))` where `u` is emitted as `const auto u = v.clone();`, followed by downstream string-conversion/constructor/template-surface cascades.
+17. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.17.1`.
+   - implement a generic ownership-safe constructor-argument lowering fix for context-qualified `Result` constructor paths (`Ok`/`Err`) so tuple/assertion scaffolding does not force invalid moves from const/lvalue-constrained bindings, then reprobe matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2209,6 +2213,7 @@ Required approach:
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
+- for constructor payload forwarding, do not force `std::move` from const/lvalue-constrained bindings into context-qualified `Result` constructors; preserve copy semantics when move construction is not valid
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
