@@ -9625,7 +9625,10 @@ impl CodeGen {
                                     .expect("field presence checked above");
                                 let field_ty =
                                     self.lookup_struct_literal_field_type(struct_expr, field_name);
-                                self.emit_expr_to_string_with_expected(expr, field_ty.as_ref())
+                                self.emit_expr_to_string_with_expected_and_move_if_needed(
+                                    expr,
+                                    field_ty.as_ref(),
+                                )
                             })
                             .collect();
                         return format!("{}({})", target_name, args.join(", "));
@@ -9647,7 +9650,8 @@ impl CodeGen {
                     .unwrap_or_else(|| escape_cpp_keyword(&rust_member_name));
                 let field_ty =
                     self.lookup_struct_literal_field_type(struct_expr, &rust_member_name);
-                let val = self.emit_expr_to_string_with_expected(&f.expr, field_ty.as_ref());
+                let val = self
+                    .emit_expr_to_string_with_expected_and_move_if_needed(&f.expr, field_ty.as_ref());
                 format!(".{} = {}", emitted_member_name, val)
             })
             .collect();
@@ -14395,11 +14399,15 @@ impl CodeGen {
                 }
                 let name = path.path.segments[0].ident.to_string();
 
+                // By-value receiver methods treat `self` as a consumable value path.
+                // Keep reference receivers unchanged to avoid moving borrowed `self`.
+                if name == "self" {
+                    return !self.current_self_receiver_is_reference();
+                }
+
                 // Skip keywords and special names
-                if matches!(
-                    name.as_str(),
-                    "self" | "Self" | "true" | "false" | "None" | "Some" | "Ok" | "Err"
-                ) {
+                if matches!(name.as_str(), "Self" | "true" | "false" | "None" | "Some" | "Ok" | "Err")
+                {
                     return false;
                 }
 
@@ -24356,6 +24364,68 @@ mod tests {
         );
         assert!(out.contains("auto _m0 = &*p;"));
         assert!(!out.contains("std::string_view(*p)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327141_consuming_self_constructor_call_moves_this() {
+        let out = transpile_str(
+            r#"
+            struct IntoIter<T, const CAP: usize>(usize, ArrayVec<T, CAP>);
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn into_iter(self) -> IntoIter<T, CAP> {
+                    IntoIter(0, self)
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("IntoIter(0, std::move((*this)))"),
+            "expected by-value self constructor arg to move this, output:\n{}",
+            out
+        );
+        assert!(!out.contains("IntoIter(0, (*this))"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327141_consuming_self_struct_literal_moves_this_field() {
+        let out = transpile_str(
+            r#"
+            struct IntoIter<T, const CAP: usize> { index: usize, v: ArrayVec<T, CAP> }
+            impl<T, const CAP: usize> Drop for IntoIter<T, CAP> {
+                fn drop(&mut self) {}
+            }
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn into_iter(self) -> IntoIter<T, CAP> {
+                    IntoIter { index: 0, v: self }
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("IntoIter<T, CAP>(0, std::move((*this)))"),
+            "expected consuming self struct-literal field to move this, output:\n{}",
+            out
+        );
+        assert!(!out.contains("IntoIter<T, CAP>(0, (*this))"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327141_borrowed_self_argument_is_not_moved() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            fn touch(_s: &S) {}
+            impl S {
+                fn f(&self) {
+                    touch(self);
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("touch((*this));"));
+        assert!(!out.contains("touch(std::move((*this)))"));
     }
 
     #[test]

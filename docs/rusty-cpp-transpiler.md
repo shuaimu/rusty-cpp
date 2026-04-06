@@ -2503,8 +2503,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-13-2-1775518425 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-58. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.14.1`.
-   - focus: collapse the post-27.13.2 first deterministic move-only constructor/iterator-consumption head generically, then verify matrix-head movement.
+58. `Leaf 4.15.4.3.3.3.3.3.27.14.1` is complete.
+   - plan/scope check: fix stayed under the small-change budget (<1000 LOC), so no additional leaf decomposition was required.
+   - implemented generic consuming-`self` move hardening in `transpiler/src/codegen.rs`:
+     - move insertion now treats path `self` as movable only under by-value receiver scope (`fn foo(self)`), while keeping `&self`/`&mut self` unchanged,
+     - struct-literal lowering now uses move-aware field emission in both constructor-ordered and designated-field paths, so consuming `self` field payloads are not emitted as lvalue copies.
+   - added fixture-agnostic transpiler regressions:
+     - `test_leaf41543333333327141_consuming_self_constructor_call_moves_this`
+     - `test_leaf41543333333327141_consuming_self_struct_literal_moves_this_field`
+     - `test_leaf41543333333327141_borrowed_self_argument_is_not_moved`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-14-1b-1775519130 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1060` (`IntoIter<T, CAP>(0, (*this))` deleted-copy fallback); generated `runner.cpp` now emits `IntoIter<T, CAP>(0, std::move((*this)))`.
+   - new deterministic first hard error now starts at `runner.cpp:838`: `cannot convert rusty::MaybeUninit<rusty::Vec<int>>* to rusty::Vec<int>*` in `ArrayVec::get_unchecked_ptr` return via `rusty::ptr::add(rusty::as_mut_ptr((*this)), ...)`, with canonical artifacts at `/tmp/rusty-parity-matrix-27-14-1b-1775519130/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-14-1b-1775519130 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): kept changes shared and receiver-shape-gated in AST-aware lowering, avoided crate-specific scripts, and avoided one-off callsite rewrites.
+59. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.14.2`.
+   - focus: re-run full seven-crate parity matrix after 27.14.1 and record the deterministic first failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2619,6 +2634,7 @@ Required approach:
 - for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
 - for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout
+- for struct-literal field lowering in consuming `self` scopes, do not bypass move insertion by using non-move field emission helpers; field payload emission must preserve receiver-aware move semantics
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
