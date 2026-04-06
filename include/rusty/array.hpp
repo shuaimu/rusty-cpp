@@ -33,6 +33,30 @@ constexpr bool operator==(const std::array<L, N>& lhs, std::span<R, RExtent> rhs
     return rhs == lhs;
 }
 
+// Mixed-element std::array equality for transpiled assertion scaffolding.
+// Keep this narrow: only for different element types and only when one-sided
+// element equality is well-formed.
+template<typename L, std::size_t N, typename R>
+requires (
+    !std::is_same_v<std::remove_cv_t<L>, std::remove_cv_t<R>> &&
+    (requires(const L& l, const R& r) { l == r; } ||
+     requires(const L& l, const R& r) { r == l; }))
+constexpr bool operator==(const std::array<L, N>& lhs, const std::array<R, N>& rhs) {
+    if constexpr (requires(const L& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    }
+}
+
 namespace rusty {
 
 namespace detail {

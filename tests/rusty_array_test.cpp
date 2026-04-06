@@ -2,6 +2,7 @@
 #include "../include/rusty/array.hpp"
 #include "../include/rusty/io.hpp"
 #include "../include/rusty/slice.hpp"
+#include "../include/rusty/string.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -201,6 +202,31 @@ void test_span_equality_helper_shape() {
     assert(lhs == rhs);
     assert(!(lhs == rhs_short));
 
+    printf("PASS\n");
+}
+
+void test_array_cross_element_equality_shape() {
+    printf("test_array_cross_element_equality_shape: ");
+    {
+        std::array<rusty::String, 4> lhs{
+            rusty::String::from("a"),
+            rusty::String::from("b"),
+            rusty::String::from("c"),
+            rusty::String::from("d"),
+        };
+        std::array<const char*, 4> rhs{"a", "b", "c", "d"};
+        assert(lhs == rhs);
+        assert(rhs == lhs);
+    }
+    {
+        std::array<rusty::String, 2> lhs{
+            rusty::String::from("x"),
+            rusty::String::from("y"),
+        };
+        std::array<const char*, 2> rhs{"x", "z"};
+        assert(!(lhs == rhs));
+        assert(!(rhs == lhs));
+    }
     printf("PASS\n");
 }
 
@@ -448,6 +474,7 @@ int main() {
     test_slice_full_prefers_as_slice_helpers_shape();
     test_len_helper_shapes();
     test_span_equality_helper_shape();
+    test_array_cross_element_equality_shape();
     test_slice_iter_helpers_shape();
     test_cursor_new_helper_shape();
     test_filter_map_lazy_shape();
