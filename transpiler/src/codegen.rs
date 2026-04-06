@@ -48,6 +48,12 @@ enum GenericParamKind {
     Const,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntoReceiverKind {
+    StringLike,
+    ScalarLike,
+}
+
 #[derive(Debug, Clone)]
 enum GenericParamDefault {
     Type(syn::Type),
@@ -8324,6 +8330,126 @@ impl CodeGen {
         }
     }
 
+    fn is_known_scalar_like_type(&self, ty: &syn::Type) -> bool {
+        if self.is_known_integer_like_type(ty) {
+            return true;
+        }
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
+                let name = tp.path.segments[0].ident.to_string();
+                matches!(name.as_str(), "f32" | "f64" | "bool" | "char")
+            }
+            _ => {
+                let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
+                Self::is_scalar_into_target_cpp_type(&canonical)
+            }
+        }
+    }
+
+    fn is_known_string_like_type(&self, ty: &syn::Type) -> bool {
+        let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
+        matches!(
+            canonical.as_str(),
+            "rusty::String" | "std::string" | "std::string_view" | "char*"
+        )
+    }
+
+    fn classify_into_receiver_expr(&self, expr: &syn::Expr) -> Option<IntoReceiverKind> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(_),
+                ..
+            }) => Some(IntoReceiverKind::StringLike),
+            syn::Expr::Lit(syn::ExprLit { lit, .. })
+                if matches!(
+                    lit,
+                    syn::Lit::Int(_)
+                        | syn::Lit::Float(_)
+                        | syn::Lit::Bool(_)
+                        | syn::Lit::Char(_)
+                        | syn::Lit::Byte(_)
+                ) =>
+            {
+                Some(IntoReceiverKind::ScalarLike)
+            }
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let ty = self.infer_simple_expr_type(expr)?;
+                if self.is_known_string_like_type(&ty) {
+                    Some(IntoReceiverKind::StringLike)
+                } else if self.is_known_scalar_like_type(&ty) {
+                    Some(IntoReceiverKind::ScalarLike)
+                } else {
+                    None
+                }
+            }
+            syn::Expr::Cast(cast) => {
+                if self.is_known_string_like_type(&cast.ty) {
+                    Some(IntoReceiverKind::StringLike)
+                } else if self.is_known_scalar_like_type(&cast.ty) {
+                    Some(IntoReceiverKind::ScalarLike)
+                } else {
+                    self.classify_into_receiver_expr(&cast.expr)
+                }
+            }
+            syn::Expr::Unary(unary)
+                if matches!(unary.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) =>
+            {
+                match self.classify_into_receiver_expr(&unary.expr) {
+                    Some(IntoReceiverKind::ScalarLike) => Some(IntoReceiverKind::ScalarLike),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn strip_into_target_cpp_type(&self, cpp_ty: &str) -> String {
+        let mut stripped = cpp_ty.trim().to_string();
+        while stripped.ends_with('&') {
+            stripped.pop();
+            stripped = stripped.trim_end().to_string();
+        }
+        if let Some(rest) = stripped.strip_prefix("const ") {
+            return rest.trim_start().to_string();
+        }
+        stripped
+    }
+
+    fn canonical_into_target_cpp_type(&self, cpp_ty: &str) -> String {
+        self.strip_into_target_cpp_type(cpp_ty)
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect()
+    }
+
+    fn is_scalar_into_target_cpp_type(canonical_cpp_ty: &str) -> bool {
+        matches!(
+            canonical_cpp_ty,
+            "int8_t"
+                | "int16_t"
+                | "int32_t"
+                | "int64_t"
+                | "__int128"
+                | "uint8_t"
+                | "uint16_t"
+                | "uint32_t"
+                | "uint64_t"
+                | "unsigned__int128"
+                | "size_t"
+                | "ptrdiff_t"
+                | "float"
+                | "double"
+                | "longdouble"
+                | "bool"
+                | "char"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "wchar_t"
+        )
+    }
+
     fn should_collapse_reborrow_of_deref_operand(&self, operand: &syn::Expr) -> bool {
         if self.is_expr_reference_like(operand) {
             return true;
@@ -8370,6 +8496,9 @@ impl CodeGen {
     ) -> String {
         if let Some(try_into_call) = self.try_emit_try_into_method_call(mc, expected_ty) {
             return try_into_call;
+        }
+        if let Some(into_call) = self.try_emit_into_method_call(mc, expected_ty) {
+            return into_call;
         }
         if mc.method == "assume_init" && mc.args.is_empty() {
             if let Some(expected) = expected_ty {
@@ -8691,7 +8820,13 @@ impl CodeGen {
                 declared_expected,
                 syn::Type::Path(tp)
                     if tp.path.segments.len() == 1
-                        && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                        && (self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                            || tp.path.segments[0]
+                                .ident
+                                .to_string()
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_uppercase()))
             ),
         };
         if !allow_infer {
@@ -9983,6 +10118,56 @@ impl CodeGen {
         let target_cpp = self.map_type(&target_ty);
         let receiver = self.emit_try_into_receiver_arg(&mc.receiver);
         Some(format!("{}::try_from({})", target_cpp, receiver))
+    }
+
+    fn try_emit_into_method_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if mc.method != "into" || !mc.args.is_empty() {
+            return None;
+        }
+        let receiver_kind = self.classify_into_receiver_expr(&mc.receiver)?;
+        let target_ty = match expected_ty {
+            Some(expected) => expected.clone(),
+            // Keep no-context string-literal lowering compilable (`"x".into()`) while
+            // avoiding blanket rewrites for non-string primitives without target type.
+            None if receiver_kind == IntoReceiverKind::StringLike => parse_quote!(rusty::String),
+            None => return None,
+        };
+        if self.type_contains_infer(&target_ty) {
+            return None;
+        }
+        let target_cpp = self.map_type(&target_ty);
+        if target_cpp == "auto"
+            || target_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&target_cpp)
+        {
+            return None;
+        }
+
+        let stripped_target = self.strip_into_target_cpp_type(&target_cpp);
+        let canonical_target = self.canonical_into_target_cpp_type(&target_cpp);
+        let receiver = self.emit_expr_maybe_move(&mc.receiver);
+
+        match receiver_kind {
+            IntoReceiverKind::StringLike => match canonical_target.as_str() {
+                "rusty::String" => Some(format!("rusty::String::from({})", receiver)),
+                "std::string" => Some(format!("std::string({})", receiver)),
+                "std::string_view" => Some(format!("std::string_view({})", receiver)),
+                // Rust `&str` can lower to C-string receiver surfaces.
+                "char*" => Some(receiver),
+                _ => None,
+            },
+            IntoReceiverKind::ScalarLike => {
+                if Self::is_scalar_into_target_cpp_type(&canonical_target) {
+                    Some(format!("static_cast<{}>({})", stripped_target, receiver))
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn resolve_expected_type_with_iter_hint(
@@ -21690,6 +21875,57 @@ mod tests {
         assert!(!out.contains(").try_into("));
         assert!(!out.contains("(&std::array"));
         assert!(!out.contains("Result<ArrayVec<auto"));
+    }
+
+    #[test]
+    fn test_leaf41543333333191_into_string_literal_lowers_via_string_from_in_typed_context() {
+        let out = transpile_str(
+            r#"
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn new_() -> Self { ArrayVec }
+                fn push(&mut self, _v: T) {}
+            }
+            fn f() {
+                let mut v = ArrayVec::<String, 4>::new_();
+                v.push(("a").into());
+            }
+        "#,
+        );
+        assert!(out.contains("v.push(rusty::String::from("));
+        assert!(!out.contains("(\"a\").into()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333191_into_numeric_scalar_lowers_to_static_cast() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x: i32 = 7;
+                let y: i64 = x.into();
+            }
+        "#,
+        );
+        assert!(out.contains("static_cast<int64_t>("));
+        assert!(!out.contains("x.into()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333191_into_on_nonprimitive_receiver_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct Wrap;
+            impl Wrap {
+                fn into(self) -> i32 { 1 }
+            }
+            fn f() {
+                let w = Wrap;
+                let _x: i32 = w.into();
+            }
+        "#,
+        );
+        assert!(out.contains("w.into()"));
+        assert!(!out.contains("static_cast<int32_t>(w)"));
     }
 
     #[test]

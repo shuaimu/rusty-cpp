@@ -2130,8 +2130,17 @@ Active work items:
    - full seven-crate rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-18-2-1775453841 --keep-work-dirs`) remains `pass=4`, `fail=1` with first failure at `arrayvec` Stage D.
    - canonical artifacts: `/tmp/rusty-parity-matrix-18-2-1775453841/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error remains string-literal conversion surface mismatch in `test_into_inner_2`: `request for member 'into'` at `runner.cpp:3258` (`("a").into()` and siblings), followed by downstream array/string comparison (`std::array<rusty::String, 4>` vs `std::array<const char*, 4>` at `runner.cpp:3272`) and existing template/runtime-surface cascades.
-21. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.19.1`.
-   - implement generic `.into()` conversion lowering for literal/primitive expression receivers (no crate-specific scripts), add focused regressions, then re-run matrix in `19.2`.
+21. `Leaf 4.15.4.3.3.3.3.3.19.1` is complete.
+   - transpiler `.into()` lowering now applies shape-gated conversion emission for literal/primitive receivers in typed contexts:
+     - string-like receivers lower to valid conversion surfaces (`rusty::String::from(...)`, `std::string(...)`, `std::string_view(...)`) rather than Rust trait-style member calls.
+     - scalar-like receivers lower to typed `static_cast<target>(...)` surfaces when target type is scalar-like.
+     - non-primitive receivers are preserved unchanged (no blanket rewrite).
+   - method-arg expected-type inference for receiver-gated methods (`push/insert/set`) now allows concrete receiver-driven substitution when declared argument type is an uppercase generic placeholder (`T`-style), enabling `.into()` lowering in generic method call contexts.
+   - focused regressions were added (`leaf41543333333191`) covering string-literal typed `.into()`, scalar typed `.into()`, and non-primitive `.into()` non-rewrite behavior.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-19-1-1775455372 --keep-work-dirs`) removed the prior deterministic first hard head (`("a").into()` member-call failure at `runner.cpp:3258`); canonical artifacts at `/tmp/rusty-parity-matrix-19-1-1775455372/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3272`: `no match for operator==` between `std::array<rusty::String, 4>` and `std::array<const char*, 4>`.
+22. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.19.2`.
+   - re-run the full seven-crate parity matrix after 19.1 and record/update the next deterministic Stage D head (or close the parent if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2236,6 +2245,7 @@ Required approach:
 - for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
 - for Result assertion parity, do not add one-off transpiler rewrites that bypass value comparison shape for specific call sites; maintain runtime `rusty::Result` equality surfaces (`operator==`/`operator!=`) so generated assertion scaffolding remains generic
 - for `Into` conversion lowering, do not emit Rust trait-style member calls directly on literals/primitives (for example `("a").into()` in C++); lower through valid helper/context conversion surfaces instead
+- for receiver-gated generic method args (`push(T)`/`insert(_, T)`/`set(T)`), do not block receiver-driven expected-type recovery just because the declared arg type placeholder is not in current scope; resolve concrete arg type from receiver context before conversion-lowering decisions
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
