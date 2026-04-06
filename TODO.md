@@ -1072,7 +1072,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                             - `cargo test -j1 -- --test-threads=1`
                             - `ctest --test-dir build-tests --output-on-failure`
                           - [x] *done* Re-probed `arrayvec` parity after 27.1 (`/tmp/rusty-parity-matrix-27-1b-1775495221/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`): prior deterministic omitted-template head (`ArrayString::new_()` without owner args, then `HashMap::new_()` without owner args) is removed from first slot; new deterministic Stage D lead starts at `runner.cpp:3514` (`rusty::HashMap<ArrayString<16>, int>` key-hash/moveability surface failures), followed by downstream runtime-surface/type-shape fallout.
-                          - [ ] Leaf 4.15.4.3.3.3.3.3.27.2: Re-run full seven-crate parity matrix after 27.1, record the next deterministic failure head with canonical artifact paths, and update active-frontier docs/TODO status (or mark parent complete if all seven pass).
+                          - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.2: Re-run full seven-crate parity matrix after 27.1
+                            - Matrix results: either ✅, tap ✅, cfg-if ✅, take_mut ✅, arrayvec ❌ (build fail)
+                            - Deterministic failure head: `runner.cpp:3514` — `std::hash<ArrayString<16>>::~hash()` deleted, `ArrayString` move ctor deleted (from `std::array<MaybeUninit<u8>, 16>` move), `HashMap::operator[]` type mismatch
+                            - Root cause: `rusty::MaybeUninit<T>` wrapping makes `std::array<MaybeUninit<u8>, CAP>` non-moveable/non-copyable, breaking `ArrayString` which needs to be a HashMap key
+                            - Artifacts: `/tmp/parity-matrix-272/arrayvec/{baseline.txt,build.log,runner.cpp}`
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
