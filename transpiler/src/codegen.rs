@@ -6733,7 +6733,7 @@ impl CodeGen {
                     let resolved_ty = if let Some(hint) = self.lookup_local_placeholder_type_hint(&name_str) {
                         self.substitute_owner_infer_with_hint(
                             &pat_type.ty,
-                            &["ArrayVec", "Cell", "Vec"],
+                            &["ArrayVec", "Cell", "Vec", "HashMap"],
                             hint,
                         )
                     } else {
@@ -7107,6 +7107,33 @@ impl CodeGen {
                         });
                     replaced = true;
                 }
+            } else if owner_name == "ArrayString" {
+                if let Some(cap_expr) = extract_arraystring_capacity_expr_for_hint(hint) {
+                    let mut args = syn::punctuated::Punctuated::new();
+                    args.push(syn::GenericArgument::Const(cap_expr));
+                    owner_seg.arguments =
+                        syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                            colon2_token: None,
+                            lt_token: syn::token::Lt::default(),
+                            args,
+                            gt_token: syn::token::Gt::default(),
+                        });
+                    replaced = true;
+                }
+            } else if owner_name == "HashMap" {
+                if let Some((key_ty, value_ty)) = extract_hashmap_key_value_types_for_hint(hint) {
+                    let mut args = syn::punctuated::Punctuated::new();
+                    args.push(syn::GenericArgument::Type(key_ty));
+                    args.push(syn::GenericArgument::Type(value_ty));
+                    owner_seg.arguments =
+                        syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                            colon2_token: None,
+                            lt_token: syn::token::Lt::default(),
+                            args,
+                            gt_token: syn::token::Gt::default(),
+                        });
+                    replaced = true;
+                }
             }
         }
         if !replaced {
@@ -7240,11 +7267,58 @@ impl CodeGen {
                                     }
                                 }
                             }
+                            if owner_name == "ArrayString"
+                                && matches!(
+                                    method_name.as_str(),
+                                    "new" | "new_" | "from" | "try_from" | "from_byte_string"
+                                )
+                            {
+                                if let syn::PathArguments::AngleBracketed(owner_args) =
+                                    &owner_seg.arguments
+                                {
+                                    let cap_expr = owner_args.args.iter().find_map(|arg| match arg {
+                                        syn::GenericArgument::Const(c)
+                                            if !matches!(c, syn::Expr::Infer(_)) =>
+                                        {
+                                            Some(c.clone())
+                                        }
+                                        _ => None,
+                                    });
+                                    if let Some(cap_expr) = cap_expr {
+                                        let inferred: syn::Type = parse_quote!(ArrayString<#cap_expr>);
+                                        return Some(inferred);
+                                    }
+                                }
+                            }
                             if owner_name == "Cell" && matches!(method_name.as_str(), "new" | "new_")
                             {
                                 if let Some(arg) = call.args.first() {
                                     if let Some(elem_ty) = self.infer_hint_type_from_expr(arg) {
                                         let inferred: syn::Type = parse_quote!(Cell<#elem_ty>);
+                                        return Some(inferred);
+                                    }
+                                }
+                            }
+                            if owner_name == "HashMap"
+                                && matches!(method_name.as_str(), "new" | "new_")
+                            {
+                                if let syn::PathArguments::AngleBracketed(owner_args) =
+                                    &owner_seg.arguments
+                                {
+                                    let mut type_args =
+                                        owner_args.args.iter().filter_map(|arg| match arg {
+                                            syn::GenericArgument::Type(t)
+                                                if !matches!(t, syn::Type::Infer(_)) =>
+                                            {
+                                                Some(t.clone())
+                                            }
+                                            _ => None,
+                                        });
+                                    if let (Some(key_ty), Some(value_ty)) =
+                                        (type_args.next(), type_args.next())
+                                    {
+                                        let inferred: syn::Type =
+                                            parse_quote!(HashMap<#key_ty, #value_ty>);
                                         return Some(inferred);
                                     }
                                 }
@@ -9441,6 +9515,12 @@ impl CodeGen {
             .iter()
             .map(|arg| self.emit_expr_maybe_move(arg))
             .collect();
+        if owner_cpp.starts_with("rusty::HashMap")
+            && matches!(method.as_str(), "new" | "new_")
+            && args.is_empty()
+        {
+            return Some(format!("{}()", owner_cpp));
+        }
         Some(format!("{}::{}({})", owner_cpp, method, args.join(", ")))
     }
 
@@ -10143,10 +10223,18 @@ impl CodeGen {
             }),
             _ => false,
         };
+        let owner_has_explicit_args =
+            matches!(owner_seg.arguments, syn::PathArguments::AngleBracketed(_));
         let owner_args_omitted = matches!(owner_seg.arguments, syn::PathArguments::None);
+        let owner_is_supported_explicit_recovery_target =
+            matches!(owner_name.as_str(), "ArrayVec" | "ArrayString" | "HashMap");
         let owner_is_supported_omitted_recovery_target =
-            matches!(owner_name.as_str(), "ArrayVec" | "Cell");
+            matches!(
+                owner_name.as_str(),
+                "ArrayVec" | "Cell" | "ArrayString" | "HashMap"
+            );
         if !owner_has_placeholder_arg
+            && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
             && !(owner_args_omitted && owner_is_supported_omitted_recovery_target)
         {
             return base_func;
@@ -10649,6 +10737,34 @@ impl CodeGen {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Vec<") {
                     return format!("{}::new_()", expected_cpp);
+                }
+            }
+        }
+
+        // `rusty::HashMap` exposes constructor/make surfaces instead of `new_`.
+        // Lower associated `HashMap::new()` calls to direct value construction
+        // after owner-template recovery so omitted generics become concrete.
+        if call.args.is_empty() {
+            let is_hashmap_assoc_new = if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                if path_expr.path.segments.len() >= 2 {
+                    let owner = path_expr.path.segments.iter().nth_back(1);
+                    let method = path_expr.path.segments.last();
+                    matches!(owner.map(|seg| seg.ident.to_string()).as_deref(), Some("HashMap"))
+                        && matches!(
+                            method.map(|seg| seg.ident.to_string()).as_deref(),
+                            Some("new") | Some("new_")
+                        )
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if is_hashmap_assoc_new {
+                if let Some((owner_cpp, _)) = func.rsplit_once("::") {
+                    if owner_cpp.starts_with("rusty::HashMap") {
+                        return format!("{}()", owner_cpp);
+                    }
                 }
             }
         }
@@ -15681,6 +15797,7 @@ fn collect_repeat_element_type_hints(stmts: &[syn::Stmt]) -> HashMap<String, syn
 
 fn collect_local_generic_placeholder_hints(stmts: &[syn::Stmt]) -> HashMap<String, syn::Type> {
     let mut candidates = std::collections::HashSet::new();
+    let mut candidate_owner_targets: HashMap<String, String> = HashMap::new();
     for stmt in stmts {
         let syn::Stmt::Local(local) = stmt else {
             continue;
@@ -15690,12 +15807,16 @@ fn collect_local_generic_placeholder_hints(stmts: &[syn::Stmt]) -> HashMap<Strin
         };
         let has_placeholder_type = get_local_type(local)
             .is_some_and(type_has_generic_placeholder);
-        let has_placeholder_owner_call = local
+        let owner_target = local
             .init
             .as_ref()
-            .is_some_and(|init| call_owner_has_placeholder_generic(&init.expr));
+            .and_then(|init| call_owner_placeholder_target(&init.expr));
+        let has_placeholder_owner_call = owner_target.is_some();
         if has_placeholder_type || has_placeholder_owner_call {
-            candidates.insert(name);
+            candidates.insert(name.clone());
+            if let Some(owner) = owner_target {
+                candidate_owner_targets.insert(name, owner);
+            }
         }
     }
 
@@ -15709,6 +15830,7 @@ fn collect_local_generic_placeholder_hints(stmts: &[syn::Stmt]) -> HashMap<Strin
         collect_local_generic_placeholder_hints_in_stmt(
             stmt,
             &candidates,
+            &candidate_owner_targets,
             &known_local_types,
             &mut hints,
         );
@@ -15747,38 +15869,45 @@ fn type_has_generic_placeholder(ty: &syn::Type) -> bool {
     }
 }
 
-fn call_owner_has_placeholder_generic(expr: &syn::Expr) -> bool {
+fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
     let syn::Expr::Call(call) = peel_paren_group_expr(expr) else {
-        return false;
+        return None;
     };
     let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-        return false;
+        return None;
     };
     if path_expr.path.segments.len() < 2 {
-        return false;
+        return None;
     }
     let owner_seg = match path_expr.path.segments.iter().nth_back(1) {
         Some(seg) => seg,
-        None => return false,
+        None => return None,
     };
+    let owner = owner_seg.ident.to_string();
     match &owner_seg.arguments {
         syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| match arg {
             syn::GenericArgument::Type(inner) => matches!(inner, syn::Type::Infer(_)),
+            syn::GenericArgument::Const(inner) => matches!(inner, syn::Expr::Infer(_)),
             _ => false,
-        }),
+        }).then_some(owner),
         syn::PathArguments::None => {
             let method = match path_expr.path.segments.last() {
                 Some(seg) => seg.ident.to_string(),
-                None => return false,
+                None => return None,
             };
-            match owner_seg.ident.to_string().as_str() {
+            match owner.as_str() {
                 "ArrayVec" => matches!(method.as_str(), "new" | "new_" | "from" | "try_from" | "from_iter"),
                 "Cell" => matches!(method.as_str(), "new" | "new_"),
                 "Vec" => matches!(method.as_str(), "new" | "new_"),
+                "HashMap" => matches!(method.as_str(), "new" | "new_"),
+                "ArrayString" => matches!(
+                    method.as_str(),
+                    "new" | "new_" | "from" | "try_from" | "from_byte_string"
+                ),
                 _ => false,
-            }
+            }.then_some(owner)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -15929,7 +16058,9 @@ fn infer_known_local_type_from_expr(expr: &syn::Expr) -> Option<syn::Type> {
     let expr = peel_paren_group_expr(expr);
     match expr {
         syn::Expr::Reference(reference) => infer_known_local_type_from_expr(&reference.expr),
-        syn::Expr::Call(call) => infer_known_arrayvec_type_from_call(call),
+        syn::Expr::Call(call) => infer_known_arrayvec_type_from_call(call)
+            .or_else(|| infer_known_arraystring_type_from_call(call))
+            .or_else(|| infer_known_hashmap_type_from_call(call)),
         _ => None,
     }
 }
@@ -15966,6 +16097,50 @@ fn infer_known_arrayvec_type_from_call(call: &syn::ExprCall) -> Option<syn::Type
     Some(parse_quote!(ArrayVec<#elem_ty, #cap_expr>))
 }
 
+fn infer_known_arraystring_type_from_call(call: &syn::ExprCall) -> Option<syn::Type> {
+    let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+        return None;
+    };
+    if path_expr.path.segments.len() < 2 {
+        return None;
+    }
+    let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+    if owner_seg.ident != "ArrayString" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &owner_seg.arguments else {
+        return None;
+    };
+    let cap_expr = args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Const(c) if !matches!(c, syn::Expr::Infer(_)) => Some(c.clone()),
+        _ => None,
+    })?;
+    Some(parse_quote!(ArrayString<#cap_expr>))
+}
+
+fn infer_known_hashmap_type_from_call(call: &syn::ExprCall) -> Option<syn::Type> {
+    let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+        return None;
+    };
+    if path_expr.path.segments.len() < 2 {
+        return None;
+    }
+    let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+    if owner_seg.ident != "HashMap" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &owner_seg.arguments else {
+        return None;
+    };
+    let mut type_args = args.args.iter().filter_map(|arg| match arg {
+        syn::GenericArgument::Type(t) if !matches!(t, syn::Type::Infer(_)) => Some(t.clone()),
+        _ => None,
+    });
+    let key_ty = type_args.next()?;
+    let value_ty = type_args.next()?;
+    Some(parse_quote!(HashMap<#key_ty, #value_ty>))
+}
+
 fn peel_reference_paren_group_type_hint<'a>(mut ty: &'a syn::Type) -> &'a syn::Type {
     loop {
         match ty {
@@ -15995,9 +16170,52 @@ fn extract_arrayvec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
     })
 }
 
+fn extract_arraystring_capacity_expr_for_hint(ty: &syn::Type) -> Option<syn::Expr> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "ArrayString" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Const(expr) if !matches!(expr, syn::Expr::Infer(_)) => {
+            Some(expr.clone())
+        }
+        _ => None,
+    })
+}
+
+fn extract_hashmap_key_value_types_for_hint(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "HashMap" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+
+    let mut type_args = args.args.iter().filter_map(|arg| match arg {
+        syn::GenericArgument::Type(t) if !matches!(t, syn::Type::Infer(_)) => Some(t.clone()),
+        _ => None,
+    });
+    let key_ty = type_args.next()?;
+    let value_ty = type_args.next()?;
+    Some((key_ty, value_ty))
+}
+
 fn collect_local_generic_placeholder_hints_in_stmt(
     stmt: &syn::Stmt,
     candidates: &std::collections::HashSet<String>,
+    candidate_owner_targets: &HashMap<String, String>,
     known_local_types: &HashMap<String, syn::Type>,
     hints: &mut HashMap<String, syn::Type>,
 ) {
@@ -16007,6 +16225,7 @@ fn collect_local_generic_placeholder_hints_in_stmt(
                 collect_local_generic_placeholder_hints_in_expr(
                     &init.expr,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16016,6 +16235,7 @@ fn collect_local_generic_placeholder_hints_in_stmt(
             collect_local_generic_placeholder_hints_in_expr(
                 expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16027,6 +16247,7 @@ fn collect_local_generic_placeholder_hints_in_stmt(
 fn collect_local_generic_placeholder_hints_in_expr(
     expr: &syn::Expr,
     candidates: &std::collections::HashSet<String>,
+    candidate_owner_targets: &HashMap<String, String>,
     known_local_types: &HashMap<String, syn::Type>,
     hints: &mut HashMap<String, syn::Type>,
 ) {
@@ -16035,31 +16256,47 @@ fn collect_local_generic_placeholder_hints_in_expr(
             if let Some(name) = extract_simple_local_ident(&mc.receiver) {
                 if candidates.contains(&name) && !hints.contains_key(&name) {
                     let method = mc.method.to_string();
-                    if matches!(method.as_str(), "write" | "write_all" | "write_fmt") {
-                        let ty: syn::Type = parse_quote!(u8);
-                        hints.insert(name, ty);
-                    } else {
-                        let arg_idx = match method.as_str() {
-                            "push" | "try_push" | "set" => Some(0usize),
-                            "insert" | "try_insert" => Some(1usize),
-                            "clone_from" => Some(0usize),
-                            _ => None,
-                        };
-                        if let Some(arg_idx) = arg_idx {
-                            if let Some(arg) = mc.args.iter().nth(arg_idx) {
-                                let inferred =
-                                    infer_hint_type_for_local_placeholder(arg, known_local_types);
-                                if method == "clone_from" {
-                                    let inferred_elem = inferred
-                                        .as_ref()
-                                        .and_then(extract_arrayvec_element_type_for_hint);
-                                    let source_elem = extract_simple_local_ident(arg)
-                                        .and_then(|source_name| hints.get(&source_name).cloned());
-                                    if let Some(elem_ty) = inferred_elem.or(source_elem) {
-                                        hints.insert(name, elem_ty);
+                    let owner_target = candidate_owner_targets.get(&name).map(String::as_str);
+                    if owner_target == Some("HashMap")
+                        && method == "insert"
+                        && mc.args.len() >= 2
+                    {
+                        let key_ty =
+                            infer_hint_type_for_local_placeholder(&mc.args[0], known_local_types);
+                        let value_ty =
+                            infer_hint_type_for_local_placeholder(&mc.args[1], known_local_types);
+                        if let (Some(key_ty), Some(value_ty)) = (key_ty, value_ty) {
+                            let ty: syn::Type = parse_quote!(HashMap<#key_ty, #value_ty>);
+                            hints.insert(name.clone(), ty);
+                        }
+                    }
+                    if !hints.contains_key(&name) {
+                        if matches!(method.as_str(), "write" | "write_all" | "write_fmt") {
+                            let ty: syn::Type = parse_quote!(u8);
+                            hints.insert(name, ty);
+                        } else {
+                            let arg_idx = match method.as_str() {
+                                "push" | "try_push" | "set" => Some(0usize),
+                                "insert" | "try_insert" => Some(1usize),
+                                "clone_from" => Some(0usize),
+                                _ => None,
+                            };
+                            if let Some(arg_idx) = arg_idx {
+                                if let Some(arg) = mc.args.iter().nth(arg_idx) {
+                                    let inferred =
+                                        infer_hint_type_for_local_placeholder(arg, known_local_types);
+                                    if method == "clone_from" {
+                                        let inferred_elem = inferred
+                                            .as_ref()
+                                            .and_then(extract_arrayvec_element_type_for_hint);
+                                        let source_elem = extract_simple_local_ident(arg)
+                                            .and_then(|source_name| hints.get(&source_name).cloned());
+                                        if let Some(elem_ty) = inferred_elem.or(source_elem) {
+                                            hints.insert(name, elem_ty);
+                                        }
+                                    } else if let Some(inferred) = inferred {
+                                        hints.insert(name, inferred);
                                     }
-                                } else if let Some(inferred) = inferred {
-                                    hints.insert(name, inferred);
                                 }
                             }
                         }
@@ -16069,6 +16306,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &mc.receiver,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16076,6 +16314,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     arg,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16085,6 +16324,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &call.func,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16092,6 +16332,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     arg,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16101,12 +16342,14 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &assign.left,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
             collect_local_generic_placeholder_hints_in_expr(
                 &assign.right,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16116,6 +16359,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16125,6 +16369,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &if_expr.cond,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16132,6 +16377,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16140,6 +16386,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     else_expr,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16149,6 +16396,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &w.cond,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16156,6 +16404,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16166,6 +16415,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16175,6 +16425,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &f.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16182,6 +16433,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16191,6 +16443,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &match_expr.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             );
@@ -16199,6 +16452,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                     collect_local_generic_placeholder_hints_in_expr(
                         guard,
                         candidates,
+                        candidate_owner_targets,
                         known_local_types,
                         hints,
                     );
@@ -16206,6 +16460,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     &arm.body,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16215,6 +16470,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &unary.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16223,6 +16479,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &reference.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16231,6 +16488,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &paren.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16239,6 +16497,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &group.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16248,6 +16507,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     elem,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16258,6 +16518,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     elem,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16268,6 +16529,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     &field.expr,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16276,6 +16538,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     rest,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16286,6 +16549,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_stmt(
                     stmt,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16295,6 +16559,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &closure.body,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16303,6 +16568,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &await_expr.base,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16311,6 +16577,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &try_expr.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -16320,6 +16587,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     value,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16330,6 +16598,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
                 collect_local_generic_placeholder_hints_in_expr(
                     value,
                     candidates,
+                    candidate_owner_targets,
                     known_local_types,
                     hints,
                 );
@@ -16339,6 +16608,7 @@ fn collect_local_generic_placeholder_hints_in_expr(
             collect_local_generic_placeholder_hints_in_expr(
                 &let_expr.expr,
                 candidates,
+                candidate_owner_targets,
                 known_local_types,
                 hints,
             )
@@ -23039,6 +23309,45 @@ mod tests {
         assert!(out.contains("target.clone_from(source);"));
         assert!(!out.contains("target.clone_from(&source)"));
         assert!(!out.contains("ArrayVec<auto, 4>::new_()"));
+    }
+
+    #[test]
+    fn test_leaf415433333333271_arraystring_explicit_owner_const_generic_is_preserved() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn new() -> Self { ArrayString }
+            }
+            fn f() {
+                let s = ArrayString::<16>::new();
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayString<16>::new_()"));
+        assert!(!out.contains("ArrayString::new_()"));
+    }
+
+    #[test]
+    fn test_leaf415433333333271_hashmap_new_omitted_owner_recovers_from_insert_usage() {
+        let out = transpile_str(
+            r#"
+            use std::collections::HashMap;
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn new() -> Self { ArrayString }
+            }
+            fn f() {
+                let s = ArrayString::<16>::new();
+                let mut map = HashMap::new();
+                map.insert(s, 1);
+            }
+        "#,
+        );
+        assert!(out.contains("ArrayString<16>::new_()"));
+        assert!(out.contains("HashMap<ArrayString<16>, int32_t>()"));
+        assert!(!out.contains("HashMap::new_()"));
+        assert!(!out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"));
     }
 
     #[test]

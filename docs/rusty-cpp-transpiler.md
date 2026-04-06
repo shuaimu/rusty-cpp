@@ -2287,9 +2287,20 @@ Active work items:
    - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-26-2-1775487958 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-26-2-1775487958/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - deterministic first hard error now starts at `runner.cpp:3480`: omitted-template owner constructor surface `ArrayString::new_()` (`ArrayString` used without template arguments), followed by downstream omitted-template/runtime-surface diagnostics (`HashMap::new_()` missing template args, repeated `ArrayString` omitted args, unresolved `RUSTY_TRY`/`Ok`, and `parse`-surface fallout on C-string receivers).
-35. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.1`.
-   - focus: collapse the omitted-template owner constructor family led by `ArrayString::new_()` / `HashMap::new_()` using generic expected-type/usage-context recovery only.
-   - guardrail (wrong-approach checklist §11): continue root-cause-first collapse with shape-gated template recovery; avoid blanket associated-call rewrites across unrelated owners.
+35. `Leaf 4.15.4.3.3.3.3.3.27.1` is complete.
+   - implemented shape-gated omitted-owner recovery for `ArrayString`/`HashMap` associated constructor surfaces in `transpiler/src/codegen.rs`:
+     - expanded owner template recovery for explicit and omitted owner args using expected-type + local usage hints,
+     - extended placeholder/local-binding inference to recover `ArrayString` const capacity and `HashMap<K, V>` key/value args from nearby usage (for example `insert`),
+     - lowered recovered `rusty::HashMap<...>::new_()` calls to constructor form (`rusty::HashMap<...>()`) so emitted code matches runtime `HashMap` API.
+   - added focused regressions (`leaf415433333333271`) for:
+     - `ArrayString::<CAP>::new()` explicit-owner const-generic preservation,
+     - omitted-owner `HashMap::new()` recovery + constructor-form lowering from insert usage context.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-1b-1775495221 --keep-work-dirs`) removed the prior deterministic omitted-template head family (`ArrayString::new_()` / `HashMap::new_()` missing owner args); canonical artifacts: `/tmp/rusty-parity-matrix-27-1b-1775495221/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - new deterministic first hard error now starts at `runner.cpp:3514`: `rusty::HashMap<ArrayString<16>, int>` key-hash/moveability surface failures (`std::hash` and move-ctor constraints for key type), followed by downstream runtime-surface/type-shape fallout.
+   - guardrail check against wrong-approach checklist (§11): kept fixes root-cause-first and shape-gated; no blanket associated-call rewrites were introduced.
+36. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.2`.
+   - focus: rerun full seven-crate parity matrix after 27.1, record canonical first-failure artifacts, and capture the next deterministic head family (or mark parent complete if all seven pass).
+   - guardrail (wrong-approach checklist §11): keep stage-head collapse disciplined; avoid broad runtime/transpiler rewrites before confirming deterministic first-head ordering in matrix artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
