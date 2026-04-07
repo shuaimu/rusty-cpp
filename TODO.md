@@ -2123,7 +2123,23 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                               - [x] *done* Verification:
                                 - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-2-semver-20260407-1 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head capture from canonical artifacts and made no crate-specific rewrites/scripts.
-                            - [ ] Leaf 4.15.4.4.3: Collapse current `bitflags` Stage D callable-surface head generically (starting with repeated `std::move_only_function` signature failures in generated runner output), add fixture-agnostic regressions, then re-run `bitflags` parity.
+                            - [x] *done* Leaf 4.15.4.4.3: Collapse current `bitflags` Stage D callable-surface head generically (starting with repeated `std::move_only_function` signature failures in generated runner output), add fixture-agnostic regressions, then re-run `bitflags` parity.
+                              - [x] *done* Plan/scope check: targeted shared transpiler changes (no crate-local scripts) stayed well below the <1000 LOC guardrail and required no further decomposition.
+                              - [x] *done* Root-cause analysis from canonical repro (`/tmp/rusty-parity-4-15-4-4-3-bitflags-20260407-1/bitflags/*`): callable signatures in nested `tests::iter::*` forward declarations resolved `iter::...` against sibling namespaces instead of crate-root `iter`.
+                              - [x] *done* Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+                                - forward-declaration recursion now threads `module_stack` through nested `mod` traversal (`emit_item_forward_decls`), keeping path/type mapping context-correct in predecl emissions.
+                                - added callable-surface type-path disambiguation for `Fn`/`FnMut`/`FnOnce` lowering (`try_map_fn_trait`, `try_map_fn_trait_boxed`) with explicit crate-root head handling and innermost-namespace collision guarding.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_leaf415443_callable_fn_signatures_global_qualify_shadowed_module_paths`
+                                - `codegen::tests::test_leaf415443_callable_boxed_fn_signatures_global_qualify_shadowed_module_paths`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate bitflags --work-root /tmp/rusty-parity-4-15-4-4-3-bitflags-20260407-4 --keep-work-dirs`
+                              - [x] *done* Single-crate parity confirms the callable-surface head family is collapsed: Stage D no longer fails on `tests::iter::iter::{Iter, IterNames}` signatures; deterministic first head moved to parser writer-surface typing (`void*` receiver) at `runner.cpp:717/720/725`.
+                              - [x] *done* Canonical artifacts:
+                                - pre-fix head: `/tmp/rusty-parity-4-15-4-4-3-bitflags-20260407-1/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+                                - post-fix rerun: `/tmp/rusty-parity-4-15-4-4-3-bitflags-20260407-4/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are shared and shape/context-gated at AST emission/mapping sites, with no crate-specific rewrites/scripts.
                             - [ ] Leaf 4.15.4.4.4: Re-run `bitflags` parity (`tests/transpile_tests/run_parity_matrix.sh --crate bitflags`) and record the next deterministic head with canonical artifacts.
                             - [ ] Leaf 4.15.4.4.5: Re-run full seven-crate parity matrix after 4.15.4.4.1-4.15.4.4.4; resume `arrayvec` leaf progression only after `semver` and `bitflags` no longer fail first in their single-crate Stage D runs.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.

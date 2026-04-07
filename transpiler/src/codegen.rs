@@ -788,7 +788,9 @@ impl CodeGen {
             let mod_cpp_name = escape_cpp_keyword(&mod_name);
             self.writeln(&format!("namespace {} {{", mod_cpp_name));
             self.indent += 1;
+            self.module_stack.push(mod_name);
             self.emit_item_forward_decls(nested_items, module_depth + 1);
+            self.module_stack.pop();
             self.indent -= 1;
             self.writeln("}");
             emitted_any = true;
@@ -16148,6 +16150,86 @@ impl CodeGen {
         )
     }
 
+    /// In nested C++ namespaces like `tests::iter::iter`, a callable signature
+    /// type `iter::Iter<T>` resolves to the current namespace (`tests::iter::iter::Iter`)
+    /// instead of the intended crate-level `::iter::Iter<T>`.
+    ///
+    /// Keep callable lowering generic by only global-qualifying path-like mapped
+    /// types when their first segment collides with the current innermost module.
+    fn disambiguate_callable_surface_type_path(&self, mapped: String, force_global: bool) -> String {
+        if !mapped.contains("::") {
+            return mapped;
+        }
+
+        let mut rest = mapped.trim_start();
+        let mut prefixes: Vec<&str> = Vec::new();
+        loop {
+            if let Some(stripped) = rest.strip_prefix("const ") {
+                prefixes.push("const ");
+                rest = stripped;
+                continue;
+            }
+            if let Some(stripped) = rest.strip_prefix("typename ") {
+                prefixes.push("typename ");
+                rest = stripped;
+                continue;
+            }
+            break;
+        }
+
+        if rest.starts_with("::") {
+            return mapped;
+        }
+
+        if force_global {
+            let mut prefix = String::new();
+            for p in prefixes {
+                prefix.push_str(p);
+            }
+            return format!("{}::{}", prefix, rest);
+        }
+
+        let Some(current_ns) = self.module_stack.last() else {
+            return mapped;
+        };
+
+        let first_segment = rest.split("::").next().unwrap_or_default();
+        let first_ident: String = first_segment
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if first_ident != *current_ns {
+            return mapped;
+        }
+
+        let mut prefix = String::new();
+        for p in prefixes {
+            prefix.push_str(p);
+        }
+        format!("{}::{}", prefix, rest)
+    }
+
+    fn type_head_is_explicit_crate_path(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                tp.qself.is_none()
+                    && tp.path.segments.len() > 1
+                    && tp.path.segments.first().is_some_and(|seg| seg.ident == "crate")
+            }
+            syn::Type::Reference(r) => self.type_head_is_explicit_crate_path(&r.elem),
+            syn::Type::Ptr(p) => self.type_head_is_explicit_crate_path(&p.elem),
+            syn::Type::Paren(p) => self.type_head_is_explicit_crate_path(&p.elem),
+            syn::Type::Group(g) => self.type_head_is_explicit_crate_path(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn map_callable_surface_type(&self, ty: &syn::Type) -> String {
+        let mapped = self.map_type(ty);
+        let force_global = self.type_head_is_explicit_crate_path(ty);
+        self.disambiguate_callable_surface_type_path(mapped, force_global)
+    }
+
     /// Try to map a Fn/FnMut/FnOnce trait bound to a C++ function type.
     /// Returns Some(cpp_type) if it's a Fn trait, None otherwise.
     fn try_map_fn_trait(&self, tb: &syn::TraitBound) -> Option<String> {
@@ -16163,11 +16245,15 @@ impl CodeGen {
 
         // Extract the parenthesized args: Fn(i32, i32) -> i32
         if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
-            let param_types: Vec<String> = args.inputs.iter().map(|t| self.map_type(t)).collect();
+            let param_types: Vec<String> = args
+                .inputs
+                .iter()
+                .map(|t| self.map_callable_surface_type(t))
+                .collect();
 
             let return_type = match &args.output {
                 syn::ReturnType::Default => "void".to_string(),
-                syn::ReturnType::Type(_, ty) => self.map_type(ty),
+                syn::ReturnType::Type(_, ty) => self.map_callable_surface_type(ty),
             };
 
             Some(format!(
@@ -16193,10 +16279,14 @@ impl CodeGen {
         }
 
         if let syn::PathArguments::Parenthesized(args) = &last_seg.arguments {
-            let param_types: Vec<String> = args.inputs.iter().map(|t| self.map_type(t)).collect();
+            let param_types: Vec<String> = args
+                .inputs
+                .iter()
+                .map(|t| self.map_callable_surface_type(t))
+                .collect();
             let return_type = match &args.output {
                 syn::ReturnType::Default => "void".to_string(),
-                syn::ReturnType::Type(_, ty) => self.map_type(ty),
+                syn::ReturnType::Type(_, ty) => self.map_callable_surface_type(ty),
             };
             Some(format!(
                 "rusty::Function<{}({})>",
@@ -22325,6 +22415,44 @@ mod tests {
         assert!(out.contains("std::function<rusty::String(int32_t, double, bool)>"));
     }
 
+    #[test]
+    fn test_leaf415443_callable_fn_signatures_global_qualify_shadowed_module_paths() {
+        let out = transpile_str(
+            r#"
+            mod iter {
+                pub struct Iter<T>(T);
+            }
+            mod tests {
+                pub mod iter {
+                    pub mod iter {
+                        pub fn case_<T>(f: impl Fn(&T) -> iter::Iter<T>) {}
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::function<::iter::Iter<T>(const T&)> f"));
+    }
+
+    #[test]
+    fn test_leaf415443_callable_boxed_fn_signatures_global_qualify_shadowed_module_paths() {
+        let out = transpile_str(
+            r#"
+            mod iter {
+                pub struct Iter<T>(T);
+            }
+            mod tests {
+                pub mod iter {
+                    pub mod iter {
+                        pub fn case_<T>(f: Box<dyn FnOnce(&T) -> iter::Iter<T>>) {}
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::Function<::iter::Iter<T>(const T&)> f"));
+    }
+
     // ── Phase 7: C++20 module tests ─────────────────────────────
 
     #[test]
@@ -22907,8 +23035,14 @@ mod tests {
         "#,
         );
         assert!(out.contains("return Left<int32_t, int32_t>(1);"));
-        assert!(out.contains("const Either_Left<int32_t, int32_t>& _v"));
-        assert!(out.contains("const Either_Right<int32_t, int32_t>& _v"));
+        assert!(
+            out.contains("const Either_Left<int32_t, int32_t>& _v")
+                || out.contains("const ::Either_Left<int32_t, int32_t>& _v")
+        );
+        assert!(
+            out.contains("const Either_Right<int32_t, int32_t>& _v")
+                || out.contains("const ::Either_Right<int32_t, int32_t>& _v")
+        );
     }
 
     #[test]
