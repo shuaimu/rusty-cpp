@@ -6612,6 +6612,15 @@ impl CodeGen {
         }
     }
 
+    fn if_let_requires_single_eval_scrutinee(&self, scrutinee_expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(scrutinee_expr) {
+            syn::Expr::Path(_) => false,
+            syn::Expr::Field(field) => self.if_let_requires_single_eval_scrutinee(&field.base),
+            syn::Expr::Reference(r) => self.if_let_requires_single_eval_scrutinee(&r.expr),
+            _ => true,
+        }
+    }
+
     /// Emit `if let Pattern = expr { ... } else { ... }` as C++ code.
     fn emit_if_let(
         &mut self,
@@ -6639,44 +6648,104 @@ impl CodeGen {
                     "Some" | "Option::Some" => {
                         // if let Some(v) = opt → if (opt.<is_some/has_value>()) { auto v = opt.<unwrap/value>(); ... }
                         let binding = self.extract_tuple_struct_bindings(&ts.elems);
+                        let scrutinee_var = "_iflet_scrutinee";
+                        let use_scrutinee_storage =
+                            self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+                        let cond_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let body_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let if_init_expr = if use_scrutinee_storage {
+                            Some(scrutinee.as_str())
+                        } else {
+                            None
+                        };
                         let cond =
-                            self.format_option_like_pattern_condition(scrutinee_expr, &scrutinee, true);
+                            self.format_option_like_pattern_condition(scrutinee_expr, cond_scrutinee, true);
                         self.emit_if_let_body(
                             &cond,
                             &binding,
-                            &scrutinee,
+                            body_scrutinee,
                             option_unwrap_method,
                             then_branch,
                             else_branch,
                             first,
+                            if_init_expr,
+                            scrutinee.ends_with(".as_mut()"),
                         );
                     }
                     "Ok" | "Result::Ok" => {
                         // if let Ok(v) = result → if (result.is_ok()) { auto v = result.unwrap(); ... }
                         let binding = self.extract_tuple_struct_bindings(&ts.elems);
-                        let cond = format!("{}.is_ok()", scrutinee);
+                        let scrutinee_var = "_iflet_scrutinee";
+                        let use_scrutinee_storage =
+                            self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+                        let cond_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let body_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let if_init_expr = if use_scrutinee_storage {
+                            Some(scrutinee.as_str())
+                        } else {
+                            None
+                        };
+                        let cond = format!("{}.is_ok()", cond_scrutinee);
                         self.emit_if_let_body(
                             &cond,
                             &binding,
-                            &scrutinee,
+                            body_scrutinee,
                             "unwrap",
                             then_branch,
                             else_branch,
                             first,
+                            if_init_expr,
+                            scrutinee.ends_with(".as_mut()"),
                         );
                     }
                     "Err" | "Result::Err" => {
                         // if let Err(e) = result → if (result.is_err()) { auto e = result.unwrap_err(); ... }
                         let binding = self.extract_tuple_struct_bindings(&ts.elems);
-                        let cond = format!("{}.is_err()", scrutinee);
+                        let scrutinee_var = "_iflet_scrutinee";
+                        let use_scrutinee_storage =
+                            self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+                        let cond_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let body_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let if_init_expr = if use_scrutinee_storage {
+                            Some(scrutinee.as_str())
+                        } else {
+                            None
+                        };
+                        let cond = format!("{}.is_err()", cond_scrutinee);
                         self.emit_if_let_body(
                             &cond,
                             &binding,
-                            &scrutinee,
+                            body_scrutinee,
                             "unwrap_err",
                             then_branch,
                             else_branch,
                             first,
+                            if_init_expr,
+                            scrutinee.ends_with(".as_mut()"),
                         );
                     }
                     _ => {
@@ -6684,12 +6753,40 @@ impl CodeGen {
                         // → if (std::holds_alternative<Variant>(val)) { ... }
                         let cpp_type = path_str.replace("::", "_");
                         let binding = self.extract_tuple_struct_bindings(&ts.elems);
-                        let cond = format!("std::holds_alternative<{}>({})", cpp_type, scrutinee);
+                        let scrutinee_var = "_iflet_scrutinee";
+                        let use_scrutinee_storage =
+                            self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+                        let cond_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let body_scrutinee = if use_scrutinee_storage {
+                            scrutinee_var
+                        } else {
+                            &scrutinee
+                        };
+                        let cond =
+                            format!("std::holds_alternative<{}>({})", cpp_type, cond_scrutinee);
 
                         if first {
-                            self.writeln(&format!("if ({}) {{", cond));
+                            if use_scrutinee_storage {
+                                self.writeln(&format!(
+                                    "if (auto&& {} = {}; {}) {{",
+                                    scrutinee_var, scrutinee, cond
+                                ));
+                            } else {
+                                self.writeln(&format!("if ({}) {{", cond));
+                            }
                         } else {
-                            self.output.push_str(&format!("if ({}) {{\n", cond));
+                            if use_scrutinee_storage {
+                                self.output.push_str(&format!(
+                                    "if (auto&& {} = {}; {}) {{\n",
+                                    scrutinee_var, scrutinee, cond
+                                ));
+                            } else {
+                                self.output.push_str(&format!("if ({}) {{\n", cond));
+                            }
                         }
                         self.indent += 1;
                         // Emit bindings
@@ -6697,7 +6794,7 @@ impl CodeGen {
                             if name != "_" {
                                 self.writeln(&format!(
                                     "const auto& {} = std::get<{}>({})._{};",
-                                    name, cpp_type, scrutinee, i
+                                    name, cpp_type, body_scrutinee, i
                                 ));
                             }
                         }
@@ -6798,11 +6895,18 @@ impl CodeGen {
         then_branch: &syn::Block,
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
+        if_init_expr: Option<&str>,
+        scrutinee_is_as_mut: bool,
     ) {
-        if first {
-            self.writeln(&format!("if ({}) {{", cond));
+        let if_header = if let Some(init_expr) = if_init_expr {
+            format!("if (auto&& {} = {}; {}) {{", scrutinee, init_expr, cond)
         } else {
-            self.output.push_str(&format!("if ({}) {{\n", cond));
+            format!("if ({}) {{", cond)
+        };
+        if first {
+            self.writeln(&if_header);
+        } else {
+            self.output.push_str(&format!("{}\n", if_header));
         }
         self.indent += 1;
 
@@ -6820,7 +6924,7 @@ impl CodeGen {
                 // Those are represented as pointer-like unwrap values in C++ runtime types;
                 // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
                 // call arguments (avoid producing pointer-to-pointer by accident).
-                if scrutinee.ends_with(".as_mut()") {
+                if scrutinee_is_as_mut {
                     self.writeln(&format!("auto& {} = *{};", bindings[0], unwrap_expr));
                 } else {
                     self.writeln(&format!("auto {} = {};", bindings[0], unwrap_expr));
@@ -19499,8 +19603,9 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("auto& val = *self_.as_mut().unwrap_err();"));
-        assert!(!out.contains("auto val = self_.as_mut().unwrap_err();"));
+        assert!(out.contains("if (auto&& _iflet_scrutinee = self_.as_mut(); _iflet_scrutinee.is_err()) {"));
+        assert!(out.contains("auto& val = *_iflet_scrutinee.unwrap_err();"));
+        assert!(!out.contains("auto val = _iflet_scrutinee.unwrap_err();"));
     }
 
     #[test]
@@ -26966,11 +27071,36 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("if (rusty::detail::option_has_value(iter.next())) {"));
-        assert!(out.contains("auto&& _iflet_take = iter.next();"));
+        assert!(out.contains(
+            "if (auto&& _iflet_scrutinee = iter.next(); rusty::detail::option_has_value(_iflet_scrutinee)) {"
+        ));
+        assert!(out.contains("auto&& _iflet_take = _iflet_scrutinee;"));
         assert!(out.contains("auto v = rusty::detail::option_take_value(_iflet_take);"));
+        assert!(!out.contains("rusty::detail::option_has_value(iter.next())"));
+        assert!(!out.contains("auto&& _iflet_take = iter.next();"));
         assert!(!out.contains("iter.next().is_some()"));
         assert!(!out.contains("iter.next().unwrap()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327381_else_if_let_iter_next_uses_single_eval_storage() {
+        let out = transpile_str(
+            r#"
+            fn f<I>(iterable: I) {
+                let iter = iterable.into_iter();
+                if true {
+                    let _ = 0;
+                } else if let Some(v) = iter.next() {
+                    let _ = v;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "} else if (auto&& _iflet_scrutinee = iter.next(); rusty::detail::option_has_value(_iflet_scrutinee)) {"
+        ));
+        assert!(out.contains("auto&& _iflet_take = _iflet_scrutinee;"));
+        assert!(!out.contains("auto&& _iflet_take = iter.next();"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────

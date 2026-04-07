@@ -3084,8 +3084,35 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-37-2-20260407-020850 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-106. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.38.1`.
-   - focus: collapse the `ArrayVec::clone_from` runtime unwrap-none family generically (starting with `array_clone_from` failure at `runner.cpp:3433`, clone path `runner.cpp:1157-1164`) via shared transpiler/runtime fixes and fixture-agnostic regressions.
+106. `Leaf 4.15.4.3.3.3.3.3.27.38.1` is complete.
+   - plan/scope check: transpiler-only statement `if let` single-evaluation lowering plus focused fixture-agnostic regressions stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - `emit_if_let` now single-evaluates side-effectful scrutinees via C++17 if-init storage (`if (auto&& _iflet_scrutinee = ...; cond)`), eliminating duplicate scrutinee evaluation in statement `if let` lowering.
+     - `emit_if_let_body` now supports optional if-init emission while preserving explicit `as_mut` binding shape (`auto& val = *...`) in Option/Result reference surfaces.
+     - path/field scrutinee lowering remains unchanged unless side-effectful shape detection requires storage, preserving no-blanket-rewrite discipline.
+   - added fixture-agnostic regressions:
+     - updated `codegen::tests::test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals`
+     - added `codegen::tests::test_leaf41543333333327381_else_if_let_iter_next_uses_single_eval_storage`
+     - updated `codegen::tests::test_leaf411_result_as_mut_if_let_binds_referenced_inner_value`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327381_else_if_let_iter_next_uses_single_eval_storage -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-38-1-20260407-023010 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.37.2 runtime head family is collapsed: `array_clone_from` now passes.
+   - new deterministic first failure shifts to Stage E hard runtime abort after `char_test_encode_utf8 PASSED`; next scheduled test is `char_test_encode_utf8_oob` (`runner.cpp:4616`), with panic/abort surface in test body around `runner.cpp:661-665` (`matches!` assertion checks over `encode_utf8(...)`).
+   - canonical artifacts: `/tmp/rusty-parity-27-38-1-20260407-023010/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared AST-aware lowering surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+107. `Leaf 4.15.4.3.3.3.3.3.27.38.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-38-2b-20260407-025507 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-38-2b-20260407-025507/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure remains Stage E runtime: output still stops immediately after `char_test_encode_utf8 PASSED`; next scheduled runner test is `char_test_encode_utf8_oob` (`runner.cpp:4616`), which calls `char_::test_encode_utf8_oob` (`runner.cpp:636`) where active assertion/panic surfaces are at `runner.cpp:661-665` (`matches!` checks over `encode_utf8(...)`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-38-2b-20260407-025507 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+108. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.39.1`.
+   - focus: implement a shared fix for the post-27.38.2 Stage E `char_test_encode_utf8_oob` runtime hang/assertion family (no crate-specific scripts), add fixture-agnostic regressions, then re-run the seven-crate matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
