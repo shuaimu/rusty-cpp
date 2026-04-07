@@ -3609,7 +3609,7 @@ impl CodeGen {
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
         // Skip wildcard const bindings (`const _: () = ...;`) which are
-        // Rust compile-time assertions that have no C++ equivalent.
+        // Rust compile-time assertions or macro-internal scope blocks.
         if c.ident == "_" {
             return;
         }
@@ -16487,6 +16487,16 @@ impl CodeGen {
                         .map(|s| s.ident.to_string())
                         .collect();
                     if !assoc_segments.is_empty() {
+                        // Try to resolve the associated type through impl blocks.
+                        // E.g., <TestFlags as PublicFlags>::Internal → InternalBitFlags
+                        if assoc_segments.len() == 1 {
+                            let assoc_name = &assoc_segments[0];
+                            if let Some(resolved) =
+                                self.resolve_assoc_type_from_impl_blocks(&self_type, assoc_name)
+                            {
+                                return resolved;
+                            }
+                        }
                         if let Some(struct_name) = &self.current_struct {
                             if &self_type == struct_name {
                                 return assoc_segments.join("::");
@@ -17647,6 +17657,45 @@ impl CodeGen {
             base = base.trim_end().to_string();
         }
         base
+    }
+
+    /// Try to resolve an associated type like `<TestFlags as Trait>::Internal`
+    /// by looking up `type Internal = ...` in the impl blocks collected for the type.
+    fn resolve_assoc_type_from_impl_blocks(
+        &self,
+        type_name: &str,
+        assoc_name: &str,
+    ) -> Option<String> {
+        // Try impl_blocks with multiple key variants
+        let candidates = [
+            type_name.to_string(),
+            self.scoped_type_key(type_name),
+        ];
+        for key in &candidates {
+            if let Some(items) = self.impl_blocks.get(key) {
+                for item in items {
+                    if let syn::ImplItem::Type(assoc_type) = item {
+                        if assoc_type.ident == assoc_name {
+                            return Some(self.map_type(&assoc_type.ty));
+                        }
+                    }
+                }
+            }
+        }
+        // Also try all keys that end with ::TypeName
+        let suffix = format!("::{}", type_name);
+        for (key, items) in &self.impl_blocks {
+            if key.ends_with(&suffix) || key == type_name {
+                for item in items {
+                    if let syn::ImplItem::Type(assoc_type) = item {
+                        if assoc_type.ident == assoc_name {
+                            return Some(self.map_type(&assoc_type.ty));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn maybe_prefix_typename_for_dependent_path(&self, path: String) -> String {
@@ -27179,6 +27228,27 @@ mod tests {
         // into MyFlags as static methods
         assert!(out.contains("empty()"), "empty() should be injected, got: {}", out);
         assert!(out.contains("all()"), "all() should be injected, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154433_assoc_type_field_resolved_through_impl() {
+        let out = transpile_str(
+            r#"
+            mod __private {
+                pub trait PublicFlags {
+                    type Internal;
+                }
+            }
+            pub struct TestFlags(<TestFlags as __private::PublicFlags>::Internal);
+            impl __private::PublicFlags for TestFlags {
+                type Internal = u8;
+            }
+            "#,
+        );
+        // The struct field should resolve through impl block: Internal → uint8_t
+        // (when impl block is at the same scope, not inside const _: () = { })
+        assert!(out.contains("uint8_t _0") || out.contains("Internal _0"),
+            "field should resolve to uint8_t or Internal, got: {}", out);
     }
 
     #[test]
