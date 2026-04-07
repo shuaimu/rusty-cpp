@@ -152,6 +152,16 @@ inline T* add(T* ptr, Count count) {
 }
 
 template<typename T, typename Count>
+inline const T* sub(const T* ptr, Count count) {
+    return ptr - static_cast<std::size_t>(count);
+}
+
+template<typename T, typename Count>
+inline T* sub(T* ptr, Count count) {
+    return ptr - static_cast<std::size_t>(count);
+}
+
+template<typename T, typename Count>
 inline const T* offset(const T* ptr, Count count) {
     return ptr + static_cast<std::ptrdiff_t>(count);
 }

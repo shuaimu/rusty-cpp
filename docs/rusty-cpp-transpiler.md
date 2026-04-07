@@ -2615,8 +2615,28 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-18-2-1775522678 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-68. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.19.1`.
-   - focus: implement generic range-bound visitor/pointer-call lowering hardening for the deterministic `runner.cpp:967` head, then re-run the full matrix.
+68. `Leaf 4.15.4.3.3.3.3.3.27.19.1` is complete.
+   - plan/scope check: transpiler/runtime-only implementation remained under the <1000 LOC guardrail and required no additional TODO decomposition.
+   - implemented generic transpiler/runtime hardening:
+     - `transpiler/src/codegen.rs`: runtime `Bound` visit-arm parameter typing now recovers from `std::variant_alternative_t<idx, std::remove_reference_t<decltype(_m)>>` when pattern template args are implicit, removing hardcoded `Bound<size_t>` assumptions.
+     - `transpiler/src/codegen.rs`: statement-side `std::visit` lowering now binds scrutinee as `_m` in a local scope so the same variant-type recovery path is available for arm emission.
+     - `transpiler/src/codegen.rs`: raw-pointer local inference now covers `as_ptr`/`as_mut_ptr` method+call forms, pointer add/offset/sub call shapes (including `core::ptr::*`/`std::ptr::*`), and `unsafe { ... }` wrapped initializers.
+     - `transpiler/src/codegen.rs`: raw-pointer method lowering now includes `sub` alongside `add`/`offset` for pointer locals and chained raw-pointer expressions.
+     - `include/rusty/ptr.hpp`: added shared runtime helper overloads `rusty::ptr::sub(const T*, Count)` / `rusty::ptr::sub(T*, Count)`.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327191_bound_match_visit_uses_variant_alternative_type_recovery`
+     - `test_leaf41543333333327191_local_raw_pointer_add_sub_calls_lower_to_runtime_helpers`
+     - `test_leaf41543333333327191_std_ptr_add_local_receiver_sub_lowers_to_runtime_helper`
+     - `test_leaf41543333333327191_unsafe_local_pointer_add_sub_lowers_to_runtime_helpers`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-19-1d-1775524379 --keep-work-dirs`) removed the prior deterministic heads at `runner.cpp:967` (`Bound<size_t>` vs `Bound<int>` `std::visit` mismatch) and `runner.cpp:1304` (`ptr.add(...)` member-call on raw pointer).
+   - new deterministic first hard error now starts at `runner.cpp:918` (`return rusty::ptr::drop_in_place(cur)` void-value misuse in `retain` lambda), followed by adjacent `SafeFn` argument-shape mismatches at `runner.cpp:933/938`; canonical artifacts are at `/tmp/rusty-parity-matrix-27-19-1d-1775524379/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327191 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-19-1d-1775524379 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes remain shared and shape-gated in core lowering/runtime paths, with no crate-specific scripts or fixture-only rewrites.
+69. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.19.2`.
+   - focus: re-run the full seven-crate matrix after 27.19.1 and record the new deterministic first failing head from canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

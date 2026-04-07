@@ -4938,23 +4938,35 @@ impl CodeGen {
         arms: &[syn::Arm],
         variant_ctx: Option<&VariantTypeContext>,
     ) {
-        // Emit: std::visit(overloaded { [](Type& v) { ... }, ... }, scrutinee);
-        self.writeln(&format!("std::visit(overloaded {{"));
+        // Emit in a local scope so path-pattern visit parameter recovery can
+        // refer to `_m` via `decltype(_m)` when template args are implicit.
+        self.writeln("{");
+        self.indent += 1;
+        self.writeln(&format!("auto&& _m = {};", scrutinee));
+        self.writeln("std::visit(overloaded {");
         self.indent += 1;
 
         for arm in arms {
-            self.emit_visit_arm(arm, variant_ctx);
+            self.emit_visit_arm(arm, variant_ctx, Some("_m"));
         }
 
         self.indent -= 1;
-        self.writeln(&format!("}}, {});", scrutinee));
+        self.writeln("}, _m);");
+        self.indent -= 1;
+        self.writeln("}");
     }
 
-    fn emit_visit_arm(&mut self, arm: &syn::Arm, variant_ctx: Option<&VariantTypeContext>) {
+    fn emit_visit_arm(
+        &mut self,
+        arm: &syn::Arm,
+        variant_ctx: Option<&VariantTypeContext>,
+        visit_value_name: Option<&str>,
+    ) {
         match &arm.pat {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
-                let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
+                let cpp_type =
+                    self.visit_pattern_cpp_type(&ts.path, variant_ctx, visit_value_name);
                 let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v") else {
                     self.writeln("// TODO: complex tuple-struct pattern binding");
                     self.writeln("[&](const auto&) {},");
@@ -5000,7 +5012,8 @@ impl CodeGen {
             }
             syn::Pat::Struct(ps) => {
                 // Pattern like `Shape::Rect { w, h }` → [](const Shape_Rect& _v) { ... }
-                let cpp_type = self.variant_pattern_cpp_type(&ps.path, variant_ctx);
+                let cpp_type =
+                    self.visit_pattern_cpp_type(&ps.path, variant_ctx, visit_value_name);
 
                 self.write_indent();
                 let visit_param = if self.pattern_requires_mut_ref_binding(&arm.pat) {
@@ -5046,7 +5059,8 @@ impl CodeGen {
             }
             syn::Pat::Path(pp) => {
                 // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
-                let cpp_type = self.variant_pattern_cpp_type(&pp.path, variant_ctx);
+                let cpp_type =
+                    self.visit_pattern_cpp_type(&pp.path, variant_ctx, visit_value_name);
 
                 self.write_indent();
                 self.output
@@ -5585,7 +5599,7 @@ impl CodeGen {
             };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
-                    let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
+                    let cpp_type = self.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
                     let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v")
                     else {
                         parts.push(format!(
@@ -5628,7 +5642,7 @@ impl CodeGen {
                     }
                 }
                 syn::Pat::Path(pp) => {
-                    let cpp_type = self.variant_pattern_cpp_type(&pp.path, variant_ctx);
+                    let cpp_type = self.visit_pattern_cpp_type(&pp.path, variant_ctx, Some("_m"));
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
                         parts.push(format!(
@@ -6065,6 +6079,54 @@ impl CodeGen {
         }
     }
 
+    fn runtime_bound_variant_index_for_path(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Option<usize> {
+        if self.data_enum_types.contains("Bound") {
+            return None;
+        }
+        let variant_name = path.segments.last()?.ident.to_string();
+        let variant_index = match variant_name.as_str() {
+            "Unbounded" => 0usize,
+            "Included" => 1usize,
+            "Excluded" => 2usize,
+            _ => return None,
+        };
+        let has_bound_owner = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .is_some_and(|seg| seg.ident == "Bound");
+        let ctx_is_bound = variant_ctx.is_some_and(|ctx| ctx.enum_name == "Bound");
+        if has_bound_owner || ctx_is_bound {
+            Some(variant_index)
+        } else {
+            None
+        }
+    }
+
+    fn visit_pattern_cpp_type(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+        visit_value_name: Option<&str>,
+    ) -> String {
+        if let (Some(value_name), Some(index)) = (
+            visit_value_name,
+            self.runtime_bound_variant_index_for_path(path, variant_ctx),
+        ) {
+            // Recover concrete `Bound<T>` payload type directly from the visited
+            // variant value when enum template args are implicit at the pattern site.
+            return format!(
+                "std::variant_alternative_t<{}, std::remove_reference_t<decltype({})>>",
+                index, value_name
+            );
+        }
+        self.variant_pattern_cpp_type(path, variant_ctx)
+    }
+
     fn extract_variant_pattern_enum_name(
         &self,
         path: &syn::Path,
@@ -6190,6 +6252,9 @@ impl CodeGen {
                 let ty = self.lookup_field_type_for_expr_base(&field.base, &member)?;
                 self.infer_variant_type_context_from_type(&ty)
             }
+            syn::Expr::MethodCall(_) => self
+                .infer_simple_expr_type(expr)
+                .and_then(|ty| self.infer_variant_type_context_from_type(&ty)),
             syn::Expr::Paren(p) => self.infer_variant_type_context_from_expr(&p.expr),
             syn::Expr::Group(g) => self.infer_variant_type_context_from_expr(&g.expr),
             syn::Expr::Reference(r) => self.infer_variant_type_context_from_expr(&r.expr),
@@ -7260,6 +7325,9 @@ impl CodeGen {
                 syn::ReturnType::Default => None,
             },
             syn::Expr::Call(call) => {
+                if let Some(ptr_ty) = self.infer_pointer_type_from_call_expr(call) {
+                    return Some(ptr_ty);
+                }
                 if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                     let joined = path_expr
                         .path
@@ -7448,9 +7516,99 @@ impl CodeGen {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
             }
+            syn::Expr::Unsafe(unsafe_expr) => self
+                .extract_single_expr_from_block(&unsafe_expr.block)
+                .and_then(|inner| self.infer_local_binding_type_from_initializer(inner)),
+            syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
             _ => None,
         }
+    }
+
+    fn infer_method_call_result_type_for_local(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<syn::Type> {
+        let method = mc.method.to_string();
+
+        if matches!(method.as_str(), "as_ptr" | "as_mut_ptr") && mc.args.is_empty() {
+            let pointee_ty = self
+                .infer_array_element_type_from_expr(&mc.receiver)
+                .or_else(|| {
+                    self.infer_simple_expr_type(&mc.receiver).and_then(|ty| {
+                        let peeled = self.peel_reference_paren_group_type(&ty);
+                        match peeled {
+                            syn::Type::Ptr(ptr) => Some((*ptr.elem).clone()),
+                            _ => self.extract_iter_item_type_from_type(peeled),
+                        }
+                    })
+                })
+                // Keep local raw-pointer flow analyzable even when pointee type
+                // cannot be recovered from receiver context.
+                .unwrap_or_else(|| parse_quote!(u8));
+            if method == "as_mut_ptr" {
+                return Some(parse_quote!(*mut #pointee_ty));
+            }
+            return Some(parse_quote!(*const #pointee_ty));
+        }
+
+        if matches!(method.as_str(), "add" | "offset" | "sub") && mc.args.len() == 1 {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                if matches!(receiver_ty, syn::Type::Ptr(_)) {
+                    return Some(receiver_ty);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn infer_pointer_type_from_call_expr(&self, call: &syn::ExprCall) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+
+        if matches!(
+            joined.as_str(),
+            "as_mut_ptr" | "rusty::as_mut_ptr" | "as_ptr" | "rusty::as_ptr"
+        ) && call.args.len() == 1
+        {
+            let pointee_ty = self
+                .infer_array_element_type_from_expr(&call.args[0])
+                .or_else(|| {
+                    self.infer_simple_expr_type(&call.args[0]).and_then(|ty| {
+                        let peeled = self.peel_reference_paren_group_type(&ty);
+                        match peeled {
+                            syn::Type::Ptr(ptr) => Some((*ptr.elem).clone()),
+                            _ => self.extract_iter_item_type_from_type(peeled),
+                        }
+                    })
+                })
+                .unwrap_or_else(|| parse_quote!(u8));
+            if joined.ends_with("as_mut_ptr") {
+                return Some(parse_quote!(*mut #pointee_ty));
+            }
+            return Some(parse_quote!(*const #pointee_ty));
+        }
+
+        if Self::is_ptr_add_or_offset_call_path(&path_expr.path) && !call.args.is_empty() {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                if matches!(receiver_ty, syn::Type::Ptr(_)) {
+                    return Some(receiver_ty);
+                }
+            }
+        }
+
+        None
     }
 
     fn should_emit_inferred_sum_type_for_local(
@@ -7581,6 +7739,10 @@ impl CodeGen {
                 }
                 self.infer_local_binding_type_from_initializer(expr)
             }
+            syn::Expr::Unsafe(unsafe_expr) => self
+                .extract_single_expr_from_block(&unsafe_expr.block)
+                .and_then(|inner| self.infer_simple_expr_type(inner)),
+            syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             _ => None,
         }
     }
@@ -8611,7 +8773,7 @@ impl CodeGen {
                 if matches!(method.as_str(), "as_ptr" | "as_mut_ptr") {
                     return true;
                 }
-                if matches!(method.as_str(), "add" | "offset") {
+                if matches!(method.as_str(), "add" | "offset" | "sub") {
                     return self.is_expr_raw_pointer_like(&mc.receiver);
                 }
                 false
@@ -8637,20 +8799,34 @@ impl CodeGen {
             joined.as_str(),
             "rusty::ptr::add"
                 | "rusty::ptr::offset"
+                | "rusty::ptr::sub"
                 | "ptr::add"
                 | "ptr::offset"
+                | "ptr::sub"
+                | "core::ptr::add"
+                | "std::ptr::add"
+                | "core::ptr::offset"
+                | "std::ptr::offset"
+                | "core::ptr::sub"
+                | "std::ptr::sub"
                 | "core::ptr::mut_ptr::add"
                 | "std::ptr::mut_ptr::add"
                 | "ptr::mut_ptr::add"
                 | "core::ptr::mut_ptr::offset"
                 | "std::ptr::mut_ptr::offset"
                 | "ptr::mut_ptr::offset"
+                | "core::ptr::mut_ptr::sub"
+                | "std::ptr::mut_ptr::sub"
+                | "ptr::mut_ptr::sub"
                 | "core::ptr::const_ptr::add"
                 | "std::ptr::const_ptr::add"
                 | "ptr::const_ptr::add"
                 | "core::ptr::const_ptr::offset"
                 | "std::ptr::const_ptr::offset"
                 | "ptr::const_ptr::offset"
+                | "core::ptr::const_ptr::sub"
+                | "std::ptr::const_ptr::sub"
+                | "ptr::const_ptr::sub"
         )
     }
 
@@ -8660,20 +8836,34 @@ impl CodeGen {
             receiver_cpp,
             s if s.starts_with("rusty::ptr::add(")
                 || s.starts_with("rusty::ptr::offset(")
+                || s.starts_with("rusty::ptr::sub(")
                 || s.starts_with("ptr::add(")
                 || s.starts_with("ptr::offset(")
+                || s.starts_with("ptr::sub(")
+                || s.starts_with("core::ptr::add(")
+                || s.starts_with("std::ptr::add(")
+                || s.starts_with("core::ptr::offset(")
+                || s.starts_with("std::ptr::offset(")
+                || s.starts_with("core::ptr::sub(")
+                || s.starts_with("std::ptr::sub(")
                 || s.starts_with("core::ptr::mut_ptr::add(")
                 || s.starts_with("std::ptr::mut_ptr::add(")
                 || s.starts_with("ptr::mut_ptr::add(")
                 || s.starts_with("core::ptr::mut_ptr::offset(")
                 || s.starts_with("std::ptr::mut_ptr::offset(")
                 || s.starts_with("ptr::mut_ptr::offset(")
+                || s.starts_with("core::ptr::mut_ptr::sub(")
+                || s.starts_with("std::ptr::mut_ptr::sub(")
+                || s.starts_with("ptr::mut_ptr::sub(")
                 || s.starts_with("core::ptr::const_ptr::add(")
                 || s.starts_with("std::ptr::const_ptr::add(")
                 || s.starts_with("ptr::const_ptr::add(")
                 || s.starts_with("core::ptr::const_ptr::offset(")
                 || s.starts_with("std::ptr::const_ptr::offset(")
                 || s.starts_with("ptr::const_ptr::offset(")
+                || s.starts_with("core::ptr::const_ptr::sub(")
+                || s.starts_with("std::ptr::const_ptr::sub(")
+                || s.starts_with("ptr::const_ptr::sub(")
         )
     }
 
@@ -9308,7 +9498,7 @@ impl CodeGen {
             };
             return format!("{}({}, {}, {})", helper, args[0], receiver, args[1]);
         }
-        if matches!(method_name.as_str(), "add" | "offset")
+        if matches!(method_name.as_str(), "add" | "offset" | "sub")
             && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
@@ -22778,12 +22968,47 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::Bound_Unbounded<size_t>"));
-        assert!(out.contains("rusty::Bound_Included<size_t>"));
-        assert!(out.contains("rusty::Bound_Excluded<size_t>"));
+        assert!(
+            out.contains("rusty::Bound_Unbounded<size_t>")
+                || out.contains("std::variant_alternative_t<0, std::remove_reference_t<decltype(_m)>>")
+        );
+        assert!(
+            out.contains("rusty::Bound_Included<size_t>")
+                || out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>")
+        );
+        assert!(
+            out.contains("rusty::Bound_Excluded<size_t>")
+                || out.contains("std::variant_alternative_t<2, std::remove_reference_t<decltype(_m)>>")
+        );
         assert!(!out.contains("const Bound_Unbounded&"));
         assert!(!out.contains("const Bound_Included&"));
         assert!(!out.contains("const Bound_Excluded&"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327191_bound_match_visit_uses_variant_alternative_type_recovery() {
+        let out = transpile_str(
+            r#"
+            use std::ops::{Bound, RangeBounds};
+            fn start_index<R: RangeBounds<i32>>(range: R) -> i32 {
+                match range.start_bound() {
+                    Bound::Unbounded => 0,
+                    Bound::Included(&i) => i,
+                    Bound::Excluded(&i) => i + 1,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::variant_alternative_t<0, std::remove_reference_t<decltype(_m)>>"
+        ));
+        assert!(out.contains(
+            "std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>"
+        ));
+        assert!(out.contains(
+            "std::variant_alternative_t<2, std::remove_reference_t<decltype(_m)>>"
+        ));
+        assert!(!out.contains("rusty::Bound_Included<size_t>"));
     }
 
     #[test]
@@ -22837,6 +23062,56 @@ mod tests {
         );
         assert!(out.contains("rusty::ptr::add(rusty::as_mut_ptr(b),"));
         assert!(!out.contains("b.as_mut_ptr().add("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327191_local_raw_pointer_add_sub_calls_lower_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            fn f(xs: &mut [i32; 4], n: usize) {
+                let ptr = xs.as_mut_ptr();
+                let _a = ptr.add(n);
+                let _b = ptr.sub(n);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::add(ptr,"));
+        assert!(out.contains("rusty::ptr::sub(ptr,"));
+        assert!(!out.contains("ptr.add(n)"));
+        assert!(!out.contains("ptr.sub(n)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327191_std_ptr_add_local_receiver_sub_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *mut i32, n: usize) {
+                unsafe {
+                    let cur = std::ptr::add(p, n);
+                    let _hole = cur.sub(n);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::ptr::add(") || out.contains("rusty::ptr::add("));
+        assert!(out.contains("rusty::ptr::sub(cur,"));
+        assert!(!out.contains("cur.sub(n)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327191_unsafe_local_pointer_add_sub_lowers_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            fn f(xs: &mut [i32; 4], n: usize) {
+                let cur = unsafe { xs.as_mut_ptr().add(n) };
+                let _hole = cur.sub(n);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::add("));
+        assert!(out.contains("rusty::as_mut_ptr(xs)"));
+        assert!(out.contains("rusty::ptr::sub(cur,"));
+        assert!(!out.contains("cur.sub(n)"));
     }
 
     #[test]
