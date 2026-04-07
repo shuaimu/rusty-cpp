@@ -176,6 +176,9 @@ pub struct CodeGen {
     /// Track ALL C++ names ever used in each scope level to prevent re-declaration
     /// when the same Rust variable is shadowed multiple times.
     local_cpp_names_used: Vec<HashSet<String>>,
+    /// For-loop variable names to inject into the next block scope, so that
+    /// variable shadowing inside the loop body generates `_shadow1` names.
+    pending_loop_var_bindings: Vec<String>,
     /// Scoped Rust-local constness as emitted in C++ (`const auto` vs mutable storage).
     /// Used by value-constructor lowering to avoid forcing invalid moves from
     /// const-constrained locals in context-qualified constructor paths.
@@ -317,6 +320,7 @@ impl CodeGen {
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
+            pending_loop_var_bindings: Vec::new(),
             local_const_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
@@ -443,6 +447,7 @@ impl CodeGen {
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
         self.local_cpp_names_used.clear();
+        self.pending_loop_var_bindings.clear();
         self.local_const_bindings.clear();
         self.delayed_init_locals.clear();
         self.local_function_bindings.clear();
@@ -4768,6 +4773,23 @@ impl CodeGen {
         self.local_cpp_names_used.push(HashSet::new());
         self.local_const_bindings.push(HashMap::new());
         self.delayed_init_locals.push(HashSet::new());
+
+        // Inject for-loop variable names into the body scope so that
+        // shadowing inside the loop body generates _shadow1 names.
+        if !self.pending_loop_var_bindings.is_empty() {
+            let loop_vars = std::mem::take(&mut self.pending_loop_var_bindings);
+            if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                for name in &loop_vars {
+                    scope.insert(name.clone(), name.clone());
+                }
+            }
+            if let Some(used) = self.local_cpp_names_used.last_mut() {
+                for name in &loop_vars {
+                    used.insert(name.clone());
+                }
+            }
+        }
+
         let local_functions: HashSet<String> = block
             .stmts
             .iter()
@@ -7674,7 +7696,21 @@ impl CodeGen {
         // Use auto&& to handle both references and values correctly
         self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_expr));
         self.indent += 1;
+
+        // Collect for-loop pattern binding names so they can be registered
+        // in the body scope. This ensures that variable shadowing inside the
+        // loop body (e.g., `let flag = trim(flag)`) correctly renames to
+        // `flag_shadow1` instead of redeclaring `flag`.
+        let mut loop_binding_names = HashSet::new();
+        self.collect_pattern_binding_names(&for_expr.pat, &mut loop_binding_names);
+
+        // Temporarily store the binding names; emit_block will push a new scope,
+        // and we'll inject the loop var names into it afterwards.
+        let loop_var_names: Vec<String> = loop_binding_names.into_iter().collect();
+        self.pending_loop_var_bindings = loop_var_names.clone();
         self.emit_block(&for_expr.body);
+        self.pending_loop_var_bindings.clear();
+
         self.indent -= 1;
         self.writeln("}");
         if iter_is_borrowed {
@@ -26947,6 +26983,25 @@ mod tests {
         // Each should appear exactly twice: declaration + use/move
         assert!(count1 <= 3, "err_shadow1 should not be redeclared, count={}", count1);
         assert!(count2 <= 3, "err_shadow2 should not be redeclared, count={}", count2);
+    }
+
+    #[test]
+    fn test_leaf4154426_for_loop_var_shadowing_renames_inner_binding() {
+        let out = transpile_str(
+            r#"
+            fn f(items: &[&str]) {
+                for flag in items {
+                    let flag = flag.trim();
+                    let _ = flag;
+                }
+            }
+            "#,
+        );
+        // The inner `let flag = flag.trim()` should shadow the loop var
+        assert!(out.contains("flag_shadow1"),
+            "inner binding should be renamed to flag_shadow1, got: {}", out);
+        assert!(!out.contains("const auto flag = flag"),
+            "should not redeclare flag in same scope, got: {}", out);
     }
 
     #[test]
