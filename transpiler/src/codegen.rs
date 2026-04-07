@@ -684,7 +684,13 @@ impl CodeGen {
                 syn::Item::Fn(_) => {
                     has_fn = true;
                 }
-                syn::Item::Use(_) => {}
+                // Non-type-defining items that don't prevent delaying
+                syn::Item::Use(_)
+                | syn::Item::Const(_)
+                | syn::Item::Static(_)
+                | syn::Item::ExternCrate(_)
+                | syn::Item::ForeignMod(_)
+                | syn::Item::Macro(_) => {}
                 syn::Item::Mod(m) => {
                     let Some((_, nested_items)) = &m.content else {
                         return false;
