@@ -226,6 +226,9 @@ pub struct CodeGen {
     module_stack: Vec<String>,
     /// Traits intentionally skipped in module mode (Proxy facade unavailable),
     /// tracked by scoped path so `pub use` can be lowered as Rust-only imports.
+    /// Crate-root `pub use module::{Name1, Name2}` re-exports.
+    /// Maps simple name → module path (e.g., "Flags" → "traits").
+    crate_reexports: HashMap<String, String>,
     skipped_module_traits: HashSet<String>,
     /// Expanded Rust libtest marker names discovered from skipped
     /// `test::TestDescAndFn` metadata consts.
@@ -338,6 +341,7 @@ impl CodeGen {
             self_path_overrides: Vec::new(),
             module_name: None,
             module_stack: Vec::new(),
+            crate_reexports: HashMap::new(),
             skipped_module_traits: HashSet::new(),
             expanded_test_markers: Vec::new(),
             expanded_test_marker_should_panic: HashMap::new(),
@@ -482,6 +486,8 @@ impl CodeGen {
         self.collect_extension_trait_impl_methods(&file.items, &[]);
         self.extension_method_names
             .extend(self.external_extension_method_hints.iter().cloned());
+        // Pass 1e2: collect crate-root `pub use module::Name` re-exports.
+        self.collect_crate_reexports(&file.items);
         // Pass 1f: collect trait static default methods before impl blocks.
         self.collect_trait_static_default_methods(&file.items);
         // Pass 1g: collect all impl blocks (including inline-module nested ones)
@@ -1164,6 +1170,56 @@ impl CodeGen {
     /// Instance methods (with receivers) are NOT injected because they have
     /// complex dependencies on `Self::Bits`, `Self::FLAGS`, etc. that don't
     /// resolve correctly when transplanted to a different type context.
+    /// Collect crate-root `pub use module::{Name1, Name2}` re-exports.
+    /// These map simple names to their source module, so `use crate::Flags`
+    /// can resolve to `traits::Flags` when `pub use traits::Flags;` exists.
+    fn collect_crate_reexports(&mut self, items: &[syn::Item]) {
+        for item in items {
+            if let syn::Item::Use(u) = item {
+                if !matches!(u.vis, syn::Visibility::Public(_)) {
+                    continue;
+                }
+                self.collect_reexport_tree(&u.tree, "");
+            }
+        }
+    }
+
+    fn collect_reexport_tree(&mut self, tree: &syn::UseTree, prefix: &str) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                let ident = p.ident.to_string();
+                // Skip crate/self/super/std/core prefixes
+                if matches!(ident.as_str(), "crate" | "self" | "super" | "std" | "core" | "alloc") {
+                    return;
+                }
+                let new_prefix = if prefix.is_empty() {
+                    ident
+                } else {
+                    format!("{}::{}", prefix, ident)
+                };
+                self.collect_reexport_tree(&p.tree, &new_prefix);
+            }
+            syn::UseTree::Name(n) => {
+                if !prefix.is_empty() {
+                    self.crate_reexports.insert(n.ident.to_string(), prefix.to_string());
+                }
+            }
+            syn::UseTree::Group(g) => {
+                for tree in &g.items {
+                    self.collect_reexport_tree(tree, prefix);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                // `pub use module::*` — don't track wildcards
+            }
+            syn::UseTree::Rename(r) => {
+                if !prefix.is_empty() {
+                    self.crate_reexports.insert(r.rename.to_string(), prefix.to_string());
+                }
+            }
+        }
+    }
+
     fn collect_trait_static_default_methods(&mut self, items: &[syn::Item]) {
         for item in items {
             match item {
@@ -4548,10 +4604,16 @@ impl CodeGen {
                 self.flatten_use_tree(&p.tree, &new_prefix)
             }
             syn::UseTree::Name(n) => {
+                let name = n.ident.to_string();
                 let full = if prefix.is_empty() {
-                    n.ident.to_string()
+                    // Check if this name was re-exported from a module
+                    if let Some(source_module) = self.crate_reexports.get(&name) {
+                        format!("{}::{}", source_module, name)
+                    } else {
+                        name
+                    }
                 } else {
-                    format!("{}::{}", prefix, n.ident)
+                    format!("{}::{}", prefix, name)
                 };
                 vec![full]
             }
@@ -25363,7 +25425,8 @@ mod tests {
         );
         assert!(!out.contains("// TODO: external crate 'traits'"));
         assert!(out.contains("// Rust-only: using traits::Flags;"));
-        assert!(out.contains("// Rust-only: using Flags;"));
+        // `use crate::Flags;` in inner module resolves through re-export to traits::Flags
+        assert!(out.contains("// Rust-only:") && out.contains("traits::Flags"));
         assert!(!out.contains("using ::Flags;"));
     }
 
