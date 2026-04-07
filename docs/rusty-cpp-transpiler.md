@@ -2538,8 +2538,15 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327151 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): kept changes shared and type-context-gated in AST-aware lowering, with no crate-specific scripts or fixture-specific rewrites.
-61. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.15.2`.
-   - focus: re-run full seven-crate parity matrix after 27.15.1 and record the deterministic first failure head with canonical artifacts.
+61. `Leaf 4.15.4.3.3.3.3.3.27.15.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-15-2-1775520042 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-15-2-1775520042/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1022`: `ArrayVec::as_mut_slice` could not convert `span<rusty::MaybeUninit<T>>` to `span<T>` through `return ArrayVecImpl::as_mut_slice((*this));`, followed by adjacent `MaybeUninit` payload/slice fallout.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-15-2-1775520042 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+62. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.16.1`.
+   - focus: implement generic `MaybeUninit` slice-surface payload-shape fixes for the new deterministic head at `runner.cpp:1022`, then re-run full seven-crate matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
