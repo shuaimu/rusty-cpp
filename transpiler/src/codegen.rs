@@ -16332,8 +16332,10 @@ impl CodeGen {
                         }
                     }
                 }
+                // In argument position, `impl Trait` is equivalent to a template parameter.
+                // Use C++20 abbreviated function template: `auto` creates an implicit template param.
                 if self.module_name.is_some() {
-                    return "void*".to_string();
+                    return "auto".to_string();
                 }
                 // Collect all trait names
                 let trait_paths: Vec<&syn::Path> = it
@@ -26440,6 +26442,23 @@ mod tests {
         // The unreachable arm should NOT have `return` producing void/typed mismatch
         assert!(!out.contains("return [&]() { [&]() { rusty::panicking::unreachable_display"),
             "diverging arm body should not have return keyword, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154411_impl_trait_arg_position_uses_auto_not_void_ptr() {
+        let out = transpile_str_module(
+            r#"
+            trait Write {
+                fn write_str(&mut self, s: &str);
+            }
+            fn to_writer(writer: impl Write) {
+                writer.write_str("hello");
+            }
+            "#,
+            "test_crate",
+        );
+        assert!(out.contains("auto writer"), "impl Trait arg should use auto, got: {}", out);
+        assert!(!out.contains("void*"), "impl Trait should not use void*, got: {}", out);
     }
 
     #[test]
