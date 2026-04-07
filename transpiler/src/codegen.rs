@@ -1176,6 +1176,68 @@ impl CodeGen {
                         self.collect_impl_blocks(nested_items, &nested_path);
                     }
                 }
+                // Collect type aliases from impl blocks inside `const _: () = { ... }`.
+                // For aliases pointing to const-block-local types (like InternalBitFlags),
+                // resolve through to the underlying primitive type instead.
+                syn::Item::Const(c) if c.ident == "_" => {
+                    if let syn::Expr::Block(block) = c.expr.as_ref() {
+                        // First, collect local struct definitions to detect newtype wrappers
+                        let local_newtypes: HashMap<String, syn::Type> = block.block.stmts.iter()
+                            .filter_map(|stmt| {
+                                if let syn::Stmt::Item(syn::Item::Struct(s)) = stmt {
+                                    if let syn::Fields::Unnamed(fields) = &s.fields {
+                                        if fields.unnamed.len() == 1 {
+                                            return Some((s.ident.to_string(), fields.unnamed[0].ty.clone()));
+                                        }
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+
+                        for stmt in &block.block.stmts {
+                            if let syn::Stmt::Item(syn::Item::Impl(impl_block)) = stmt {
+                                let Some(tp) = (match impl_block.self_ty.as_ref() {
+                                    syn::Type::Path(tp) => Some(tp),
+                                    _ => None,
+                                }) else {
+                                    continue;
+                                };
+                                let raw_type_name = tp.path.segments.iter()
+                                    .map(|s| s.ident.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("::");
+                                let type_name = qualify_impl_type_name(
+                                    &raw_type_name,
+                                    module_path,
+                                    &self.declared_item_names,
+                                );
+                                let entry = self.impl_blocks.entry(type_name.clone()).or_default();
+                                for impl_item in &impl_block.items {
+                                    if let syn::ImplItem::Type(assoc) = impl_item {
+                                        // Check if the alias target is a const-block-local type
+                                        let target_name = match &assoc.ty {
+                                            syn::Type::Path(tp) if tp.qself.is_none() => {
+                                                tp.path.segments.last().map(|s| s.ident.to_string())
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(ref target) = target_name {
+                                            if let Some(inner_ty) = local_newtypes.get(target) {
+                                                // Replace alias target with the newtype's inner type
+                                                let mut resolved_assoc = assoc.clone();
+                                                resolved_assoc.ty = inner_ty.clone();
+                                                entry.push(syn::ImplItem::Type(resolved_assoc));
+                                                continue;
+                                            }
+                                        }
+                                        entry.push(impl_item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2907,6 +2969,25 @@ impl CodeGen {
         self.writeln(&format!("{}struct {} {{", export_prefix, name));
         self.indent += 1;
 
+        // Emit associated type aliases BEFORE fields, so field types like
+        // `<Self as Trait>::Assoc` can resolve through the alias.
+        // Track emitted names to prevent duplicate emission later.
+        let mut early_emitted_type_aliases: HashSet<String> = HashSet::new();
+        if let Some(ref methods) = merged_impl_items {
+            let prev_struct = self.current_struct.clone();
+            self.current_struct = Some(name_str.clone());
+            self.emitted_non_method_member_names.push(HashSet::new());
+            for impl_item in methods {
+                if let syn::ImplItem::Type(t) = impl_item {
+                    let alias_name = escape_cpp_keyword(&t.ident.to_string());
+                    early_emitted_type_aliases.insert(alias_name);
+                    self.emit_impl_item(impl_item);
+                }
+            }
+            self.emitted_non_method_member_names.pop();
+            self.current_struct = prev_struct;
+        }
+
         // Emit fields
         let mut named_field_types: HashMap<String, syn::Type> = HashMap::new();
         let mut named_field_order: Vec<String> = Vec::new();
@@ -3146,8 +3227,10 @@ impl CodeGen {
             let prev_struct = self.current_struct.clone();
             self.current_struct = Some(name_str.clone());
             self.emitted_method_conflict_keys.push(HashSet::new());
-            let non_method_member_names: HashSet<String> =
+            let mut non_method_member_names: HashSet<String> =
                 named_field_cpp_names.values().cloned().collect();
+            // Include type aliases already emitted before fields
+            non_method_member_names.extend(early_emitted_type_aliases.iter().cloned());
             self.emitted_non_method_member_names
                 .push(non_method_member_names);
 
