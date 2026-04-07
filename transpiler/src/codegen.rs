@@ -4619,6 +4619,13 @@ impl CodeGen {
         let is_deref_mut_method = method_ident == "deref_mut";
 
         let mut return_type = self.map_return_type(&method.sig.output);
+        // operator<=> must return std::partial_ordering for C++ comparison synthesis.
+        // When body returns Option<Ordering>, we wrap it with to_partial_ordering.
+        let wrap_body_with_partial_ordering = name == "operator<=>"
+            && (return_type.contains("Option") || return_type.contains("cmp::Ordering"));
+        if wrap_body_with_partial_ordering {
+            return_type = "std::partial_ordering".to_string();
+        }
         // In constrained emission modes (named module output and expanded tests),
         // merged trait impls can surface unconstrained associated-type returns
         // (e.g. `L::IntoIter`, `Self::Output`, `Either::Item`) that hard-fail when
@@ -4704,6 +4711,14 @@ impl CodeGen {
         if is_drop_destructor {
             self.writeln("if (rusty::mem::consume_forgotten_address(this)) { return; }");
         }
+        if wrap_body_with_partial_ordering {
+            // Wrap operator<=> body: return to_partial_ordering([&]() -> Option<Ordering> { <body> }())
+            self.writeln(&format!(
+                "return rusty::to_partial_ordering([&]() -> {} {{",
+                self.map_return_type(&method.sig.output)
+            ));
+            self.indent += 1;
+        }
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
@@ -4717,6 +4732,10 @@ impl CodeGen {
         self.pop_param_bindings();
         self.pop_return_type_hint();
         self.pop_return_value_scope();
+        if wrap_body_with_partial_ordering {
+            self.indent -= 1;
+            self.writeln("}());");
+        }
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
@@ -17979,6 +17998,16 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
     "namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+}\n\
+// Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
+inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
+    if (opt.is_none()) return std::partial_ordering::unordered;\n\
+    switch (static_cast<int>(opt.unwrap())) {\n\
+        case static_cast<int>(rusty::cmp::Ordering::Less): return std::partial_ordering::less;\n\
+        case static_cast<int>(rusty::cmp::Ordering::Equal): return std::partial_ordering::equivalent;\n\
+        case static_cast<int>(rusty::cmp::Ordering::Greater): return std::partial_ordering::greater;\n\
+        default: return std::partial_ordering::unordered;\n\
+    }\n\
 }\n\
 template<typename A, typename B>\n\
 auto partial_cmp(A&& a, B&& b) {\n\
