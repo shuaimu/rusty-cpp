@@ -9968,6 +9968,15 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::is_char_boundary({}, {})", receiver, args[0]);
         }
+        if method_name == "hash" && args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::hash::hash({}, {})", receiver, args[0]);
+        }
         if method_name == "zip" && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -16646,8 +16655,28 @@ constexpr T* get_unchecked_mut(T& value) {\n\
 }\n\
 }\n\
 namespace hash {\n\
+template<typename State>\n\
+inline void combine(State& state, std::size_t value) {\n\
+    auto seed = static_cast<std::size_t>(state);\n\
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\
+    state = static_cast<State>(seed);\n\
+}\n\
 template<typename T, typename State>\n\
-void hash(const T&, State&) {}\n\
+void hash(const T& value, State& state) {\n\
+    if constexpr (requires { value.hash(state); }) {\n\
+        value.hash(state);\n\
+    } else if constexpr (requires { std::hash<std::remove_cvref_t<T>>{}(value); }) {\n\
+        combine(state, std::hash<std::remove_cvref_t<T>>{}(value));\n\
+    } else {\n\
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&value);\n\
+        std::size_t h = 14695981039346656037ULL;\n\
+        for (std::size_t i = 0; i < sizeof(T); ++i) {\n\
+            h ^= static_cast<std::size_t>(bytes[i]);\n\
+            h *= 1099511628211ULL;\n\
+        }\n\
+        combine(state, h);\n\
+    }\n\
+}\n\
 }\n\
 namespace str_runtime {\n\
 using Utf8Error = rusty::String;\n\
@@ -24111,6 +24140,30 @@ mod tests {
         assert!(out.contains("reinterpret_cast<const uint8_t*>(ptr)"));
         assert!(out.contains("reinterpret_cast<const int32_t*>(rusty::ptr::add("));
         assert!(!out.contains(".cast<uint8_t>()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            use std::ops::Deref;
+
+            struct S;
+            impl Deref for S {
+                type Target = str;
+                fn deref(&self) -> &str { "x" }
+            }
+
+            impl S {
+                fn do_hash(&self, h: &mut usize) {
+                    (**self).hash(h);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::hash::hash("));
+        assert!(out.contains("rusty::hash::hash((*(*this)), h);"));
+        assert!(!out.contains("(*(*this)).hash(h);"));
     }
 
     #[test]

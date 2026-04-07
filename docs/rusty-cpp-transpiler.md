@@ -2987,8 +2987,26 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-33-2-20260407-010206 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-98. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.34.1`.
-   - focus: collapse the `runner.cpp:1594` string-hash surface mismatch and immediate adjacent cloned-iterator move-only copy head (`slice.hpp:81`) via shared transpiler/runtime fixes and fixture-agnostic regressions.
+98. `Leaf 4.15.4.3.3.3.3.3.27.34.1` is complete.
+   - plan/scope check: shared transpiler/runtime updates (hash-call lowering + fallback helper semantics + slice cloned-iterator clone semantics) stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared fixes:
+     - `transpiler/src/codegen.rs`: lowered `.hash(state)` method-call surfaces to `rusty::hash::hash(receiver, state)` so string-view-backed receivers do not emit invalid `.hash(...)` member calls.
+     - `transpiler/src/codegen.rs`: upgraded runtime fallback `rusty::hash::hash` helper from no-op to generic dispatch (`value.hash(state)` when available, otherwise `std::hash` and byte-hash combine fallback).
+     - `include/rusty/slice.hpp`: `slice_iter::Iter::ClonedIter` now uses `clone()` when available (copy fallback only for copy-constructible values), removing move-only cloneable payload copy-constructor requirements.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper`
+     - `runtime_move_semantics::test_slice_cloned_iter_supports_move_only_cloneable_payloads`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_slice_cloned_iter_supports_move_only_cloneable_payloads -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-34-1-20260407-011235 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.33.2 head family is collapsed: `runner.cpp:1594` string-view `.hash` member-call and adjacent `slice.hpp:81` cloned-iterator copy head are gone.
+   - new deterministic first hard error starts at `runner.cpp:3444` (span equality payload-shape mismatch; `std::span<rusty::Vec<int>>` compared against `std::span<const rusty::Vec<rusty::Vec<int>>>`), with dependent comparator diagnostics rooted at `/usr/include/c++/14/bits/stl_algobase.h:1196`.
+   - canonical artifacts: `/tmp/rusty-parity-27-34-1-20260407-011235/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed in shared transpiler/runtime surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+99. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.34.2`.
+   - focus: re-run the full seven-crate matrix after 27.34.1, capture the new deterministic first-head family (currently led by `runner.cpp:3444` span-equality payload-shape mismatch), and advance frontier docs/TODO status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

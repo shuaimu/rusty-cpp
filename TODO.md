@@ -1757,7 +1757,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-33-2-20260407-010206 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head workflow and canonical artifact capture, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.34: Collapse the post-27.33.2 deterministic Stage D string-hash/clone-iterator family generically (starting with `runner.cpp:1594` `std::string_view` hash-call mismatch and adjacent `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:81` move-only cloned-iterator copy surface), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.34.1: Implement shared transpiler/runtime fixes for the first deterministic 27.33.2 head (no crate-specific scripts): align string hash lowering for string-view-backed receivers and remove cloned-iterator copy requirements for move-only payloads in shared slice iteration surfaces.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.34.1: Implement shared transpiler/runtime fixes for the first deterministic 27.33.2 head (no crate-specific scripts): align string hash lowering for string-view-backed receivers and remove cloned-iterator copy requirements for move-only payloads in shared slice iteration surfaces.
+                              - [x] *done* Plan/scope check: shared transpiler/runtime delta with focused helper/lowering updates and regression coverage; net change stayed well below the <1000 LOC guardrail, so no additional decomposition was required.
+                              - [x] *done* Implemented shared fixes:
+                                - `transpiler/src/codegen.rs`: lowered `.hash(state)` method-call surfaces through `rusty::hash::hash(receiver, state)` to avoid invalid string-view member-call emission; upgraded runtime-fallback `rusty::hash::hash` helper from no-op stub to generic dispatch (`value.hash(state)` when available, otherwise `std::hash`/byte-hash combine).
+                                - `include/rusty/slice.hpp`: `slice_iter::Iter::ClonedIter` now clones items via `clone()` when available (fallback copy only when copy-constructible), removing hard copy-constructor requirements for move-only cloneable payloads.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `transpiler/src/codegen.rs`:
+                                  - `test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper`
+                                - `transpiler/tests/runtime_move_semantics.rs`:
+                                  - `test_slice_cloned_iter_supports_move_only_cloneable_payloads`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_slice_cloned_iter_supports_move_only_cloneable_payloads -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-34-1-20260407-011235 --keep-work-dirs`
+                              - [x] *done* Single-crate reprobe removed the deterministic `runner.cpp:1594` string-view `.hash` member head and adjacent `slice.hpp:81` cloned-iterator move-only copy head; new deterministic first hard error now starts at `runner.cpp:3444` (span equality payload-shape mismatch: `std::span<rusty::Vec<int>>` compared against `std::span<const rusty::Vec<rusty::Vec<int>>>`), with additional dependent mismatch at `/usr/include/c++/14/bits/stl_algobase.h:1196`.
+                              - [x] *done* Canonical artifacts for this leaf’s reprobe are at `/tmp/rusty-parity-27-34-1-20260407-011235/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes remained in shared transpiler/runtime surfaces with fixture-agnostic regressions, no crate-specific rewrites/scripts, and deterministic first-head artifact capture.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.34.2: Re-run full seven-crate parity matrix after 27.34.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

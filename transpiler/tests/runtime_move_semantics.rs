@@ -167,3 +167,41 @@ fn test_result_err_supports_non_default_constructible_error_payloads() {
 
     compile_and_run_cpp(source, "result_err_non_default");
 }
+
+#[test]
+fn test_slice_cloned_iter_supports_move_only_cloneable_payloads() {
+    let source = r#"
+        #include <array>
+        #include <rusty/slice.hpp>
+
+        struct MoveOnlyCloneable {
+            int value;
+            explicit MoveOnlyCloneable(int v) : value(v) {}
+            MoveOnlyCloneable(const MoveOnlyCloneable&) = delete;
+            MoveOnlyCloneable& operator=(const MoveOnlyCloneable&) = delete;
+            MoveOnlyCloneable(MoveOnlyCloneable&&) noexcept = default;
+            MoveOnlyCloneable& operator=(MoveOnlyCloneable&&) noexcept = default;
+
+            MoveOnlyCloneable clone() const { return MoveOnlyCloneable(value); }
+        };
+
+        int main() {
+            std::array<MoveOnlyCloneable, 2> data{
+                MoveOnlyCloneable(7),
+                MoveOnlyCloneable(9),
+            };
+            auto iter = rusty::slice_iter::Iter<const MoveOnlyCloneable>(
+                std::span<const MoveOnlyCloneable>(data)
+            ).cloned();
+
+            auto first = iter.next();
+            if (first.is_none()) {
+                return 1;
+            }
+            auto v = first.unwrap();
+            return v.value == 7 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_cloned_move_only_cloneable");
+}

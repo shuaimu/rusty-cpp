@@ -78,7 +78,7 @@ public:
             if (next_ptr.is_none()) {
                 return rusty::None;
             }
-            return rusty::Option<value_type>(*next_ptr.unwrap());
+            return rusty::Option<value_type>(clone_value(*next_ptr.unwrap()));
         }
 
         rusty::Option<value_type> next_back() {
@@ -86,7 +86,7 @@ public:
             if (next_ptr.is_none()) {
                 return rusty::None;
             }
-            return rusty::Option<value_type>(*next_ptr.unwrap());
+            return rusty::Option<value_type>(clone_value(*next_ptr.unwrap()));
         }
 
         std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
@@ -94,6 +94,19 @@ public:
         }
 
     private:
+        template<typename U>
+        static U clone_value(const U& value) {
+            if constexpr (requires { value.clone(); }) {
+                return value.clone();
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<U>,
+                    "rusty::slice_iter::Iter::cloned requires copy-constructible or clone() values"
+                );
+                return U(value);
+            }
+        }
+
         Iter iter_;
     };
 
