@@ -133,6 +133,10 @@ pub struct CodeGen {
     /// Used to propagate expected type context into argument lowering (for example
     /// `&[1,2,3]` coercions for slice/span parameters).
     function_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    /// Collected free-function type generic parameter names keyed by scoped
+    /// function path. Used for targeted template-argument recovery when C++
+    /// deduction is blocked by wrapper pointer forms.
+    function_type_param_names: HashMap<String, Vec<String>>,
     /// Collected method parameter passing styles keyed by method name.
     /// Mixed signatures remain conservative and do not trigger address-of stripping.
     method_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
@@ -280,6 +284,7 @@ impl CodeGen {
             struct_field_cpp_names: HashMap::new(),
             function_arg_pass_styles: HashMap::new(),
             function_arg_expected_types: HashMap::new(),
+            function_type_param_names: HashMap::new(),
             method_arg_pass_styles: HashMap::new(),
             method_arg_expected_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
@@ -397,6 +402,7 @@ impl CodeGen {
         self.struct_field_cpp_names.clear();
         self.function_arg_pass_styles.clear();
         self.function_arg_expected_types.clear();
+        self.function_type_param_names.clear();
         self.method_arg_pass_styles.clear();
         self.method_arg_expected_types.clear();
         self.reassigned_vars.clear();
@@ -1316,6 +1322,8 @@ impl CodeGen {
                     let expected_types =
                         self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
                     self.record_function_arg_expected_types(&scoped_name, expected_types);
+                    let type_params = self.collect_type_param_names_from_generics(&f.sig.generics);
+                    self.record_function_type_param_names(&scoped_name, type_params);
                 }
                 syn::Item::Impl(impl_block) => {
                     for impl_item in &impl_block.items {
@@ -1381,6 +1389,17 @@ impl CodeGen {
             }
         }
         expected
+    }
+
+    fn collect_type_param_names_from_generics(&self, generics: &syn::Generics) -> Vec<String> {
+        generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn arg_pass_style_for_type(&self, ty: &syn::Type) -> ArgPassStyle {
@@ -1458,6 +1477,22 @@ impl CodeGen {
             Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
             Entry::Vacant(vac) => {
                 vac.insert(expected);
+            }
+        }
+    }
+
+    fn record_function_type_param_names(&mut self, key: &str, params: Vec<String>) {
+        use std::collections::hash_map::Entry;
+        match self.function_type_param_names.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => {
+                if occ.get() != &params {
+                    // Signature ambiguity across same name/path: disable
+                    // template-arg recovery rather than guessing.
+                    occ.insert(Vec::new());
+                }
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(params);
             }
         }
     }
@@ -1561,6 +1596,20 @@ impl CodeGen {
             if let Some(expected) = self.function_arg_expected_types.get(&key) {
                 if let Some(Some(ty)) = expected.get(arg_idx) {
                     return Some(ty);
+                }
+            }
+        }
+        None
+    }
+
+    fn lookup_function_type_param_names<'a>(&'a self, func: &syn::Expr) -> Option<&'a Vec<String>> {
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        for key in self.call_path_candidates(&path_expr.path) {
+            if let Some(params) = self.function_type_param_names.get(&key) {
+                if !params.is_empty() {
+                    return Some(params);
                 }
             }
         }
@@ -2098,6 +2147,48 @@ impl CodeGen {
                 _ => None,
             })
             .collect()
+    }
+
+    fn infer_function_type_template_args_from_pointer_call(
+        &self,
+        call: &syn::ExprCall,
+        emitted_args: &[String],
+    ) -> Option<Vec<String>> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let last_seg = path_expr.path.segments.last()?;
+        if !matches!(last_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        if call.args.is_empty() || emitted_args.is_empty() {
+            return None;
+        }
+        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
+        if type_params.len() != 1 {
+            return None;
+        }
+        let first_expected = self.lookup_function_arg_expected_type(call.func.as_ref(), 0)?;
+        let first_expected = self.peel_reference_paren_group_type(first_expected);
+        let syn::Type::Ptr(ptr_ty) = first_expected else {
+            return None;
+        };
+        let pointee = self.peel_reference_paren_group_type(&ptr_ty.elem);
+        let syn::Type::Path(pointee_path) = pointee else {
+            return None;
+        };
+        if pointee_path.qself.is_some() || pointee_path.path.segments.len() != 1 {
+            return None;
+        }
+        let pointee_ident = pointee_path.path.segments[0].ident.to_string();
+        if pointee_ident != type_params[0] {
+            return None;
+        }
+        let first_arg_cpp = emitted_args.first()?;
+        Some(vec![format!(
+            "std::remove_pointer_t<std::remove_cvref_t<decltype(({}))>>",
+            first_arg_cpp
+        )])
     }
 
     /// Emit a nested function definition as a local callable.
@@ -4303,6 +4394,9 @@ impl CodeGen {
                     let local_expected =
                         self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
                     self.record_function_arg_expected_types(&local_fn_name, local_expected);
+                    let local_type_params =
+                        self.collect_type_param_names_from_generics(&f.sig.generics);
+                    self.record_function_type_param_names(&local_fn_name, local_type_params);
                     let return_ty = match &f.sig.output {
                         syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
                         syn::ReturnType::Default => None,
@@ -11777,7 +11871,7 @@ impl CodeGen {
         }
 
         let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
-        let mut args: Vec<String> = call
+        let call_args: Vec<String> = call
             .args
             .iter()
             .enumerate()
@@ -11792,12 +11886,20 @@ impl CodeGen {
                 )
             })
             .collect();
+        let mut args = call_args.clone();
+        let recovered_function_template_args =
+            self.infer_function_type_template_args_from_pointer_call(call, &call_args);
         let const_generic_args = self.local_function_const_generic_call_args(call);
         if !const_generic_args.is_empty() {
             let mut merged = const_generic_args;
             merged.extend(args);
             args = merged;
         }
+        let func = if let Some(template_args) = recovered_function_template_args {
+            format!("{}<{}>", func, template_args.join(", "))
+        } else {
+            func
+        };
         format!("{}({})", func, args.join(", "))
     }
 
@@ -23446,9 +23548,26 @@ mod tests {
             "#,
         );
         assert!(out.contains(
-            "raw_ptr_add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
+            "raw_ptr_add<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this)))))>>>(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
         ));
         assert!(!out.contains("raw_ptr_add(rusty::as_mut_ptr((*this)),"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327281_nongeneric_pointer_call_does_not_gain_template_args() {
+        let out = transpile_str(
+            r#"
+            fn raw_ptr_add(ptr: *mut i32, offset: usize) -> *mut i32 {
+                ptr.add(offset)
+            }
+
+            fn f(ptr: *mut i32, index: usize) -> *mut i32 {
+                raw_ptr_add(ptr, index)
+            }
+            "#,
+        );
+        assert!(out.contains("return raw_ptr_add(std::move(ptr), std::move(index));"));
+        assert!(!out.contains("raw_ptr_add<"));
     }
 
     #[test]

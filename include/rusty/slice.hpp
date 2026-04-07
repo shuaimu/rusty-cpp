@@ -222,6 +222,10 @@ public:
     map_next_iter(Iter iter, Func func)
         : iter_(std::move(iter)), func_(std::move(func)) {}
 
+    map_next_iter into_iter() {
+        return std::move(*this);
+    }
+
     auto next() {
         using item_type = next_item_t<Iter>;
         using mapped_type = std::decay_t<decltype(
@@ -250,6 +254,10 @@ public:
     );
 
     explicit enumerate_next_iter(Iter iter) : iter_(std::move(iter)), index_(0) {}
+
+    enumerate_next_iter into_iter() {
+        return std::move(*this);
+    }
 
     auto next() {
         using item_type = next_item_t<Iter>;
@@ -284,6 +292,10 @@ public:
 
     explicit rev_next_iter(Iter iter) : iter_(std::move(iter)) {}
 
+    rev_next_iter into_iter() {
+        return std::move(*this);
+    }
+
     auto next() {
         return iter_.next_back();
     }
@@ -302,6 +314,10 @@ public:
 
     take_next_iter(Iter iter, size_t remaining)
         : iter_(std::forward<Iter>(iter)), remaining_(remaining) {}
+
+    take_next_iter into_iter() {
+        return std::move(*this);
+    }
 
     auto next() {
         using next_result = decltype(iter_.next());

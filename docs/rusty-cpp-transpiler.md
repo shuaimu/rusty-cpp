@@ -2824,8 +2824,25 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-27-2-1775530872 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-86. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.28.1`.
-   - focus: implement a generic fix for the deterministic `runner.cpp:1073` `raw_ptr_add`/`runner.cpp:1078` iterator-`into_iter` head family, then re-run matrix.
+86. `Leaf 4.15.4.3.3.3.3.3.27.28.1` is complete.
+   - plan/scope check: transpiler/runtime implementation remained focused and under the <1000 LOC threshold, so no additional decomposition was required.
+   - implemented generic free-function pointer-call template-argument recovery in `transpiler/src/codegen.rs`: collected function type-generic metadata and applied shape-gated template arg recovery for pointer-typed helper calls so `raw_ptr_add` call sites emit explicit args when deduction would otherwise fail.
+   - implemented shared iterator-adaptation normalization in runtime headers:
+     - `include/rusty/slice.hpp`: added move-preserving `.into_iter()` to `map_next_iter`, `enumerate_next_iter`, `rev_next_iter`, and `take_next_iter`.
+     - `include/rusty/array.hpp`: added `.into_iter()` to `range`, `range_inclusive`, and `range_from`, plus Rust-style `range_inclusive::next()` / `count()` helpers for transpiled iterator surfaces.
+   - updated/added fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327151_as_mut_ptr_argument_adapts_to_expected_pointer_shape`
+     - `test_leaf41543333333327281_nongeneric_pointer_call_does_not_gain_template_args`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-28-1-1775533001 --keep-work-dirs`) removed the deterministic `runner.cpp:1073` (`raw_ptr_add` deduction) and adjacent `runner.cpp:1078` (`into_iter`) head family.
+   - new deterministic first hard error now starts at `runner.cpp:1104` (raw pointer `ptr.write(...)` member-call shape), with adjacent fallout at `runner.cpp:1080/1081` (`std::optional` emitted with Rust `is_some`/`unwrap` surface) and downstream variant/copy cascades.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327151_as_mut_ptr_argument_adapts_to_expected_pointer_shape -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327281_nongeneric_pointer_call_does_not_gain_template_args -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-28-1-1775533001 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes remain shared and AST/type-context-gated, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
+87. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.28.2`.
+   - focus: re-run the full seven-crate parity matrix after 27.28.1, record canonical first-head artifacts, and advance the active frontier (or close Leaf 4 if the matrix fully passes).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

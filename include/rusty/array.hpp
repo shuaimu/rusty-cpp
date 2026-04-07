@@ -563,6 +563,10 @@ class range {
 public:
     range(T start, T end) : start_(start), end_(end) {}
 
+    range into_iter() {
+        return std::move(*this);
+    }
+
     struct iterator {
         T current;
         T operator*() const { return current; }
@@ -610,6 +614,10 @@ class range_inclusive {
 public:
     range_inclusive(T start, T end) : start_(start), end_(end) {}
 
+    range_inclusive into_iter() {
+        return std::move(*this);
+    }
+
     struct iterator {
         T current;
         T end;
@@ -625,8 +633,40 @@ public:
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start_}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
 
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    std::optional<T> next() {
+        if (done_) {
+            return std::nullopt;
+        }
+        T current = start_;
+        if (start_ == end_) {
+            done_ = true;
+        } else {
+            ++start_;
+        }
+        return current;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    size_t count() const {
+        if (done_) {
+            return 0;
+        }
+        T current = start_;
+        size_t n = 0;
+        while (true) {
+            ++n;
+            if (current == end_) {
+                break;
+            }
+            ++current;
+        }
+        return n;
+    }
+
 private:
     T start_, end_;
+    bool done_ = false;
 };
 
 template<typename A, typename B>
@@ -636,6 +676,10 @@ range_inclusive(A, B) -> range_inclusive<std::common_type_t<A, B>>;
 template<typename T>
 struct range_from {
     T start;
+
+    range_from into_iter() {
+        return std::move(*this);
+    }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
