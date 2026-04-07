@@ -1622,7 +1622,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-28-2-1775532180 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): preserved deterministic first-head discipline and canonical artifact capture, and did not introduce any crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.29: Collapse the post-27.28.2 deterministic Stage D raw-pointer write/optional-next surface family generically (starting with `runner.cpp:1104` raw-pointer `ptr.write(...)` member-call emission and adjacent `runner.cpp:1080/1081` `std::optional` `is_some`/`unwrap` mismatch), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.29.1: Implement generic transpiler/runtime fixes for the first deterministic 27.28.2 head (no crate-specific scripts): normalize raw-pointer write/optional-next lowering surfaces so pointer/optional-like values dispatch through shared runtime/container APIs instead of Rust-only member names.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.29.1: Implement generic transpiler/runtime fixes for the first deterministic 27.28.2 head (no crate-specific scripts): normalize raw-pointer write/optional-next lowering surfaces so pointer/optional-like values dispatch through shared runtime/container APIs instead of Rust-only member names.
+                              - [x] *done* Plan/scope check: transpiler-only implementation remained focused and below the <1000 LOC guardrail; no additional decomposition was needed.
+                              - [x] *done* Implemented shared first-head fixes in `transpiler/src/codegen.rs`:
+                                - extended function return-type metadata recovery so untyped locals initialized from helper calls preserve raw-pointer return type (enabling `ptr.write(...)` to lower to `rusty::ptr::write(...)` through the existing pointer method-call rewrite path).
+                                - hardened option-pattern (`if let` / `while let`) lowering for ambiguous iterator `next()` surfaces by introducing a tri-state mapping:
+                                  - known `std::optional` → `has_value()` / `value()`
+                                  - known `rusty::Option` → `is_some()` / `unwrap()`
+                                  - unresolved generic optional-like flows → `rusty::detail::option_has_value(...)` / `rusty::detail::option_take_value(...)`
+                                - added an rvalue-safe binding step for helper-based `if let` extraction to avoid binding `option_take_value(...)` to temporary rvalues directly.
+                              - [x] *done* Added/updated fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327291_local_pointer_helper_write_lowers_to_runtime_helper`
+                                - `test_leaf41543333333327291_next_optional_like_methods_lower_to_optional_surface`
+                                - `test_leaf41543333333327291_next_optional_like_methods_lower_for_type_param_iterator_locals`
+                                - `test_leaf41543333333327291_while_let_iter_next_uses_optional_surface_for_type_param_locals`
+                                - `test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler leaf41543333333327291 -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-29-1-1775534183 --keep-work-dirs`
+                              - [x] *done* Single-crate reprobe moved the deterministic head forward:
+                                - removed the prior adjacent optional-surface first-family diagnostics (`runner.cpp:1080/1081` `is_some`/`unwrap` mismatch).
+                                - first hard error now starts at `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:119` (copy of move-only payload through pointer read/write family), with canonical artifacts at `/tmp/rusty-parity-27-29-1-1775534183/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes remain shared and AST/type-context-gated, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.29.2: Re-run full seven-crate parity matrix after 27.29.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

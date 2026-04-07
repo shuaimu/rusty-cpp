@@ -2849,8 +2849,30 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-28-2-1775532180 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-88. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.29.1`.
-   - focus: implement a generic fix for the deterministic `runner.cpp:1104` raw-pointer `ptr.write(...)`/adjacent `runner.cpp:1080/1081` optional-surface family, then re-run matrix.
+88. `Leaf 4.15.4.3.3.3.3.3.27.29.1` is complete.
+   - plan/scope check: transpiler-only implementation stayed under the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - extended local-type recovery from free-function return metadata so untyped locals initialized from pointer helpers keep raw-pointer type context (which routes `ptr.write(...)` through existing pointer helper lowering to `rusty::ptr::write(...)`).
+     - hardened `if let` / `while let` option-pattern lowering with a tri-state surface:
+       - known `std::optional` → `has_value()` / `value()`
+       - known `rusty::Option` → `is_some()` / `unwrap()`
+       - unresolved generic optional-like flows → `rusty::detail::option_has_value(...)` / `rusty::detail::option_take_value(...)`
+     - added helper-based rvalue-safe binding in statement-level `if let` when using `option_take_value(...)` to avoid non-const lvalue-reference binding failures on temporary `next()` results.
+   - added/updated fixture-agnostic regressions:
+     - `test_leaf41543333333327291_local_pointer_helper_write_lowers_to_runtime_helper`
+     - `test_leaf41543333333327291_next_optional_like_methods_lower_to_optional_surface`
+     - `test_leaf41543333333327291_next_optional_like_methods_lower_for_type_param_iterator_locals`
+     - `test_leaf41543333333327291_while_let_iter_next_uses_optional_surface_for_type_param_locals`
+     - `test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-29-1-1775534183 --keep-work-dirs`) removed the prior adjacent `runner.cpp:1080/1081` optional-surface first-family diagnostics.
+   - new deterministic first hard error now starts at `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:119` (move-only copy fallback in pointer read/write family), with canonical artifacts at `/tmp/rusty-parity-27-29-1-1775534183/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327291 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-29-1-1775534183 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes remain shared and context-gated, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
+89. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.29.2`.
+   - focus: rerun full seven-crate matrix after 27.29.1, record canonical first-head artifacts, and update frontier status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

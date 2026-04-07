@@ -54,6 +54,9 @@ enum IntoReceiverKind {
     ScalarLike,
 }
 
+const IF_LET_OPTION_HAS_VALUE_HELPER_MARKER: &str = "__rusty_option_has_value_helper";
+const IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER: &str = "__rusty_option_take_value_helper";
+
 #[derive(Debug, Clone)]
 enum GenericParamDefault {
     Type(syn::Type),
@@ -137,6 +140,10 @@ pub struct CodeGen {
     /// function path. Used for targeted template-argument recovery when C++
     /// deduction is blocked by wrapper pointer forms.
     function_type_param_names: HashMap<String, Vec<String>>,
+    /// Collected free-function return types keyed by scoped function path.
+    /// Used for local type recovery when call results flow into untyped locals
+    /// (for example pointer helper wrappers returning `*mut T`).
+    function_return_types: HashMap<String, Option<syn::Type>>,
     /// Collected method parameter passing styles keyed by method name.
     /// Mixed signatures remain conservative and do not trigger address-of stripping.
     method_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
@@ -285,6 +292,7 @@ impl CodeGen {
             function_arg_pass_styles: HashMap::new(),
             function_arg_expected_types: HashMap::new(),
             function_type_param_names: HashMap::new(),
+            function_return_types: HashMap::new(),
             method_arg_pass_styles: HashMap::new(),
             method_arg_expected_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
@@ -403,6 +411,7 @@ impl CodeGen {
         self.function_arg_pass_styles.clear();
         self.function_arg_expected_types.clear();
         self.function_type_param_names.clear();
+        self.function_return_types.clear();
         self.method_arg_pass_styles.clear();
         self.method_arg_expected_types.clear();
         self.reassigned_vars.clear();
@@ -1324,6 +1333,8 @@ impl CodeGen {
                     self.record_function_arg_expected_types(&scoped_name, expected_types);
                     let type_params = self.collect_type_param_names_from_generics(&f.sig.generics);
                     self.record_function_type_param_names(&scoped_name, type_params);
+                    let return_ty = self.collect_return_type_from_output(&f.sig.output);
+                    self.record_function_return_type(&scoped_name, return_ty);
                 }
                 syn::Item::Impl(impl_block) => {
                     for impl_item in &impl_block.items {
@@ -1400,6 +1411,13 @@ impl CodeGen {
                 _ => None,
             })
             .collect()
+    }
+
+    fn collect_return_type_from_output(&self, output: &syn::ReturnType) -> Option<syn::Type> {
+        match output {
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+            syn::ReturnType::Default => None,
+        }
     }
 
     fn arg_pass_style_for_type(&self, ty: &syn::Type) -> ArgPassStyle {
@@ -1493,6 +1511,30 @@ impl CodeGen {
             }
             Entry::Vacant(vac) => {
                 vac.insert(params);
+            }
+        }
+    }
+
+    fn merge_function_return_type(
+        existing: &mut Option<syn::Type>,
+        incoming: &Option<syn::Type>,
+    ) {
+        match (existing.as_ref(), incoming.as_ref()) {
+            (Some(lhs), Some(rhs)) if Self::types_equivalent_by_tokens(lhs, rhs) => {}
+            _ => {
+                *existing = None;
+            }
+        }
+    }
+
+    fn record_function_return_type(&mut self, key: &str, return_ty: Option<syn::Type>) {
+        use std::collections::hash_map::Entry;
+        match self.function_return_types.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => {
+                Self::merge_function_return_type(occ.get_mut(), &return_ty);
+            }
+            Entry::Vacant(vac) => {
+                vac.insert(return_ty);
             }
         }
     }
@@ -1611,6 +1653,18 @@ impl CodeGen {
                 if !params.is_empty() {
                     return Some(params);
                 }
+            }
+        }
+        None
+    }
+
+    fn lookup_function_return_type<'a>(&'a self, func: &syn::Expr) -> Option<&'a syn::Type> {
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        for key in self.call_path_candidates(&path_expr.path) {
+            if let Some(Some(ty)) = self.function_return_types.get(&key) {
+                return Some(ty);
             }
         }
         None
@@ -4397,10 +4451,8 @@ impl CodeGen {
                     let local_type_params =
                         self.collect_type_param_names_from_generics(&f.sig.generics);
                     self.record_function_type_param_names(&local_fn_name, local_type_params);
-                    let return_ty = match &f.sig.output {
-                        syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
-                        syn::ReturnType::Default => None,
-                    };
+                    let return_ty = self.collect_return_type_from_output(&f.sig.output);
+                    self.record_function_return_type(&local_fn_name, return_ty.clone());
                     self.register_local_binding(local_fn_name, return_ty);
                     self.emit_nested_function(f);
                 } else if self.block_depth > 0 && matches!(item, syn::Item::Impl(_)) {
@@ -6451,6 +6503,88 @@ impl CodeGen {
         self.emit_if_inner(if_expr, true);
     }
 
+    fn option_like_pattern_surface_for_expr(
+        &self,
+        scrutinee_expr: &syn::Expr,
+    ) -> (&'static str, &'static str, &'static str, bool) {
+        if let Some(inferred_ty) = self.infer_simple_expr_type(scrutinee_expr) {
+            if self.is_std_optional_syn_type(&inferred_ty) {
+                return ("has_value", "has_value", "value", true);
+            }
+            if self.is_rust_option_syn_type(&inferred_ty) {
+                return ("is_some", "is_none", "unwrap", false);
+            }
+        }
+        if self.is_std_optional_like_receiver_expr(scrutinee_expr) {
+            return (
+                IF_LET_OPTION_HAS_VALUE_HELPER_MARKER,
+                IF_LET_OPTION_HAS_VALUE_HELPER_MARKER,
+                IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER,
+                true,
+            );
+        }
+        ("is_some", "is_none", "unwrap", false)
+    }
+
+    fn format_receiver_method_call_expr(
+        &self,
+        receiver_expr: &syn::Expr,
+        receiver_cpp: &str,
+        method: &str,
+    ) -> String {
+        let receiver = if self.method_receiver_needs_parentheses(receiver_expr) {
+            format!("({})", receiver_cpp)
+        } else {
+            receiver_cpp.to_string()
+        };
+        let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr) {
+            "->"
+        } else {
+            "."
+        };
+        format!("{}{}{}()", receiver, member_op, method)
+    }
+
+    fn emit_if_let_unwrap_expr(&self, scrutinee_cpp: &str, unwrap_method: &str) -> String {
+        if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+            format!("rusty::detail::option_take_value({})", scrutinee_cpp)
+        } else {
+            format!("{}.{}()", scrutinee_cpp, unwrap_method)
+        }
+    }
+
+    fn emit_if_let_has_value_expr(&self, scrutinee_cpp: &str) -> String {
+        format!("rusty::detail::option_has_value({})", scrutinee_cpp)
+    }
+
+    fn format_option_like_pattern_condition(
+        &self,
+        scrutinee_expr: &syn::Expr,
+        scrutinee_cpp: &str,
+        expect_some: bool,
+    ) -> String {
+        let (some_check, none_check, _, none_negated) =
+            self.option_like_pattern_surface_for_expr(scrutinee_expr);
+        if some_check == IF_LET_OPTION_HAS_VALUE_HELPER_MARKER {
+            let has_value_expr = self.emit_if_let_has_value_expr(scrutinee_cpp);
+            return if expect_some {
+                has_value_expr
+            } else {
+                format!("!{}", has_value_expr)
+            };
+        }
+        if expect_some {
+            return self.format_receiver_method_call_expr(scrutinee_expr, scrutinee_cpp, some_check);
+        }
+        let none_check_expr =
+            self.format_receiver_method_call_expr(scrutinee_expr, scrutinee_cpp, none_check);
+        if none_negated {
+            format!("!{}", none_check_expr)
+        } else {
+            none_check_expr
+        }
+    }
+
     /// Emit `if let Pattern = expr { ... } else { ... }` as C++ code.
     fn emit_if_let(
         &mut self,
@@ -6459,7 +6593,10 @@ impl CodeGen {
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
     ) {
-        let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+        let scrutinee_expr = let_expr.expr.as_ref();
+        let scrutinee = self.emit_expr_to_string(scrutinee_expr);
+        let (_, _, option_unwrap_method, _) =
+            self.option_like_pattern_surface_for_expr(scrutinee_expr);
 
         match &*let_expr.pat {
             syn::Pat::TupleStruct(ts) => {
@@ -6473,14 +6610,15 @@ impl CodeGen {
 
                 match path_str.as_str() {
                     "Some" | "Option::Some" => {
-                        // if let Some(v) = opt → if (opt.is_some()) { auto v = opt.unwrap(); ... }
+                        // if let Some(v) = opt → if (opt.<is_some/has_value>()) { auto v = opt.<unwrap/value>(); ... }
                         let binding = self.extract_tuple_struct_bindings(&ts.elems);
-                        let cond = format!("{}.is_some()", scrutinee);
+                        let cond =
+                            self.format_option_like_pattern_condition(scrutinee_expr, &scrutinee, true);
                         self.emit_if_let_body(
                             &cond,
                             &binding,
                             &scrutinee,
-                            "unwrap",
+                            option_unwrap_method,
                             then_branch,
                             else_branch,
                             first,
@@ -6546,7 +6684,11 @@ impl CodeGen {
                 let name = pi.ident.to_string();
                 // Check for known enum variants that parse as idents
                 let cond = match name.as_str() {
-                    "None" => Some(format!("{}.is_none()", scrutinee)),
+                    "None" => Some(self.format_option_like_pattern_condition(
+                        scrutinee_expr,
+                        &scrutinee,
+                        false,
+                    )),
                     _ => None,
                 };
 
@@ -6575,7 +6717,7 @@ impl CodeGen {
                 }
             }
             syn::Pat::Path(pp) => {
-                // if let None = opt → if (opt.is_none())
+                // if let None = opt → if (opt.<is_none/!has_value>())
                 let path_str = pp
                     .path
                     .segments
@@ -6584,7 +6726,11 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join("::");
                 let cond = match path_str.as_str() {
-                    "None" | "Option::None" => format!("{}.is_none()", scrutinee),
+                    "None" | "Option::None" => self.format_option_like_pattern_condition(
+                        scrutinee_expr,
+                        &scrutinee,
+                        false,
+                    ),
                     _ => {
                         let cpp_type = path_str.replace("::", "_");
                         format!("std::holds_alternative<{}>({})", cpp_type, scrutinee)
@@ -6635,20 +6781,23 @@ impl CodeGen {
 
         // Emit bindings
         if bindings.len() == 1 && bindings[0] != "_" {
-            // `if let ... = <option_or_result>.as_mut()` binds `&mut T` / `&mut E`.
-            // Those are represented as pointer-like unwrap values in C++ runtime types;
-            // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
-            // call arguments (avoid producing pointer-to-pointer by accident).
-            if scrutinee.ends_with(".as_mut()") {
+            if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
                 self.writeln(&format!(
-                    "auto& {} = *{}.{}();",
-                    bindings[0], scrutinee, unwrap_method
+                    "auto {} = rusty::detail::option_take_value(_iflet_take);",
+                    bindings[0]
                 ));
             } else {
-                self.writeln(&format!(
-                    "auto {} = {}.{}();",
-                    bindings[0], scrutinee, unwrap_method
-                ));
+                let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee, unwrap_method);
+                // `if let ... = <option_or_result>.as_mut()` binds `&mut T` / `&mut E`.
+                // Those are represented as pointer-like unwrap values in C++ runtime types;
+                // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
+                // call arguments (avoid producing pointer-to-pointer by accident).
+                if scrutinee.ends_with(".as_mut()") {
+                    self.writeln(&format!("auto& {} = *{};", bindings[0], unwrap_expr));
+                } else {
+                    self.writeln(&format!("auto {} = {};", bindings[0], unwrap_expr));
+                }
             }
         }
 
@@ -6759,10 +6908,13 @@ impl CodeGen {
         self.writeln(&format!("if (!({})) {{ break; }}", cond_expr));
         if let Some(binding) = binding_name {
             if let Some(unwrap) = unwrap_method {
-                if scrutinee.ends_with(".as_mut()") {
-                    self.writeln(&format!("auto& {} = *_whilelet.{}();", binding, unwrap));
+                let unwrap_expr = self.emit_if_let_unwrap_expr("_whilelet", unwrap);
+                if scrutinee.ends_with(".as_mut()")
+                    && unwrap != IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER
+                {
+                    self.writeln(&format!("auto& {} = *{};", binding, unwrap_expr));
                 } else {
-                    self.writeln(&format!("auto {} = _whilelet.{}();", binding, unwrap));
+                    self.writeln(&format!("auto {} = {};", binding, unwrap_expr));
                 }
             } else {
                 self.writeln(&format!("auto {} = _whilelet;", binding));
@@ -7732,6 +7884,31 @@ impl CodeGen {
             }
         }
 
+        if matches!(method.as_str(), "next" | "next_back") && mc.args.is_empty() {
+            if self.is_iterator_like_receiver_expr(&mc.receiver) {
+                let item_ty = self
+                    .infer_iter_item_type_from_expr(&mc.receiver)
+                    .unwrap_or_else(|| parse_quote!(std::tuple<>));
+                return Some(parse_quote!(std::optional<#item_ty>));
+            }
+            let receiver = self.peel_paren_group_expr(&mc.receiver);
+            if let syn::Expr::Path(path) = receiver {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(local_ty) = self.lookup_local_binding_type(&name) {
+                        let local_ty = self.peel_reference_paren_group_type(&local_ty);
+                        if let syn::Type::Path(tp) = local_ty {
+                            if tp.path.segments.len() == 1
+                                && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                            {
+                                return Some(parse_quote!(std::optional<std::tuple<>>));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -7776,6 +7953,13 @@ impl CodeGen {
                 if matches!(receiver_ty, syn::Type::Ptr(_)) {
                     return Some(receiver_ty);
                 }
+            }
+        }
+
+        if let Some(return_ty) = self.lookup_function_return_type(call.func.as_ref()) {
+            let return_ty = self.peel_reference_paren_group_type(return_ty).clone();
+            if matches!(return_ty, syn::Type::Ptr(_)) {
+                return Some(return_ty);
             }
         }
 
@@ -8367,6 +8551,9 @@ impl CodeGen {
                 if path.path.segments.len() == 1 {
                     let ident = path.path.segments[0].ident.to_string();
                     if ident != "self" && self.lookup_local_binding_type(&ident).is_none() {
+                        if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                            return "rusty::detail::option_take_value(_iflet)".to_string();
+                        }
                         return format!("_iflet.{}()", unwrap_method);
                     }
                 }
@@ -11064,8 +11251,37 @@ impl CodeGen {
     }
 
     fn is_std_optional_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
-        self.infer_simple_expr_type(expr)
+        if self
+            .infer_simple_expr_type(expr)
             .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
+        {
+            return true;
+        }
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::MethodCall(mc) = expr else {
+            return false;
+        };
+        if !matches!(mc.method.to_string().as_str(), "next" | "next_back") || !mc.args.is_empty() {
+            return false;
+        }
+        if self.is_iterator_like_receiver_expr(&mc.receiver) {
+            return true;
+        }
+        let receiver = self.peel_paren_group_expr(&mc.receiver);
+        if let syn::Expr::MethodCall(inner) = receiver {
+            return inner.method == "into_iter" && inner.args.is_empty();
+        }
+        if let syn::Expr::Path(path) = receiver {
+            if path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                if self.lookup_local_binding_cpp_name(&name).is_some()
+                    && self.lookup_local_binding_type(&name).is_none()
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn is_to_vec_runtime_receiver_expr(&self, expr: &syn::Expr) -> bool {
@@ -12877,9 +13093,10 @@ impl CodeGen {
             let emitted = self.emit_expr_to_string_with_expected(then_expr, branch_expected_ty);
             if let Some(binding) = binding_name {
                 if let Some(unwrap) = unwrap_method {
+                    let unwrap_expr = self.emit_if_let_unwrap_expr("_iflet", unwrap);
                     format!(
-                        "([&]() {{ auto {} = _iflet.{}(); return {}; }}())",
-                        binding, unwrap, emitted
+                        "([&]() {{ auto {} = {}; return {}; }}())",
+                        binding, unwrap_expr, emitted
                     )
                 } else {
                     format!(
@@ -12907,6 +13124,8 @@ impl CodeGen {
         &self,
         let_expr: &syn::ExprLet,
     ) -> Option<(String, Option<String>, Option<&'static str>)> {
+        let (option_some_check, option_none_check, option_unwrap, option_none_negated) =
+            self.option_like_pattern_surface_for_expr(&let_expr.expr);
         match &*let_expr.pat {
             syn::Pat::TupleStruct(ts) => {
                 let path_str = ts
@@ -12916,10 +13135,19 @@ impl CodeGen {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
-                let (cond, unwrap) = match path_str.as_str() {
-                    "Some" | "Option::Some" => ("_iflet.is_some()", Some("unwrap")),
-                    "Ok" | "Result::Ok" => ("_iflet.is_ok()", Some("unwrap")),
-                    "Err" | "Result::Err" => ("_iflet.is_err()", Some("unwrap_err")),
+                let (cond, unwrap): (String, Option<&'static str>) = match path_str.as_str() {
+                    "Some" | "Option::Some" => {
+                        if option_some_check == IF_LET_OPTION_HAS_VALUE_HELPER_MARKER {
+                            (
+                                "rusty::detail::option_has_value(_iflet)".to_string(),
+                                Some(option_unwrap),
+                            )
+                        } else {
+                            (format!("_iflet.{}()", option_some_check), Some(option_unwrap))
+                        }
+                    }
+                    "Ok" | "Result::Ok" => ("_iflet.is_ok()".to_string(), Some("unwrap")),
+                    "Err" | "Result::Err" => ("_iflet.is_err()".to_string(), Some("unwrap_err")),
                     _ => return None,
                 };
                 let binding = if ts.elems.len() == 1 {
@@ -12933,7 +13161,7 @@ impl CodeGen {
                 } else {
                     return None;
                 };
-                Some((cond.to_string(), binding, unwrap))
+                Some((cond, binding, unwrap))
             }
             syn::Pat::Path(pp) => {
                 let path_str = pp
@@ -12944,10 +13172,21 @@ impl CodeGen {
                     .collect::<Vec<_>>()
                     .join("::");
                 let cond = match path_str.as_str() {
-                    "None" | "Option::None" => "_iflet.is_none()",
+                    "None" | "Option::None" => {
+                        let call = if option_none_check == IF_LET_OPTION_HAS_VALUE_HELPER_MARKER {
+                            "rusty::detail::option_has_value(_iflet)".to_string()
+                        } else {
+                            format!("_iflet.{}()", option_none_check)
+                        };
+                        if option_none_negated {
+                            format!("!{}", call)
+                        } else {
+                            call
+                        }
+                    }
                     _ => return None,
                 };
-                Some((cond.to_string(), None, None))
+                Some((cond, None, None))
             }
             syn::Pat::Ident(pi) => {
                 let binding = if pi.ident == "_" {
@@ -15468,6 +15707,32 @@ impl CodeGen {
             }
             syn::Type::Paren(p) => self.is_std_optional_syn_type(&p.elem),
             syn::Type::Group(g) => self.is_std_optional_syn_type(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn is_rust_option_syn_type(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => {
+                let parts: Vec<String> = tp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect();
+                match parts.as_slice() {
+                    [single] => single == "Option",
+                    [ns, opt] => (ns == "rusty" || ns == "core" || ns == "std") && opt == "Option",
+                    [prefix, option, opt] => {
+                        (prefix == "core" || prefix == "std")
+                            && option == "option"
+                            && opt == "Option"
+                    }
+                    _ => false,
+                }
+            }
+            syn::Type::Paren(p) => self.is_rust_option_syn_type(&p.elem),
+            syn::Type::Group(g) => self.is_rust_option_syn_type(&g.elem),
             _ => false,
         }
     }
@@ -23610,6 +23875,28 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf41543333333327291_local_pointer_helper_write_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn raw_ptr_add<T>(ptr: *mut T, offset: usize) -> *mut T {
+                ptr.add(offset)
+            }
+
+            fn f(ptr: *mut i32, v: i32) {
+                unsafe {
+                    let p = raw_ptr_add(ptr, 0);
+                    p.write(v);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::write("));
+        assert!(out.contains("raw_ptr_add"));
+        assert!(!out.contains("p.write(v)"));
+        assert!(!out.contains("p.write(std::move(v))"));
+    }
+
+    #[test]
     fn test_leaf41543333333251_non_pointer_write_call_is_not_rewritten() {
         let out = transpile_str(
             r#"
@@ -26124,6 +26411,81 @@ mod tests {
         assert!(out.contains("x.has_value()"));
         assert!(out.contains("!x.has_value()"));
         assert!(out.contains("x.value()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327291_next_optional_like_methods_lower_to_optional_surface() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut iter = 0..3;
+                let _a = iter.next().is_some();
+                let _b = iter.next().unwrap();
+            }
+            "#,
+        );
+        assert!(out.contains("iter.next().has_value()"));
+        assert!(out.contains("iter.next().value()"));
+        assert!(!out.contains("iter.next().is_some()"));
+        assert!(!out.contains("iter.next().unwrap()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327291_next_optional_like_methods_lower_for_type_param_iterator_locals()
+    {
+        let out = transpile_str(
+            r#"
+            fn f<I>(iterable: I) {
+                let iter = iterable.into_iter();
+                let _a = iter.next().is_some();
+                let _b = iter.next().unwrap();
+            }
+            "#,
+        );
+        assert!(out.contains("iter.next().has_value()"));
+        assert!(out.contains("iter.next().value()"));
+        assert!(!out.contains("iter.next().is_some()"));
+        assert!(!out.contains("iter.next().unwrap()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327291_while_let_iter_next_uses_optional_surface_for_type_param_locals() {
+        let out = transpile_str(
+            r#"
+            fn f<I>(iterable: I) {
+                let iter = iterable.into_iter();
+                while let Some(v) = iter.next() {
+                    let _ = v;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("if (!(rusty::detail::option_has_value(_whilelet))) { break; }"));
+        assert!(out.contains("auto v = rusty::detail::option_take_value(_whilelet);"));
+        assert!(!out.contains("_whilelet.is_some()"));
+        assert!(!out.contains("_whilelet.unwrap()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals()
+    {
+        let out = transpile_str(
+            r#"
+            fn f<I>(iterable: I) -> i32 {
+                let iter = iterable.into_iter();
+                if let Some(v) = iter.next() {
+                    v
+                } else {
+                    0
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("if (rusty::detail::option_has_value(iter.next())) {"));
+        assert!(out.contains("auto&& _iflet_take = iter.next();"));
+        assert!(out.contains("auto v = rusty::detail::option_take_value(_iflet_take);"));
+        assert!(!out.contains("iter.next().is_some()"));
+        assert!(!out.contains("iter.next().unwrap()"));
     }
 
     // ── Phase 17 Fix 3: UFCS and expanded macro patterns ────────
