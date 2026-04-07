@@ -10060,8 +10060,29 @@ impl CodeGen {
             }
         }
 
-        let fields: Vec<String> = struct_expr
-            .fields
+        let mut ordered_fields: Vec<&syn::FieldValue> = struct_expr.fields.iter().collect();
+        if let Some(struct_name) = resolved_struct_name.as_ref() {
+            if let Some(field_order) = self.lookup_struct_field_order(struct_name) {
+                let field_rank: HashMap<String, usize> = field_order
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, name)| (name.clone(), idx))
+                    .collect();
+                if ordered_fields
+                    .iter()
+                    .all(|f| matches!(f.member, syn::Member::Named(_)))
+                {
+                    ordered_fields.sort_by_key(|f| match &f.member {
+                        syn::Member::Named(ident) => {
+                            field_rank.get(&ident.to_string()).copied().unwrap_or(usize::MAX)
+                        }
+                        syn::Member::Unnamed(_) => usize::MAX,
+                    });
+                }
+            }
+        }
+
+        let fields: Vec<String> = ordered_fields
             .iter()
             .map(|f| {
                 let rust_member_name = match &f.member {
@@ -23636,6 +23657,34 @@ mod tests {
         );
         assert!(out.contains("sink.clone_from_slice(1);"));
         assert!(!out.contains("rusty::clone_from_slice(sink"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327231_struct_literal_designators_follow_decl_order() {
+        let out = transpile_str(
+            r#"
+            struct Pair { a: i32, b: i32 }
+            fn f() -> Pair {
+                Pair { b: 2, a: 1 }
+            }
+            "#,
+        );
+        assert!(out.contains("return Pair{.a = 1, .b = 2};"));
+        assert!(!out.contains("return Pair{.b = 2, .a = 1};"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327231_arraystring_like_literal_designators_follow_decl_order() {
+        let out = transpile_str(
+            r#"
+            struct A { len_field: usize, xs: [u8; 2] }
+            fn f() -> A {
+                A { xs: [1, 2], len_field: 0 }
+            }
+            "#,
+        );
+        assert!(out.contains("return A{.len_field = 0, .xs = std::array{"));
+        assert!(!out.contains("return A{.xs = std::array{"));
     }
 
     #[test]

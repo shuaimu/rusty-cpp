@@ -2716,8 +2716,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-22-2-1775527215 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-76. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.23.1`.
-   - focus: implement a generic fix for the new deterministic `runner.cpp:1408` aggregate-designator-order head, then re-run matrix.
+76. `Leaf 4.15.4.3.3.3.3.3.27.23.1` is complete.
+   - plan/scope check: transpiler-only implementation remained under the <1000 LOC guardrail and required no additional decomposition.
+   - implemented generic transpiler hardening in `transpiler/src/codegen.rs`:
+     - struct-literal lowering for named aggregates now emits designated fields in declaration order (using recorded struct field-order metadata) rather than source-expression order, preserving C++ designated-initializer ordering requirements;
+     - existing drop-sensitive full-field constructor lowering remains unchanged, so move/drop semantics for those shapes are not broadened by this fix.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327231_struct_literal_designators_follow_decl_order`
+     - `test_leaf41543333333327231_arraystring_like_literal_designators_follow_decl_order`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-23-1-1775527657 --keep-work-dirs`) removed the deterministic head at `runner.cpp:1408` (aggregate designator order mismatch for `ArrayString<CAP>::new_`).
+   - new deterministic first hard error now starts at `runner.cpp:1588`: `&*"..."` address-of-rvalue and `std::string_view*` vs `std::string_view` compare-shape mismatch, with adjacent fallout at `include/rusty/array.hpp:309` (`len(const char*)` unresolved `std::size`) and downstream string/constexpr-capacity errors.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327231_struct_literal_designators_follow_decl_order -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327231_arraystring_like_literal_designators_follow_decl_order -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-23-1-1775527657 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fix is shared and AST-context-gated, avoids crate-specific scripts or text-rewrite shortcuts, and preserves deterministic first-head artifact discipline.
+77. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.23.2`.
+   - focus: re-run full seven-crate matrix after 27.23.1 and record the next deterministic head with canonical artifacts (or mark closure if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
