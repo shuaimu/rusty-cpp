@@ -2871,8 +2871,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-29-1-1775534183 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes remain shared and context-gated, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
-89. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.29.2`.
-   - focus: rerun full seven-crate matrix after 27.29.1, record canonical first-head artifacts, and update frontier status.
+89. `Leaf 4.15.4.3.3.3.3.3.27.29.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-29-2-1775534455 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-29-2-1775534455/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:119` (`rusty::ptr::read` returns by copy for a move-only payload, surfaced via `ArrayVecImpl::pop`), with immediate adjacent fallout at `/home/shuai/git/rusty-cpp/include/rusty/mem.hpp:86` (`rusty::mem::replace` copy-assignment surface on move-only `ArrayVec<...Bump...>`), followed by downstream dependent variant/slice/template diagnostics.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-29-2-1775534455 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+90. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.30.1`.
+   - focus: implement a shared move-semantics fix for the `ptr::read`/`mem::replace` runtime head family, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
