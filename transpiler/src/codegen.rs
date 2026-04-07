@@ -155,7 +155,7 @@ pub struct CodeGen {
     /// is reassigned, emit it as a pointer instead of a reference.
     reassigned_vars: std::collections::HashSet<String>,
     /// Immutable local names in the current block that are consumed through
-    /// by-value method calls (for example `res.unwrap_err()`).
+    /// by-value method/function calls or returned by value.
     /// Such bindings must not be emitted as `const auto`.
     consuming_method_receiver_vars: std::collections::HashSet<String>,
     /// Per-block inferred element type hints for untyped `[val; N]` locals.
@@ -17426,7 +17426,8 @@ fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<Str
 }
 
 /// Scan statements and collect immutable locals that are consumed through
-/// by-value method calls (for example `res.unwrap_err()`).
+/// by-value calls or by-value returns (for example `res.unwrap_err()` or
+/// `return v;` / tail `v`).
 fn collect_consuming_method_receiver_vars(
     stmts: &[syn::Stmt],
 ) -> std::collections::HashSet<String> {
@@ -17434,7 +17435,50 @@ fn collect_consuming_method_receiver_vars(
     for stmt in stmts {
         collect_consuming_method_receivers_in_stmt(stmt, &mut result);
     }
+    mark_tail_value_consumed_locals(stmts, &mut result);
     result
+}
+
+fn mark_tail_value_consumed_locals(
+    stmts: &[syn::Stmt],
+    result: &mut std::collections::HashSet<String>,
+) {
+    let Some(last_stmt) = stmts.last() else {
+        return;
+    };
+    let syn::Stmt::Expr(expr, semi) = last_stmt else {
+        return;
+    };
+    if semi.is_none() {
+        mark_consumed_local_from_value_expr(expr, result);
+    }
+}
+
+fn mark_consumed_local_from_value_expr(
+    expr: &syn::Expr,
+    result: &mut std::collections::HashSet<String>,
+) {
+    if let Some(name) = extract_simple_local_ident(expr) {
+        result.insert(name);
+        return;
+    }
+    match peel_paren_group_expr(expr) {
+        syn::Expr::Block(block) => {
+            mark_tail_value_consumed_locals(&block.block.stmts, result);
+        }
+        syn::Expr::If(if_expr) => {
+            mark_tail_value_consumed_locals(&if_expr.then_branch.stmts, result);
+            if let Some((_, else_expr)) = &if_expr.else_branch {
+                mark_consumed_local_from_value_expr(else_expr, result);
+            }
+        }
+        syn::Expr::Match(match_expr) => {
+            for arm in &match_expr.arms {
+                mark_consumed_local_from_value_expr(&arm.body, result);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Infer element types for untyped repeat-array locals (`let x = [0; N];`) by
@@ -18790,11 +18834,13 @@ fn collect_consuming_method_receivers_in_expr(
         }
         syn::Expr::Break(brk) => {
             if let Some(value) = &brk.expr {
+                mark_consumed_local_from_value_expr(value, result);
                 collect_consuming_method_receivers_in_expr(value, result);
             }
         }
         syn::Expr::Return(ret) => {
             if let Some(value) = &ret.expr {
+                mark_consumed_local_from_value_expr(value, result);
                 collect_consuming_method_receivers_in_expr(value, result);
             }
         }
@@ -20466,6 +20512,36 @@ mod tests {
         // let b = a → auto b = std::move(a)
         let out = transpile_str("fn f() { let a = 1; let b = a; }");
         assert!(out.contains("std::move(a)"));
+    }
+
+    #[test]
+    fn test_leaf415433333333321_tail_return_consumes_local_binding() {
+        let out = transpile_str(
+            r#"
+            fn f() -> String {
+                let s = String::from("hi");
+                s
+            }
+            "#,
+        );
+        assert!(out.contains("auto s = rusty::String::from("));
+        assert!(!out.contains("const auto s = rusty::String::from("));
+        assert!(out.contains("return s;") || out.contains("return std::move(s);"));
+    }
+
+    #[test]
+    fn test_leaf415433333333321_explicit_return_consumes_local_binding() {
+        let out = transpile_str(
+            r#"
+            fn f() -> String {
+                let s = String::from("hi");
+                return s;
+            }
+            "#,
+        );
+        assert!(out.contains("auto s = rusty::String::from("));
+        assert!(!out.contains("const auto s = rusty::String::from("));
+        assert!(out.contains("return s;") || out.contains("return std::move(s);"));
     }
 
     #[test]

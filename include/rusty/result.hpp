@@ -26,6 +26,8 @@ namespace rusty {
 template<typename T, typename E>
 class Result {
 private:
+    struct UninitTag {};
+
     // Use aligned storage for union-like behavior (C++11 compatible)
     union Storage {
         typename std::aligned_storage<sizeof(T), alignof(T)>::type ok_storage;
@@ -36,6 +38,9 @@ private:
     } storage;
     
     bool is_ok_value;
+
+    // Construct storage without materializing either payload variant.
+    explicit Result(UninitTag) noexcept : is_ok_value(false) {}
     
     T& ok_ref() { return *reinterpret_cast<T*>(&storage.ok_storage); }
     const T& ok_ref() const { return *reinterpret_cast<const T*>(&storage.ok_storage); }
@@ -53,7 +58,7 @@ private:
 public:
     // Constructors for Ok variant
     static Result Ok(T value) {
-        Result r;
+        Result r(UninitTag{});
         new (&r.storage.ok_storage) T(std::move(value));
         r.is_ok_value = true;
         return r;
@@ -61,7 +66,7 @@ public:
     
     // Constructors for Err variant
     static Result Err(E error) {
-        Result r;
+        Result r(UninitTag{});
         new (&r.storage.err_storage) E(std::move(error));
         r.is_ok_value = false;
         return r;

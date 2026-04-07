@@ -129,7 +129,7 @@ inline T read(T* src) {
 
 template<typename T, typename U>
 inline void write(T* dst, U&& value) {
-    *dst = std::forward<U>(value);
+    std::construct_at(dst, std::forward<U>(value));
 }
 
 template<typename T, typename Count>

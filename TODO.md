@@ -1700,7 +1700,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-31-2-verify-20260407-010640 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head discipline and canonical artifact capture, and did not introduce crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.32: Collapse the post-27.31.2 deterministic Stage D `Result`/move-only runtime family generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72` default-construction and adjacent move-only assignment/copy surfaces), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.32.1: Implement shared transpiler/runtime fixes for the first deterministic 27.31.2 head (no crate-specific scripts): eliminate `Result::Err` default-construction requirements for move-only non-default-constructible payloads and collapse immediate adjacent move-only write/copy surfaces only where root-cause evidence requires.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.32.1: Implement shared transpiler/runtime fixes for the first deterministic 27.31.2 head (no crate-specific scripts): eliminate `Result::Err` default-construction requirements for move-only non-default-constructible payloads and collapse immediate adjacent move-only write/copy surfaces only where root-cause evidence requires.
+                              - [x] *done* Plan/scope check: shared runtime + transpiler + regression updates remained focused and under the <1000 LOC guardrail, so no additional decomposition was required.
+                              - [x] *done* Implemented shared runtime fixes:
+                                - `include/rusty/result.hpp`: added uninitialized constructor-tag path for `Result<T, E>` and switched `Result::Ok`/`Result::Err` to construct active storage directly without routing through `Result()` (removes implicit `E()` default-construction requirement and avoids transient wrong-variant construction).
+                                - `include/rusty/ptr.hpp`: updated `rusty::ptr::write(T*, U&&)` to use `std::construct_at` write semantics instead of assignment, removing move-assignment requirements for move-only/non-assignable payloads.
+                              - [x] *done* Implemented shared transpiler fix in `transpiler/src/codegen.rs`: extended immutable-local consumption analysis to treat by-value `return x;`, by-value `break x`, and tail value expressions as consuming surfaces so corresponding locals are not emitted as `const auto` when move-out semantics are required.
+                              - [x] *done* Added/updated fixture-agnostic regressions:
+                                - `transpiler/src/codegen.rs`
+                                  - `test_leaf415433333333321_tail_return_consumes_local_binding`
+                                  - `test_leaf415433333333321_explicit_return_consumes_local_binding`
+                                - `transpiler/tests/runtime_move_semantics.rs`
+                                  - `test_ptr_write_supports_non_assignable_move_only_payloads`
+                                  - `test_result_err_supports_non_default_constructible_error_payloads`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler test_leaf415433333333321_tail_return_consumes_local_binding -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler test_leaf415433333333321_explicit_return_consumes_local_binding -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-32-1-20260407-013012 --keep-work-dirs`
+                              - [x] *done* Single-crate reprobe removed the deterministic `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72` default-construction head and immediate adjacent `runner.cpp:1013` + `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:132` move-only write/copy family; new deterministic first hard error now starts at `runner.cpp:1342` (`raw_ptr_add` still assumes wrapper-pointer `.cast` surface while receiving raw pointer pointees), with immediate adjacent fallout at `runner.cpp:1327` (scope-exit guard lambda invocation/value-category mismatch against `auto&` first parameter expectations).
+                              - [x] *done* Canonical artifacts for this leaf’s reprobe are at `/tmp/rusty-parity-27-32-1-20260407-013012/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed in shared runtime/transpiler surfaces, avoided crate-specific scripts/post-generation rewrites, and preserved deterministic first-head artifact capture.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.32.2: Re-run full seven-crate parity matrix after 27.32.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

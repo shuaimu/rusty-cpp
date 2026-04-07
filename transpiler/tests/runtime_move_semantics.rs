@@ -111,3 +111,59 @@ fn test_mem_replace_supports_non_assignable_move_only_payloads() {
 
     compile_and_run_cpp(source, "mem_replace_non_assignable");
 }
+
+#[test]
+fn test_ptr_write_supports_non_assignable_move_only_payloads() {
+    let source = r#"
+        #include <rusty/ptr.hpp>
+
+        struct NonAssignable {
+            int value;
+            explicit NonAssignable(int v) : value(v) {}
+            NonAssignable() = delete;
+            NonAssignable(const NonAssignable&) = delete;
+            NonAssignable& operator=(const NonAssignable&) = delete;
+            NonAssignable(NonAssignable&&) noexcept = default;
+            NonAssignable& operator=(NonAssignable&&) = delete;
+        };
+
+        int main() {
+            alignas(NonAssignable) unsigned char storage[sizeof(NonAssignable)];
+            auto* dst = reinterpret_cast<NonAssignable*>(storage);
+            rusty::ptr::write(dst, NonAssignable(11));
+            const bool ok = dst->value == 11;
+            dst->~NonAssignable();
+            return ok ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "ptr_write_non_assignable");
+}
+
+#[test]
+fn test_result_err_supports_non_default_constructible_error_payloads() {
+    let source = r#"
+        #include <rusty/result.hpp>
+
+        struct NonDefaultErr {
+            int value;
+            NonDefaultErr() = delete;
+            explicit NonDefaultErr(int v) : value(v) {}
+            NonDefaultErr(const NonDefaultErr&) = delete;
+            NonDefaultErr& operator=(const NonDefaultErr&) = delete;
+            NonDefaultErr(NonDefaultErr&&) noexcept = default;
+            NonDefaultErr& operator=(NonDefaultErr&&) noexcept = default;
+        };
+
+        int main() {
+            auto res = rusty::Result<int, NonDefaultErr>::Err(NonDefaultErr(7));
+            if (!res.is_err()) {
+                return 1;
+            }
+            auto err = res.unwrap_err();
+            return err.value == 7 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "result_err_non_default");
+}
