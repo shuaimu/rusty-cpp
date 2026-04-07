@@ -2583,8 +2583,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-17-1-1775521581 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fix remains generic and fixture-agnostic (no crate-specific scripts), inference/template adaptation is context-gated, and deterministic first-head artifact capture was preserved.
-65. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.17.2`.
-   - focus: re-run the full seven-crate parity matrix after 27.17.1, record canonical first-head artifacts, and update frontier status.
+65. `Leaf 4.15.4.3.3.3.3.3.27.17.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-17-2-1775521860 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-17-2-1775521860/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1043`: invalid `static_cast` from `const std::array<int, 3>*` to `const std::array<rusty::MaybeUninit<int>, 3>*` in the `ArrayVec::from` storage-copy path; adjacent fallout includes move-only copy-constructor failures through `rusty::mem` helper calls.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-17-2-1775521860 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+66. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.18.1`.
+   - focus: implement generic `ArrayVec::from` storage-copy/pointer adaptation hardening for the new deterministic `runner.cpp:1043` head, then re-run the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
