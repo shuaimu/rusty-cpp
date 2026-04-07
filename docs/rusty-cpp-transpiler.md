@@ -2895,8 +2895,17 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-30-1-20260407-001026 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes remained in shared runtime surfaces, avoided crate-specific scripts/post-generation rewrites, and preserved deterministic first-head artifact capture.
-91. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.30.2`.
-   - focus: run the full seven-crate matrix and record the new deterministic first-failing head family/artifacts after 27.30.1.
+91. `Leaf 4.15.4.3.3.3.3.3.27.30.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-30-2-20260407-001457 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-30-2-20260407-001457/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:968`: `ArrayVec::drain` bound-visitor `std::visit` alternatives do not unify to one return type; immediate adjacent fallout appears at `runner.cpp:973` where generated `const auto* range_slice` assumes pointer shape while `rusty::slice((*this), start, end)` yields a span/slice value.
+   - downstream dependent families remain (for example `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72` default-construction of non-default-constructible `Err` payload and `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:132` move-assignment requirement in `ptr::write`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-30-2-20260407-001457 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+92. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.31.1`.
+   - focus: implement shared transpiler/runtime normalization for `drain` bound-visit return-shape unification and slice materialization pointer-shape correctness, then reprobe `arrayvec`.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2997,6 +3006,7 @@ Required approach:
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for runtime move-transfer helpers (`ptr::read`, `mem::replace`, `ptr::write`), do not rely on copy-return or copy-assignment fallbacks that require copyable payloads; preserve move-only behavior with move-out/placement-style reconstruction in shared runtime paths
+- for range-bound visitor lowering (`start_bound`/`end_bound` in `drain`-style code), do not emit mixed return categories across `std::visit` alternatives and do not force slice helper results into pointer declarators (`const auto*`) when runtime helpers return span/slice values; unify return/value shapes from local type context first
 - for raw-pointer helper/receiver lowering (`as_ptr`/`as_mut_ptr`, `ptr::add`/`ptr::offset`), do not preserve storage-pointer pointee shapes when call context expects payload pointers; propagate expected pointer context and adapt pointee shape explicitly
 - for runtime pointer helpers on `MaybeUninit`-backed storage (`as_ptr`/`as_mut_ptr`), do not expose wrapper-element pointers to payload-facing slice/read APIs; normalize helper results to payload pointers (`T*`/`const T*`) via shared runtime adaptation instead of crate-local rewrites
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
