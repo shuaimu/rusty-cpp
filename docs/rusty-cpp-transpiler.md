@@ -2683,8 +2683,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-21-1-1775526113 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fix remains shared/context-gated in AST emission, avoids crate-specific scripts, and preserves deterministic first-head artifact capture.
-73. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.21.2`.
-   - focus: rerun full seven-crate parity matrix after 27.21.1, capture canonical artifacts, and record the first deterministic post-27.21.1 failure family (or close Leaf 4 if all crates pass).
+73. `Leaf 4.15.4.3.3.3.3.3.27.21.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-21-2-1775526278 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-21-2-1775526278/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1137`: `std::span<rusty::Vec<int>>` has no member `clone_from_slice`, with adjacent fallout at `runner.cpp:1408` and `runner.cpp:1588`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-21-2-1775526278 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+74. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.22.1`.
+   - focus: implement generic runtime/transpiler dispatch for `clone_from_slice` when slice-like receivers lower to `std::span`, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
