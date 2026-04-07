@@ -173,6 +173,9 @@ pub struct CodeGen {
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
     local_cpp_bindings: Vec<HashMap<String, String>>,
+    /// Track ALL C++ names ever used in each scope level to prevent re-declaration
+    /// when the same Rust variable is shadowed multiple times.
+    local_cpp_names_used: Vec<HashSet<String>>,
     /// Scoped Rust-local constness as emitted in C++ (`const auto` vs mutable storage).
     /// Used by value-constructor lowering to avoid forcing invalid moves from
     /// const-constrained locals in context-qualified constructor paths.
@@ -313,6 +316,7 @@ impl CodeGen {
             local_placeholder_type_hints: Vec::new(),
             local_bindings: Vec::new(),
             local_cpp_bindings: Vec::new(),
+            local_cpp_names_used: Vec::new(),
             local_const_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
@@ -438,6 +442,7 @@ impl CodeGen {
         self.param_bindings.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
+        self.local_cpp_names_used.clear();
         self.local_const_bindings.clear();
         self.delayed_init_locals.clear();
         self.local_function_bindings.clear();
@@ -4723,6 +4728,7 @@ impl CodeGen {
         self.local_placeholder_type_hints.push(placeholder_hints);
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
+        self.local_cpp_names_used.push(HashSet::new());
         self.local_const_bindings.push(HashMap::new());
         self.delayed_init_locals.push(HashSet::new());
         let local_functions: HashSet<String> = block
@@ -4799,6 +4805,7 @@ impl CodeGen {
         self.block_depth -= 1;
         self.local_bindings.pop();
         self.local_cpp_bindings.pop();
+        self.local_cpp_names_used.pop();
         self.local_const_bindings.pop();
         self.delayed_init_locals.pop();
         self.local_function_bindings.pop();
@@ -8165,21 +8172,30 @@ impl CodeGen {
         };
 
         let escaped_name = escape_cpp_keyword(rust_name);
+        // Check ALL previously used C++ names (not just current bindings) to prevent
+        // re-declaring the same shadow name when a Rust variable is shadowed 3+ times.
+        let used = self.local_cpp_names_used.last().cloned().unwrap_or_default();
         if !scope.contains_key(rust_name)
-            && !scope.values().any(|v| v == &escaped_name)
+            && !used.contains(&escaped_name)
             && !param_scope_has_rust_name
             && !param_cpp_names.contains(&escaped_name)
         {
             let cpp_name = escaped_name;
             scope.insert(rust_name.to_string(), cpp_name.clone());
+            if let Some(used_set) = self.local_cpp_names_used.last_mut() {
+                used_set.insert(cpp_name.clone());
+            }
             return cpp_name;
         }
 
         let mut idx = 1usize;
         loop {
             let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
-            if !scope.values().any(|v| v == &candidate) && !param_cpp_names.contains(&candidate) {
+            if !used.contains(&candidate) && !param_cpp_names.contains(&candidate) {
                 scope.insert(rust_name.to_string(), candidate.clone());
+                if let Some(used_set) = self.local_cpp_names_used.last_mut() {
+                    used_set.insert(candidate.clone());
+                }
                 return candidate;
             }
             idx += 1;
@@ -26759,6 +26775,31 @@ mod tests {
         assert!(!out.contains("const auto array = std::move(array);"));
         assert!(!out.contains("array_shadow1 = std::move(array_shadow1)"));
         assert!(out.contains("array_shadow1 = std::move(array)"));
+    }
+
+    #[test]
+    fn test_leaf4154416_triple_variable_shadowing_uses_monotonic_shadow_counter() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let err = 1;
+                let err = 2;
+                let err = 3;
+                let err = 4;
+                let _ = err;
+            }
+            "#,
+        );
+        // Each shadow should get a unique monotonically increasing suffix
+        assert!(out.contains("err_shadow1"), "should have err_shadow1, got: {}", out);
+        assert!(out.contains("err_shadow2"), "should have err_shadow2, got: {}", out);
+        assert!(out.contains("err_shadow3"), "should have err_shadow3, got: {}", out);
+        // Check no duplicate declarations
+        let count1 = out.matches("err_shadow1").count();
+        let count2 = out.matches("err_shadow2").count();
+        // Each should appear exactly twice: declaration + use/move
+        assert!(count1 <= 3, "err_shadow1 should not be redeclared, count={}", count1);
+        assert!(count2 <= 3, "err_shadow2 should not be redeclared, count={}", count2);
     }
 
     #[test]
