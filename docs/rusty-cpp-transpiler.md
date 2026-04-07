@@ -3174,8 +3174,18 @@ Active work items:
    - new deterministic first failure shifts to Stage E runtime abort at `test_compact_size`: `run.log` reaches `test_capacity_left PASSED` (`run.log:10`) before abort, and single-wrapper repro (`./runner --rusty-single-test rusty_test_test_compact_size`) aborts with stack at `test_compact_size` (`runner.cpp:2774-2797`).
    - canonical artifacts: `/tmp/rusty-parity-27-41-1b-20260407-050904/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed in shared runtime/transpiler surfaces, were shape-gated, and introduced no crate-specific rewrites/scripts.
-113. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.41.2`.
-   - focus: re-run the full seven-crate matrix after 27.41.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
+113. `Leaf 4.15.4.3.3.3.3.3.27.41.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-41-2-20260407-052350 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-41-2-20260407-052350/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure head remains the new Stage E runtime abort family: execution reaches `test_capacity_left PASSED` (`run.log:10`) and then aborts with `ArrayVec: largest supported capacity is u32::MAX` (`run.log:12`) / `Aborted` (`run.log:13`) before `test_compact_size` can be reported by the main runner (`runner.cpp:4758` dispatch).
+   - single-wrapper repro from canonical artifacts confirms the same head: `./runner --rusty-single-test rusty_test_test_compact_size` exits with `134` (abort), with active test body at `runner.cpp:2776-2797` and capacity-guard panic sites at `runner.cpp:810`, `runner.cpp:1425`, and `runner.cpp:1486`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-41-2-20260407-052350 --keep-work-dirs`
+     - `cd /tmp/rusty-parity-matrix-27-41-2-20260407-052350/arrayvec && ./runner --rusty-single-test rusty_test_test_compact_size`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+114. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.42.1`.
+   - focus: implement shared transpiler/runtime fixes for the post-27.41.2 Stage E `test_compact_size` capacity-guard abort family, add fixture-agnostic regressions, then re-run full seven-crate parity matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
