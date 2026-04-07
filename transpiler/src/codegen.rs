@@ -4319,6 +4319,7 @@ impl CodeGen {
         match tree {
             syn::UseTree::Path(p) => {
                 let ident = p.ident.to_string();
+                let at_root = prefix.is_empty();
 
                 // Map path prefixes (crate::, self::, core::, etc.)
                 let mapped = match ident.as_str() {
@@ -4347,7 +4348,7 @@ impl CodeGen {
                             return self.flatten_use_tree(&p.tree, prefix);
                         }
                     }
-                    "std" | "core" | "alloc" => "std".to_string(),
+                    "std" | "core" | "alloc" if at_root => "std".to_string(),
                     _ => ident,
                 };
 
@@ -15634,7 +15635,7 @@ impl CodeGen {
                     }
                 }
 
-                // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or std::move_only_function for Fn traits
+                // Special case: Box<dyn Trait> → pro::proxy<TraitFacade> or rusty::Function for Fn traits
                 if let Some(last_seg) = tp.path.segments.last() {
                     let seg_name = last_seg.ident.to_string();
                     if seg_name == "Box" {
@@ -15642,7 +15643,7 @@ impl CodeGen {
                             if let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                             {
-                                // Check for Fn → move_only_function
+                                // Check for Fn → rusty::Function
                                 if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
                                     if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
                                         return fn_type;
@@ -16156,7 +16157,7 @@ impl CodeGen {
         let wrapper = match trait_name.as_str() {
             "Fn" => "std::function",
             "FnMut" => "std::function",
-            "FnOnce" => "std::move_only_function",
+            "FnOnce" => "rusty::Function",
             _ => return None,
         };
 
@@ -16182,7 +16183,7 @@ impl CodeGen {
     }
 
     /// Map Box<dyn Fn/FnMut/FnOnce> to the appropriate C++ function type.
-    /// All Box<dyn Fn*> → std::move_only_function since Box implies ownership.
+    /// All Box<dyn Fn*> → rusty::Function since Box implies ownership.
     fn try_map_fn_trait_boxed(&self, tb: &syn::TraitBound) -> Option<String> {
         let last_seg = tb.path.segments.last()?;
         let trait_name = last_seg.ident.to_string();
@@ -16198,7 +16199,7 @@ impl CodeGen {
                 syn::ReturnType::Type(_, ty) => self.map_type(ty),
             };
             Some(format!(
-                "std::move_only_function<{}({})>",
+                "rusty::Function<{}({})>",
                 return_type,
                 param_types.join(", ")
             ))
@@ -17309,6 +17310,7 @@ namespace fmt {\n\
 using Result = bool;\n\
 struct Arguments {};\n\
 struct Error {};\n\
+enum class Alignment { Left, Right, Center };\n\
 struct DebugList {\n\
     template<typename... Args>\n\
     DebugList& entries(Args&&...) { return *this; }\n\
@@ -17321,6 +17323,13 @@ struct Formatter {\n\
     static Result debug_struct_field1_finish(Args&&...) { return true; }\n\
     template<typename... Args>\n\
     Result write_fmt(Args&&...) const { return true; }\n\
+    rusty::Option<size_t> width() const { return rusty::Option<size_t>(rusty::None); }\n\
+    rusty::Option<Alignment> align() const { return rusty::Option<Alignment>(rusty::None); }\n\
+    char fill() const { return ' '; }\n\
+    template<typename Ch>\n\
+    Result write_char(Ch&&) const { return true; }\n\
+    template<typename Str>\n\
+    Result write_str(Str&&) const { return true; }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
 };\n\
 }\n\
@@ -17802,6 +17811,15 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_path_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_alloc_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_num_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_primitive_module_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_str_import(normalized) {
         return action;
     }
@@ -17980,6 +17998,7 @@ fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
         "read" | "write" | "copy" | "copy_nonoverlapping" | "drop_in_place" => {
             UseImportAction::Using(format!("rusty::ptr::{}", item))
         }
+        "NonNull" => UseImportAction::Using("rusty::ptr::NonNull".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -18076,6 +18095,63 @@ fn rewrite_std_path_import(path: &str) -> Option<UseImportAction> {
         _ => UseImportAction::RustOnly,
     };
     Some(action)
+}
+
+fn rewrite_std_alloc_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::alloc" {
+        return Some(UseImportAction::Raw(
+            "namespace alloc = rusty::alloc;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::alloc::")?;
+    let action = match item {
+        "alloc" => UseImportAction::Using("rusty::alloc::alloc".to_string()),
+        "dealloc" => UseImportAction::Using("rusty::alloc::dealloc".to_string()),
+        "handle_alloc_error" => {
+            UseImportAction::Using("rusty::alloc::handle_alloc_error".to_string())
+        }
+        "Layout" => UseImportAction::Using("rusty::alloc::Layout".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_num_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::num" {
+        return Some(UseImportAction::Raw(
+            "namespace num = rusty::num;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::num::")?;
+    let action = match item {
+        "NonZeroUsize" => UseImportAction::Using("rusty::num::NonZeroUsize".to_string()),
+        "NonZeroU64" => UseImportAction::Using("rusty::num::NonZeroU64".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_primitive_module_import(path: &str) -> Option<UseImportAction> {
+    if matches!(
+        path,
+        "std::usize"
+            | "std::isize"
+            | "std::u8"
+            | "std::u16"
+            | "std::u32"
+            | "std::u64"
+            | "std::u128"
+            | "std::i8"
+            | "std::i16"
+            | "std::i32"
+            | "std::i64"
+            | "std::i128"
+    ) {
+        return Some(UseImportAction::RustOnly);
+    }
+    None
 }
 
 fn rewrite_std_str_import(path: &str) -> Option<UseImportAction> {
@@ -22222,7 +22298,7 @@ mod tests {
     #[test]
     fn test_impl_fn_once_param() {
         let out = transpile_str("fn apply(f: impl FnOnce() -> String) {}");
-        assert!(out.contains("std::move_only_function<rusty::String()> f"));
+        assert!(out.contains("rusty::Function<rusty::String()> f"));
     }
 
     #[test]
@@ -22234,7 +22310,13 @@ mod tests {
     #[test]
     fn test_box_dyn_fn_once() {
         let out = transpile_str("fn apply(f: Box<dyn FnOnce() -> i32>) {}");
-        assert!(out.contains("std::move_only_function<int32_t()> f"));
+        assert!(out.contains("rusty::Function<int32_t()> f"));
+    }
+
+    #[test]
+    fn test_box_dyn_fn_mut_uses_rusty_function() {
+        let out = transpile_str("fn apply(f: Box<dyn FnMut(i32) -> i32>) {}");
+        assert!(out.contains("rusty::Function<int32_t(int32_t)> f"));
     }
 
     #[test]
@@ -25746,6 +25828,41 @@ mod tests {
     fn test_leaf4154333333362_runtime_fallback_formatter_exposes_error_type() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("struct Error {};"));
+    }
+
+    #[test]
+    fn test_leaf415441_runtime_fallback_formatter_supports_padding_surface() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("enum class Alignment { Left, Right, Center };"));
+        assert!(helpers.contains("rusty::Option<size_t> width() const"));
+        assert!(helpers.contains("rusty::Option<Alignment> align() const"));
+        assert!(helpers.contains("char fill() const { return ' '; }"));
+        assert!(helpers.contains("Result write_char(Ch&&) const { return true; }"));
+        assert!(helpers.contains("Result write_str(Str&&) const { return true; }"));
+    }
+
+    #[test]
+    fn test_leaf415441_use_rewrites_cover_alloc_num_nonnull_and_primitive_modules() {
+        let out = transpile_str(
+            r#"
+            use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+            use std::num::{NonZeroU64, NonZeroUsize};
+            use std::ptr::NonNull;
+            use std::{usize, isize};
+            "#,
+        );
+        assert!(out.contains("using rusty::alloc::alloc;"));
+        assert!(out.contains("using rusty::alloc::dealloc;"));
+        assert!(out.contains("using rusty::alloc::handle_alloc_error;"));
+        assert!(out.contains("using rusty::alloc::Layout;"));
+        assert!(out.contains("using rusty::num::NonZeroU64;"));
+        assert!(out.contains("using rusty::num::NonZeroUsize;"));
+        assert!(out.contains("using rusty::ptr::NonNull;"));
+        assert!(out.contains("// Rust-only: using std::usize;"));
+        assert!(out.contains("// Rust-only: using std::isize;"));
+        assert!(!out.contains("\nusing std::usize;"));
+        assert!(!out.contains("\nusing std::isize;"));
+        assert!(!out.contains("using std::std::alloc;"));
     }
 
     #[test]

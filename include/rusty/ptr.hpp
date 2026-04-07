@@ -46,6 +46,24 @@ using Ptr = const T*;
 template<typename T>
 using MutPtr = T*;
 
+// NonNull<T> - non-null raw pointer wrapper (Rust std::ptr::NonNull analogue)
+template<typename T>
+class NonNull {
+private:
+    T* ptr_;
+
+public:
+    constexpr explicit NonNull(T* ptr) noexcept : ptr_(ptr) {}
+
+    static constexpr NonNull<T> new_unchecked(T* ptr) noexcept {
+        return NonNull<T>(ptr);
+    }
+
+    constexpr T* as_ptr() const noexcept {
+        return ptr_;
+    }
+};
+
 // Null pointer constants for explicit null initialization
 template<typename T>
 constexpr Ptr<T> null_ptr = nullptr;
@@ -113,6 +131,9 @@ constexpr MutPtr<T> offset_mut(MutPtr<T> ptr, std::ptrdiff_t count) noexcept {
 
 // Minimal Rust std::ptr runtime surface used by transpiled expanded output.
 namespace ptr {
+
+template<typename T>
+using NonNull = ::rusty::NonNull<T>;
 
 template<typename T>
 inline T read(const T* src) {

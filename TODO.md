@@ -2079,7 +2079,40 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `cd /tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec && gdb -q ./runner -ex 'set args --rusty-single-test rusty_test_test_retain' -ex run -ex bt -ex quit`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head + canonical-artifact workflow, kept fixes in shared transpiler/runtime surfaces, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.4: Priority pivot (2026-04-07): close current `semver` and `bitflags` Stage D heads before resuming `arrayvec` frontier leaves.
-                            - [ ] Leaf 4.15.4.4.1: Collapse current `semver` Stage D formatter/runtime/type-surface head generically (starting with `std::move_only_function` unavailability and unresolved `NonNull` type surfaces), add fixture-agnostic regressions, then re-run `semver` parity.
+                            - [x] *done* Leaf 4.15.4.4.1: Collapse current `semver` Stage D formatter/runtime/type-surface head generically (starting with `std::move_only_function` unavailability and unresolved `NonNull` type surfaces), add fixture-agnostic regressions, then re-run `semver` parity.
+                              - [x] *done* Plan/scope check: shared transpiler/runtime updates stayed well below the <1000 LOC guardrail and required no additional TODO decomposition.
+                              - [x] *done* Implemented shared fixes (no crate-specific scripts):
+                                - `FnOnce`/boxed `Fn*` lowering now uses `rusty::Function<...>` instead of `std::move_only_function<...>` (`transpiler/src/codegen.rs`) and runtime now exposes `rusty::Function` via `include/rusty/rusty.hpp`.
+                                - Added shared runtime/type surfaces for `NonNull`/`NonZero*`/alloc helpers:
+                                  - `include/rusty/ptr.hpp`: `rusty::NonNull<T>` plus `rusty::ptr::NonNull` alias.
+                                  - `include/rusty/num.hpp`: `rusty::num::NonZeroUsize` / `NonZeroU64`.
+                                  - `include/rusty/alloc.hpp`: `rusty::alloc::{Layout,alloc,dealloc,handle_alloc_error,__export::must_use,fmt::format}`.
+                                  - `include/rusty/rusty.hpp`: include wiring for `num`, `alloc`, and `function`.
+                                - Expanded transpiler import/type/path rewrites (`transpiler/src/codegen.rs`, `transpiler/src/types.rs`):
+                                  - `std::ptr::NonNull` → `rusty::ptr::NonNull`
+                                  - `std::num::{NonZeroUsize,NonZeroU64}` → `rusty::num::*`
+                                  - `std::alloc::*` → `rusty::alloc::*`
+                                  - primitive module imports (`std::usize`, `std::isize`, etc.) treated as Rust-only
+                                  - root-only `core`/`alloc`→`std` remap in use-tree flattening (prevents `std::std::...` emission)
+                                  - alloc function paths mapped to `rusty::alloc::*`
+                                - Expanded fallback formatter helper surface (`runtime_path_fallback_helpers_text`) with `Alignment`, `width`, `align`, `fill`, `write_char`, and `write_str`.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_box_dyn_fn_mut_uses_rusty_function`
+                                - updated `impl FnOnce` / `Box<dyn FnOnce>` expectations to `rusty::Function`
+                                - `codegen::tests::test_leaf415441_runtime_fallback_formatter_supports_padding_surface`
+                                - `codegen::tests::test_leaf415441_use_rewrites_cover_alloc_num_nonnull_and_primitive_modules`
+                                - `types::tests::test_leaf42_runtime_type_fallback_mappings` and `types::tests::test_leaf42_runtime_function_path_mappings` extended for new mappings.
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-1-semver-20260407-3 --keep-work-dirs`
+                              - [x] *done* Single-crate parity repro confirms the original Stage D head family is collapsed:
+                                - generated runner now uses `rusty::Function` (`runner.cpp:419/470/481`)
+                                - `NonZero*`/`NonNull` imports are remapped (`runner.cpp:815-819`)
+                                - prior `std::move_only_function`/`std::std::alloc`/`std::num::*` unresolved surfaces are absent from the first head.
+                              - [x] *done* New deterministic first Stage D head moved to forward-declaration type qualification in `parse` signatures:
+                                - `Position` unresolved in prototypes (`runner.cpp:450/452/455/457`; see `build.log` in canonical artifacts).
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-1-semver-20260407-3/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes stayed in shared transpiler/runtime surfaces, remained shape-gated, and introduced no crate-specific rewrites/scripts.
                             - [ ] Leaf 4.15.4.4.2: Re-run `semver` parity (`tests/transpile_tests/run_parity_matrix.sh --crate semver`) and record the next deterministic head with canonical artifacts.
                             - [ ] Leaf 4.15.4.4.3: Collapse current `bitflags` Stage D callable-surface head generically (starting with repeated `std::move_only_function` signature failures in generated runner output), add fixture-agnostic regressions, then re-run `bitflags` parity.
                             - [ ] Leaf 4.15.4.4.4: Re-run `bitflags` parity (`tests/transpile_tests/run_parity_matrix.sh --crate bitflags`) and record the next deterministic head with canonical artifacts.

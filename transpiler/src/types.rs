@@ -79,9 +79,20 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
+        "core::fmt::Alignment" | "fmt::Alignment" => Some(("rusty::fmt::Alignment", false)),
         "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => {
             Some(("rusty::fmt::Error", false))
         }
+        "NonNull" | "std::ptr::NonNull" | "core::ptr::NonNull" => {
+            Some(("rusty::ptr::NonNull", true))
+        }
+        "NonZeroUsize" | "std::num::NonZeroUsize" | "core::num::NonZeroUsize" => {
+            Some(("rusty::num::NonZeroUsize", false))
+        }
+        "NonZeroU64" | "std::num::NonZeroU64" | "core::num::NonZeroU64" => {
+            Some(("rusty::num::NonZeroU64", false))
+        }
+        "std::alloc::Layout" | "core::alloc::Layout" => Some(("rusty::alloc::Layout", false)),
         "std::str::Utf8Error" | "core::str::Utf8Error" => {
             Some(("rusty::str_runtime::Utf8Error", false))
         }
@@ -175,6 +186,19 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::mem::size_of" | "mem::size_of" => Some("rusty::mem::size_of"),
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
+        "alloc::alloc" | "std::alloc::alloc" | "core::alloc::alloc" => Some("rusty::alloc::alloc"),
+        "alloc::dealloc" | "std::alloc::dealloc" | "core::alloc::dealloc" => {
+            Some("rusty::alloc::dealloc")
+        }
+        "alloc::handle_alloc_error"
+        | "std::alloc::handle_alloc_error"
+        | "core::alloc::handle_alloc_error" => Some("rusty::alloc::handle_alloc_error"),
+        "alloc::fmt::format" | "std::alloc::fmt::format" | "core::alloc::fmt::format" => {
+            Some("rusty::alloc::fmt::format")
+        }
+        "alloc::__export::must_use"
+        | "std::alloc::__export::must_use"
+        | "core::alloc::__export::must_use" => Some("rusty::alloc::__export::must_use"),
         "ManuallyDrop::new" | "std::mem::ManuallyDrop::new" | "mem::ManuallyDrop::new" => {
             Some("rusty::mem::manually_drop_new")
         }
@@ -371,6 +395,26 @@ mod tests {
         assert_eq!(
             map_std_type("std::mem::ManuallyDrop"),
             Some(("rusty::mem::ManuallyDrop", true))
+        );
+        assert_eq!(
+            map_std_type("core::fmt::Alignment"),
+            Some(("rusty::fmt::Alignment", false))
+        );
+        assert_eq!(
+            map_std_type("std::ptr::NonNull"),
+            Some(("rusty::ptr::NonNull", true))
+        );
+        assert_eq!(
+            map_std_type("core::num::NonZeroUsize"),
+            Some(("rusty::num::NonZeroUsize", false))
+        );
+        assert_eq!(
+            map_std_type("std::num::NonZeroU64"),
+            Some(("rusty::num::NonZeroU64", false))
+        );
+        assert_eq!(
+            map_std_type("core::alloc::Layout"),
+            Some(("rusty::alloc::Layout", false))
         );
     }
 
@@ -575,6 +619,26 @@ mod tests {
         assert_eq!(
             map_function_path("mem::replace"),
             Some("rusty::mem::replace")
+        );
+        assert_eq!(
+            map_function_path("core::alloc::alloc"),
+            Some("rusty::alloc::alloc")
+        );
+        assert_eq!(
+            map_function_path("std::alloc::dealloc"),
+            Some("rusty::alloc::dealloc")
+        );
+        assert_eq!(
+            map_function_path("alloc::handle_alloc_error"),
+            Some("rusty::alloc::handle_alloc_error")
+        );
+        assert_eq!(
+            map_function_path("alloc::fmt::format"),
+            Some("rusty::alloc::fmt::format")
+        );
+        assert_eq!(
+            map_function_path("alloc::__export::must_use"),
+            Some("rusty::alloc::__export::must_use")
         );
         assert_eq!(
             map_function_path("std::mem::ManuallyDrop::new"),
