@@ -11085,6 +11085,19 @@ impl CodeGen {
             // C++ unsigned arithmetic wraps naturally; cast to size_t to ensure unsigned
             return format!("(static_cast<size_t>({}) {} static_cast<size_t>({}))", receiver, op, args[0]);
         }
+        // Rust checked arithmetic methods → rusty:: free-function helpers returning Option<T>
+        if matches!(method_name.as_str(), "checked_add" | "checked_sub" | "checked_mul" | "checked_div")
+            && args.len() == 1
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+        }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
         }
@@ -26442,6 +26455,19 @@ mod tests {
         // The unreachable arm should NOT have `return` producing void/typed mismatch
         assert!(!out.contains("return [&]() { [&]() { rusty::panicking::unreachable_display"),
             "diverging arm body should not have return keyword, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154412_checked_mul_on_integer_emits_rusty_checked_mul() {
+        let out = transpile_str(
+            r#"
+            fn f(x: u64) -> Option<u64> {
+                x.checked_mul(10)
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::checked_mul("),
+            "checked_mul should emit rusty::checked_mul, got: {}", out);
     }
 
     #[test]
