@@ -2950,8 +2950,17 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-32-1-20260407-013012 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes remained in shared runtime/transpiler surfaces, avoided crate-specific scripts/post-generation rewrites, and preserved deterministic first-head artifact capture.
-95. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.32.2`.
-   - focus: run the full seven-crate matrix and capture/post the new deterministic first-failing head family after 27.32.1.
+95. `Leaf 4.15.4.3.3.3.3.3.27.32.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-32-2-20260407-013518 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-32-2-20260407-013518/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:1342`: `raw_ptr_add` still assumes wrapper-pointer `.cast<uint8_t>()` surface while receiving raw pointer pointees; immediate adjacent fallout remains at `runner.cpp:1327` where scope-exit guard callback invocation shape cannot bind the lambda’s first `auto&` parameter from the emitted `&this->data` argument.
+   - downstream dependent families remain (for example `runner.cpp:1593` string-view `.hash` surface mismatch).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-32-2-20260407-013518 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+96. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.33.1`.
+   - focus: collapse the `runner.cpp:1342` raw-pointer helper head family (plus adjacent `runner.cpp:1327` scope-exit guard callback shape), add fixture-agnostic regressions, then reprobe parity.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
