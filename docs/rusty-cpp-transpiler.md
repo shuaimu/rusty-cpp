@@ -2643,8 +2643,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-19-2-1775524575 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-70. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.20.1`.
-   - focus: implement generic retain/backshift lambda lowering fixes for the deterministic `runner.cpp:918` head and adjacent `SafeFn` argument-shape fallout (`runner.cpp:933/938`), then re-run the full matrix.
+70. `Leaf 4.15.4.3.3.3.3.3.27.20.1` is complete.
+   - plan/scope check: transpiler-only implementation remained under the <1000 LOC guardrail and required no additional decomposition.
+   - implemented generic transpiler hardening in `transpiler/src/codegen.rs`:
+     - control-flow statement emission now scopes tail-return behavior, preventing statement-position `unsafe`/block/if/match lowering from inheriting enclosing value-return scope and emitting invalid `return <void_expr>;` forms;
+     - nested function-item lowering now records local function argument pass-style/expected-type metadata before emission, so local callable invocations map Rust `&` / `&mut` arguments to C++ reference-shaped call surfaces when signatures require references.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_unsafe_block_statement_in_value_return_scope_does_not_emit_void_return`
+     - `test_leaf41543333333327201_nested_fn_mut_ref_args_are_passed_by_reference`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-20-1-arrayvec --keep-work-dirs`) removed the deterministic retain/backshift head family at `runner.cpp:918` (`return rusty::ptr::drop_in_place(cur)` void-return misuse) and adjacent callable-surface mismatches at `runner.cpp:933/938`.
+   - new deterministic first hard error now starts at `runner.cpp:857`: `rusty::ptr::copy` call-shape mismatch in `ArrayVec::try_insert` (`const auto* p` causes destination `ptr::offset(p, 1)` to remain `const T*`), with canonical artifacts at `/tmp/rusty-parity-27-20-1-arrayvec/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_unsafe_block_statement_in_value_return_scope_does_not_emit_void_return`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327201_nested_fn_mut_ref_args_are_passed_by_reference`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-20-1-arrayvec --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes are shared/context-gated at AST emission points, avoid crate-specific scripts, and preserve deterministic first-head artifact discipline.
+71. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.20.2`.
+   - focus: rerun full seven-crate parity matrix after 27.20.1, capture canonical artifacts, and record the first deterministic post-27.20.1 failure family (or close Leaf 4 if all crates pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

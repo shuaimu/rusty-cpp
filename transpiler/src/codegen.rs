@@ -4261,8 +4261,12 @@ impl CodeGen {
                     && is_tail
                     && semi.is_none()
                     && matches!(expr, syn::Expr::Match(_));
+                let preserve_control_flow_tail_returns =
+                    is_tail && semi.is_none() && self.in_value_return_scope();
                 // Control flow expressions are emitted as statements directly
-                if !force_expr_path && self.try_emit_control_flow(expr) {
+                if !force_expr_path
+                    && self.try_emit_control_flow(expr, preserve_control_flow_tail_returns)
+                {
                     return;
                 }
                 let should_emit_tail_return =
@@ -4283,11 +4287,18 @@ impl CodeGen {
             syn::Stmt::Item(item) => {
                 // Nested function definitions → emit as lambda (C++ doesn't allow nested fns)
                 if let syn::Item::Fn(f) = item {
+                    let local_fn_name = f.sig.ident.to_string();
+                    let local_styles =
+                        self.collect_arg_pass_styles_from_inputs(&f.sig.inputs, false);
+                    self.record_function_arg_pass_styles(&local_fn_name, local_styles);
+                    let local_expected =
+                        self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
+                    self.record_function_arg_expected_types(&local_fn_name, local_expected);
                     let return_ty = match &f.sig.output {
                         syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
                         syn::ReturnType::Default => None,
                     };
-                    self.register_local_binding(f.sig.ident.to_string(), return_ty);
+                    self.register_local_binding(local_fn_name, return_ty);
                     self.emit_nested_function(f);
                 } else if self.block_depth > 0 && matches!(item, syn::Item::Impl(_)) {
                     self.writeln("// Rust-only nested impl block skipped in local scope");
@@ -4301,30 +4312,53 @@ impl CodeGen {
         }
     }
 
+    fn emit_control_flow_with_return_scope<F>(&mut self, preserve_tail_returns: bool, emit: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        if preserve_tail_returns {
+            emit(self);
+            return;
+        }
+        self.return_value_scopes.push(false);
+        emit(self);
+        self.return_value_scopes.pop();
+    }
+
     /// Try to emit an expression as a control flow statement.
     /// Returns true if it was handled, false if it should go through emit_expr_to_string.
-    fn try_emit_control_flow(&mut self, expr: &syn::Expr) -> bool {
+    fn try_emit_control_flow(&mut self, expr: &syn::Expr, preserve_tail_returns: bool) -> bool {
         match expr {
             syn::Expr::If(if_expr) => {
-                self.emit_if(if_expr);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_if(if_expr);
+                });
                 true
             }
             syn::Expr::While(while_expr) => {
-                self.emit_while(while_expr);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_while(while_expr);
+                });
                 true
             }
             syn::Expr::Loop(loop_expr) => {
-                self.emit_loop(loop_expr);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_loop(loop_expr);
+                });
                 true
             }
             syn::Expr::ForLoop(for_expr) => {
-                self.emit_for_loop(for_expr);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_for_loop(for_expr);
+                });
                 true
             }
             syn::Expr::Block(block_expr) => {
                 self.writeln("{");
                 self.indent += 1;
-                self.emit_block(&block_expr.block);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_block(&block_expr.block);
+                });
                 self.indent -= 1;
                 self.writeln("}");
                 true
@@ -4333,13 +4367,17 @@ impl CodeGen {
                 self.writeln("// @unsafe");
                 self.writeln("{");
                 self.indent += 1;
-                self.emit_block(&unsafe_expr.block);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_block(&unsafe_expr.block);
+                });
                 self.indent -= 1;
                 self.writeln("}");
                 true
             }
             syn::Expr::Match(match_expr) => {
-                self.emit_match(match_expr);
+                self.emit_control_flow_with_return_scope(preserve_tail_returns, |this| {
+                    this.emit_match(match_expr);
+                });
                 true
             }
             _ => false,
@@ -6298,7 +6336,7 @@ impl CodeGen {
         // If the body is a block, emit its statements
         if let syn::Expr::Block(block) = body {
             self.emit_block(&block.block);
-        } else if self.try_emit_control_flow(body) {
+        } else if self.try_emit_control_flow(body, false) {
             // Control flow handled
         } else {
             let body_str = self.emit_expr_to_string(body);
@@ -19685,6 +19723,21 @@ mod tests {
         assert!(out.contains("const auto x = 1;"));
     }
 
+    #[test]
+    fn test_unsafe_block_statement_in_value_return_scope_does_not_emit_void_return() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *mut i32) -> bool {
+                unsafe { std::ptr::drop_in_place(p) };
+                false
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::drop_in_place("));
+        assert!(!out.contains("return rusty::ptr::drop_in_place("));
+        assert!(out.contains("return false;"));
+    }
+
     // ── Tuple and destructuring tests ───────────────────────────
 
     #[test]
@@ -22914,6 +22967,33 @@ mod tests {
         assert!(out.contains("use_local(false,"));
         assert!(out.contains("use_local(true,"));
         assert!(!out.contains("Local<int32_t>"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327201_nested_fn_mut_ref_args_are_passed_by_reference() {
+        let out = transpile_str(
+            r#"
+            fn outer() {
+                fn process_one<const FLAG: bool, F: FnMut(&mut i32) -> bool>(
+                    f: &mut F,
+                    g: &mut i32,
+                ) -> bool {
+                    if FLAG {
+                        f(g)
+                    } else {
+                        f(g)
+                    }
+                }
+
+                let mut pred = |_: &mut i32| true;
+                let mut value = 7;
+                let _ = process_one::<false, _>(&mut pred, &mut value);
+            }
+            "#,
+        );
+        assert!(out.contains("const rusty::SafeFn<bool(bool, F&, int32_t&)> process_one"));
+        assert!(out.contains("process_one(false, pred, value)"));
+        assert!(!out.contains("process_one(false, &pred, &value)"));
     }
 
     // ── Phase 15 Gap 6: Range syntax variants ───────────────────
