@@ -11417,11 +11417,36 @@ impl CodeGen {
                         return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
                     }
                 }
-                let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
-                if inner.starts_with('&') {
-                    format!("&({})", inner)
+                // In Rust, `&expr` borrows the expression. In C++, `&expr` takes
+                // the address, which doesn't work on rvalues. Strip `&` for
+                // specific known rvalue patterns that produce temporaries and
+                // should pass by value to const-ref parameters.
+                let inner_is_known_rvalue_call = match self.peel_paren_group_expr(&r.expr) {
+                    syn::Expr::Call(call) => {
+                        // Strip & for known formatting/allocation function calls
+                        let func_str = self.emit_expr_to_string(&call.func);
+                        func_str.contains("fmt::format")
+                            || func_str.contains("must_use")
+                            || func_str.contains("to_string")
+                    }
+                    syn::Expr::Macro(m) => {
+                        // Strip & for macro invocations like format!(), vec!()
+                        let name = m.mac.path.segments.last()
+                            .map(|s| s.ident.to_string())
+                            .unwrap_or_default();
+                        matches!(name.as_str(), "format" | "format_args" | "vec")
+                    }
+                    _ => false,
+                };
+                if inner_is_known_rvalue_call {
+                    self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
                 } else {
-                    format!("&{}", inner)
+                    let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                    if inner.starts_with('&') {
+                        format!("&({})", inner)
+                    } else {
+                        format!("&{}", inner)
+                    }
                 }
             }
             syn::Expr::Paren(p) => {
