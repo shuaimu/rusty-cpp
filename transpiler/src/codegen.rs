@@ -4017,7 +4017,12 @@ impl CodeGen {
                 }
                 let ty = self.map_type(&c.ty);
                 let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
-                self.writeln(&format!("static constexpr {} {} = {};", ty, name, expr));
+                let storage_spec = if self.impl_const_type_requires_inline_const(&ty) {
+                    "static inline const"
+                } else {
+                    "static constexpr"
+                };
+                self.writeln(&format!("{} {} {} = {};", storage_spec, ty, name, expr));
             }
             syn::ImplItem::Type(t) => {
                 if self.should_soften_dependent_assoc_mode()
@@ -4048,6 +4053,10 @@ impl CodeGen {
                 self.writeln("// TODO: unhandled impl item");
             }
         }
+    }
+
+    fn impl_const_type_requires_inline_const(&self, ty_cpp: &str) -> bool {
+        ty_cpp.contains("rusty::MaybeUninit<")
     }
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
@@ -7055,9 +7064,14 @@ impl CodeGen {
         let val = self.emit_expr_to_string_with_expected(&repeat.expr, Some(elem_hint));
         let elem_ty = self.map_type(elem_hint);
         let len = self.emit_expr_to_string(len_hint);
+        let repeat_len = if self.should_sanitize_array_capacity_expr(len_hint, &len) {
+            format!("rusty::sanitize_array_capacity<{}>()", len)
+        } else {
+            len
+        };
         format!(
             "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
-            elem_ty, len, elem_ty, val
+            elem_ty, repeat_len, elem_ty, val
         )
     }
 
@@ -11440,9 +11454,10 @@ impl CodeGen {
 
         let (elem_cpp, cap_cpp) = (elem_cpp?, cap_cpp?);
         let value = self.emit_expr_to_string(&repeat_expr.expr);
+        let repeat_cap = self.maybe_sanitize_array_capacity_cpp_len(&cap_cpp);
         let fixed_array_arg = format!(
             "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
-            elem_cpp, cap_cpp, elem_cpp, value
+            elem_cpp, repeat_cap, elem_cpp, value
         );
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         Some(format!("{}({})", func, fixed_array_arg))
@@ -14327,10 +14342,34 @@ impl CodeGen {
     }
 
     fn should_sanitize_array_capacity_expr(&self, len_expr: &syn::Expr, len_cpp: &str) -> bool {
-        if len_cpp.contains("std::numeric_limits<size_t>::max()") {
+        if self.should_sanitize_array_capacity_cpp_len(len_cpp) {
             return true;
         }
         matches!(self.peel_paren_group_expr(len_expr), syn::Expr::Path(_))
+    }
+
+    fn should_sanitize_array_capacity_cpp_len(&self, len_cpp: &str) -> bool {
+        let trimmed = len_cpp.trim();
+        if trimmed.contains("rusty::sanitize_array_capacity<") {
+            return false;
+        }
+        if trimmed.contains("std::numeric_limits<size_t>::max()") {
+            return true;
+        }
+        if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':'))
+    }
+
+    fn maybe_sanitize_array_capacity_cpp_len(&self, len_cpp: &str) -> String {
+        if self.should_sanitize_array_capacity_cpp_len(len_cpp) {
+            format!("rusty::sanitize_array_capacity<{}>()", len_cpp.trim())
+        } else {
+            len_cpp.trim().to_string()
+        }
     }
 
     fn map_type(&self, ty: &syn::Type) -> String {
@@ -19273,6 +19312,10 @@ mod tests {
         );
         assert!(out.contains("MakeMaybeUninit<T, CAP>::ARRAY"));
         assert!(!out.contains("MakeMaybeUninit::ARRAY"));
+        assert!(out.contains(
+            "std::array<rusty::MaybeUninit<T>, rusty::sanitize_array_capacity<N>()> _repeat{};"
+        ));
+        assert!(!out.contains("std::array<rusty::MaybeUninit<T>, N> _repeat{};"));
     }
 
     #[test]
@@ -19287,12 +19330,12 @@ mod tests {
                     const VALUE: MaybeUninit<T> = MaybeUninit::uninit();
                 }
             }
-            "#,
+        "#,
         );
         assert!(out.contains(
-            "static constexpr rusty::MaybeUninit<T> VALUE = rusty::MaybeUninit<T>::uninit();"
+            "static inline const rusty::MaybeUninit<T> VALUE = rusty::MaybeUninit<T>::uninit();"
         ));
-        assert!(!out.contains("static constexpr rusty::MaybeUninit<T> VALUE = MaybeUninit::uninit();"));
+        assert!(!out.contains("static inline const rusty::MaybeUninit<T> VALUE = MaybeUninit::uninit();"));
     }
 
     #[test]

@@ -2783,8 +2783,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-25-2-1775531752 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-82. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.26.1`.
-   - focus: implement a generic fix for the deterministic `runner.cpp:710` `MakeMaybeUninit` constexpr/materialization head, then re-run matrix.
+82. `Leaf 4.15.4.3.3.3.3.3.27.26.1` is complete.
+   - plan/scope check: transpiler-only implementation remained under the <1000 LOC guardrail and required no additional decomposition.
+   - implemented generic impl-associated-const lowering hardening in `transpiler/src/codegen.rs`: impl const items mapped to `rusty::MaybeUninit<...>` surfaces now emit `static inline const` instead of `static constexpr`, avoiding invalid constexpr requirements for `MaybeUninit` initialization/copy paths while preserving `static constexpr` for other const families.
+   - implemented generic fixed-array repeat sanitization in `transpiler/src/codegen.rs`: repeat-lambda materialization now applies `rusty::sanitize_array_capacity<...>()` for path/max-capacity lengths in both direct fixed-array expected contexts and recovered ArrayVec owner-capacity paths, preventing unsanitized `std::array<..., N>` materialization for `usize::MAX`-like capacities.
+   - updated focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf415432_local_assoc_const_template_args_recovered_with_name_mismatch` now asserts sanitized inner repeat capacity (`sanitize_array_capacity<N>()`).
+     - `test_leaf4154333333361_impl_const_maybeuninit_uninit_uses_expected_owner_type` now asserts `static inline const rusty::MaybeUninit<T> VALUE = rusty::MaybeUninit<T>::uninit();`.
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-26-1-1775532325 --keep-work-dirs`) removed deterministic heads at `runner.cpp:710/711` (`MakeMaybeUninit` constexpr/materialization + unsanitized-capacity fallout).
+   - new deterministic first hard error now starts at `runner.cpp:1469`: missing `MaybeUninit<std::array<...>>::zeroed`, with adjacent fallout at `runner.cpp:1073` (`raw_ptr_add` deduction) and downstream iterator/visit return-shape families.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf415432_local_assoc_const_template_args_recovered_with_name_mismatch -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf4154333333361_impl_const_maybeuninit_uninit_uses_expected_owner_type -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-26-1-1775532325 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes are shared transpiler changes, AST/type-context-gated, and avoid crate-specific scripts or post-generation rewrites.
+83. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.26.2`.
+   - focus: re-run full seven-crate matrix after 27.26.1 and capture the updated deterministic frontier.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
