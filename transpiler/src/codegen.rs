@@ -11760,6 +11760,10 @@ impl CodeGen {
                 };
                 if inner_is_known_rvalue_call {
                     self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
+                } else if matches!(self.peel_paren_group_expr(&r.expr), syn::Expr::Reference(_)) {
+                    // Double reference `&&expr` in Rust → just `&expr` in C++
+                    // (C++ const-ref parameters accept lvalues directly)
+                    self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
                 } else {
                     let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                     if inner.starts_with('&') {
