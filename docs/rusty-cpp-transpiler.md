@@ -2708,8 +2708,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-22-1-1775527001 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fix is shared and receiver-shape-gated in core lowering/runtime paths, avoids crate-specific scripts and blanket rewrites, and preserves deterministic first-head artifact discipline.
-75. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.22.2`.
-   - focus: re-run full seven-crate matrix after 27.22.1 and record the next deterministic head with canonical artifacts (or mark closure if all seven pass).
+75. `Leaf 4.15.4.3.3.3.3.3.27.22.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-22-2-1775527215 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-22-2-1775527215/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1408`: designator order mismatch for `array_string::ArrayString<CAP>::len_field` in aggregate initialization, with adjacent fallout at `runner.cpp:1588` (`&*"..."` address-of-rvalue / string-view comparison shape).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-22-2-1775527215 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+76. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.23.1`.
+   - focus: implement a generic fix for the new deterministic `runner.cpp:1408` aggregate-designator-order head, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
