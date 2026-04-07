@@ -9274,6 +9274,40 @@ impl CodeGen {
                 return format!("rusty::ptr::write({}, {})", receiver, args[0]);
             }
         }
+        if matches!(method_name.as_str(), "copy_to_nonoverlapping" | "copy_to")
+            && args.len() == 2
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let helper = if method_name == "copy_to_nonoverlapping" {
+                "rusty::ptr::copy_nonoverlapping"
+            } else {
+                "rusty::ptr::copy"
+            };
+            return format!("{}({}, {}, {})", helper, receiver, args[0], args[1]);
+        }
+        if matches!(method_name.as_str(), "copy_from_nonoverlapping" | "copy_from")
+            && args.len() == 2
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let helper = if method_name == "copy_from_nonoverlapping" {
+                "rusty::ptr::copy_nonoverlapping"
+            } else {
+                "rusty::ptr::copy"
+            };
+            return format!("{}({}, {}, {})", helper, args[0], receiver, args[1]);
+        }
         if matches!(method_name.as_str(), "add" | "offset")
             && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)
@@ -12174,6 +12208,7 @@ impl CodeGen {
                 let ty = self.map_type(&c.ty);
                 let target_is_pointer_type =
                     matches!(c.ty.as_ref(), syn::Type::Ptr(_)) || ty.ends_with('*');
+                let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&c.expr);
                 let source_is_explicit_reference =
                     matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
                 if type_string_has_auto_placeholder(&ty) {
@@ -12185,6 +12220,11 @@ impl CodeGen {
                     } else {
                         expr
                     }
+                } else if target_is_pointer_type
+                    && source_is_raw_pointer_type
+                    && !source_is_explicit_reference
+                {
+                    format!("reinterpret_cast<{}>({})", ty, expr)
                 } else if target_is_pointer_type
                     && self.is_expr_reference_like(&c.expr)
                     && !source_is_explicit_reference
@@ -17799,6 +17839,20 @@ fn collect_consuming_method_receivers_in_expr(
                         }
                     }
                 }
+                let joined = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if types::map_function_path(&joined) == Some("rusty::mem::drop")
+                    && call.args.len() == 1
+                {
+                    if let Some(name) = extract_simple_local_ident(&call.args[0]) {
+                        result.insert(name);
+                    }
+                }
             }
             collect_consuming_method_receivers_in_expr(&call.func, result);
             for arg in &call.args {
@@ -23090,6 +23144,41 @@ mod tests {
         );
         assert!(out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(&mut_ref))"));
         assert!(!out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(mut_ref))"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327181_pointer_to_pointer_cast_uses_reinterpret_cast() {
+        let out = transpile_str(
+            r#"
+            use std::mem::{self, MaybeUninit};
+            fn f<T, const N: usize>(array: [T; N], dst: *mut [MaybeUninit<T>; N]) {
+                let array = mem::ManuallyDrop::new(array);
+                unsafe {
+                    (array.as_ptr() as *const [MaybeUninit<T>; N]).copy_to_nonoverlapping(dst, 1);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<rusty::MaybeUninit<T>, rusty::sanitize_array_capacity<N>()>>>>(rusty::as_ptr(array_shadow1))",
+        ));
+        assert!(out.contains("rusty::ptr::copy_nonoverlapping("));
+        assert!(!out.contains("->copy_to_nonoverlapping("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327181_drop_marks_immutable_local_as_consumed() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let v = Vec::<i32>::new();
+                drop(v);
+            }
+            "#,
+        );
+        assert!(out.contains("auto v = rusty::Vec::new_();"));
+        assert!(!out.contains("const auto v ="));
+        assert!(out.contains("rusty::mem::drop(std::move(v));"));
     }
 
     #[test]

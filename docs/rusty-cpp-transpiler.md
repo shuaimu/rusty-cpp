@@ -2591,8 +2591,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-17-2-1775521860 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-66. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.18.1`.
-   - focus: implement generic `ArrayVec::from` storage-copy/pointer adaptation hardening for the new deterministic `runner.cpp:1043` head, then re-run the full matrix.
+66. `Leaf 4.15.4.3.3.3.3.3.27.18.1` is complete.
+   - plan/scope check: transpiler-only implementation stayed well under the <1000 LOC threshold and required no additional decomposition.
+   - implemented generic transpiler hardening in `transpiler/src/codegen.rs`:
+     - pointer-to-pointer Rust `as` casts now emit `reinterpret_cast` instead of invalid cross-type `static_cast`,
+     - raw-pointer copy-method surfaces (`copy_to_nonoverlapping` / `copy_to` / `copy_from_nonoverlapping` / `copy_from`) now lower to `rusty::ptr` runtime helpers,
+     - `drop(...)` callsite scanning now marks immutable locals as consumed so transpiled locals remain movable (`auto`) for move-only payloads.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327181_pointer_to_pointer_cast_uses_reinterpret_cast`
+     - `test_leaf41543333333327181_drop_marks_immutable_local_as_consumed`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-18-1-1775522528 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1043` (invalid `std::array<T,N>*` → `std::array<MaybeUninit<T>,N>*` cast) and adjacent move-only `rusty::mem::drop` copy-constructor failures.
+   - new deterministic first hard error now starts at `runner.cpp:967`: `std::visit` overload mismatch in `ArrayVec::drain` bound lowering (`Bound<usize>` visitor arms emitted against `Bound<int>` variant payload), with canonical artifacts at `/tmp/rusty-parity-matrix-27-18-1-1775522528/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327181 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-18-1-1775522528 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): kept fixes generic and context-scoped, avoided crate-specific scripts/one-off rewrites, and preserved deterministic first-head capture before advancing.
+67. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.18.2`.
+   - focus: re-run the full seven-crate parity matrix after 27.18.1, record canonical first-head artifacts, and update frontier status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
