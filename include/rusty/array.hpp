@@ -535,7 +535,11 @@ auto slice_from(Container& container, Start start) {
     auto span = slice_full(container);
     const size_t start_index = detail::checked_index(start);
     detail::validate_slice_bounds(span, start_index, span.size());
-    return span.subspan(start_index);
+    if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
+        return container.substr(start_index);
+    } else {
+        return span.subspan(start_index);
+    }
 }
 
 template<typename Container, typename Start, typename End>
@@ -544,7 +548,11 @@ auto slice(Container& container, Start start, End end) {
     const size_t start_index = detail::checked_index(start);
     const size_t end_index = detail::checked_index(end);
     detail::validate_slice_bounds(span, start_index, end_index);
-    return span.subspan(start_index, end_index - start_index);
+    if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
+        return container.substr(start_index, end_index - start_index);
+    } else {
+        return span.subspan(start_index, end_index - start_index);
+    }
 }
 
 template<typename Container, typename Start, typename End>
