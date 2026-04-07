@@ -9202,6 +9202,9 @@ impl CodeGen {
                     false
                 }
             }
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                self.should_collapse_reborrow_of_deref_operand(&unary.expr)
+            }
             syn::Expr::Paren(p) => self.should_collapse_reborrow_of_deref_operand(&p.expr),
             syn::Expr::Group(g) => self.should_collapse_reborrow_of_deref_operand(&g.expr),
             _ => false,
@@ -23685,6 +23688,38 @@ mod tests {
         );
         assert!(out.contains("return A{.len_field = 0, .xs = std::array{"));
         assert!(!out.contains("return A{.xs = std::array{"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327241_nested_self_deref_reborrow_drops_address_of_artifact() {
+        let out = transpile_str(
+            r#"
+            use std::ops::Deref;
+            struct S;
+            impl Deref for S {
+                type Target = str;
+                fn deref(&self) -> &str { "x" }
+            }
+            impl S {
+                fn eq_str(&self, rhs: &str) -> bool { &**self == rhs }
+            }
+            "#,
+        );
+        assert!(out.contains("return *(*this) == rhs;"));
+        assert!(!out.contains("return &*(*this) == rhs;"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327241_raw_pointer_reborrow_of_deref_is_not_collapsed() {
+        let out = transpile_str(
+            r#"
+            unsafe fn g<'a>(p: *const i32) -> &'a i32 {
+                &*p
+            }
+            "#,
+        );
+        assert!(out.contains("return *p;"));
+        assert!(!out.contains("return p;"));
     }
 
     #[test]

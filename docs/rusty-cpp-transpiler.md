@@ -2740,8 +2740,30 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-23-2-1775527809 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-78. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.24.1`.
-   - focus: implement a generic fix for the new deterministic `runner.cpp:1588` string-assertion pointer-shape head, then re-run matrix.
+78. `Leaf 4.15.4.3.3.3.3.3.27.24.1` is complete.
+   - plan/scope check: transpiler-only implementation remained under the <1000 LOC guardrail and required no additional decomposition.
+   - implemented generic reborrow collapse hardening in `transpiler/src/codegen.rs`: `&*` collapse now recurses through nested unary-deref operands in reference-expression lowering, removing address-of-rvalue artifacts for string-like `&**self` comparison paths while preserving raw-pointer-sensitive behavior through existing guards.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327241_nested_self_deref_reborrow_drops_address_of_artifact`
+     - `test_leaf41543333333327241_raw_pointer_reborrow_of_deref_is_not_collapsed`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-24-1-1775528337 --keep-work-dirs`) removed the deterministic head at `runner.cpp:1588` (`&*"..."` / `std::string_view*` compare mismatch).
+   - new deterministic first hard error now starts at `include/rusty/array.hpp:309` (`len(const char*)` calls `std::size` on raw C-string), with adjacent fallout at `runner.cpp:1617` (`std::string_view(ArrayString<4>)` conversion shape) and downstream capacity/constexpr errors.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327241_nested_self_deref_reborrow_drops_address_of_artifact -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327241_raw_pointer_reborrow_of_deref_is_not_collapsed -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-24-1-1775528337 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fix is shared and AST-context-gated in core reference/unary lowering, avoids crate-specific scripts and post-generation rewrites, and preserves deterministic first-head artifact discipline.
+79. `Leaf 4.15.4.3.3.3.3.3.27.24.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-24-2-1775529801 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-24-2-1775529801/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `include/rusty/array.hpp:309`: `len(const char*)` attempts `std::size` on `const char*`, with adjacent fallout at `runner.cpp:1617` (`std::string_view(ArrayString<4>)` conversion shape) and downstream capacity/constexpr errors.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-24-2-1775529801 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+80. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.25.1`.
+   - focus: implement a generic fix for the deterministic `include/rusty/array.hpp:309` C-string length/coercion head, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
