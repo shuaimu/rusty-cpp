@@ -478,6 +478,23 @@ auto to_vec(const Container& container) {
     return out;
 }
 
+// Clone elements from one slice into another.
+// Mirrors Rust `[T]::clone_from_slice` semantics with a size check.
+template<typename DstElem, std::size_t DstExtent, typename SrcElem, std::size_t SrcExtent>
+void clone_from_slice(std::span<DstElem, DstExtent> dst, std::span<SrcElem, SrcExtent> src) {
+    static_assert(!std::is_const_v<DstElem>, "clone_from_slice destination must be mutable");
+    if (dst.size() != src.size()) {
+        throw std::length_error("clone_from_slice length mismatch");
+    }
+    for (size_t i = 0; i < dst.size(); ++i) {
+        if constexpr (requires(const SrcElem& value) { value.clone(); }) {
+            dst[i] = src[i].clone();
+        } else {
+            dst[i] = src[i];
+        }
+    }
+}
+
 template<typename Container, typename End>
 auto slice_to(Container& container, End end) {
     auto span = slice_full(container);

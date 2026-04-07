@@ -2691,8 +2691,25 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-21-2-1775526278 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
-74. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.22.1`.
-   - focus: implement generic runtime/transpiler dispatch for `clone_from_slice` when slice-like receivers lower to `std::span`, then re-run matrix.
+74. `Leaf 4.15.4.3.3.3.3.3.27.22.1` is complete.
+   - plan/scope check: transpiler/runtime implementation remained a focused change set well under the <1000 LOC guardrail; no additional decomposition was required.
+   - implemented generic transpiler/runtime hardening:
+     - `transpiler/src/codegen.rs`: added receiver-shape-gated lowering for method-call `clone_from_slice` so slice/span-like receivers dispatch through `rusty::clone_from_slice(...)` instead of invalid member calls on `std::span`.
+     - `transpiler/src/codegen.rs`: added slice/span receiver-shape detection for this lowering (slice range indexing, typed slice/span receivers, and raw slice-constructor expressions) while preserving non-slice user methods as member calls.
+     - `include/rusty/array.hpp`: added shared runtime helper `rusty::clone_from_slice(std::span<...>, std::span<...>)` with Rust-like size check and clone-aware element assignment (`elem.clone()` when available, assignment fallback otherwise).
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327221_slice_clone_from_slice_dispatches_to_runtime_helper`
+     - `test_leaf41543333333327221_non_slice_clone_from_slice_stays_member_call`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-22-1-1775527001 --keep-work-dirs`) removed the deterministic head at `runner.cpp:1137` (`std::span<rusty::Vec<int>>` missing `clone_from_slice`).
+   - new deterministic first hard error now starts at `runner.cpp:1408` (designator-order mismatch for `ArrayString<CAP>::new_` aggregate initialization), with adjacent fallout at `runner.cpp:1588` (`&*"..."` address-of-rvalue/string-view compare shape) and `include/rusty/array.hpp:309` (`len(const char*)` no matching `std::size`) in the same build.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327221_slice_clone_from_slice_dispatches_to_runtime_helper -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327221_non_slice_clone_from_slice_stays_member_call -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-22-1-1775527001 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fix is shared and receiver-shape-gated in core lowering/runtime paths, avoids crate-specific scripts and blanket rewrites, and preserves deterministic first-head artifact discipline.
+75. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.22.2`.
+   - focus: re-run full seven-crate matrix after 27.22.1 and record the next deterministic head with canonical artifacts (or mark closure if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

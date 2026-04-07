@@ -9019,6 +9019,64 @@ impl CodeGen {
         Some(mapped)
     }
 
+    fn type_is_slice_or_span_like(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Slice(_) => true,
+            syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|seg| {
+                matches!(seg.ident.to_string().as_str(), "span" | "Span")
+            }),
+            _ => false,
+        }
+    }
+
+    fn is_slice_view_constructor_path(path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "slice::from_raw_parts"
+                | "core::slice::from_raw_parts"
+                | "std::slice::from_raw_parts"
+                | "slice::from_raw_parts_mut"
+                | "core::slice::from_raw_parts_mut"
+                | "std::slice::from_raw_parts_mut"
+        )
+    }
+
+    fn expr_lowers_to_slice_or_span_view(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        if self
+            .infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.type_is_slice_or_span_like(&ty))
+        {
+            return true;
+        }
+
+        match expr {
+            syn::Expr::Index(idx) => self.is_slice_range_index_expr(&idx.index),
+            syn::Expr::Reference(r) => self.expr_lowers_to_slice_or_span_view(&r.expr),
+            syn::Expr::MethodCall(mc) => {
+                mc.args.is_empty()
+                    && matches!(
+                        mc.method.to_string().as_str(),
+                        "as_slice" | "as_mut_slice" | "as_bytes" | "as_mut_bytes"
+                    )
+            }
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path) = call.func.as_ref() else {
+                    return false;
+                };
+                Self::is_slice_view_constructor_path(&path.path)
+            }
+            _ => false,
+        }
+    }
+
     fn type_uses_as_str_string_view_coercion(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
@@ -9432,6 +9490,18 @@ impl CodeGen {
             args.push(self.emit_call_arg_with_pass_style(arg, style, arg_expected, false));
         }
         let method_template_args = self.emit_method_call_template_args(mc, &args);
+        if method_name == "clone_from_slice"
+            && args.len() == 1
+            && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::clone_from_slice({}, {})", receiver, args[0]);
+        }
         if method_name == "write_fmt" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -23534,6 +23604,38 @@ mod tests {
         assert!(out.contains("const auto p = rusty::ptr::add("));
         assert!(out.contains("rusty::ptr::copy(std::move(p), rusty::ptr::offset(p, 1), 1)"));
         assert!(!out.contains("const auto* p ="));
+    }
+
+    #[test]
+    fn test_leaf41543333333327221_slice_clone_from_slice_dispatches_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(lhs: &mut [i32; 4], rhs: &[i32; 4]) {
+                lhs[..2].clone_from_slice(&rhs[..2]);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::clone_from_slice(rusty::slice_to(lhs, 2), rusty::slice_to(rhs, 2));")
+        );
+        assert!(!out.contains("slice_to(lhs, 2).clone_from_slice("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327221_non_slice_clone_from_slice_stays_member_call() {
+        let out = transpile_str(
+            r#"
+            struct Sink {}
+            impl Sink {
+                fn clone_from_slice(&mut self, value: i32) {}
+            }
+            fn f(mut sink: Sink) {
+                sink.clone_from_slice(1);
+            }
+            "#,
+        );
+        assert!(out.contains("sink.clone_from_slice(1);"));
+        assert!(!out.contains("rusty::clone_from_slice(sink"));
     }
 
     #[test]
