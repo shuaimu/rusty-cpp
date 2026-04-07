@@ -2560,8 +2560,15 @@ Active work items:
      - `ctest --test-dir build-tests --output-on-failure`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-16-1-1775520565 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): kept fix shared and context-gated in runtime helper surfaces, avoided crate-specific scripts, and preserved deterministic first-head capture.
-63. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.16.2`.
-   - focus: re-run full seven-crate parity matrix after 27.16.1 and record the deterministic first failure head with canonical artifacts.
+63. `Leaf 4.15.4.3.3.3.3.3.27.16.2` is complete.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-16-2-1775520852 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-16-2-1775520852/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1123`: `no matching function for call to ArrayVec<int, 2>::extend_from_iter(...)` because template parameter `CHECK` cannot be deduced from `extend_from_iter(rusty::iter(slice_shadow1).cloned())`, followed by adjacent iterator/template-deduction fallout.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-16-2-1775520852 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
+64. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.17.1`.
+   - focus: implement generic iterator-template deduction hardening for the new deterministic head at `runner.cpp:1123`, then re-run full seven-crate matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
