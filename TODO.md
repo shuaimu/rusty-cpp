@@ -2113,7 +2113,16 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `Position` unresolved in prototypes (`runner.cpp:450/452/455/457`; see `build.log` in canonical artifacts).
                               - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-1-semver-20260407-3/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes stayed in shared transpiler/runtime surfaces, remained shape-gated, and introduced no crate-specific rewrites/scripts.
-                            - [ ] Leaf 4.15.4.4.2: Re-run `semver` parity (`tests/transpile_tests/run_parity_matrix.sh --crate semver`) and record the next deterministic head with canonical artifacts.
+                            - [x] *done* Leaf 4.15.4.4.2: Re-run `semver` parity (`tests/transpile_tests/run_parity_matrix.sh --crate semver`) and record the next deterministic head with canonical artifacts.
+                              - [x] *done* Plan/scope check: rerun-and-documentation leaf only; work stayed well below the <1000 LOC guardrail and required no additional decomposition.
+                              - [x] *done* Re-ran single-crate semver parity:
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-2-semver-20260407-1 --keep-work-dirs`
+                              - [x] *done* Deterministic first Stage D head recorded from canonical artifacts:
+                                - first compile blocker remains unresolved `Position` qualification in `parse` forward declarations/prototypes (`runner.cpp:450/452/455/457`, repeated later at `1045/1047/1050/1052`), while `error::Position` is declared (`runner.cpp:423`) and later imported (`using error::Position` near `runner.cpp:1057`).
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-2-semver-20260407-1/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Verification:
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-2-semver-20260407-1 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head capture from canonical artifacts and made no crate-specific rewrites/scripts.
                             - [ ] Leaf 4.15.4.4.3: Collapse current `bitflags` Stage D callable-surface head generically (starting with repeated `std::move_only_function` signature failures in generated runner output), add fixture-agnostic regressions, then re-run `bitflags` parity.
                             - [ ] Leaf 4.15.4.4.4: Re-run `bitflags` parity (`tests/transpile_tests/run_parity_matrix.sh --crate bitflags`) and record the next deterministic head with canonical artifacts.
                             - [ ] Leaf 4.15.4.4.5: Re-run full seven-crate parity matrix after 4.15.4.4.1-4.15.4.4.4; resume `arrayvec` leaf progression only after `semver` and `bitflags` no longer fail first in their single-crate Stage D runs.
