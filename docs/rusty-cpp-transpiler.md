@@ -2659,8 +2659,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-20-1-arrayvec --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes are shared/context-gated at AST emission points, avoid crate-specific scripts, and preserve deterministic first-head artifact discipline.
-71. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.20.2`.
-   - focus: rerun full seven-crate parity matrix after 27.20.1, capture canonical artifacts, and record the first deterministic post-27.20.1 failure family (or close Leaf 4 if all crates pass).
+71. `Leaf 4.15.4.3.3.3.3.3.27.20.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-20-2-1775525451 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-20-2-1775525451/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:857`: `rusty::ptr::copy` call-shape mismatch in `ArrayVec::try_insert` (`const auto* p = get_unchecked_ptr(...)` feeds `ptr::offset(p, 1)` as a const destination), with adjacent fallout at `runner.cpp:1137`, `runner.cpp:1408`, and `runner.cpp:1588`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-20-2-1775525451 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+72. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.21.1`.
+   - focus: implement generic transpiler/runtime fixes for the `runner.cpp:857` `try_insert` pointer-copy const-destination head family, then re-run the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
