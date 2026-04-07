@@ -11762,8 +11762,15 @@ impl CodeGen {
                     self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
                 } else if matches!(self.peel_paren_group_expr(&r.expr), syn::Expr::Reference(_)) {
                     // Double reference `&&expr` in Rust → just `&expr` in C++
-                    // (C++ const-ref parameters accept lvalues directly)
                     self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
+                } else if let syn::Expr::Unary(un) = self.peel_paren_group_expr(&r.expr) {
+                    if matches!(un.op, syn::UnOp::Deref(_)) {
+                        // Rust `&*expr` is a reborrow → just emit `expr` in C++
+                        self.emit_expr_to_string_with_expected(&un.expr, expected_ty)
+                    } else {
+                        let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                        format!("&{}", inner)
+                    }
                 } else {
                     let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                     if inner.starts_with('&') {
