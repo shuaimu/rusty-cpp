@@ -11998,6 +11998,25 @@ impl CodeGen {
         format!("std::array{{{}}}", elems.join(", "))
     }
 
+    /// Check if a mapped C++ type string references type parameters not in the
+    /// current scope (e.g., `T` from a callee's template parameter used in the caller).
+    fn mapped_type_has_out_of_scope_type_params(&self, cpp_type: &str) -> bool {
+        // Look for single uppercase letter tokens (common Rust type param names)
+        // or known type param patterns that aren't in the current scope
+        for word in cpp_type.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word.is_empty() {
+                continue;
+            }
+            // Check single uppercase letter (T, U, B, etc.) or common type params
+            let is_type_param_like = (word.len() == 1 && word.chars().next().unwrap().is_uppercase())
+                || (word.len() <= 3 && word.chars().all(|c| c.is_uppercase()));
+            if is_type_param_like && !self.is_type_param_in_scope(word) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn try_emit_reference_array_literal_with_expected_span(
         &self,
         reference: &syn::ExprReference,
@@ -12018,6 +12037,33 @@ impl CodeGen {
         let elem_ty = slice_ty.elem.as_ref();
         let elem_cpp = self.map_type(elem_ty);
         let is_mut = reference.mutability.is_some() || expected_ref.mutability.is_some();
+
+        // If the element type references out-of-scope type parameters (e.g., T from
+        // a callee's template), fall back to auto-deduced storage to avoid unresolved types.
+        if self.mapped_type_has_out_of_scope_type_params(&elem_cpp) {
+            let storage_decl = if is_mut {
+                "auto _slice_ref_tmp".to_string()
+            } else {
+                "const auto _slice_ref_tmp".to_string()
+            };
+            let elems: Vec<String> = array_expr
+                .elems
+                .iter()
+                .map(|elem| self.emit_expr_to_string(elem))
+                .collect();
+            let span_decl = if is_mut {
+                "auto"
+            } else {
+                "const auto"
+            };
+            return Some(format!(
+                "[&]() {{ static {} = std::array{{{}}}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
+                storage_decl,
+                elems.join(", "),
+                span_decl,
+            ));
+        }
+
         let span_cpp = if is_mut {
             format!("std::span<{}>", elem_cpp)
         } else {
