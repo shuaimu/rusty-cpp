@@ -293,3 +293,39 @@ fn test_to_string_view_prefers_deref_over_recursive_as_str() {
 
     compile_and_run_cpp(source, "to_string_view_recursive_as_str");
 }
+
+#[test]
+fn test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage() {
+    let source = r#"
+        #include <array>
+        #include <cstdint>
+        #include <rusty/maybe_uninit.hpp>
+        #include <rusty/mem.hpp>
+
+        template<size_t CAP>
+        struct ArrayVecLike {
+            static constexpr size_t CAPACITY = CAP;
+            uint32_t len_field;
+            std::array<rusty::MaybeUninit<uint8_t>, CAP> xs;
+        };
+
+        struct Plain {
+            uint32_t a;
+            uint8_t b;
+        };
+
+        int main() {
+            const bool zero_capacity_matches_rust =
+                rusty::mem::size_of<ArrayVecLike<0>>() == sizeof(uint32_t);
+            const bool non_zero_capacity_matches_len_plus_elements =
+                rusty::mem::size_of<ArrayVecLike<4>>() == sizeof(uint32_t) + 4 * sizeof(uint8_t);
+            const bool fallback_uses_native_size =
+                rusty::mem::size_of<Plain>() == sizeof(Plain);
+            return (zero_capacity_matches_rust &&
+                    non_zero_capacity_matches_len_plus_elements &&
+                    fallback_uses_native_size) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_size_of_rust_layout_override");
+}

@@ -3184,8 +3184,27 @@ Active work items:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-41-2-20260407-052350 --keep-work-dirs`
      - `cd /tmp/rusty-parity-matrix-27-41-2-20260407-052350/arrayvec && ./runner --rusty-single-test rusty_test_test_compact_size`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-114. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.42.1`.
-   - focus: implement shared transpiler/runtime fixes for the post-27.41.2 Stage E `test_compact_size` capacity-guard abort family, add fixture-agnostic regressions, then re-run full seven-crate parity matrix.
+114. `Leaf 4.15.4.3.3.3.3.3.27.42.1` is complete.
+   - plan/scope check: runtime/transpiler updates stayed well below the <1000 LOC threshold and did not require further decomposition.
+   - implemented shared runtime/transpiler fixes (no crate-specific scripts):
+     - `include/rusty/mem.hpp`: added shared forgotten-address runtime APIs (`mark_forgotten_address` / `consume_forgotten_address`) to avoid per-instance drop-skip layout fields, and updated `rusty::mem::size_of<T>()` to use Rust-layout sizing for fixed-capacity transpiled containers exposing `CAPACITY` + `len_field` + `xs` (`sizeof(len_field) + tuple_size(xs) * sizeof(element)`), restoring `CAP=0` parity.
+     - `transpiler/src/codegen.rs`: removed emitted `rusty_forget_flag_` member storage and rewired generated Drop/move glue to runtime APIs (`other.rusty_mark_forgotten()`, destructor guard via `rusty::mem::consume_forgotten_address(this)`, `rusty_mark_forgotten()` helper via `rusty::mem::mark_forgotten_address(this)`).
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf4154_drop_trait_impl_emits_destructor`
+     - `codegen::tests::test_leaf4154_drop_struct_literal_uses_constructor_call`
+     - `runtime_move_semantics::test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf4154_drop_trait_impl_emits_destructor -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf4154_drop_struct_literal_uses_constructor_call -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-42-1c-20260407-081541 --keep-work-dirs`
+   - single-crate repro confirms the deterministic 27.41.2 head family is collapsed: Stage E now proceeds through `test_compact_size PASSED` and `test_default PASSED`.
+   - new deterministic first failure shifts to Stage E runtime assertion abort in `test_drain`: `run.log` now ends after `test_default PASSED` (`run.log:12`), and single-wrapper repro (`./runner --rusty-single-test rusty_test_test_drain`) aborts with stack in the drain assertion path (`runner.cpp:2813-2841`, `assert_failed` at `runner.cpp:2829`/adjacent assertion block).
+   - canonical artifacts: `/tmp/rusty-parity-27-42-1c-20260407-081541/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed in shared runtime/transpiler surfaces, were shape-gated, and introduced no crate-specific rewrites/scripts.
+115. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.42.2`.
+   - focus: re-run the full seven-crate matrix after 27.42.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

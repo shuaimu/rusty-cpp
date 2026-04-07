@@ -2602,9 +2602,6 @@ impl CodeGen {
             }
             syn::Fields::Unit => {}
         }
-        if has_drop_impl {
-            self.writeln("bool rusty_forget_flag_ = false;");
-        }
         if matches!(&s.fields, syn::Fields::Unit) {
             self.unit_struct_types.insert(name_str.clone());
             let scoped_name = self.scoped_type_key(&name_str);
@@ -2676,23 +2673,26 @@ impl CodeGen {
                         Some(init)
                     })
                     .collect();
-                let move_inits = if move_inits.is_empty() {
-                    "rusty_forget_flag_(false)".to_string()
+                if move_inits.is_empty() {
+                    self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
                 } else {
-                    format!("{}, rusty_forget_flag_(false)", move_inits.join(", "))
-                };
-                self.writeln(&format!(
-                    "{}({}&& other) noexcept : {} {{",
-                    name, name, move_inits
-                ));
+                    self.writeln(&format!(
+                        "{}({}&& other) noexcept : {} {{",
+                        name,
+                        name,
+                        move_inits.join(", ")
+                    ));
+                }
                 self.indent += 1;
-                self.writeln("other.rusty_forget_flag_ = true;");
+                self.writeln("other.rusty_mark_forgotten();");
                 self.indent -= 1;
                 self.writeln("}");
             } else {
                 self.writeln(&format!("{}({}&&) = default;", name, name));
             }
-            self.writeln("void rusty_mark_forgotten() noexcept { rusty_forget_flag_ = true; }");
+            self.writeln(
+                "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }",
+            );
             self.newline();
         }
 
@@ -2703,11 +2703,8 @@ impl CodeGen {
             }
             self.current_struct = Some(name_str.clone());
             self.emitted_method_conflict_keys.push(HashSet::new());
-            let mut non_method_member_names: HashSet<String> =
+            let non_method_member_names: HashSet<String> =
                 named_field_cpp_names.values().cloned().collect();
-            if has_drop_impl {
-                non_method_member_names.insert("rusty_forget_flag_".to_string());
-            }
             self.emitted_non_method_member_names
                 .push(non_method_member_names);
             for impl_item in &methods {
@@ -4412,7 +4409,7 @@ impl CodeGen {
         }
         self.indent += 1;
         if is_drop_destructor {
-            self.writeln("if (rusty_forget_flag_) { return; }");
+            self.writeln("if (rusty::mem::consume_forgotten_address(this)) { return; }");
         }
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
@@ -19937,7 +19934,12 @@ mod tests {
             "#,
         );
         assert!(out.contains("~Foo() {"));
+        assert!(out.contains("if (rusty::mem::consume_forgotten_address(this)) { return; }"));
+        assert!(out.contains(
+            "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }"
+        ));
         assert!(out.contains("Foo(Foo&&) = default;"));
+        assert!(!out.contains("rusty_forget_flag_"));
         assert!(!out.contains("void drop("));
     }
 
@@ -19955,6 +19957,12 @@ mod tests {
             "#,
         );
         assert!(out.contains("Foo(int32_t value_init) : value(std::move(value_init)) {}"));
+        assert!(out.contains("Foo(Foo&& other) noexcept : value(std::move(other.value)) {"));
+        assert!(out.contains("other.rusty_mark_forgotten();"));
+        assert!(out.contains(
+            "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }"
+        ));
+        assert!(!out.contains("rusty_forget_flag_"));
         assert!(out.contains("const auto x = Foo(1);"));
         assert!(!out.contains("Foo{.value = 1}"));
     }

@@ -2,12 +2,52 @@
 #define RUSTY_MEM_HPP
 
 #include <cstddef>
+#include <mutex>
 #include <new>
+#include <tuple>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 namespace rusty {
 namespace mem {
+
+namespace detail {
+inline std::unordered_set<const void*>& forgotten_addresses() {
+    static std::unordered_set<const void*> addresses;
+    return addresses;
+}
+
+inline std::mutex& forgotten_addresses_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+template<typename T, typename = void>
+struct rust_layout_size {
+    static constexpr std::size_t value = sizeof(T);
+};
+
+// Emulate Rust layout for transpiled fixed-capacity containers that expose:
+// - `len_field` length bookkeeping,
+// - `xs` fixed storage array,
+// - `CAPACITY` compile-time capacity.
+// This preserves Rust `mem::size_of` semantics for zero-capacity specializations
+// where C++ `std::array<T, 0>` still occupies one byte.
+template<typename T>
+struct rust_layout_size<
+    T,
+    std::void_t<decltype(T::CAPACITY),
+                decltype(std::declval<T&>().len_field),
+                decltype(std::declval<T&>().xs),
+                typename std::remove_cvref_t<decltype(std::declval<T&>().xs)>::value_type>> {
+    using LenField = std::remove_cvref_t<decltype(std::declval<T&>().len_field)>;
+    using Storage = std::remove_cvref_t<decltype(std::declval<T&>().xs)>;
+    using Element = typename Storage::value_type;
+    static constexpr std::size_t value =
+        sizeof(LenField) + std::tuple_size_v<Storage> * sizeof(Element);
+};
+} // namespace detail
 
 template<typename T>
 class ManuallyDrop {
@@ -77,7 +117,30 @@ inline auto manually_drop_new(T&& value)
 
 template<typename T>
 constexpr std::size_t size_of() noexcept {
-    return sizeof(T);
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    return detail::rust_layout_size<Value>::value;
+}
+
+inline void mark_forgotten_address(const void* address) noexcept {
+    if (address == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    detail::forgotten_addresses().insert(address);
+}
+
+inline bool consume_forgotten_address(const void* address) noexcept {
+    if (address == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    auto& addresses = detail::forgotten_addresses();
+    const auto it = addresses.find(address);
+    if (it == addresses.end()) {
+        return false;
+    }
+    addresses.erase(it);
+    return true;
 }
 
 template<typename T, typename U>
