@@ -3552,6 +3552,11 @@ impl CodeGen {
     }
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
+        // Skip wildcard const bindings (`const _: () = ...;`) which are
+        // Rust compile-time assertions that have no C++ equivalent.
+        if c.ident == "_" {
+            return;
+        }
         if self.is_rust_libtest_metadata_type(&c.ty) {
             let marker =
                 Self::rustc_test_marker_name(&c.attrs).unwrap_or_else(|| c.ident.to_string());
