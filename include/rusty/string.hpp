@@ -624,6 +624,15 @@ public:
     bool operator!=(const str& other) const { return !(*this == other); }
 };
 
+// Symmetric comparison: allow `"str" == rusty::String` and `"str" == rusty::str`
+inline bool operator==(const char* lhs, const String& rhs) { return rhs == lhs; }
+inline bool operator!=(const char* lhs, const String& rhs) { return !(rhs == lhs); }
+inline bool operator==(const char* lhs, const str& rhs) { return rhs == lhs; }
+inline bool operator!=(const char* lhs, const str& rhs) { return !(rhs == lhs); }
+// Also support string_view comparisons
+inline bool operator==(std::string_view lhs, const String& rhs) { return lhs == rhs.as_str(); }
+inline bool operator==(const String& lhs, std::string_view rhs) { return lhs.as_str() == rhs; }
+
 // Factory functions
 // @lifetime: owned
 inline String string(const char* s) {
