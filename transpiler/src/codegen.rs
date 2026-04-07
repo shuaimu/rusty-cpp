@@ -10883,6 +10883,34 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::is_char_boundary({}, {})", receiver, args[0]);
         }
+        // Rust string methods that don't exist on std::string_view
+        if method_name == "trim" && args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::str_runtime::trim({})", receiver);
+        }
+        if method_name == "strip_prefix" && args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::str_runtime::strip_prefix({}, {})", receiver, args[0]);
+        }
+        if method_name == "split" && args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::str_runtime::split({}, {})", receiver, args[0]);
+        }
         if method_name == "hash" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -17828,6 +17856,9 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::chars(",
         "rusty::str_runtime::is_char_boundary(",
         "rusty::str_runtime::parse<",
+        "rusty::str_runtime::trim(",
+        "rusty::str_runtime::strip_prefix(",
+        "rusty::str_runtime::split(",
         "rusty::char_runtime::from_u32",
         "rusty::char_runtime::len_utf8(",
         "rusty::deref_ref(",
@@ -18127,6 +18158,43 @@ rusty::Result<T, rusty::String> parse(const Input& input) {\n\
         return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"invalid digit found in string\"));\n\
     }\n\
     return rusty::Result<T, rusty::String>::Err(rusty::String::from(\"unsupported parse target\"));\n\
+}\n\
+inline std::string_view trim(std::string_view s) {\n\
+    auto start = s.find_first_not_of(\" \\t\\n\\r\");\n\
+    if (start == std::string_view::npos) return {};\n\
+    auto end = s.find_last_not_of(\" \\t\\n\\r\");\n\
+    return s.substr(start, end - start + 1);\n\
+}\n\
+inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {\n\
+    if (s.starts_with(prefix)) {\n\
+        return rusty::Option<std::string_view>(s.substr(prefix.size()));\n\
+    }\n\
+    return rusty::Option<std::string_view>(rusty::None);\n\
+}\n\
+inline rusty::Option<std::string_view> strip_prefix(std::string_view s, char32_t ch) {\n\
+    if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s[0])) == ch) {\n\
+        return rusty::Option<std::string_view>(s.substr(1));\n\
+    }\n\
+    return rusty::Option<std::string_view>(rusty::None);\n\
+}\n\
+struct SplitIter {\n\
+    std::string_view remaining;\n\
+    char32_t delim;\n\
+    bool done = false;\n\
+    rusty::Option<std::string_view> next() {\n\
+        if (done) return rusty::Option<std::string_view>(rusty::None);\n\
+        auto pos = remaining.find(static_cast<char>(delim));\n\
+        if (pos == std::string_view::npos) {\n\
+            done = true;\n\
+            return rusty::Option<std::string_view>(remaining);\n\
+        }\n\
+        auto piece = remaining.substr(0, pos);\n\
+        remaining = remaining.substr(pos + 1);\n\
+        return rusty::Option<std::string_view>(piece);\n\
+    }\n\
+};\n\
+inline SplitIter split(std::string_view s, char32_t delim) {\n\
+    return SplitIter{s, delim};\n\
 }\n\
 }\n\
 namespace char_runtime {\n\
@@ -26455,6 +26523,32 @@ mod tests {
         // The unreachable arm should NOT have `return` producing void/typed mismatch
         assert!(!out.contains("return [&]() { [&]() { rusty::panicking::unreachable_display"),
             "diverging arm body should not have return keyword, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154413_str_trim_emits_str_runtime_trim() {
+        let out = transpile_str(
+            r#"
+            fn f(s: &str) -> &str {
+                s.trim()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::str_runtime::trim("),
+            "trim should emit str_runtime::trim, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154413_str_strip_prefix_emits_str_runtime_strip_prefix() {
+        let out = transpile_str(
+            r#"
+            fn f(s: &str) -> Option<&str> {
+                s.strip_prefix("hello")
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::str_runtime::strip_prefix("),
+            "strip_prefix should emit str_runtime::strip_prefix, got: {}", out);
     }
 
     #[test]

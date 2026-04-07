@@ -47,9 +47,9 @@ requires std::is_integral_v<T>
 Option<T> checked_add(T a, T b) {
     T result;
     if (__builtin_add_overflow(a, b, &result)) {
-        return Option<T>::None();
+        return Option<T>(rusty::None);
     }
-    return Option<T>::Some(result);
+    return Option<T>(result);
 }
 
 template<typename T>
@@ -57,9 +57,9 @@ requires std::is_integral_v<T>
 Option<T> checked_sub(T a, T b) {
     T result;
     if (__builtin_sub_overflow(a, b, &result)) {
-        return Option<T>::None();
+        return Option<T>(rusty::None);
     }
-    return Option<T>::Some(result);
+    return Option<T>(result);
 }
 
 template<typename T>
@@ -67,23 +67,23 @@ requires std::is_integral_v<T>
 Option<T> checked_mul(T a, T b) {
     T result;
     if (__builtin_mul_overflow(a, b, &result)) {
-        return Option<T>::None();
+        return Option<T>(rusty::None);
     }
-    return Option<T>::Some(result);
+    return Option<T>(result);
 }
 
 template<typename T>
 requires std::is_integral_v<T>
 Option<T> checked_div(T a, T b) {
     if (b == 0) {
-        return Option<T>::None();
+        return Option<T>(rusty::None);
     }
     if constexpr (std::is_signed_v<T>) {
         if (a == std::numeric_limits<T>::min() && b == static_cast<T>(-1)) {
-            return Option<T>::None();
+            return Option<T>(rusty::None);
         }
     }
-    return Option<T>::Some(a / b);
+    return Option<T>(a / b);
 }
 
 } // namespace rusty
