@@ -3076,8 +3076,16 @@ Active work items:
    - new deterministic first failure shifts to Stage E runtime: `array_clone_from` fails with `Called unwrap on None` (captured from `/tmp/rusty-parity-27-37-1-20260407-015432/arrayvec/run.log`).
    - canonical artifacts: `/tmp/rusty-parity-27-37-1-20260407-015432/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler coercion/lowering surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-105. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.37.2`.
-   - focus: re-run the full seven-crate parity matrix after 27.37.1, record the first deterministic failure head with canonical artifacts, and update active-frontier/TODO status (or close Leaf 4 if all crates pass).
+105. `Leaf 4.15.4.3.3.3.3.3.27.37.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-37-2-20260407-020850 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-37-2-20260407-020850/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure has shifted to Stage E runtime: `array_clone_from FAILED: Called unwrap on None` (`run.log:4`), rooted at `runner.cpp:3433` (`u.clone_from(v)`), with active clone path at `runner.cpp:1157-1164` (`ArrayVec::clone_from` using `rusty::clone_from_slice` + `slice_from` + `extend_from_slice`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-37-2-20260407-020850 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+106. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.38.1`.
+   - focus: collapse the `ArrayVec::clone_from` runtime unwrap-none family generically (starting with `array_clone_from` failure at `runner.cpp:3433`, clone path `runner.cpp:1157-1164`) via shared transpiler/runtime fixes and fixture-agnostic regressions.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
