@@ -2979,8 +2979,16 @@ Active work items:
    - new deterministic first hard error starts at `runner.cpp:1594` (`std::string_view` has no member `hash`), with downstream dependent families in `slice.hpp`/span equality diagnostics.
    - canonical artifacts: `/tmp/rusty-parity-27-33-1-20260407-005858/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed in shared transpiler lowering/type-inference surfaces, added fixture-agnostic regressions, and avoided crate-specific rewrites/scripts.
-97. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.33.2`.
-   - focus: re-run the full seven-crate matrix after 27.33.1, record the new deterministic first-head family (currently led by `runner.cpp:1594` string-view hash surface), and advance frontier docs/TODO status.
+97. `Leaf 4.15.4.3.3.3.3.3.27.33.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-33-2-20260407-010206 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-33-2-20260407-010206/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error is now `runner.cpp:1594`: `std::string_view` hash-call mismatch (`(*(*this)).hash(h)` has no `.hash` surface on `std::string_view`), with immediate adjacent fallout at `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:81` (`ClonedIter::next` copy-constructs move-only `rusty::Vec<int>`) and downstream dependent span-equality payload-shape diagnostics (for example `/usr/include/c++/14/bits/stl_algobase.h:1196`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-33-2-20260407-010206 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+98. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.34.1`.
+   - focus: collapse the `runner.cpp:1594` string-hash surface mismatch and immediate adjacent cloned-iterator move-only copy head (`slice.hpp:81`) via shared transpiler/runtime fixes and fixture-agnostic regressions.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
