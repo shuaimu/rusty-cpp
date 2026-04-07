@@ -3346,8 +3346,44 @@ Active work items:
      - adjacent deterministic failures at `runner.cpp:664` (`copy_nonoverlapping` `char*` vs `uint8_t*` mismatch and unresolved `mem::transmute`) and `runner.cpp:668/673/694` (`NonNull` equality/cast surface).
    - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-8-semver-20260407-3/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in emission-ordering logic, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-124. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
-   - focus: collapse the new deterministic `semver` Stage D identifier pointer/memory lowering head before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
+124. `Leaf 4.15.4.4.9` is complete.
+   - plan/scope check: shared transpiler/runtime updates plus focused regression coverage stayed below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared fixes (no crate-specific scripts):
+     - `transpiler/src/codegen.rs`:
+       - unary `!` lowering now emits bitwise `~` for integer-like operands (while retaining logical `!` for bool).
+       - integer↔pointer cast lowering now bridges via `std::uintptr_t` to avoid invalid `static_cast` pointer/integer forms.
+       - function-local Rust `const` items keep scalar numeric/boolean/floating forms `constexpr` and lower non-scalar forms to `const`, preventing non-constexpr pointer-cast initialization failures in local constant contexts without regressing scalar constexpr emission.
+       - repeat expressions with `mem::size_of::<T>()` lengths now materialize fixed arrays so transmute/source-shape flows stay typed.
+       - runtime fallback helper surface now includes `rusty::panicking::unreachable_display`.
+     - `transpiler/src/types.rs`: added `core::panicking::unreachable_display` → `rusty::panicking::unreachable_display` function-path mapping.
+     - `include/rusty/ptr.hpp`: added `NonNull` equality operators and heterogenous `copy`/`copy_nonoverlapping` overloads (equal-element-size constrained) for `char*`/`uint8_t*` interop.
+     - `include/rusty/mem.hpp`: added generic equal-size `rusty::mem::transmute<From, To>` byte reinterpretation surface.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf415449_unary_not_integer_uses_bitwise_operator`
+     - `codegen::tests::test_leaf415449_unary_not_bool_stays_logical_operator`
+     - `codegen::tests::test_leaf415449_integer_to_pointer_cast_uses_uintptr_bridge`
+     - `codegen::tests::test_leaf415449_pointer_to_integer_cast_uses_uintptr_bridge`
+     - `codegen::tests::test_leaf415449_function_local_const_item_uses_const_storage`
+     - `codegen::tests::test_leaf415449_repeat_size_of_len_prefers_fixed_array_materialization`
+     - `runtime_move_semantics::{test_ptr_copy_nonoverlapping_supports_char_to_u8_surface,test_ptr_nonnull_supports_equality_comparison,test_mem_transmute_supports_equal_size_byte_reinterpretation}`
+     - `types::tests::test_function_path_mapping` updated for `core::panicking::unreachable_display`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf415449 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler types::tests::test_function_path_mapping -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-9-semver-20260407-2 --keep-work-dirs`
+   - single-crate semver repro confirms the prior identifier pointer/memory blockers are collapsed:
+     - old first blocker (`invalid static_cast` from `bool` to `uint8_t*`) is absent.
+     - old `copy_nonoverlapping` `char*`/`uint8_t*` mismatch and missing `mem::transmute` surface are absent as first blockers.
+     - old `NonNull` equality/cast head is absent as first blocker.
+   - new deterministic first Stage D head moved to `identifier::new_unchecked` control-flow/lambda-return lowering:
+     - first compile blocker: inconsistent lambda return type (`Identifier` vs `void`) at `runner.cpp:666`.
+     - adjacent follow-ons in the same family: `is_null` on raw pointer and `rotate_right`/`wrapping_sub` intrinsic-method emission at `runner.cpp:708/748/760`.
+   - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-9-semver-20260407-2/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared + AST/context-gated and introduced no crate-specific rewrites/scripts.
+125. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
+   - focus: collapse the new deterministic `semver` Stage D `identifier::new_unchecked` control-flow/lambda-return head before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

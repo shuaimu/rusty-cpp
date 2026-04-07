@@ -2226,6 +2226,49 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `semver` still fails first in single-crate Stage D on identifier pointer/memory lowering head (`/tmp/rusty-parity-4-15-4-4-8-semver-20260407-3/semver/build.log`).
                                 - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shared and AST-shape-gated in ordering logic, avoids crate-specific rewrites/scripts, and preserves deterministic first-head artifact capture.
+                            - [x] *done* Leaf 4.15.4.4.9: Collapse current `semver` Stage D identifier pointer/memory interoperability head generically (starting with invalid `!0 as *mut u8` cast lowering, `copy_nonoverlapping` `char*`/`uint8_t*` mismatch, missing `mem::transmute` surface, and `NonNull` comparison/cast failures), add fixture-agnostic regressions, then re-run `semver` parity.
+                              - [x] *done* Plan/scope check: shared transpiler/runtime updates plus regression coverage stayed well below the <1000 LOC guardrail and required no additional decomposition.
+                              - [x] *done* Implemented shared fixes (no crate-specific scripts):
+                                - `transpiler/src/codegen.rs`:
+                                  - unary `!` lowering now emits bitwise `~` for integer-like operands (while preserving logical `!` for bool).
+                                  - raw-pointer/integer cast lowering now bridges through `std::uintptr_t` for integer↔pointer casts to avoid invalid `static_cast` forms.
+                                  - function-local Rust `const` items now preserve `constexpr` for scalar numeric/boolean/floating forms and emit `const` for non-scalar forms, avoiding non-constexpr pointer-cast initialization failures while keeping scalar constexpr behavior.
+                                  - repeat-expression lowering now materializes fixed arrays for `mem::size_of::<T>()` length forms (instead of `rusty::array_repeat` dynamic vectors), preserving typed transmute-compatible shapes.
+                                  - runtime fallback helper surface now includes `rusty::panicking::unreachable_display`.
+                                - `transpiler/src/types.rs`: mapped `core::panicking::unreachable_display` to `rusty::panicking::unreachable_display`.
+                                - `include/rusty/ptr.hpp`:
+                                  - added `rusty::NonNull<T>` equality/inequality operators.
+                                  - added heterogenous `rusty::ptr::{copy,copy_nonoverlapping}` overloads with equal-element-size guards to support `char*`/`uint8_t*` interop surfaces.
+                                - `include/rusty/mem.hpp`: added generic `rusty::mem::transmute<From, To>` (equal-size constrained byte reinterpretation).
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_leaf415449_unary_not_integer_uses_bitwise_operator`
+                                - `codegen::tests::test_leaf415449_unary_not_bool_stays_logical_operator`
+                                - `codegen::tests::test_leaf415449_integer_to_pointer_cast_uses_uintptr_bridge`
+                                - `codegen::tests::test_leaf415449_pointer_to_integer_cast_uses_uintptr_bridge`
+                                - `codegen::tests::test_leaf415449_function_local_const_item_uses_const_storage`
+                                - `codegen::tests::test_leaf415449_repeat_size_of_len_prefers_fixed_array_materialization`
+                                - `types::tests::test_function_path_mapping` (extended with `core::panicking::unreachable_display` mapping assertion)
+                                - `runtime_move_semantics::test_ptr_copy_nonoverlapping_supports_char_to_u8_surface`
+                                - `runtime_move_semantics::test_ptr_nonnull_supports_equality_comparison`
+                                - `runtime_move_semantics::test_mem_transmute_supports_equal_size_byte_reinterpretation`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler leaf415449 -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler types::tests::test_function_path_mapping -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-9-semver-20260407-2 --keep-work-dirs`
+                              - [x] *done* Single-crate semver parity confirms the prior identifier pointer/memory compile blockers are collapsed:
+                                - prior first blocker `invalid static_cast` (`bool` to `uint8_t*`) at `runner.cpp:654` is absent.
+                                - prior `copy_nonoverlapping` `char*`/`uint8_t*` mismatch and missing `mem::transmute` surface in `identifier::new_unchecked` are absent as first blockers.
+                                - prior `NonNull` equality/cast failures around `runner.cpp:668/673/694` are absent as first blockers.
+                              - [x] *done* New deterministic first Stage D head moved to `identifier::new_unchecked` control-flow/lambda return shape:
+                                - first compile blocker is `inconsistent types 'identifier::Identifier' and 'void' deduced for lambda return type` at `runner.cpp:666`.
+                                - adjacent deterministic follow-ons in the same family include pointer/int intrinsic-method surfaces (`is_null`, `rotate_right`, `wrapping_sub`) at `runner.cpp:708/748/760`.
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-9-semver-20260407-2/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Gate check for resuming `arrayvec` progression remains **not yet satisfied** under `4.15.4.4`:
+                                - `semver` still fails first in single-crate Stage D on the new `identifier::new_unchecked` control-flow/lambda-return head (`/tmp/rusty-parity-4-15-4-4-9-semver-20260407-2/semver/build.log`).
+                                - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed in shared AST-aware transpiler/runtime surfaces, remained shape-gated, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.1: Implement shared transpiler/runtime fixes for the first deterministic 27.45.2 runtime head (no crate-specific scripts): restore Rust-parity retain/equality behavior so Stage E progresses past `test_retain` without assertion abort.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.2: Re-run full seven-crate parity matrix after 27.46.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).

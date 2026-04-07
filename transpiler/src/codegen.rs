@@ -3492,7 +3492,18 @@ impl CodeGen {
         let name = &c.ident;
         let ty = self.map_type(&c.ty);
         let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
-        self.writeln(&format!("constexpr {} {} = {};", ty, name, expr));
+        let storage = if self.block_depth > 0 {
+            if is_numeric_cpp_scalar_type(&ty)
+                || matches!(ty.as_str(), "bool" | "float" | "double" | "long double")
+            {
+                "constexpr"
+            } else {
+                "const"
+            }
+        } else {
+            "constexpr"
+        };
+        self.writeln(&format!("{} {} {} = {};", storage, ty, name, expr));
     }
 
     fn emit_static(&mut self, s: &syn::ItemStatic) {
@@ -8017,6 +8028,45 @@ impl CodeGen {
         )
     }
 
+    fn repeat_len_is_size_of_expr(&self, len_expr: &syn::Expr) -> bool {
+        let len_expr = self.peel_paren_group_expr(len_expr);
+        let syn::Expr::Call(call) = len_expr else {
+            return false;
+        };
+        if !call.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return false;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "mem::size_of" | "std::mem::size_of" | "core::mem::size_of" | "rusty::mem::size_of"
+        )
+    }
+
+    fn maybe_emit_repeat_expr_with_size_of_len_hint(
+        &self,
+        repeat: &syn::ExprRepeat,
+    ) -> Option<String> {
+        if !self.repeat_len_is_size_of_expr(&repeat.len) {
+            return None;
+        }
+        let elem_ty = self.infer_simple_expr_type(&repeat.expr)?;
+        Some(self.emit_repeat_expr_with_fixed_array_hint(
+            repeat,
+            &elem_ty,
+            &repeat.len,
+        ))
+    }
+
     fn should_emit_repeat_seed_cast(elem_cpp: &str) -> bool {
         let normalized = elem_cpp.trim();
         if normalized.is_empty()
@@ -11193,6 +11243,10 @@ impl CodeGen {
                     self.emit_repeat_expr_with_fixed_array_hint(repeat_expr, elem_ty, len_ty)
                 } else if let Some(elem_ty) = self.expected_array_element_type(expected_ty) {
                     self.emit_repeat_expr_with_element_hint(repeat_expr, elem_ty)
+                } else if let Some(fixed_array_expr) =
+                    self.maybe_emit_repeat_expr_with_size_of_len_hint(repeat_expr)
+                {
+                    fixed_array_expr
                 } else {
                     let val = self.emit_expr_to_string(&repeat_expr.expr);
                     let len = self.emit_expr_to_string(&repeat_expr.len);
@@ -13739,9 +13793,20 @@ impl CodeGen {
                     format!("-{}", operand)
                 }
                 syn::UnOp::Not(_) => {
-                    let bool_ty: syn::Type = parse_quote!(bool);
-                    let operand = self.emit_expr_to_string_with_expected(&un.expr, Some(&bool_ty));
-                    format!("!{}", operand)
+                    let operand_ty = self.infer_simple_expr_type(&un.expr);
+                    if operand_ty
+                        .as_ref()
+                        .is_some_and(|ty| self.is_known_integer_like_type(ty))
+                    {
+                        let operand =
+                            self.emit_expr_to_string_with_expected(&un.expr, operand_ty.as_ref());
+                        format!("~{}", operand)
+                    } else {
+                        let bool_ty: syn::Type = parse_quote!(bool);
+                        let operand =
+                            self.emit_expr_to_string_with_expected(&un.expr, Some(&bool_ty));
+                        format!("!{}", operand)
+                    }
                 }
                 syn::UnOp::Deref(_) => {
                     if self.is_expr_reference_like(&un.expr) {
@@ -13902,9 +13967,15 @@ impl CodeGen {
                 let ty = self.map_type(&c.ty);
                 let target_is_pointer_type =
                     matches!(c.ty.as_ref(), syn::Type::Ptr(_)) || ty.ends_with('*');
+                let target_normalized = ty
+                    .trim_start_matches("const ")
+                    .trim_end_matches('&')
+                    .trim();
+                let target_is_numeric_scalar = is_numeric_cpp_scalar_type(target_normalized);
                 let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&c.expr);
                 let source_is_explicit_reference =
                     matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
+                let source_is_reference_like = self.is_expr_reference_like(&c.expr);
                 if type_string_has_auto_placeholder(&ty) {
                     if target_is_pointer_type
                         && self.is_expr_reference_like(&c.expr)
@@ -13924,6 +13995,21 @@ impl CodeGen {
                     && !source_is_explicit_reference
                 {
                     format!("static_cast<{}>(&{})", ty, expr)
+                } else if target_is_pointer_type
+                    && !source_is_raw_pointer_type
+                    && !source_is_reference_like
+                {
+                    format!(
+                        "reinterpret_cast<{}>(static_cast<std::uintptr_t>({}))",
+                        ty, expr
+                    )
+                } else if target_is_numeric_scalar
+                    && (source_is_raw_pointer_type || source_is_reference_like)
+                {
+                    format!(
+                        "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
+                        ty, expr
+                    )
                 } else {
                     format!("static_cast<{}>({})", ty, expr)
                 }
@@ -13984,9 +14070,14 @@ impl CodeGen {
             }
             syn::Expr::Repeat(rep) => {
                 // [val; N] → std::array filled with val
-                let val = self.emit_expr_to_string(&rep.expr);
-                let len = self.emit_expr_to_string(&rep.len);
-                format!("rusty::array_repeat({}, {})", val, len)
+                if let Some(fixed_array_expr) = self.maybe_emit_repeat_expr_with_size_of_len_hint(rep)
+                {
+                    fixed_array_expr
+                } else {
+                    let val = self.emit_expr_to_string(&rep.expr);
+                    let len = self.emit_expr_to_string(&rep.len);
+                    format!("rusty::array_repeat({}, {})", val, len)
+                }
             }
             _ => self.match_expr_unreachable_fallback().to_string(),
         }
@@ -17944,6 +18035,8 @@ template<typename... Args>\n\
 [[noreturn]] inline void panic(Args&&...) { std::abort(); }\n\
 template<typename... Args>\n\
 [[noreturn]] inline void panic_fmt(Args&&...) { std::abort(); }\n\
+template<typename... Args>\n\
+[[noreturn]] inline void unreachable_display(Args&&...) { std::abort(); }\n\
 }\n\
 namespace intrinsics {\n\
 struct Discriminant {\n\
@@ -26028,6 +26121,97 @@ mod tests {
         assert!(out.contains("rusty::ptr::copy_nonoverlapping("));
         assert!(!out.contains("->copy_to_nonoverlapping("));
         assert!(!out.contains("rusty::as_ptr(array_shadow1)"));
+    }
+
+    #[test]
+    fn test_leaf415449_unary_not_integer_uses_bitwise_operator() {
+        let out = transpile_str(
+            r#"
+            fn f(v: u8) -> u8 {
+                !v
+            }
+            "#,
+        );
+        assert!(out.contains("return ~v;"));
+        assert!(!out.contains("return !v;"));
+    }
+
+    #[test]
+    fn test_leaf415449_unary_not_bool_stays_logical_operator() {
+        let out = transpile_str(
+            r#"
+            fn f(v: bool) -> bool {
+                !v
+            }
+            "#,
+        );
+        assert!(out.contains("return !v;"));
+        assert!(!out.contains("return ~v;"));
+    }
+
+    #[test]
+    fn test_leaf415449_integer_to_pointer_cast_uses_uintptr_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f() -> *mut u8 {
+                !0 as *mut u8
+            }
+            "#,
+        );
+        assert!(out.contains("reinterpret_cast<uint8_t*>(static_cast<std::uintptr_t>(~0))"));
+        assert!(!out.contains("static_cast<uint8_t*>(!0)"));
+    }
+
+    #[test]
+    fn test_leaf415449_pointer_to_integer_cast_uses_uintptr_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f(p: *const u8) -> usize {
+                p as usize
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "static_cast<size_t>(reinterpret_cast<std::uintptr_t>(p))"
+        ));
+        assert!(!out.contains("static_cast<size_t>(p)"));
+    }
+
+    #[test]
+    fn test_leaf415449_function_local_const_item_uses_const_storage() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            fn f() -> NonNull<u8> {
+                const HEAD: NonNull<u8> = unsafe { NonNull::new_unchecked(!0 as *mut u8) };
+                HEAD
+            }
+            "#,
+        );
+        assert!(out.contains("const rusty::ptr::NonNull<uint8_t> HEAD ="));
+        assert!(!out.contains("constexpr rusty::ptr::NonNull<uint8_t> HEAD ="));
+    }
+
+    #[test]
+    fn test_leaf415449_repeat_size_of_len_prefers_fixed_array_materialization() {
+        let out = transpile_str(
+            r#"
+            use std::mem;
+            struct S {
+                x: u8,
+            }
+            fn f() {
+                let bytes = [0u8; mem::size_of::<S>()];
+                let _ = bytes;
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::array<uint8_t, rusty::mem::size_of<S>()> _repeat{};"
+        ));
+        assert!(!out.contains(
+            "rusty::array_repeat(static_cast<uint8_t>(0), rusty::mem::size_of<S>())"
+        ));
     }
 
     #[test]

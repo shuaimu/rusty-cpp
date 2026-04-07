@@ -2,6 +2,8 @@
 #define RUSTY_MEM_HPP
 
 #include <cstddef>
+#include <cstring>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <tuple>
@@ -119,6 +121,26 @@ template<typename T>
 constexpr std::size_t size_of() noexcept {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
     return detail::rust_layout_size<Value>::value;
+}
+
+template<typename From, typename To>
+inline To transmute(From from) {
+    using FromValue = std::remove_reference_t<From>;
+    static_assert(
+        sizeof(FromValue) == sizeof(To),
+        "rusty::mem::transmute requires source and destination of equal size");
+
+    alignas(To) unsigned char storage[sizeof(To)];
+    std::memcpy(
+        static_cast<void*>(storage),
+        static_cast<const void*>(std::addressof(from)),
+        sizeof(To));
+    auto* out_ptr = std::launder(reinterpret_cast<To*>(storage));
+    if constexpr (std::is_copy_constructible_v<To>) {
+        return *out_ptr;
+    } else {
+        return std::move(*out_ptr);
+    }
 }
 
 inline void mark_forgotten_address(const void* address) noexcept {

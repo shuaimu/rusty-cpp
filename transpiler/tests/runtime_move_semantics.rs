@@ -261,6 +261,61 @@ fn test_ptr_write_supports_non_assignable_move_only_payloads() {
 }
 
 #[test]
+fn test_ptr_copy_nonoverlapping_supports_char_to_u8_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/ptr.hpp>
+
+        int main() {
+            const char src[4] = {'a', 'b', 'c', '\0'};
+            std::array<uint8_t, 4> dst{};
+            rusty::ptr::copy_nonoverlapping(src, dst.data(), 4);
+            return (dst[0] == static_cast<uint8_t>('a') && dst[2] == static_cast<uint8_t>('c')) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "ptr_copy_nonoverlapping_char_u8");
+}
+
+#[test]
+fn test_ptr_nonnull_supports_equality_comparison() {
+    let source = r#"
+        #include <rusty/ptr.hpp>
+
+        int main() {
+            uint8_t data = 7;
+            auto a = rusty::ptr::NonNull<uint8_t>::new_unchecked(&data);
+            auto b = rusty::ptr::NonNull<uint8_t>::new_unchecked(&data);
+            return (a == b) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "ptr_nonnull_equality");
+}
+
+#[test]
+fn test_mem_transmute_supports_equal_size_byte_reinterpretation() {
+    let source = r#"
+        #include <array>
+        #include <cstdint>
+        #include <rusty/mem.hpp>
+
+        struct Pair {
+            uint8_t a;
+            uint8_t b;
+        };
+
+        int main() {
+            std::array<uint8_t, 2> bytes{5, 9};
+            auto pair = rusty::mem::transmute<std::array<uint8_t, 2>, Pair>(bytes);
+            return (pair.a == 5 && pair.b == 9) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_transmute_equal_size");
+}
+
+#[test]
 fn test_result_err_supports_non_default_constructible_error_payloads() {
     let source = r#"
         #include <rusty/result.hpp>

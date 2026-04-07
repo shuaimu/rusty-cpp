@@ -32,6 +32,7 @@
 #include <cstddef>  // for std::ptrdiff_t
 #include <cstring>
 #include <memory>
+#include <type_traits>
 #include <utility>
 
 namespace rusty {
@@ -61,6 +62,14 @@ public:
 
     constexpr T* as_ptr() const noexcept {
         return ptr_;
+    }
+
+    friend constexpr bool operator==(NonNull<T> lhs, NonNull<T> rhs) noexcept {
+        return lhs.ptr_ == rhs.ptr_;
+    }
+
+    friend constexpr bool operator!=(NonNull<T> lhs, NonNull<T> rhs) noexcept {
+        return !(lhs == rhs);
     }
 };
 
@@ -159,9 +168,29 @@ inline void copy(const T* src, T* dst, Count count) {
     std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
 }
 
+template<typename Src, typename Dst, typename Count>
+inline void copy(const Src* src, Dst* dst, Count count)
+requires (!std::is_same_v<std::remove_cv_t<Src>, std::remove_cv_t<Dst>>)
+{
+    static_assert(sizeof(Src) == sizeof(Dst), "rusty::ptr::copy requires equal element sizes");
+    auto byte_count = static_cast<std::size_t>(count) * sizeof(Src);
+    std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+}
+
 template<typename T, typename Count>
 inline void copy_nonoverlapping(const T* src, T* dst, Count count) {
     auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
+    std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+}
+
+template<typename Src, typename Dst, typename Count>
+inline void copy_nonoverlapping(const Src* src, Dst* dst, Count count)
+requires (!std::is_same_v<std::remove_cv_t<Src>, std::remove_cv_t<Dst>>)
+{
+    static_assert(
+        sizeof(Src) == sizeof(Dst),
+        "rusty::ptr::copy_nonoverlapping requires equal element sizes");
+    auto byte_count = static_cast<std::size_t>(count) * sizeof(Src);
     std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
 }
 
