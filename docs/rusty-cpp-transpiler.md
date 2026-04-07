@@ -2841,8 +2841,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-28-1-1775533001 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes remain shared and AST/type-context-gated, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
-87. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.28.2`.
-   - focus: re-run the full seven-crate parity matrix after 27.28.1, record canonical first-head artifacts, and advance the active frontier (or close Leaf 4 if the matrix fully passes).
+87. `Leaf 4.15.4.3.3.3.3.3.27.28.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-28-2-1775532180 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-28-2-1775532180/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1104`: raw pointer value emitted as `ptr.write(...)` member call, with adjacent fallout at `runner.cpp:1080/1081` (`std::optional` emitted with Rust `is_some`/`unwrap` surface) and downstream variant/copy/lifetime cascades.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-28-2-1775532180 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+88. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.29.1`.
+   - focus: implement a generic fix for the deterministic `runner.cpp:1104` raw-pointer `ptr.write(...)`/adjacent `runner.cpp:1080/1081` optional-surface family, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
