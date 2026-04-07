@@ -158,7 +158,15 @@ public:
         has_value = false;
         return result;
     }
-    
+
+    // Const unwrap - returns const reference to inner value (for borrowed access)
+    const T& unwrap() const {
+        if (!has_value) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return value;
+    }
+
     // Expect with custom message - Rust style
     // @lifetime: owned
     T expect(const char* msg) {

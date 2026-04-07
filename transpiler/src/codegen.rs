@@ -7150,7 +7150,12 @@ impl CodeGen {
         else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
         first: bool,
     ) {
-        let scrutinee_expr = let_expr.expr.as_ref();
+        // Strip reference from scrutinee: `if let Some(x) = &self.field` → use `self.field`
+        // The `&` is a Rust borrow for pattern matching that has no C++ equivalent.
+        let scrutinee_expr = match let_expr.expr.as_ref() {
+            syn::Expr::Reference(r) => r.expr.as_ref(),
+            other => other,
+        };
         let scrutinee = self.emit_expr_to_string(scrutinee_expr);
         let (_, _, option_unwrap_method, _) =
             self.option_like_pattern_surface_for_expr(scrutinee_expr);
