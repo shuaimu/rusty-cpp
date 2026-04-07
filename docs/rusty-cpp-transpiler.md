@@ -3005,8 +3005,16 @@ Active work items:
    - new deterministic first hard error starts at `runner.cpp:3444` (span equality payload-shape mismatch; `std::span<rusty::Vec<int>>` compared against `std::span<const rusty::Vec<rusty::Vec<int>>>`), with dependent comparator diagnostics rooted at `/usr/include/c++/14/bits/stl_algobase.h:1196`.
    - canonical artifacts: `/tmp/rusty-parity-27-34-1-20260407-011235/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed in shared transpiler/runtime surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-99. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.34.2`.
-   - focus: re-run the full seven-crate matrix after 27.34.1, capture the new deterministic first-head family (currently led by `runner.cpp:3444` span-equality payload-shape mismatch), and advance frontier docs/TODO status.
+99. `Leaf 4.15.4.3.3.3.3.3.27.34.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-34-2-20260407-011501 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-34-2-20260407-011501/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:3444` (span assertion equality payload-shape mismatch between `std::span<rusty::Vec<int>>` and `std::span<const rusty::Vec<rusty::Vec<int>>>`), with immediate comparator hard diagnostic at `/usr/include/c++/14/bits/stl_algobase.h:1196` and downstream dependent mismatch at the same equality surface (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-34-2-20260407-011501 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+100. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.35.1`.
+   - focus: collapse the `runner.cpp:3444` span-equality payload-shape mismatch family via shared transpiler/runtime assertion/equality lowering updates and fixture-agnostic regressions.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
