@@ -2775,8 +2775,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-25-1-1775531207 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes are shared runtime/transpiler changes, AST/type-context-gated, and avoid crate-specific scripts or post-generation rewrites.
-81. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.25.2`.
-   - focus: re-run full seven-crate matrix after 27.25.1 and capture the updated deterministic frontier.
+81. `Leaf 4.15.4.3.3.3.3.3.27.25.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-25-2-1775531752 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-25-2-1775531752/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:710`: `MakeMaybeUninit<T>::VALUE` uses non-`constexpr` `MaybeUninit<T>::uninit()`, with adjacent fallout at `runner.cpp:711` (array materialization/`usize::MAX` capacity conversion) and instantiation roots at `/usr/include/c++/14/array:61`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-25-2-1775531752 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+82. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.26.1`.
+   - focus: implement a generic fix for the deterministic `runner.cpp:710` `MakeMaybeUninit` constexpr/materialization head, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
