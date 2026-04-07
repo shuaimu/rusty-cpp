@@ -19268,6 +19268,27 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf41543333333327271_zeroed_uses_expected_type_for_maybe_uninit_receiver() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+            struct ArrayString<const CAP: usize> {
+                xs: [MaybeUninit<u8>; CAP],
+            }
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn zero_filled() -> ArrayString<CAP> {
+                    unsafe { ArrayString { xs: MaybeUninit::zeroed().assume_init() } }
+                }
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "rusty::MaybeUninit<std::array<rusty::MaybeUninit<uint8_t>, rusty::sanitize_array_capacity<CAP>()>>::zeroed().assume_init()"
+        ));
+        assert!(!out.contains("MaybeUninit::zeroed().assume_init()"));
+    }
+
+    #[test]
     fn test_leaf415432_empty_array_index_lowers_to_unreachable_fallback() {
         let out = transpile_str(
             r#"

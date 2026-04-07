@@ -110,6 +110,14 @@ public:
     static MaybeUninit<T> uninit() {
         return MaybeUninit<T>();
     }
+
+    // Create storage with all bytes set to zero.
+    // Mirrors Rust's MaybeUninit::zeroed semantics.
+    static MaybeUninit<T> zeroed() noexcept {
+        MaybeUninit<T> mu;
+        __builtin_memset(mu.storage_, 0, sizeof(T));
+        return mu;
+    }
 };
 
 // UninitArray<T, N> - Fixed-size array of uninitialized storage
