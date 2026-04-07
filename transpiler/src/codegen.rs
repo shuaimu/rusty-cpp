@@ -12172,8 +12172,10 @@ impl CodeGen {
             } else {
                 "const auto"
             };
+            let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
             return Some(format!(
-                "[&]() {{ static {} = std::array{{{}}}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
+                "{}() {{ static {} = std::array{{{}}}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
+                capture,
                 storage_decl,
                 elems.join(", "),
                 span_decl,
@@ -12196,8 +12198,12 @@ impl CodeGen {
             .iter()
             .map(|elem| self.emit_expr_to_string_with_expected(elem, Some(elem_ty)))
             .collect();
+        // Use [] (no capture) at struct/namespace scope to avoid
+        // "non-local lambda cannot have capture-default" errors.
+        let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
         Some(format!(
-            "[&]() -> {} {{ static {} = {{{}}}; return {}(_slice_ref_tmp); }}()",
+            "{}() -> {} {{ static {} = {{{}}}; return {}(_slice_ref_tmp); }}()",
+            capture,
             span_cpp,
             storage_decl,
             elems.join(", "),
@@ -12235,9 +12241,10 @@ impl CodeGen {
             "const auto _slice_ref_tmp".to_string()
         };
         let inner = self.emit_expr_to_string_with_expected(&reference.expr, Some(expected_ref.elem.as_ref()));
+        let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
         Some(format!(
-            "[&]() -> {} {{ static {} = {}; return {}(_slice_ref_tmp); }}()",
-            span_cpp, storage_decl, inner, span_cpp
+            "{}() -> {} {{ static {} = {}; return {}(_slice_ref_tmp); }}()",
+            capture, span_cpp, storage_decl, inner, span_cpp
         ))
     }
 
