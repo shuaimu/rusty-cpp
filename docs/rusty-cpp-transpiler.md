@@ -3013,8 +3013,22 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-34-2-20260407-011501 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-100. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.35.1`.
-   - focus: collapse the `runner.cpp:3444` span-equality payload-shape mismatch family via shared transpiler/runtime assertion/equality lowering updates and fixture-agnostic regressions.
+100. `Leaf 4.15.4.3.3.3.3.3.27.35.1` is complete.
+   - plan/scope check: shared runtime-pointer adaptation plus focused regression coverage stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared runtime fix in `include/rusty/array.hpp`:
+     - `rusty::as_ptr(const T&)` and `rusty::as_mut_ptr(T&)` now prefer pointer-valued `.begin()` fallback when `.as_ptr()`/`.data()` are unavailable, so `slice_full` over container-like wrappers materializes element-pointer spans instead of wrapper-address spans.
+   - added fixture-agnostic regression:
+     - `runtime_move_semantics::test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-35-1-20260407-012351 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.34.2 head family is collapsed: `runner.cpp:3444` span payload-shape mismatch is gone.
+   - new deterministic first hard error now starts at `runner.cpp:4350`, with immediate comparator failure at `/usr/include/c++/14/bits/stl_algobase.h:1196` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` assertion payload mismatch).
+   - canonical artifacts: `/tmp/rusty-parity-27-35-1-20260407-012351/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared runtime surfaces with fixture-agnostic coverage, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+101. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.35.2`.
+   - focus: run the full seven-crate matrix after 27.35.1 and capture the post-fix deterministic Stage D frontier (currently headed by `runner.cpp:4350` / `/usr/include/c++/14/bits/stl_algobase.h:1196` in `arrayvec`) with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

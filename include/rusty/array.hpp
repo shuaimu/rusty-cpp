@@ -267,6 +267,12 @@ decltype(auto) as_ptr(const T& value) {
         return detail::adapt_as_ptr_result(value, value.as_ptr());
     } else if constexpr (requires { value.data(); }) {
         return detail::adapt_as_ptr_result(value, value.data());
+    } else if constexpr (requires { value.begin(); }) {
+        if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(value.begin())>>) {
+            return detail::adapt_as_ptr_result(value, value.begin());
+        } else {
+            return &value;
+        }
     } else {
         return &value;
     }
@@ -278,6 +284,12 @@ decltype(auto) as_mut_ptr(T& value) {
         return detail::adapt_as_mut_ptr_result(value, value.as_mut_ptr());
     } else if constexpr (requires { value.data(); }) {
         return detail::adapt_as_mut_ptr_result(value, value.data());
+    } else if constexpr (requires { value.begin(); }) {
+        if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(value.begin())>>) {
+            return detail::adapt_as_mut_ptr_result(value, value.begin());
+        } else {
+            return &value;
+        }
     } else {
         return &value;
     }

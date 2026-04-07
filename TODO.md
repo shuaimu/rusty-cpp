@@ -1783,7 +1783,20 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-34-2-20260407-011501 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head workflow and canonical artifact capture, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.35: Collapse the post-27.34.2 deterministic Stage D span-equality payload-shape family generically (starting with `runner.cpp:3444` span assertion mismatch and adjacent comparator fallout in `/usr/include/c++/14/bits/stl_algobase.h:1196`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.35.1: Implement shared transpiler/runtime fixes for the first deterministic 27.34.2 head (no crate-specific scripts): normalize assertion/span equality lowering so both sides materialize compatible payload shapes for nested `Vec`-like elements without regressing existing string/byte span comparisons.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.35.1: Implement shared transpiler/runtime fixes for the first deterministic 27.34.2 head (no crate-specific scripts): normalize assertion/span equality lowering so both sides materialize compatible payload shapes for nested `Vec`-like elements without regressing existing string/byte span comparisons.
+                              - [x] *done* Plan/scope check: shared runtime-pointer adaptation plus focused regression coverage stayed well below the <1000 LOC guardrail, so no additional decomposition was required.
+                              - [x] *done* Implemented shared runtime fix in `include/rusty/array.hpp`:
+                                - `rusty::as_ptr(const T&)` and `rusty::as_mut_ptr(T&)` now prefer pointer-valued `.begin()` fallback when `.as_ptr()`/`.data()` are unavailable, so `slice_full` over container-like wrappers materializes element-pointer spans instead of wrapper-address spans.
+                              - [x] *done* Added fixture-agnostic regression:
+                                - `transpiler/tests/runtime_move_semantics.rs`:
+                                  - `test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-35-1-20260407-012351 --keep-work-dirs`
+                              - [x] *done* Single-crate reprobe confirms the deterministic 27.34.2 head family is collapsed: `runner.cpp:3444` span payload-shape mismatch is gone; new deterministic first hard error starts at `runner.cpp:4350` with comparator failure at `/usr/include/c++/14/bits/stl_algobase.h:1196` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` assertion RHS payload mismatch).
+                              - [x] *done* Canonical artifacts for this leaf’s reprobe are at `/tmp/rusty-parity-27-35-1-20260407-012351/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed in shared runtime surfaces with fixture-agnostic regression coverage, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.35.2: Re-run full seven-crate parity matrix after 27.35.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

@@ -205,3 +205,28 @@ fn test_slice_cloned_iter_supports_move_only_cloneable_payloads() {
 
     compile_and_run_cpp(source, "slice_cloned_move_only_cloneable");
 }
+
+#[test]
+fn test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+        #include <type_traits>
+
+        int main() {
+            auto xs = rusty::Vec<rusty::Vec<int>>::new_();
+            xs.push(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{1, 2})));
+            xs.push(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{3})));
+
+            auto span = rusty::slice_full(xs);
+            static_assert(
+                std::is_same_v<
+                    decltype(span),
+                    std::span<rusty::Vec<int>>
+                >
+            );
+            return span.size() == 2 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_full_vec_of_vec_pointer_shape");
+}
