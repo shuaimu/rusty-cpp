@@ -7376,10 +7376,8 @@ impl CodeGen {
         let val = self.emit_expr_to_string(&repeat.expr);
         let len = self.emit_expr_to_string(&repeat.len);
         let elem_ty = self.map_type(elem_hint);
-        format!(
-            "rusty::array_repeat(static_cast<{}>({}), {})",
-            elem_ty, val, len
-        )
+        let repeat_seed = Self::emit_repeat_seed_with_cast(&val, &elem_ty);
+        format!("rusty::array_repeat({}, {})", repeat_seed, len)
     }
 
     fn emit_repeat_expr_with_fixed_array_hint(
@@ -7396,10 +7394,31 @@ impl CodeGen {
         } else {
             len
         };
+        let repeat_seed = Self::emit_repeat_seed_with_cast("_seed", &elem_ty);
         format!(
-            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
-            elem_ty, repeat_len, elem_ty, val
+            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill({}); return _repeat; }}({})",
+            elem_ty, repeat_len, repeat_seed, val
         )
+    }
+
+    fn should_emit_repeat_seed_cast(elem_cpp: &str) -> bool {
+        let normalized = elem_cpp.trim();
+        if normalized.is_empty()
+            || normalized.contains("/* TODO")
+            || type_string_has_auto_placeholder(normalized)
+        {
+            return false;
+        }
+        is_numeric_cpp_scalar_type(normalized)
+            || matches!(normalized, "bool" | "char" | "char32_t" | "float" | "double")
+    }
+
+    fn emit_repeat_seed_with_cast(seed_expr: &str, elem_cpp: &str) -> String {
+        if Self::should_emit_repeat_seed_cast(elem_cpp) {
+            format!("static_cast<{}>({})", elem_cpp, seed_expr)
+        } else {
+            seed_expr.to_string()
+        }
     }
 
     /// Register local bindings in the current scope for expected-type lookup.
@@ -11969,9 +11988,10 @@ impl CodeGen {
         let (elem_cpp, cap_cpp) = (elem_cpp?, cap_cpp?);
         let value = self.emit_expr_to_string(&repeat_expr.expr);
         let repeat_cap = self.maybe_sanitize_array_capacity_cpp_len(&cap_cpp);
+        let repeat_seed = Self::emit_repeat_seed_with_cast("_seed", &elem_cpp);
         let fixed_array_arg = format!(
-            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill(static_cast<{}>(_seed)); return _repeat; }}({})",
-            elem_cpp, repeat_cap, elem_cpp, value
+            "[](auto _seed) {{ std::array<{}, {}> _repeat{{}}; _repeat.fill({}); return _repeat; }}({})",
+            elem_cpp, repeat_cap, repeat_seed, value
         );
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         Some(format!("{}({})", func, fixed_array_arg))
@@ -27259,6 +27279,47 @@ mod tests {
         assert!(out.contains("auto _m0_tmp = rusty::slice_full(var);"));
         assert!(out.contains("box_new(std::array{3, 5, 8})"));
         assert!(!out.contains("static_cast<uint8_t>(3)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327371_repeat_seed_u8_slice_hint_preserves_uint8_cast() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let _bytes: &[u8] = &[9; 4];
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(static_cast<uint8_t>(9), 4)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327371_repeat_seed_nonprimitive_slice_hint_avoids_cast() {
+        let out = transpile_str(
+            r#"
+            struct Z {}
+            fn f() {
+                let _values: &[Z] = &[Z{}; 5];
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(Z{}, 5)"));
+        assert!(!out.contains("static_cast<Z>("));
+        assert!(!out.contains("static_cast<auto>("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327371_repeat_seed_inferred_slice_hint_avoids_auto_cast() {
+        let out = transpile_str(
+            r#"
+            struct Z {}
+            fn f() {
+                let _values: &[_] = &[Z{}; 5];
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::array_repeat(Z{}, 5)"));
+        assert!(!out.contains("static_cast<auto>("));
     }
 
     #[test]

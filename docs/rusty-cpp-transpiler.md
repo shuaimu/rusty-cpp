@@ -3059,8 +3059,25 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-36-2-20260407-014322 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-104. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.37.1`.
-   - focus: collapse the `runner.cpp:4145` non-primitive repeat-seed cast family generically (invalid `static_cast<auto>(Z{})` in `array_repeat`, with adjacent repeats at `runner.cpp:4201/4220`) via shared transpiler coercion logic and fixture-agnostic regressions.
+104. `Leaf 4.15.4.3.3.3.3.3.27.37.1` is complete.
+   - plan/scope check: transpiler-only repeat-seed cast gating plus focused fixture-agnostic regressions stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - added repeat-seed cast gating helpers so repeat-seed `static_cast<...>` is emitted only for scalar primitive C++ targets, and skipped for `auto`/TODO/non-primitive targets.
+     - applied the shared cast helper to `emit_repeat_expr_with_element_hint`, `emit_repeat_expr_with_fixed_array_hint`, and `try_emit_arrayvec_from_repeat_with_fixed_array_arg`.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327371_repeat_seed_u8_slice_hint_preserves_uint8_cast`
+     - `codegen::tests::test_leaf41543333333327371_repeat_seed_nonprimitive_slice_hint_avoids_cast`
+     - `codegen::tests::test_leaf41543333333327371_repeat_seed_inferred_slice_hint_avoids_auto_cast`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327371 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-37-1-20260407-015432 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.36.2 compile-head family is collapsed: Stage D build now passes and `runner.cpp` no longer emits `static_cast<auto>(...)` repeat-seed casts.
+   - new deterministic first failure shifts to Stage E runtime: `array_clone_from` fails with `Called unwrap on None` (captured from `/tmp/rusty-parity-27-37-1-20260407-015432/arrayvec/run.log`).
+   - canonical artifacts: `/tmp/rusty-parity-27-37-1-20260407-015432/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler coercion/lowering surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+105. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.37.2`.
+   - focus: re-run the full seven-crate parity matrix after 27.37.1, record the first deterministic failure head with canonical artifacts, and update active-frontier/TODO status (or close Leaf 4 if all crates pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
