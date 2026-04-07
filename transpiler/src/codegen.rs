@@ -217,6 +217,9 @@ pub struct CodeGen {
     /// `test::TestDescAndFn` metadata consts.
     /// Used to emit runnable wrappers for transpiled test-body functions.
     expanded_test_markers: Vec<String>,
+    /// Per-marker panic expectation recovered from expanded libtest metadata.
+    /// `true` means Rust expects the corresponding test body to panic.
+    expanded_test_marker_should_panic: HashMap<String, bool>,
     /// True when input appears to be `cargo expand --tests` output containing
     /// Rust libtest harness metadata/scaffolding.
     /// In this mode, trait facade/proxy emission is skipped to avoid unresolved
@@ -315,6 +318,7 @@ impl CodeGen {
             module_stack: Vec::new(),
             skipped_module_traits: HashSet::new(),
             expanded_test_markers: Vec::new(),
+            expanded_test_marker_should_panic: HashMap::new(),
             expanded_libtest_mode: false,
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
@@ -384,6 +388,7 @@ impl CodeGen {
         self.drop_trait_methods.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
+        self.expanded_test_marker_should_panic.clear();
         self.expanded_libtest_mode = false;
         self.emitted_top_level_functions.clear();
         self.macro_rules_names.clear();
@@ -1973,6 +1978,65 @@ impl CodeGen {
         None
     }
 
+    fn extract_libtest_should_panic_value(&self, expr: &syn::Expr) -> Option<bool> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    if let syn::Member::Named(name) = &field.member {
+                        if name == "should_panic" {
+                            return self.extract_should_panic_flag_from_expr(&field.expr);
+                        }
+                    }
+                    if let Some(value) = self.extract_libtest_should_panic_value(&field.expr) {
+                        return Some(value);
+                    }
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    return self.extract_libtest_should_panic_value(rest);
+                }
+                None
+            }
+            syn::Expr::Reference(r) => self.extract_libtest_should_panic_value(&r.expr),
+            syn::Expr::Array(arr) => arr
+                .elems
+                .iter()
+                .find_map(|elem| self.extract_libtest_should_panic_value(elem)),
+            syn::Expr::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .find_map(|elem| self.extract_libtest_should_panic_value(elem)),
+            _ => self.extract_should_panic_flag_from_expr(expr),
+        }
+    }
+
+    fn extract_should_panic_flag_from_expr(&self, expr: &syn::Expr) -> Option<bool> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Path(path_expr) => {
+                let last = path_expr.path.segments.last()?.ident.to_string();
+                match last.as_str() {
+                    "No" => Some(false),
+                    "Yes" => Some(true),
+                    _ => None,
+                }
+            }
+            syn::Expr::Call(call_expr) => {
+                let func_expr = self.peel_paren_group_expr(call_expr.func.as_ref());
+                let syn::Expr::Path(path_expr) = func_expr else {
+                    return None;
+                };
+                let last = path_expr.path.segments.last()?.ident.to_string();
+                match last.as_str() {
+                    "No" => Some(false),
+                    "Yes" | "YesWithMessage" => Some(true),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn emit_expanded_test_wrappers(&mut self) {
         if self.expanded_test_markers.is_empty() {
             return;
@@ -1997,11 +2061,21 @@ impl CodeGen {
 
             let call_name = Self::escape_cpp_qualified_name(&call_target);
             let wrapper_name = format!("rusty_test_{}", Self::marker_wrapper_suffix(&marker));
+            let should_panic = self
+                .expanded_test_marker_should_panic
+                .get(&marker)
+                .copied()
+                .unwrap_or(false);
             let export_prefix = if self.module_name.is_some() {
                 "export "
             } else {
                 ""
             };
+            self.writeln(&format!(
+                "// Rust-only libtest wrapper metadata: marker={} should_panic={}",
+                marker,
+                if should_panic { "yes" } else { "no" }
+            ));
             self.writeln(&format!("{}void {}() {{", export_prefix, wrapper_name));
             self.indent += 1;
             self.writeln(&format!("{}();", call_name));
@@ -3112,10 +3186,21 @@ impl CodeGen {
         if self.is_rust_libtest_metadata_type(&c.ty) {
             let marker =
                 Self::rustc_test_marker_name(&c.attrs).unwrap_or_else(|| c.ident.to_string());
-            self.expanded_test_markers.push(marker);
+            let should_panic = self.extract_libtest_should_panic_value(&c.expr);
+            self.expanded_test_markers.push(marker.clone());
+            if let Some(value) = should_panic {
+                self.expanded_test_marker_should_panic
+                    .insert(marker.clone(), value);
+            }
             self.writeln(&format!(
-                "// Rust-only libtest metadata const skipped: {}",
-                c.ident
+                "// Rust-only libtest metadata const skipped: {} (marker: {}, should_panic: {})",
+                c.ident,
+                marker,
+                match should_panic {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "unknown",
+                }
             ));
             return;
         }
@@ -22443,6 +22528,43 @@ mod tests {
         assert!(out.contains("void basic() {"));
         assert!(out.contains("export void rusty_test_basic() {"));
         assert!(out.contains("basic();"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327401_libtest_wrapper_metadata_marks_should_panic() {
+        let out = transpile_str_module(
+            r#"
+            #[rustc_test_marker = "panic_case"]
+            pub const panic_case: test::TestDescAndFn = test::TestDescAndFn {
+                desc: test::TestDesc {
+                    should_panic: test::ShouldPanic::Yes,
+                    ..unsafe { std::mem::zeroed() }
+                },
+                ..unsafe { std::mem::zeroed() }
+            };
+            fn panic_case() {}
+
+            #[rustc_test_marker = "regular_case"]
+            pub const regular_case: test::TestDescAndFn = test::TestDescAndFn {
+                desc: test::TestDesc {
+                    should_panic: test::ShouldPanic::No,
+                    ..unsafe { std::mem::zeroed() }
+                },
+                ..unsafe { std::mem::zeroed() }
+            };
+            fn regular_case() {}
+        "#,
+            "fixture",
+        );
+
+        assert!(out.contains(
+            "// Rust-only libtest wrapper metadata: marker=panic_case should_panic=yes"
+        ));
+        assert!(out.contains(
+            "// Rust-only libtest wrapper metadata: marker=regular_case should_panic=no"
+        ));
+        assert!(out.contains("export void rusty_test_panic_case() {"));
+        assert!(out.contains("export void rusty_test_regular_case() {"));
     }
 
     #[test]

@@ -414,15 +414,66 @@ fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
     Some(format!("rusty_test_{}", &rest[..end]))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerTestEntry {
+    fn_name: String,
+    label: String,
+    should_panic: bool,
+}
+
+fn marker_wrapper_suffix(marker: &str) -> String {
+    marker
+        .replace("::", "_")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn parse_libtest_wrapper_metadata(trimmed: &str) -> Option<(String, bool)> {
+    let rest = trimmed
+        .strip_prefix("// Rust-only libtest wrapper metadata:")?
+        .trim();
+    let mut marker: Option<String> = None;
+    let mut should_panic = false;
+    for token in rest.split_whitespace() {
+        if let Some(value) = token.strip_prefix("marker=") {
+            marker = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("should_panic=") {
+            should_panic = matches!(value, "yes" | "true" | "1");
+        }
+    }
+    Some((marker?, should_panic))
+}
+
 fn collect_rusty_test_entries_from_cppm(
     content: &str,
     seen_test_fns: &mut HashSet<String>,
-    test_entries: &mut Vec<(String, String)>,
+    test_entries: &mut Vec<RunnerTestEntry>,
 ) {
+    let mut wrapper_should_panic: HashMap<String, bool> = HashMap::new();
     for line in content.lines() {
-        if let Some(fn_name) = extract_rusty_test_wrapper_name(line.trim()) {
+        let trimmed = line.trim();
+        if let Some((marker, should_panic)) = parse_libtest_wrapper_metadata(trimmed) {
+            let wrapper = format!("rusty_test_{}", marker_wrapper_suffix(&marker));
+            wrapper_should_panic.insert(wrapper, should_panic);
+            continue;
+        }
+        if let Some(fn_name) = extract_rusty_test_wrapper_name(trimmed) {
             if seen_test_fns.insert(fn_name.clone()) {
-                test_entries.push((fn_name.clone(), test_label_from_fn_name(&fn_name)));
+                let should_panic = wrapper_should_panic.get(&fn_name).copied().unwrap_or(false);
+                test_entries.push(RunnerTestEntry {
+                    fn_name: fn_name.clone(),
+                    label: test_label_from_fn_name(&fn_name),
+                    should_panic,
+                });
             }
         }
     }
@@ -456,8 +507,16 @@ void rusty_test_beta() {
         assert_eq!(
             entries,
             vec![
-                ("rusty_test_alpha".to_string(), "alpha".to_string()),
-                ("rusty_test_beta".to_string(), "beta".to_string()),
+                RunnerTestEntry {
+                    fn_name: "rusty_test_alpha".to_string(),
+                    label: "alpha".to_string(),
+                    should_panic: false,
+                },
+                RunnerTestEntry {
+                    fn_name: "rusty_test_beta".to_string(),
+                    label: "beta".to_string(),
+                    should_panic: false,
+                },
             ]
         );
     }
@@ -475,8 +534,30 @@ void rusty_test_dup() {
         collect_rusty_test_entries_from_cppm(content, &mut seen, &mut entries);
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "rusty_test_dup");
-        assert_eq!(entries[0].1, "dup");
+        assert_eq!(entries[0].fn_name, "rusty_test_dup");
+        assert_eq!(entries[0].label, "dup");
+        assert!(!entries[0].should_panic);
+    }
+
+    #[test]
+    fn test_collect_rusty_test_entries_from_cppm_reads_should_panic_metadata() {
+        let content = r#"
+// Rust-only libtest wrapper metadata: marker=tests::panic_case should_panic=yes
+export void rusty_test_tests_panic_case() {
+}
+// Rust-only libtest wrapper metadata: marker=tests::regular_case should_panic=no
+export void rusty_test_tests_regular_case() {
+}
+"#;
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        collect_rusty_test_entries_from_cppm(content, &mut seen, &mut entries);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].fn_name, "rusty_test_tests_panic_case");
+        assert!(entries[0].should_panic);
+        assert_eq!(entries[1].fn_name, "rusty_test_tests_regular_case");
+        assert!(!entries[1].should_panic);
     }
 
     #[test]
@@ -1312,7 +1393,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         runner_src.push_str("#include <cstdint>\n#include <cstddef>\n#include <limits>\n");
         runner_src.push_str("#include <variant>\n#include <string>\n#include <optional>\n");
         runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
-        runner_src.push_str("#include <functional>\n#include <span>\n");
+        runner_src.push_str("#include <functional>\n#include <span>\n#include <cstdlib>\n");
         runner_src.push_str("#include <rusty/rusty.hpp>\n");
         runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n#include <rusty/try.hpp>\n\n");
         runner_src.push_str("// Overloaded visitor helper\n");
@@ -1323,7 +1404,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         runner_src.push_str("overloaded(Ts...) -> overloaded<Ts...>;\n\n");
 
         // Collect test names and transpiled code
-        let mut test_entries: Vec<(String, String)> = Vec::new();
+        let mut test_entries: Vec<RunnerTestEntry> = Vec::new();
         let mut seen_test_fns: HashSet<String> = HashSet::new();
         let mut runtime_prelude_emitted = false;
         let module_namespace_markers: Vec<String> = targets
@@ -1433,25 +1514,54 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         if test_entries.is_empty() {
             return Err("No transpiled test wrappers discovered (expected exported rusty_test_* functions).".to_string());
         }
-        test_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        test_entries.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
 
         // Generate main() that runs all tests
         runner_src.push_str("\n// ── Test runner ──\n");
-        runner_src.push_str("int main() {\n");
+        runner_src.push_str("int main(int argc, char** argv) {\n");
+        runner_src.push_str("    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n");
+        runner_src.push_str("        const std::string test_name = argv[2];\n");
+        runner_src.push_str("        try {\n");
+        for entry in &test_entries {
+            runner_src.push_str(&format!(
+                "            if (test_name == \"{}\") {{ {}(); return 0; }}\n",
+                entry.fn_name, entry.fn_name
+            ));
+        }
+        runner_src.push_str(
+            "            std::cerr << \"Unknown single-test wrapper: \" << test_name << std::endl;\n",
+        );
+        runner_src.push_str("            return 64;\n");
+        runner_src.push_str("        } catch (const std::exception& e) {\n");
+        runner_src.push_str("            std::cerr << e.what() << std::endl;\n");
+        runner_src.push_str("            return 101;\n");
+        runner_src.push_str("        } catch (...) {\n");
+        runner_src.push_str("            return 102;\n");
+        runner_src.push_str("        }\n");
+        runner_src.push_str("    }\n");
         runner_src.push_str("    int pass = 0, fail = 0;\n");
-        for (fn_name, label) in &test_entries {
-            runner_src.push_str(&format!(
-                "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                fn_name, label
-            ));
-            runner_src.push_str(&format!(
-                "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
-                label
-            ));
-            runner_src.push_str(&format!(
-                "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
-                label
-            ));
+        for entry in &test_entries {
+            let fn_name = &entry.fn_name;
+            let label = &entry.label;
+            if entry.should_panic {
+                runner_src.push_str(&format!(
+                    "    {{\n        const std::string cmd = std::string(\"\\\"\") + argv[0] + \"\\\" --rusty-single-test {}\";\n        const int status = std::system(cmd.c_str());\n        if (status != 0) {{ std::cout << \"  {} PASSED (expected panic)\" << std::endl; pass++; }}\n        else {{ std::cerr << \"  {} FAILED: expected panic\" << std::endl; fail++; }}\n    }}\n",
+                    fn_name, label, label
+                ));
+            } else {
+                runner_src.push_str(&format!(
+                    "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    fn_name, label
+                ));
+                runner_src.push_str(&format!(
+                    "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
+                    label
+                ));
+                runner_src.push_str(&format!(
+                    "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
+                    label
+                ));
+            }
         }
         runner_src.push_str("    std::cout << std::endl;\n");
         runner_src.push_str("    std::cout << \"Results: \" << pass << \" passed, \" << fail << \" failed\" << std::endl;\n");

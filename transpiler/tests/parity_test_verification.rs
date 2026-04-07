@@ -145,6 +145,25 @@ fn create_mixed_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     dir.join("Cargo.toml")
 }
 
+/// Create a fixture with a normal test and a #[should_panic] test.
+fn create_should_panic_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"should_panic_wrappers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn value() -> i32 { 7 }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn regular_pass() {\n        assert_eq!(value(), 7);\n    }\n\n    #[test]\n    #[should_panic(expected = \"boom\")]\n    fn expected_panic() {\n        panic!(\"boom\");\n    }\n}\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 /// Create a fixture with only lib unit tests (`#[cfg(test)]` in lib target).
 fn create_unit_only_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     let src_dir = dir.join("src");
@@ -1150,6 +1169,37 @@ fn test_multi_target_stop_after_run_executes_and_persists_run_log() {
 
     let run_log = std::fs::read_to_string(run_log_path(work_dir.path())).expect("read run.log");
     assert!(run_log.contains("Results:"));
+}
+
+#[test]
+fn test_stop_after_run_treats_should_panic_tests_as_expected_passes() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_should_panic_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("run")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stage E: Running transpiled tests..."));
+    assert!(stdout.contains("Run: PASS"));
+
+    let run_log = std::fs::read_to_string(run_log_path(work_dir.path())).expect("read run.log");
+    assert!(run_log.contains("expected_panic PASSED (expected panic)"));
+    assert!(!run_log.contains("expected_panic FAILED"));
 }
 
 // ── Rerun determinism ──────────────────────────────────

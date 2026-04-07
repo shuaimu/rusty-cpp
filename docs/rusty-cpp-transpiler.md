@@ -3134,8 +3134,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-39-2-20260407-034412 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-110. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.40.1`.
-   - focus: implement shared parity-runner semantics for panic-expected (`should_panic`) tests so Stage E classification matches Rust test behavior (starting from `deny_max_capacity_arrayvec_value`), add fixture-agnostic regressions, then re-run matrix.
+110. `Leaf 4.15.4.3.3.3.3.3.27.40.1` is complete.
+   - plan/scope check: shared metadata threading and parity-runner classification changes stayed well below the <1000 LOC guardrail and did not require further decomposition.
+   - implemented shared transpiler/parity-runner fixes (no crate-specific scripts):
+     - `transpiler/src/codegen.rs` now extracts libtest `should_panic` state from skipped `test::TestDescAndFn` metadata consts and emits wrapper metadata comments carrying marker + panic expectation.
+     - `transpiler/src/main.rs` now parses wrapper metadata into structured runner entries and adds isolated single-test execution (`--rusty-single-test`) so panic-expected tests are classified by process outcome (`non-zero => expected panic pass`, `zero => expected panic fail`) even when panic paths abort instead of throwing.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327401_libtest_wrapper_metadata_marks_should_panic`
+     - `tests::test_collect_rusty_test_entries_from_cppm_reads_should_panic_metadata`
+     - `parity_test_verification::test_stop_after_run_treats_should_panic_tests_as_expected_passes`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327401_libtest_wrapper_metadata_marks_should_panic -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_collect_rusty_test_entries_from_cppm_reads_should_panic_metadata -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_stop_after_run_treats_should_panic_tests_as_expected_passes -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler/parity-runner surfaces, remained metadata/shape-gated, and introduced no crate-specific rewrites/scripts.
+111. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.40.2`.
+   - focus: re-run the full seven-crate matrix after 27.40.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
