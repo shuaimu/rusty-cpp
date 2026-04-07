@@ -7938,6 +7938,29 @@ impl CodeGen {
             }
         }
 
+        if method == "cast" && mc.args.is_empty() {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+                if let syn::Type::Ptr(receiver_ptr) = receiver_ty {
+                    if let Some(target_ty) = self.method_call_single_turbofish_type(mc) {
+                        if receiver_ptr.mutability.is_some() {
+                            return Some(parse_quote!(*mut #target_ty));
+                        }
+                        return Some(parse_quote!(*const #target_ty));
+                    }
+                }
+            }
+        }
+
+        if matches!(method.as_str(), "wrapping_add" | "wrapping_sub") && mc.args.len() == 1 {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                if matches!(receiver_ty, syn::Type::Ptr(_)) {
+                    return Some(receiver_ty);
+                }
+            }
+        }
+
         if matches!(method.as_str(), "next" | "next_back") && mc.args.is_empty() {
             if self.is_iterator_like_receiver_expr(&mc.receiver) {
                 let item_ty = self
@@ -7964,6 +7987,15 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn infer_raw_pointer_mutability_for_expr(&self, expr: &syn::Expr) -> Option<bool> {
+        let receiver_ty = self.infer_simple_expr_type(expr)?;
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Ptr(ptr) = receiver_ty else {
+            return None;
+        };
+        Some(ptr.mutability.is_some())
     }
 
     fn infer_pointer_type_from_call_expr(&self, call: &syn::ExprCall) -> Option<syn::Type> {
@@ -9963,6 +9995,59 @@ impl CodeGen {
                 };
                 return format!("rusty::ptr::write({}, {})", receiver, args[0]);
             }
+        }
+        if method_name == "cast" && args.is_empty() && self.is_expr_raw_pointer_like(&mc.receiver) {
+            if let Some(target_ty) = self.method_call_single_turbofish_type(mc) {
+                let is_mut = self
+                    .infer_raw_pointer_mutability_for_expr(&mc.receiver)
+                    .or_else(|| {
+                        expected_ty.and_then(|ty| {
+                            let peeled = self.peel_reference_paren_group_type(ty);
+                            let syn::Type::Ptr(ptr) = peeled else {
+                                return None;
+                            };
+                            Some(ptr.mutability.is_some())
+                        })
+                    })
+                    .unwrap_or(true);
+                let cast_ty: syn::Type = if is_mut {
+                    parse_quote!(*mut #target_ty)
+                } else {
+                    parse_quote!(*const #target_ty)
+                };
+                let cast_cpp = self.map_type(&cast_ty);
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("reinterpret_cast<{}>({})", cast_cpp, receiver);
+            }
+        }
+        if matches!(method_name.as_str(), "wrapping_add" | "wrapping_sub")
+            && args.len() == 1
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let receiver_expected = expected_ty
+                .map(|ty| self.peel_reference_paren_group_type(ty))
+                .filter(|ty| matches!(ty, syn::Type::Ptr(_)));
+            let raw_receiver = if let Some(receiver_expected) = receiver_expected {
+                self.emit_expr_to_string_with_expected(&mc.receiver, Some(receiver_expected))
+            } else {
+                self.emit_expr_to_string(&mc.receiver)
+            };
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let op = if method_name == "wrapping_sub" {
+                "sub"
+            } else {
+                "add"
+            };
+            return format!("rusty::ptr::{}({}, {})", op, receiver, args[0]);
         }
         if matches!(method_name.as_str(), "copy_to_nonoverlapping" | "copy_to")
             && args.len() == 2
@@ -15194,11 +15279,19 @@ impl CodeGen {
             "&"
         };
 
-        // Build parameter list
+        // Build parameter list.
+        let mut closure_param_prelude: Vec<String> = Vec::new();
         let params: Vec<String> = closure
             .inputs
             .iter()
-            .map(|p| self.emit_closure_param(p))
+            .enumerate()
+            .map(|(idx, p)| {
+                let (decl, prelude_stmt) = self.emit_closure_param_with_prelude(p, idx);
+                if let Some(stmt) = prelude_stmt {
+                    closure_param_prelude.push(stmt);
+                }
+                decl
+            })
             .collect();
 
         let params_str = params.join(", ");
@@ -15218,13 +15311,33 @@ impl CodeGen {
                 inner.push_return_value_scope("auto");
                 inner.return_type_hints.push(None);
                 inner.emit_block(&block.block);
-                let body_str = inner.into_output();
+                let mut body_str = inner.into_output();
+                if !closure_param_prelude.is_empty() {
+                    let mut prelude_str = String::new();
+                    for stmt in &closure_param_prelude {
+                        prelude_str.push_str(stmt);
+                        prelude_str.push('\n');
+                    }
+                    body_str = format!("{}{}", prelude_str, body_str);
+                }
                 format!("[{}]({}) {{\n{}}}", capture, params_str, body_str)
             }
             _ => {
                 // Single expression body → return it
                 let body = inner.emit_expr_to_string(&closure.body);
-                format!("[{}]({}) {{ return {}; }}", capture, params_str, body)
+                if closure_param_prelude.is_empty() {
+                    format!("[{}]({}) {{ return {}; }}", capture, params_str, body)
+                } else {
+                    let mut prelude_str = String::new();
+                    for stmt in &closure_param_prelude {
+                        prelude_str.push_str(stmt);
+                        prelude_str.push('\n');
+                    }
+                    format!(
+                        "[{}]({}) {{\n{}return {};\n}}",
+                        capture, params_str, prelude_str, body
+                    )
+                }
             }
         }
     }
@@ -15307,6 +15420,29 @@ impl CodeGen {
             }
             _ => format!("auto {}", self.emit_pat_to_string(pat)),
         }
+    }
+
+    fn emit_closure_param_with_prelude(
+        &self,
+        pat: &syn::Pat,
+        index: usize,
+    ) -> (String, Option<String>) {
+        let syn::Pat::Reference(pr) = pat else {
+            return (self.emit_closure_param(pat), None);
+        };
+        let raw_name = format!("_closure_ref_param{}", index);
+        let binding_name = match pr.pat.as_ref() {
+            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            syn::Pat::Type(pt) => match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                _ => self.emit_pat_to_string(&pr.pat),
+            },
+            _ => self.emit_pat_to_string(&pr.pat),
+        };
+        (
+            format!("auto&& {}", raw_name),
+            Some(format!("auto {} = *{};", binding_name, raw_name)),
+        )
     }
 
     /// Try to map a Fn/FnMut/FnOnce trait bound to a C++ function type.
@@ -21187,8 +21323,24 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("[&](auto& len, auto&& self_len)"));
-        assert!(!out.contains("auto& auto&& len"));
+        assert!(out.contains("[&](auto&& _closure_ref_param0, auto&& self_len)"));
+        assert!(out.contains("auto len = *_closure_ref_param0;"));
+        assert!(!out.contains("[&](auto& len, auto&& self_len)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327331_closure_ref_pattern_expr_body_uses_deref_prelude() {
+        let out = transpile_str(
+            r#"
+            fn f(x: &mut i32) {
+                let g = |&len| len + 1;
+                let _ = g(x);
+            }
+            "#,
+        );
+        assert!(out.contains("[&](auto&& _closure_ref_param0) {"));
+        assert!(out.contains("auto len = *_closure_ref_param0;"));
+        assert!(out.contains("return len + 1;"));
     }
 
     #[test]
@@ -23928,6 +24080,37 @@ mod tests {
         assert!(out.contains("rusty::as_mut_ptr(xs)"));
         assert!(out.contains("rusty::ptr::sub(cur,"));
         assert!(!out.contains("cur.sub(n)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327331_raw_ptr_cast_wrapping_add_cast_chain_lowers_generically() {
+        let out = transpile_str(
+            r#"
+            fn raw_ptr_add<T>(ptr: *mut T, offset: usize) -> *mut T {
+                ptr.cast::<u8>().wrapping_add(offset).cast::<T>()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::add("));
+        assert!(out.contains("reinterpret_cast<uint8_t*>(ptr)"));
+        assert!(out.contains(
+            "reinterpret_cast<std::add_pointer_t<T>>(rusty::ptr::add("
+        ));
+        assert!(!out.contains(".wrapping_add("));
+    }
+
+    #[test]
+    fn test_leaf41543333333327331_const_raw_ptr_cast_wrapping_add_preserves_constness() {
+        let out = transpile_str(
+            r#"
+            fn raw_ptr_add_const(ptr: *const i32, offset: usize) -> *const i32 {
+                ptr.cast::<u8>().wrapping_add(offset).cast::<i32>()
+            }
+            "#,
+        );
+        assert!(out.contains("reinterpret_cast<const uint8_t*>(ptr)"));
+        assert!(out.contains("reinterpret_cast<const int32_t*>(rusty::ptr::add("));
+        assert!(!out.contains(".cast<uint8_t>()"));
     }
 
     #[test]

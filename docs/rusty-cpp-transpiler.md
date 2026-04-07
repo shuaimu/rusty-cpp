@@ -2959,8 +2959,28 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-32-2-20260407-013518 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-96. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.33.1`.
-   - focus: collapse the `runner.cpp:1342` raw-pointer helper head family (plus adjacent `runner.cpp:1327` scope-exit guard callback shape), add fixture-agnostic regressions, then reprobe parity.
+96. `Leaf 4.15.4.3.3.3.3.3.27.33.1` is complete.
+   - plan/scope check: shared transpiler-only updates (raw-pointer lowering/inference + closure parameter lowering) stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler changes in `transpiler/src/codegen.rs`:
+     - added raw-pointer method result inference for `.cast::<T>()` and `.wrapping_add/.wrapping_sub(...)` chains.
+     - lowered raw-pointer `.cast::<T>()` to mutability-aware `reinterpret_cast<...>(...)` and `.wrapping_add/.wrapping_sub(...)` to `rusty::ptr::add/sub(...)`.
+     - adjusted closure `&pattern` parameter lowering to use forwarding params plus deref-prelude bindings, preventing scope-exit callback call-shape mismatches.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327331_closure_ref_pattern_expr_body_uses_deref_prelude`
+     - `codegen::tests::test_leaf41543333333327331_raw_ptr_cast_wrapping_add_cast_chain_lowers_generically`
+     - `codegen::tests::test_leaf41543333333327331_const_raw_ptr_cast_wrapping_add_preserves_constness`
+     - updated `codegen::tests::test_leaf41543333332_closure_ref_pattern_param_emits_single_auto_ref`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327331 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333332_closure_ref_pattern_param_emits_single_auto_ref -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-33-1-20260407-005858 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.32.2 head family is collapsed: `runner.cpp:1342` now emits raw-pointer-safe cast/add lowering and scope-exit callback invocation at `runner.cpp:1328` no longer fails to bind lambda parameters.
+   - new deterministic first hard error starts at `runner.cpp:1594` (`std::string_view` has no member `hash`), with downstream dependent families in `slice.hpp`/span equality diagnostics.
+   - canonical artifacts: `/tmp/rusty-parity-27-33-1-20260407-005858/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed in shared transpiler lowering/type-inference surfaces, added fixture-agnostic regressions, and avoided crate-specific rewrites/scripts.
+97. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.33.2`.
+   - focus: re-run the full seven-crate matrix after 27.33.1, record the new deterministic first-head family (currently led by `runner.cpp:1594` string-view hash surface), and advance frontier docs/TODO status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
