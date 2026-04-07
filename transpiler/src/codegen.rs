@@ -10883,6 +10883,16 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::is_char_boundary({}, {})", receiver, args[0]);
         }
+        // Rust `is_empty()` → dispatch to `.is_empty()` or `.empty()` depending on type
+        if method_name == "is_empty" && args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::is_empty({})", receiver);
+        }
         // Rust string methods that don't exist on std::string_view
         if method_name == "trim" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -17928,6 +17938,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::split(",
         "rusty::char_runtime::from_u32",
         "rusty::char_runtime::len_utf8(",
+        "rusty::is_empty(",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
         "rusty::partial_cmp(",
@@ -18278,6 +18289,16 @@ inline std::size_t len_utf8(char32_t ch) {\n\
     if (code < 0x10000) return 3;\n\
     return 4;\n\
 }\n\
+}\n\
+template<typename T>\n\
+bool is_empty(const T& value) {\n\
+    if constexpr (requires { value.is_empty(); }) {\n\
+        return value.is_empty();\n\
+    } else if constexpr (requires { value.empty(); }) {\n\
+        return value.empty();\n\
+    } else {\n\
+        return false;\n\
+    }\n\
 }\n\
 template<typename T>\n\
 auto deref_ref(const T& value) {\n\
