@@ -3259,8 +3259,17 @@ Active work items:
    - new deterministic first failure shifts later in Stage E (same downstream family previously observed): after `test_drain_range_inclusive_oob PASSED (expected panic)`, run aborts with `ArrayVec: largest supported capacity is u32::MAX` and `slice range out of bounds` messages.
    - canonical artifacts: `/tmp/rusty-parity-27-44-1-20260407-081914/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): kept the fix in shared transpiler surfaces, used shape-gated logic, and introduced no crate-specific rewrites/scripts.
-119. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.44.2`.
-   - focus: re-run full seven-crate parity matrix, capture canonical artifacts, and record the new deterministic first failure head (or mark Leaf 4 complete if all seven pass).
+119. `Leaf 4.15.4.3.3.3.3.3.27.44.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - re-ran full seven-crate matrix (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-44-2-20260407-082206 --keep-work-dirs`) after 27.44.1: deterministic first failure remains `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - deterministic first failure head remains the new Stage E runtime abort family: execution reaches `test_drain_range_inclusive_oob PASSED (expected panic)` (`run.log:16`) and then aborts with `ArrayVec: largest supported capacity is u32::MAX` (`run.log:18`) / `Aborted` (`run.log:19`) before `test_drop` can be reported by the main runner (`runner.cpp:4778` dispatch).
+   - single-wrapper repro from canonical artifacts confirms the same head:
+     - `./runner --rusty-single-test rusty_test_test_drop` exits with `134` (abort)
+     - `./runner --rusty-single-test rusty_test_test_drop_in_insert` exits with `134` (abort)
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-44-2-20260407-082206/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,rusty_test_test_drop.log,rusty_test_test_drop_in_insert.log}`.
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+120. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.45.1`.
+   - focus: implement shared transpiler/runtime fixes for the deterministic `test_drop` Stage E abort head (no crate-specific scripts), then rerun full matrix in 27.45.2.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
