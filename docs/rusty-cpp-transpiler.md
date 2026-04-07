@@ -3227,8 +3227,25 @@ Active work items:
    - new deterministic first failure shifts later in Stage E: after `test_drain_range_inclusive_oob PASSED (expected panic)`, run aborts with `ArrayVec: largest supported capacity is u32::MAX` and `slice range out of bounds` messages (`run.log:18-21`).
    - canonical artifacts: `/tmp/rusty-parity-27-43-1b-20260407-120322/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): kept the fix in shared transpiler surfaces, used shape-gated logic, and introduced no crate-specific rewrites/scripts.
-117. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.43.2`.
-   - focus: re-run full seven-crate parity matrix, capture canonical artifacts, and record the new deterministic first failure head (or mark Leaf 4 complete if all seven pass).
+117. `Leaf 4.15.4.3.3.3.3.3.27.43.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - re-ran full seven-crate matrix (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-43-2b-20260407-080242 --keep-work-dirs`) after 27.43.1: `either`, `tap`, `cfg-if`, and `take_mut` pass; first blocking crate remains `arrayvec` at Stage E.
+   - deterministic first failure head has shifted to a Stage E non-terminating runtime family in `char_test_encode_utf8`:
+     - runner dispatch proceeds through `allow_max_capacity_arrayvec_type` and `array_clone_from`, then next scheduled test is `rusty_test_char_test_encode_utf8` (`runner.cpp:4724`).
+     - active generated loop in that test body uses `rusty::range_inclusive(0, static_cast<uint32_t>(std::numeric_limits<char32_t>::max()))` (`runner.cpp:582`), producing the new blocking runtime surface.
+   - timeout-scoped canonical repro from the same artifact:
+     - `timeout 60s stdbuf -oL -eL ./runner` exits `124`; `run-timeout.log` contains only:
+       - `allow_max_capacity_arrayvec_type PASSED`
+       - `array_clone_from PASSED`
+     - single-wrapper probes:
+       - `rusty_test_allow_max_capacity_arrayvec_type` → `EXIT_CODE=0`
+       - `rusty_test_array_clone_from` → `EXIT_CODE=0`
+       - `rusty_test_char_test_encode_utf8` → `EXIT_CODE=124`
+       - `rusty_test_char_test_encode_utf8_oob` → `EXIT_CODE=0`
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-43-2b-20260407-080242/arrayvec/{baseline.txt,build.log,matrix.log,runner.cpp,run-timeout.log,*.single.log}`.
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+118. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.44.1`.
+   - focus: implement shared transpiler/runtime fixes for the deterministic `char_test_encode_utf8` Stage E non-terminating head (Unicode max/range-bound lowering parity), then rerun full matrix in 27.44.2.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
