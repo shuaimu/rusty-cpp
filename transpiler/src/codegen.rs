@@ -189,6 +189,11 @@ pub struct CodeGen {
     /// block scope. C++ does not support local class templates, so local type
     /// references must not recover/emit template arguments.
     local_type_bindings: Vec<HashSet<String>>,
+    /// Scoped local bindings initialized from `ManuallyDrop::new(...)` /
+    /// `manually_drop_new(...)`.
+    /// Used to preserve Rust auto-deref method resolution for `as_ptr`/`as_mut_ptr`
+    /// on wrapped values.
+    local_manually_drop_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
@@ -308,6 +313,7 @@ impl CodeGen {
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
             local_type_bindings: Vec::new(),
+            local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
@@ -1075,6 +1081,106 @@ impl CodeGen {
             }
             syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
         }
+    }
+
+    fn collect_local_impl_overrides(
+        &self,
+        stmts: &[syn::Stmt],
+        local_types: &HashSet<String>,
+    ) -> (
+        HashMap<String, Vec<syn::ImplItem>>,
+        HashSet<(String, String)>,
+        HashMap<(String, String), String>,
+    ) {
+        let mut local_impl_blocks: HashMap<String, Vec<syn::ImplItem>> = HashMap::new();
+        let mut local_drop_trait_methods: HashSet<(String, String)> = HashSet::new();
+        let mut local_operator_renames: HashMap<(String, String), String> = HashMap::new();
+        let mut local_impl_method_conflict_keys: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for stmt in stmts {
+            let syn::Stmt::Item(syn::Item::Impl(impl_block)) = stmt else {
+                continue;
+            };
+            let Some(tp) = (match impl_block.self_ty.as_ref() {
+                syn::Type::Path(tp) if tp.qself.is_none() => Some(tp),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let Some(type_seg) = tp.path.segments.last() else {
+                continue;
+            };
+            let type_name = type_seg.ident.to_string();
+            if !local_types.contains(&type_name) {
+                continue;
+            }
+
+            let trait_name = impl_block
+                .trait_
+                .as_ref()
+                .and_then(|(_, path, _)| path.segments.last())
+                .map(|seg| seg.ident.to_string());
+            let is_inherent_impl = trait_name.is_none();
+            let is_drop_trait = trait_name.as_deref() == Some("Drop");
+            if !is_inherent_impl && !is_drop_trait {
+                continue;
+            }
+            let op_name = trait_name
+                .as_ref()
+                .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+
+            let entry = local_impl_blocks.entry(type_name.clone()).or_default();
+            let seen_method_keys = local_impl_method_conflict_keys
+                .entry(type_name.clone())
+                .or_default();
+            for impl_item in &impl_block.items {
+                if op_name.is_some() {
+                    if let syn::ImplItem::Type(assoc) = impl_item {
+                        if assoc.ident == "Output" {
+                            continue;
+                        }
+                    }
+                }
+                let mut collected_item = impl_item.clone();
+                if let syn::ImplItem::Fn(method) = impl_item {
+                    let mut merged = method.clone();
+                    merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                    let key = impl_method_conflict_key(&merged);
+                    if seen_method_keys.contains(&key) {
+                        if let Some(existing_index) = find_impl_method_conflict_index(entry, &key) {
+                            let should_replace = match &entry[existing_index] {
+                                syn::ImplItem::Fn(existing_method) => {
+                                    should_replace_conflicting_impl_method(existing_method, &merged)
+                                }
+                                _ => false,
+                            };
+                            if should_replace {
+                                entry[existing_index] = syn::ImplItem::Fn(merged);
+                            }
+                        }
+                        continue;
+                    }
+                    seen_method_keys.insert(key);
+                    if let Some(op) = &op_name {
+                        let method_name = merged.sig.ident.to_string();
+                        local_operator_renames.insert((type_name.clone(), method_name), op.clone());
+                    }
+                    if is_drop_trait {
+                        let method_name = merged.sig.ident.to_string();
+                        local_drop_trait_methods.insert((type_name.clone(), method_name));
+                    }
+                    collected_item = syn::ImplItem::Fn(merged);
+                }
+                entry.push(collected_item);
+            }
+        }
+
+        (
+            local_impl_blocks,
+            local_drop_trait_methods,
+            local_operator_renames,
+        )
     }
 
     fn collect_top_level_item_names(&mut self, items: &[syn::Item]) {
@@ -2626,69 +2732,162 @@ impl CodeGen {
         }
 
         if has_drop_impl {
-            if let syn::Fields::Named(fields) = &s.fields {
-                let ctor_params: Vec<String> = fields
-                    .named
-                    .iter()
-                    .filter_map(|field| {
-                        let field_name = field.ident.as_ref()?.to_string();
-                        let param_name = format!("{}_init", field_name);
-                        Some(format!("{} {}", self.map_type(&field.ty), param_name))
-                    })
-                    .collect();
-                let ctor_inits: Vec<String> = fields
-                    .named
-                    .iter()
-                    .filter_map(|field| {
-                        let rust_field_name = field.ident.as_ref()?.to_string();
-                        let member_name = named_field_cpp_names
-                            .get(&rust_field_name)
-                            .cloned()
-                            .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
-                        let param_name = format!("{}_init", rust_field_name);
-                        Some(format!("{}(std::move({}))", member_name, param_name))
-                    })
-                    .collect();
-                self.writeln(&format!(
-                    "{}({}) : {} {{}}",
-                    name,
-                    ctor_params.join(", "),
-                    ctor_inits.join(", ")
-                ));
+            match &s.fields {
+                syn::Fields::Named(fields) => {
+                    let ctor_params: Vec<String> = fields
+                        .named
+                        .iter()
+                        .filter_map(|field| {
+                            let field_name = field.ident.as_ref()?.to_string();
+                            let param_name = format!("{}_init", field_name);
+                            Some(format!("{} {}", self.map_type(&field.ty), param_name))
+                        })
+                        .collect();
+                    let ctor_inits: Vec<String> = fields
+                        .named
+                        .iter()
+                        .filter_map(|field| {
+                            let rust_field_name = field.ident.as_ref()?.to_string();
+                            let member_name = named_field_cpp_names
+                                .get(&rust_field_name)
+                                .cloned()
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
+                            let param_name = format!("{}_init", rust_field_name);
+                            let init = if matches!(&field.ty, syn::Type::Reference(_)) {
+                                format!("{}({})", member_name, param_name)
+                            } else {
+                                format!("{}(std::move({}))", member_name, param_name)
+                            };
+                            Some(init)
+                        })
+                        .collect();
+                    self.writeln(&format!(
+                        "{}({}) : {} {{}}",
+                        name,
+                        ctor_params.join(", "),
+                        ctor_inits.join(", ")
+                    ));
+                    self.writeln(&format!("{}(const {}&) = default;", name, name));
 
-                let move_inits: Vec<String> = fields
-                    .named
-                    .iter()
-                    .filter_map(|field| {
-                        let rust_field_name = field.ident.as_ref()?.to_string();
-                        let member_name = named_field_cpp_names
-                            .get(&rust_field_name)
-                            .cloned()
-                            .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
-                        let init = if matches!(&field.ty, syn::Type::Reference(_)) {
-                            format!("{}(other.{})", member_name, member_name)
-                        } else {
-                            format!("{}(std::move(other.{}))", member_name, member_name)
-                        };
-                        Some(init)
-                    })
-                    .collect();
-                if move_inits.is_empty() {
-                    self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
-                } else {
+                    let move_inits: Vec<String> = fields
+                        .named
+                        .iter()
+                        .filter_map(|field| {
+                            let rust_field_name = field.ident.as_ref()?.to_string();
+                            let member_name = named_field_cpp_names
+                                .get(&rust_field_name)
+                                .cloned()
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
+                            let init = if matches!(&field.ty, syn::Type::Reference(_)) {
+                                format!("{}(other.{})", member_name, member_name)
+                            } else {
+                                format!("{}(std::move(other.{}))", member_name, member_name)
+                            };
+                            Some(init)
+                        })
+                        .collect();
+                    if move_inits.is_empty() {
+                        self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
+                    } else {
+                        self.writeln(&format!(
+                            "{}({}&& other) noexcept : {} {{",
+                            name,
+                            name,
+                            move_inits.join(", ")
+                        ));
+                    }
+                    self.indent += 1;
+                    self.writeln("if (rusty::mem::consume_forgotten_address(&other)) {");
+                    self.indent += 1;
+                    self.writeln("this->rusty_mark_forgotten();");
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                syn::Fields::Unnamed(fields) => {
+                    let ctor_params: Vec<String> = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| format!("{} _{}_init", self.map_type(&field.ty), i))
+                        .collect();
+                    let ctor_inits: Vec<String> = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let param_name = format!("_{}_init", i);
+                            if matches!(&field.ty, syn::Type::Reference(_)) {
+                                format!("_{}({})", i, param_name)
+                            } else {
+                                format!("_{}(std::move({}))", i, param_name)
+                            }
+                        })
+                        .collect();
+                    self.writeln(&format!(
+                        "{}({}) : {} {{}}",
+                        name,
+                        ctor_params.join(", "),
+                        ctor_inits.join(", ")
+                    ));
+                    self.writeln(&format!("{}(const {}&) = default;", name, name));
+
+                    let move_inits: Vec<String> = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            if matches!(&field.ty, syn::Type::Reference(_)) {
+                                format!("_{}(other._{})", i, i)
+                            } else {
+                                format!("_{}(std::move(other._{}))", i, i)
+                            }
+                        })
+                        .collect();
                     self.writeln(&format!(
                         "{}({}&& other) noexcept : {} {{",
                         name,
                         name,
                         move_inits.join(", ")
                     ));
+                    self.indent += 1;
+                    self.writeln("if (rusty::mem::consume_forgotten_address(&other)) {");
+                    self.indent += 1;
+                    self.writeln("this->rusty_mark_forgotten();");
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
                 }
-                self.indent += 1;
-                self.writeln("other.rusty_mark_forgotten();");
-                self.indent -= 1;
-                self.writeln("}");
-            } else {
-                self.writeln(&format!("{}({}&&) = default;", name, name));
+                syn::Fields::Unit => {
+                    self.writeln(&format!("{}() = default;", name));
+                    self.writeln(&format!("{}(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
+                    self.indent += 1;
+                    self.writeln("if (rusty::mem::consume_forgotten_address(&other)) {");
+                    self.indent += 1;
+                    self.writeln("this->rusty_mark_forgotten();");
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.writeln("other.rusty_mark_forgotten();");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
             }
             self.writeln(
                 "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }",
@@ -2701,6 +2900,7 @@ impl CodeGen {
             if !matches!(&s.fields, syn::Fields::Unit if methods.is_empty()) {
                 self.newline();
             }
+            let prev_struct = self.current_struct.clone();
             self.current_struct = Some(name_str.clone());
             self.emitted_method_conflict_keys.push(HashSet::new());
             let non_method_member_names: HashSet<String> =
@@ -2712,7 +2912,7 @@ impl CodeGen {
             }
             self.emitted_non_method_member_names.pop();
             self.emitted_method_conflict_keys.pop();
-            self.current_struct = None;
+            self.current_struct = prev_struct;
         }
 
         // Emit derive-generated code
@@ -2986,13 +3186,14 @@ impl CodeGen {
                 // Merge impl block methods into the enum struct
                 if let Some(methods) = self.take_impls_for_type(&name.to_string()) {
                     self.newline();
+                    let prev_struct = self.current_struct.clone();
                     self.current_struct = Some(name.to_string());
                     self.emitted_method_conflict_keys.push(HashSet::new());
                     for impl_item in &methods {
                         self.emit_impl_item(impl_item);
                     }
                     self.emitted_method_conflict_keys.pop();
-                    self.current_struct = None;
+                    self.current_struct = prev_struct;
                 }
 
                 self.indent -= 1;
@@ -4396,7 +4597,7 @@ impl CodeGen {
             return;
         }
         if is_drop_destructor {
-            self.writeln(&format!("{}({}) {{", name, params.join(", ")));
+            self.writeln(&format!("{}({}) noexcept(false) {{", name, params.join(", ")));
         } else {
             self.writeln(&format!(
                 "{}{} {}({}){} {{",
@@ -4461,9 +4662,30 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        let (local_impl_overrides, local_drop_overrides, local_operator_overrides) =
+            self.collect_local_impl_overrides(&block.stmts, &local_types);
         self.local_function_bindings.push(local_functions);
         self.local_type_bindings.push(local_types);
+        self.local_manually_drop_bindings.push(HashSet::new());
         self.block_depth += 1;
+
+        // Block-local impls are merged into local type declarations in this scope.
+        // Apply temporary overrides and restore them after the block is emitted.
+        let mut prev_impl_overrides: Vec<(String, Option<Vec<syn::ImplItem>>)> = Vec::new();
+        for (type_name, impl_items) in local_impl_overrides {
+            let prev = self.impl_blocks.insert(type_name.clone(), impl_items);
+            prev_impl_overrides.push((type_name, prev));
+        }
+        let mut inserted_drop_overrides: Vec<((String, String), bool)> = Vec::new();
+        for drop_key in local_drop_overrides {
+            let inserted = self.drop_trait_methods.insert(drop_key.clone());
+            inserted_drop_overrides.push((drop_key, inserted));
+        }
+        let mut prev_operator_overrides: Vec<((String, String), Option<String>)> = Vec::new();
+        for (op_key, op_value) in local_operator_overrides {
+            let prev = self.operator_renames.insert(op_key.clone(), op_value);
+            prev_operator_overrides.push((op_key, prev));
+        }
 
         let stmts = &block.stmts;
         let len = stmts.len();
@@ -4473,6 +4695,26 @@ impl CodeGen {
             self.emit_stmt(stmt, is_last);
         }
 
+        for (op_key, prev) in prev_operator_overrides {
+            if let Some(prev_value) = prev {
+                self.operator_renames.insert(op_key, prev_value);
+            } else {
+                self.operator_renames.remove(&op_key);
+            }
+        }
+        for (drop_key, inserted) in inserted_drop_overrides {
+            if inserted {
+                self.drop_trait_methods.remove(&drop_key);
+            }
+        }
+        for (type_name, prev) in prev_impl_overrides {
+            if let Some(prev_items) = prev {
+                self.impl_blocks.insert(type_name, prev_items);
+            } else {
+                self.impl_blocks.remove(&type_name);
+            }
+        }
+
         self.block_depth -= 1;
         self.local_bindings.pop();
         self.local_cpp_bindings.pop();
@@ -4480,6 +4722,7 @@ impl CodeGen {
         self.delayed_init_locals.pop();
         self.local_function_bindings.pop();
         self.local_type_bindings.pop();
+        self.local_manually_drop_bindings.pop();
         self.local_placeholder_type_hints.pop();
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
@@ -7226,6 +7469,13 @@ impl CodeGen {
                     .last()
                     .is_some_and(|params| params.contains_key(&name_str));
                 let is_mut = pat_ident.mutability.is_some();
+                if local
+                    .init
+                    .as_ref()
+                    .is_some_and(|init| self.expr_is_manually_drop_new_call(&init.expr))
+                {
+                    self.mark_local_manually_drop_binding(&name_str);
+                }
                 let mut inferred_binding_ty = local
                     .init
                     .as_ref()
@@ -7416,6 +7666,13 @@ impl CodeGen {
                         .last()
                         .is_some_and(|params| params.contains_key(&name_str));
                     let is_mut = pi.mutability.is_some();
+                    if local
+                        .init
+                        .as_ref()
+                        .is_some_and(|init| self.expr_is_manually_drop_new_call(&init.expr))
+                    {
+                        self.mark_local_manually_drop_binding(&name_str);
+                    }
                     let resolved_ty = if let Some(hint) = self.lookup_local_placeholder_type_hint(&name_str) {
                         self.substitute_owner_infer_with_hint(
                             &pat_type.ty,
@@ -7720,6 +7977,51 @@ impl CodeGen {
         }
     }
 
+    fn mark_local_manually_drop_binding(&mut self, name: &str) {
+        if let Some(scope) = self.local_manually_drop_bindings.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn is_local_manually_drop_binding_in_scope(&self, name: &str) -> bool {
+        self.local_manually_drop_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn expr_is_manually_drop_new_call(&self, expr: &syn::Expr) -> bool {
+        let Some(expr) = self.extract_value_expr(expr) else {
+            return false;
+        };
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        if call.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return false;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "manually_drop_new"
+                | "rusty::mem::manually_drop_new"
+                | "ManuallyDrop::new"
+                | "mem::ManuallyDrop::new"
+                | "std::mem::ManuallyDrop::new"
+                | "core::mem::ManuallyDrop::new"
+                | "rusty::mem::ManuallyDrop::manually_drop_new"
+        )
+    }
+
     fn is_const_local_binding_in_scope(&self, name: &str) -> bool {
         self.local_const_bindings
             .iter()
@@ -7953,6 +8255,20 @@ impl CodeGen {
                         .map(|s| s.ident.to_string())
                         .collect::<Vec<_>>()
                         .join("::");
+                    if matches!(
+                        joined.as_str(),
+                        "manually_drop_new"
+                            | "rusty::mem::manually_drop_new"
+                            | "ManuallyDrop::new"
+                            | "mem::ManuallyDrop::new"
+                            | "std::mem::ManuallyDrop::new"
+                            | "core::mem::ManuallyDrop::new"
+                    ) && call.args.len() == 1
+                    {
+                        if let Some(inner_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            return Some(parse_quote!(rusty::mem::ManuallyDrop<#inner_ty>));
+                        }
+                    }
                     if matches!(
                         joined.as_str(),
                         "Some" | "Option::Some" | "core::option::Option::Some"
@@ -8276,6 +8592,45 @@ impl CodeGen {
             return None;
         };
         Some(ptr.mutability.is_some())
+    }
+
+    fn is_manually_drop_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.path.segments.is_empty() {
+            return false;
+        }
+        let joined = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "ManuallyDrop"
+                | "mem::ManuallyDrop"
+                | "std::mem::ManuallyDrop"
+                | "core::mem::ManuallyDrop"
+                | "rusty::mem::ManuallyDrop"
+        )
+    }
+
+    fn method_receiver_is_manually_drop_expr(&self, expr: &syn::Expr) -> bool {
+        let receiver = self.peel_paren_group_expr(expr);
+        if let syn::Expr::Path(path) = receiver {
+            if path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                if self.is_local_manually_drop_binding_in_scope(&name) {
+                    return true;
+                }
+            }
+        }
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.is_manually_drop_type(&ty))
     }
 
     fn infer_pointer_type_from_call_expr(&self, call: &syn::ExprCall) -> Option<syn::Type> {
@@ -10208,6 +10563,11 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
+            // Rust method resolution can auto-deref `ManuallyDrop<T>` to call
+            // `T::as_ptr/as_mut_ptr`; preserve that by dispatching through `*`.
+            if self.method_receiver_is_manually_drop_expr(&mc.receiver) {
+                return format!("(*{}).{}()", receiver, method_name);
+            }
             let helper = if method_name == "as_mut_ptr" {
                 "rusty::as_mut_ptr"
             } else {
@@ -10963,7 +11323,11 @@ impl CodeGen {
         }
     }
 
-    fn mapped_assoc_method_name_for_call_path(&self, path: &syn::Path) -> Option<String> {
+    fn mapped_assoc_method_name_for_expected_owner(
+        &self,
+        path: &syn::Path,
+        owner_cpp: &str,
+    ) -> Option<String> {
         let joined = path
             .segments
             .iter()
@@ -10971,7 +11335,12 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
         if let Some(mapped) = types::map_function_path(&joined) {
-            return mapped.split("::").last().map(|s| s.to_string());
+            let (mapped_owner, mapped_method) = mapped.rsplit_once("::")?;
+            let owner_cpp_base = owner_cpp.split('<').next()?.trim();
+            if mapped_owner != owner_cpp_base {
+                return None;
+            }
+            return Some(mapped_method.to_string());
         }
         let last = path.segments.last()?.ident.to_string();
         Some(escape_cpp_keyword(&last))
@@ -11001,7 +11370,7 @@ impl CodeGen {
         if owner_cpp.contains("<auto") {
             return None;
         }
-        let method = self.mapped_assoc_method_name_for_call_path(func_path)?;
+        let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
         let args: Vec<String> = call
             .args
             .iter()
@@ -19842,7 +20211,95 @@ mod tests {
         );
         assert!(out.contains("// Rust-only nested impl block skipped in local scope"));
         assert!(out.contains("const auto _x = Foo{};"));
-        assert!(!out.contains("bar() const"));
+        assert!(out.contains("void bar() const {"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327451_local_drop_impl_merges_into_local_struct() {
+        let out = transpile_str(
+            r#"
+            use std::cell::Cell;
+            fn f() {
+                let flag = &Cell::new(0);
+                struct Bump<'a>(&'a Cell<i32>);
+                impl<'a> Drop for Bump<'a> {
+                    fn drop(&mut self) {
+                        let n = self.0.get();
+                        self.0.set(n + 1);
+                    }
+                }
+                let _x = Bump(flag);
+            }
+            "#,
+        );
+        assert!(out.contains("Bump(const rusty::Cell<int32_t>& _0_init) : _0(_0_init) {}"));
+        assert!(out.contains("Bump(Bump&& other) noexcept : _0(other._0) {"));
+        assert!(out.contains("~Bump() noexcept(false) {"));
+        assert!(out.contains("this->_0.set(n + 1);"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327451_local_non_drop_trait_impl_is_skipped() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                struct Local<'a>(&'a i32);
+                impl<'a> Clone for Local<'a> {
+                    fn clone(&self) -> Self {
+                        Local(self.0)
+                    }
+                }
+                let value = 1;
+                let _x = Local(&value);
+            }
+            "#,
+        );
+        assert!(out.contains("// Rust-only nested impl block skipped in local scope"));
+        assert!(!out.contains("Local clone() const"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327451_local_drop_unit_struct_has_default_ctor() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                struct DropPanic;
+                impl Drop for DropPanic {
+                    fn drop(&mut self) {}
+                }
+                let _x = DropPanic {};
+            }
+            "#,
+        );
+        assert!(out.contains("DropPanic() = default;"));
+        assert!(out.contains("DropPanic(DropPanic&& other) noexcept {"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327451_local_impl_keeps_outer_self_context() {
+        let out = transpile_str(
+            r#"
+            struct Outer {
+                len_field: i32,
+            }
+            impl Outer {
+                fn first(&mut self) {
+                    struct Local<'a>(&'a mut i32);
+                    impl<'a> Drop for Local<'a> {
+                        fn drop(&mut self) {}
+                    }
+                    let _g = Local(&mut self.len_field);
+                }
+                fn second(self) -> Self {
+                    Self { len_field: self.len_field }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("Outer second() {"));
+        assert!(out.contains("return Outer{.len_field = this->len_field};"));
+        assert!(!out.contains("auto second() {"));
+        assert!(!out.contains("Self::"));
     }
 
     #[test]
@@ -19986,12 +20443,16 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("~Foo() {"));
+        assert!(out.contains("~Foo() noexcept(false) {"));
         assert!(out.contains("if (rusty::mem::consume_forgotten_address(this)) { return; }"));
         assert!(out.contains(
             "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }"
         ));
-        assert!(out.contains("Foo(Foo&&) = default;"));
+        assert!(out.contains("Foo() = default;"));
+        assert!(out.contains("Foo(Foo&& other) noexcept {"));
+        assert!(out.contains("if (rusty::mem::consume_forgotten_address(&other)) {"));
+        assert!(out.contains("this->rusty_mark_forgotten();"));
+        assert!(out.contains("other.rusty_mark_forgotten();"));
         assert!(!out.contains("rusty_forget_flag_"));
         assert!(!out.contains("void drop("));
     }
@@ -20011,6 +20472,8 @@ mod tests {
         );
         assert!(out.contains("Foo(int32_t value_init) : value(std::move(value_init)) {}"));
         assert!(out.contains("Foo(Foo&& other) noexcept : value(std::move(other.value)) {"));
+        assert!(out.contains("if (rusty::mem::consume_forgotten_address(&other)) {"));
+        assert!(out.contains("this->rusty_mark_forgotten();"));
         assert!(out.contains("other.rusty_mark_forgotten();"));
         assert!(out.contains(
             "void rusty_mark_forgotten() noexcept { rusty::mem::mark_forgotten_address(this); }"
@@ -20216,6 +20679,7 @@ mod tests {
         "#,
         );
         assert!(out.contains("rusty::mem::manually_drop_new(std::move(v))"));
+        assert!(!out.contains("rusty::mem::ManuallyDrop<int32_t>::manually_drop_new"));
         assert!(!out.contains("std::mem::ManuallyDrop::new"));
     }
 
@@ -25096,10 +25560,34 @@ mod tests {
             "#,
         );
         assert!(out.contains(
-            "reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<rusty::MaybeUninit<T>, rusty::sanitize_array_capacity<N>()>>>>(rusty::as_ptr(array_shadow1))",
+            "reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<rusty::MaybeUninit<T>, rusty::sanitize_array_capacity<N>()>>>>((*array_shadow1).as_ptr())",
         ));
         assert!(out.contains("rusty::ptr::copy_nonoverlapping("));
         assert!(!out.contains("->copy_to_nonoverlapping("));
+        assert!(!out.contains("rusty::as_ptr(array_shadow1)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327451_manually_drop_as_ptr_dispatches_to_inner_receiver() {
+        let out = transpile_str(
+            r#"
+            struct Buf<T> {
+                xs: [T; 2],
+            }
+            impl<T> Buf<T> {
+                fn as_ptr(&self) -> *const T {
+                    self.xs.as_ptr()
+                }
+            }
+            fn f<T>(buf: Buf<T>) -> *const T {
+                let holder = std::mem::ManuallyDrop::new(buf);
+                holder.as_ptr()
+            }
+            "#,
+        );
+        assert!(out.contains("manually_drop_new(std::move(buf))"));
+        assert!(out.contains("return (*holder).as_ptr();"));
+        assert!(!out.contains("return rusty::as_ptr(holder);"));
     }
 
     #[test]

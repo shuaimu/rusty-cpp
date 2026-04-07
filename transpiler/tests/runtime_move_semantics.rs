@@ -113,6 +113,126 @@ fn test_mem_replace_supports_non_assignable_move_only_payloads() {
 }
 
 #[test]
+fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
+    let source = r#"
+        #include <rusty/mem.hpp>
+
+        int main() {
+            int value = 0;
+            const void* addr = &value;
+
+            rusty::mem::mark_forgotten_address(addr);
+            rusty::mem::mark_forgotten_address(addr);
+
+            if (!rusty::mem::consume_forgotten_address(addr)) {
+                return 1;
+            }
+            if (!rusty::mem::consume_forgotten_address(addr)) {
+                return 2;
+            }
+            if (rusty::mem::consume_forgotten_address(addr)) {
+                return 3;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_forgotten_address_refcount");
+}
+
+#[test]
+fn test_mem_drop_allows_unwind_catch_for_panicking_destructors() {
+    let source = r#"
+        #include <rusty/mem.hpp>
+        #include <rusty/panic.hpp>
+
+        struct PanicOnDrop {
+            PanicOnDrop() = default;
+            PanicOnDrop(const PanicOnDrop&) = default;
+            PanicOnDrop(PanicOnDrop&& other) noexcept {
+                if (rusty::mem::consume_forgotten_address(&other)) {
+                    rusty::mem::mark_forgotten_address(this);
+                    rusty::mem::mark_forgotten_address(&other);
+                } else {
+                    rusty::mem::mark_forgotten_address(&other);
+                }
+            }
+
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+
+            ~PanicOnDrop() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                rusty::panic::begin_panic("drop");
+            }
+        };
+
+        int main() {
+            PanicOnDrop value{};
+            auto res = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&]() {
+                rusty::mem::drop(std::move(value));
+            }));
+            return res.is_err() ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_drop_unwind_catch");
+}
+
+#[test]
+fn test_vec_drop_panic_is_catchable_via_catch_unwind() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+
+        struct Bump {
+            const rusty::Cell<int>& flag;
+            explicit Bump(const rusty::Cell<int>& flag_ref) : flag(flag_ref) {}
+            Bump(const Bump&) = default;
+            Bump(Bump&& other) noexcept : flag(other.flag) {
+                if (rusty::mem::consume_forgotten_address(&other)) {
+                    rusty::mem::mark_forgotten_address(this);
+                    rusty::mem::mark_forgotten_address(&other);
+                } else {
+                    rusty::mem::mark_forgotten_address(&other);
+                }
+            }
+
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+
+            ~Bump() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                const auto n = flag.get();
+                flag.set(n + 1);
+                if (n == 0) {
+                    rusty::panic::begin_panic("drop");
+                }
+            }
+        };
+
+        int main() {
+            const auto& flag = rusty::Cell<int>::new_(0);
+            auto v = rusty::Vec<Bump>::new_();
+            v.push(Bump(flag));
+            v.push(Bump(flag));
+
+            auto res = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&]() {
+                rusty::mem::drop(std::move(v));
+            }));
+            return res.is_err() ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "vec_drop_panic_catch_unwind");
+}
+
+#[test]
 fn test_ptr_write_supports_non_assignable_move_only_payloads() {
     let source = r#"
         #include <rusty/ptr.hpp>

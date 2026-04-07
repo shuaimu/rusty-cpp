@@ -101,7 +101,7 @@ public:
     }
     
     // Move assignment
-    Vec& operator=(Vec&& other) noexcept {
+    Vec& operator=(Vec&& other) {
         if (this != &other) {
             // Clean up existing data
             clear();
@@ -120,7 +120,7 @@ public:
     }
     
     // Destructor
-    ~Vec() {
+    ~Vec() noexcept(false) {
         clear();
         ::operator delete(data_);
     }

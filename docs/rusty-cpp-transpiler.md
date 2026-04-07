@@ -3268,8 +3268,47 @@ Active work items:
      - `./runner --rusty-single-test rusty_test_test_drop_in_insert` exits with `134` (abort)
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-44-2-20260407-082206/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,rusty_test_test_drop.log,rusty_test_test_drop_in_insert.log}`.
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-120. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.45.1`.
-   - focus: implement shared transpiler/runtime fixes for the deterministic `test_drop` Stage E abort head (no crate-specific scripts), then rerun full matrix in 27.45.2.
+120. `Leaf 4.15.4.3.3.3.3.3.27.45.1` is complete.
+   - plan/scope check: targeted transpiler/runtime updates stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes (no crate-specific scripts):
+     - `transpiler/src/codegen.rs`: local `Drop` impl merging for local structs, outer `current_struct` restoration across nested local-type emission, and merge-scope restriction to inherent + `Drop` local impls.
+     - `transpiler/src/codegen.rs`: drop-enabled move constructors now propagate forgotten-state across chained moves; drop trait destructors are emitted as `noexcept(false)` so panic paths can unwind/catch.
+     - `transpiler/src/codegen.rs`: `as_ptr/as_mut_ptr` on `ManuallyDrop` receivers now dispatch through wrapped values (`(*holder).as_ptr()`), fixing `into_inner_unchecked`/drop-path corruption.
+     - `include/rusty/mem.hpp`: forgotten-address tracking switched to per-address refcounts; `rusty::mem::drop` no longer enforces a terminate-on-unwind path.
+     - `include/rusty/vec.hpp`: move assignment/destructor now allow unwinding (`~Vec() noexcept(false)`), preserving `catch_unwind(drop(vec))` behavior.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327451_local_drop_impl_merges_into_local_struct`
+     - `codegen::tests::test_leaf41543333333327451_local_non_drop_trait_impl_is_skipped`
+     - `codegen::tests::test_leaf41543333333327451_local_drop_unit_struct_has_default_ctor`
+     - `codegen::tests::test_leaf41543333333327451_local_impl_keeps_outer_self_context`
+     - `codegen::tests::test_leaf41543333333327451_manually_drop_as_ptr_dispatches_to_inner_receiver`
+     - `runtime_move_semantics` regressions for forgotten-address refcount and panic-catch drop paths.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-45-1j-20260407-094516 --keep-work-dirs`
+   - single-crate repro confirms the 27.44.2 head family is collapsed: Stage E now reports `test_drop PASSED` and `test_drop_in_insert PASSED` (and proceeds through `test_pop_at PASSED`) before the next deterministic failure.
+   - canonical artifacts: `/tmp/rusty-parity-27-45-1j-20260407-094516/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes remained in shared transpiler/runtime surfaces and introduced no crate-specific rewrites/scripts.
+121. `Leaf 4.15.4.3.3.3.3.3.27.45.2` is complete.
+   - plan/scope check: rerun/documentation-focused work plus required regression repair from verification stayed well below the <1000 LOC threshold and required no further decomposition.
+   - required transpiler-suite verification exposed one deterministic regression in associated-call expected-type specialization; fixed in shared transpiler logic (`transpiler/src/codegen.rs`) by gating mapped-method reuse on mapped-owner match with expected owner type, preventing invalid member-call rewrites like `rusty::mem::ManuallyDrop<T>::manually_drop_new(...)`.
+   - added/updated fixture-agnostic regression:
+     - `codegen::tests::test_leaf41543333332_std_mem_manually_drop_new_path_remapped`
+   - re-ran full seven-crate matrix (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-45-2-20260407-1 --keep-work-dirs`) after 27.45.1: deterministic first failing crate remains `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - deterministic first failure head has moved to the Stage E `test_retain` family:
+     - `run.log` reaches `test_pop_at PASSED` (`run.log:36`) and then aborts (`run.log:38-46`) before another pass/fail marker.
+     - next scheduled wrapper in generated dispatch is `rusty_test_test_retain` (`runner.cpp:4840`).
+     - single-wrapper repro exits with `134` (abort), and `gdb` batch backtrace points to `rusty::panicking::assert_failed` from `test_retain()`, with active assertion surface at `runner.cpp:3133-3136`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-45-2-20260407-1 --keep-work-dirs`
+     - `cd /tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec && timeout 30s ./runner --rusty-single-test rusty_test_test_retain`
+     - `cd /tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec && gdb -q ./runner -ex 'set args --rusty-single-test rusty_test_test_retain' -ex run -ex bt -ex quit`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow, kept fixes in shared transpiler/runtime surfaces, and introduced no crate-specific rewrites/scripts.
+122. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.46.1`.
+   - focus: collapse the deterministic Stage E `test_retain` assertion-abort family generically so the matrix can progress past the new first failure head.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3382,6 +3421,7 @@ Required approach:
 - for receiver-gated generic method args (`push(T)`/`insert(_, T)`/`set(T)`), do not block receiver-driven expected-type recovery just because the declared arg type placeholder is not in current scope; resolve concrete arg type from receiver context before conversion-lowering decisions
 - for assertion/equality array-shape fallout, do not add fixture-specific `std::array` equality hacks or crate-local rewrites and do not special-case `assert_eq!` callsites; normalize compared element/container shapes through generic transpiler/runtime surfaces with explicit type/context gating
 - for omitted-template owner constructor fallout (`Type<auto, ...>::new_()`), do not hardcode crate/type-specific constructor rewrites or globally strip placeholder args; recover owner template args through explicit expected-type/scope inference gates so unaffected constructor sites keep their existing behavior
+- for expected-type associated-call specialization, do not reuse only the mapped function-tail when the mapped path is actually a free helper (for example `std::mem::ManuallyDrop::new` → `rusty::mem::manually_drop_new`); emit `Owner::method(...)` only when mapped owner path matches the expected owner base
 - for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies
 - for method-call lowering on reference-wrapped receivers, do not emit fixed member-access operators from surface syntax (`expr.method(...)`) without post-lowering receiver-shape validation; select `.`/`->` from the lowered receiver type so `(&v)`-style forms remain type-correct
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking

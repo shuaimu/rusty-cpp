@@ -6,15 +6,15 @@
 #include <new>
 #include <tuple>
 #include <type_traits>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace rusty {
 namespace mem {
 
 namespace detail {
-inline std::unordered_set<const void*>& forgotten_addresses() {
-    static std::unordered_set<const void*> addresses;
+inline std::unordered_map<const void*, std::size_t>& forgotten_addresses() {
+    static std::unordered_map<const void*, std::size_t> addresses;
     return addresses;
 }
 
@@ -126,7 +126,8 @@ inline void mark_forgotten_address(const void* address) noexcept {
         return;
     }
     std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
-    detail::forgotten_addresses().insert(address);
+    auto& addresses = detail::forgotten_addresses();
+    addresses[address] += 1;
 }
 
 inline bool consume_forgotten_address(const void* address) noexcept {
@@ -139,7 +140,11 @@ inline bool consume_forgotten_address(const void* address) noexcept {
     if (it == addresses.end()) {
         return false;
     }
-    addresses.erase(it);
+    if (it->second > 1) {
+        it->second -= 1;
+    } else {
+        addresses.erase(it);
+    }
     return true;
 }
 
@@ -157,9 +162,9 @@ inline T replace(T& destination, U&& value) {
 
 // Rust std::mem::drop consumes a value and destroys it at the end of this call.
 template<typename T>
-inline void drop(T&& value) noexcept {
-    using Value = std::remove_reference_t<T>;
-    [[maybe_unused]] Value consumed = std::forward<T>(value);
+inline void drop(T value) {
+    [[maybe_unused]] auto* consume = &value;
+    (void)consume;
 }
 
 // Rust std::mem::forget consumes a value and intentionally leaks/drop-skips it.
