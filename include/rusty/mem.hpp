@@ -82,8 +82,13 @@ constexpr std::size_t size_of() noexcept {
 
 template<typename T, typename U>
 inline T replace(T& destination, U&& value) {
-    T old = std::move(destination);
-    destination = std::forward<U>(value);
+    // Build replacement first so aliasing inputs are consumed before we
+    // destroy the destination, then reconstruct in-place to avoid requiring
+    // copy/move assignment on T.
+    T replacement(std::forward<U>(value));
+    T old(std::move(destination));
+    destination.~T();
+    new (&destination) T(std::move(replacement));
     return old;
 }
 

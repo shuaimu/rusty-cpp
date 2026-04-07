@@ -116,7 +116,10 @@ namespace ptr {
 
 template<typename T>
 inline T read(const T* src) {
-    return *src;
+    // Mirror Rust `ptr::read` move-out semantics even from `*const T`-shaped
+    // call sites. This surface is intentionally unsafe: callers must guarantee
+    // source validity and single-drop discipline.
+    return std::move(*const_cast<T*>(src));
 }
 
 template<typename T>

@@ -2879,8 +2879,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-29-2-1775534455 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-90. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.30.1`.
-   - focus: implement a shared move-semantics fix for the `ptr::read`/`mem::replace` runtime head family, then re-run matrix.
+90. `Leaf 4.15.4.3.3.3.3.3.27.30.1` is complete.
+   - plan/scope check: shared runtime + regression-test implementation stayed under the <1000 LOC threshold and required no further decomposition.
+   - implemented shared runtime move-only transfer fixes:
+     - `include/rusty/ptr.hpp`: `rusty::ptr::read(const T*)` now models Rust-like move-out semantics via `std::move(*const_cast<T*>(src))` instead of copy fallback.
+     - `include/rusty/mem.hpp`: `rusty::mem::replace(T&, U&&)` now performs move-out + destroy + placement reconstruction, removing copy/move-assignment requirements on destination payload types.
+   - added fixture-agnostic runtime regressions in `transpiler/tests/runtime_move_semantics.rs`:
+     - `test_ptr_read_const_pointer_supports_move_only_payloads`
+     - `test_mem_replace_supports_non_assignable_move_only_payloads`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-30-1-20260407-001026 --keep-work-dirs`) removed the deterministic 27.29.2 runtime head family (`ptr::read` copy + `mem::replace` copy-assignment).
+   - new deterministic first hard error now starts at `runner.cpp:968` (`std::visit` return-type mismatch across range-bound alternatives), with immediate adjacent fallout at `runner.cpp:973` (slice pointer shape mismatch), and additional downstream move-only/runtime surfaces at `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72` + `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:132`.
+   - canonical artifacts: `/tmp/rusty-parity-27-30-1-20260407-001026/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-30-1-20260407-001026 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes remained in shared runtime surfaces, avoided crate-specific scripts/post-generation rewrites, and preserved deterministic first-head artifact capture.
+91. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.30.2`.
+   - focus: run the full seven-crate matrix and record the new deterministic first-failing head family/artifacts after 27.30.1.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2980,6 +2996,7 @@ Required approach:
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
+- for runtime move-transfer helpers (`ptr::read`, `mem::replace`, `ptr::write`), do not rely on copy-return or copy-assignment fallbacks that require copyable payloads; preserve move-only behavior with move-out/placement-style reconstruction in shared runtime paths
 - for raw-pointer helper/receiver lowering (`as_ptr`/`as_mut_ptr`, `ptr::add`/`ptr::offset`), do not preserve storage-pointer pointee shapes when call context expects payload pointers; propagate expected pointer context and adapt pointee shape explicitly
 - for runtime pointer helpers on `MaybeUninit`-backed storage (`as_ptr`/`as_mut_ptr`), do not expose wrapper-element pointers to payload-facing slice/read APIs; normalize helper results to payload pointers (`T*`/`const T*`) via shared runtime adaptation instead of crate-local rewrites
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
