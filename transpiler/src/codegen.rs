@@ -6256,6 +6256,18 @@ impl CodeGen {
                         parts.push(format!("if ({}) {}{};", conds.join(" || "), ret_prefix, body));
                     }
                 }
+                syn::Pat::Ident(pi) if pi.ident != "_" => {
+                    // Catch-all with binding: `cmp => cmp` → declare alias to scrutinee
+                    parts.push(format!(
+                        "{{ const auto& {} = _m; {}{};  }}",
+                        pi.ident, ret_prefix, body
+                    ));
+                }
+                syn::Pat::Range(_) => {
+                    // Range patterns in switch expression context: emit as if-else
+                    // TODO: proper range pattern emission
+                    parts.push(format!("{}{};", ret_prefix, body));
+                }
                 _ => parts.push(format!("{}{};", ret_prefix, body)),
             }
         }
