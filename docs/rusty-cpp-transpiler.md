@@ -3203,8 +3203,18 @@ Active work items:
    - new deterministic first failure shifts to Stage E runtime assertion abort in `test_drain`: `run.log` now ends after `test_default PASSED` (`run.log:12`), and single-wrapper repro (`./runner --rusty-single-test rusty_test_test_drain`) aborts with stack in the drain assertion path (`runner.cpp:2813-2841`, `assert_failed` at `runner.cpp:2829`/adjacent assertion block).
    - canonical artifacts: `/tmp/rusty-parity-27-42-1c-20260407-081541/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed in shared runtime/transpiler surfaces, were shape-gated, and introduced no crate-specific rewrites/scripts.
-115. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.42.2`.
-   - focus: re-run the full seven-crate matrix after 27.42.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
+115. `Leaf 4.15.4.3.3.3.3.3.27.42.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure head remains the Stage E runtime abort family: execution reaches `test_default PASSED` (`run.log:12`) and then aborts with `ArrayVec: largest supported capacity is u32::MAX` (`run.log:14`) / `Aborted` (`run.log:15`) before `test_drain` can be reported by the main runner (`runner.cpp:4760` dispatch).
+   - single-wrapper repro from canonical artifacts confirms the same head: `./runner --rusty-single-test rusty_test_test_drain` exits with `134` (abort), with active test body at `runner.cpp:2813-2841` and assertion abort site at `runner.cpp:2829`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210 --keep-work-dirs`
+     - `cd /tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210/arrayvec && ./runner --rusty-single-test rusty_test_test_drain`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+116. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.43.1`.
+   - focus: implement shared transpiler/runtime fixes for the deterministic `test_drain` Stage E abort head (no crate-specific scripts), then rerun full matrix in 27.43.2.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
