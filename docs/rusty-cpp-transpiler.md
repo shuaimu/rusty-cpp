@@ -2635,8 +2635,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-19-1d-1775524379 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes remain shared and shape-gated in core lowering/runtime paths, with no crate-specific scripts or fixture-only rewrites.
-69. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.19.2`.
-   - focus: re-run the full seven-crate matrix after 27.19.1 and record the new deterministic first failing head from canonical artifacts.
+69. `Leaf 4.15.4.3.3.3.3.3.27.19.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-19-2-1775524575 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-19-2-1775524575/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:918`: `return rusty::ptr::drop_in_place(cur)` void-value misuse in the `retain` backshift lambda, with adjacent callable-surface mismatches at `runner.cpp:933/938`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-19-2-1775524575 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+70. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.20.1`.
+   - focus: implement generic retain/backshift lambda lowering fixes for the deterministic `runner.cpp:918` head and adjacent `SafeFn` argument-shape fallout (`runner.cpp:933/938`), then re-run the full matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
