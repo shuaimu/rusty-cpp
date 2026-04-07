@@ -2732,8 +2732,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-23-1-1775527657 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fix is shared and AST-context-gated, avoids crate-specific scripts or text-rewrite shortcuts, and preserves deterministic first-head artifact discipline.
-77. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.23.2`.
-   - focus: re-run full seven-crate matrix after 27.23.1 and record the next deterministic head with canonical artifacts (or mark closure if all seven pass).
+77. `Leaf 4.15.4.3.3.3.3.3.27.23.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-23-2-1775527809 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-23-2-1775527809/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1588`: `&*"..."` address-of-rvalue and `std::string_view*` vs `std::string_view` comparison mismatch, with adjacent fallout at `include/rusty/array.hpp:309` (`len(const char*)` no matching `std::size`) and downstream string/capacity constexpr errors.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-23-2-1775527809 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and added no crate-specific scripts/rewrite shortcuts.
+78. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.24.1`.
+   - focus: implement a generic fix for the new deterministic `runner.cpp:1588` string-assertion pointer-shape head, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
