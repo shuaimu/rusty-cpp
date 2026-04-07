@@ -383,6 +383,15 @@ auto make_take_next_iter(Iter&& iter, size_t remaining) {
         std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
     return take_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
 }
+
+template<typename Range>
+decltype(auto) preserve_for_in_range(Range&& range) {
+    if constexpr (std::is_lvalue_reference_v<Range>) {
+        return (range);
+    } else {
+        return std::decay_t<Range>(std::forward<Range>(range));
+    }
+}
 } // namespace detail
 
 template<typename Range>
@@ -454,13 +463,17 @@ decltype(auto) for_in(Range&& range) {
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return for_in(std::forward<Range>(range).into_iter());
     } else if constexpr (
+        requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }
+    ) {
+        return detail::preserve_for_in_range(std::forward<Range>(range));
+    } else if constexpr (
         requires { std::forward<Range>(range).iter(); }
         || requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }
         || requires { *std::forward<Range>(range); }
     ) {
         return for_in(iter(std::forward<Range>(range)));
     } else {
-        return std::forward<Range>(range);
+        return detail::preserve_for_in_range(std::forward<Range>(range));
     }
 }
 

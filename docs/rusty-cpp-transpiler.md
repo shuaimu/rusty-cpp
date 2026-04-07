@@ -3111,8 +3111,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-38-2b-20260407-025507 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-108. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.39.1`.
-   - focus: implement a shared fix for the post-27.38.2 Stage E `char_test_encode_utf8_oob` runtime hang/assertion family (no crate-specific scripts), add fixture-agnostic regressions, then re-run the seven-crate matrix.
+108. `Leaf 4.15.4.3.3.3.3.3.27.39.1` is complete.
+   - plan/scope check: runtime-only `for_in` lifetime fix plus focused fixture-agnostic regression stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared runtime fix in `include/rusty/slice.hpp`:
+     - added `detail::preserve_for_in_range` so `rusty::for_in` preserves begin/end-capable rvalue ranges by value while retaining lvalue reference behavior.
+     - updated `for_in` branch ordering to prefer begin/end range iteration before `iter(...)` adaptation, preventing temporary-container lifetime loss (for example `rusty::for_in(rusty::zip(...))`).
+   - added fixture-agnostic regression:
+     - `runtime_move_semantics::test_for_in_zip_temporary_preserves_rvalue_storage_lifetime`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_for_in_zip_temporary_preserves_rvalue_storage_lifetime -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-39-1-20260407-032937 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.38.2 runtime head family is collapsed: Stage E now proceeds through `char_test_encode_utf8_oob PASSED`.
+   - new deterministic first failure shifts to Stage E runner semantics: `deny_max_capacity_arrayvec_value FAILED: ArrayVec: largest supported capacity is u32::MAX` (`run.log:6`), rooted at panic-expected test body `runner.cpp:4290-4297` (libtest metadata skipped) with fail accounting in runner dispatch at `runner.cpp:4619-4621`.
+   - canonical artifacts: `/tmp/rusty-parity-27-39-1-20260407-032937/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared runtime iteration/lifetime surfaces with fixture-agnostic regression coverage, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+109. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.39.2`.
+   - focus: re-run full seven-crate parity matrix after 27.39.1, record first deterministic failure head with canonical artifacts, and update active-frontier/TODO status (or close Leaf 4 if all crates pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

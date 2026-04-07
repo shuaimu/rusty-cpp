@@ -230,3 +230,40 @@ fn test_slice_full_vec_of_vec_uses_element_pointer_not_container_pointer() {
 
     compile_and_run_cpp(source, "slice_full_vec_of_vec_pointer_shape");
 }
+
+#[test]
+fn test_for_in_zip_temporary_preserves_rvalue_storage_lifetime() {
+    let source = r#"
+        #include <array>
+        #include <rusty/rusty.hpp>
+
+        int main() {
+            const auto chars = std::array{U'a', U'α', U'�', U'𐍈'};
+            size_t count = 0;
+            const auto utf8_len = [](char32_t ch) -> size_t {
+                const auto code = static_cast<uint32_t>(ch);
+                if (code < 0x80u) {
+                    return 1;
+                }
+                if (code < 0x800u) {
+                    return 2;
+                }
+                if (code < 0x10000u) {
+                    return 3;
+                }
+                return 4;
+            };
+
+            for (auto&& [len, ch] : rusty::for_in(rusty::zip((rusty::range_inclusive(1, 4)), chars))) {
+                if (static_cast<size_t>(len) != utf8_len(ch)) {
+                    return 1;
+                }
+                ++count;
+            }
+
+            return count == 4 ? 0 : 2;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "for_in_zip_temporary_lifetime");
+}
