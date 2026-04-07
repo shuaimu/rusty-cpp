@@ -1441,7 +1441,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-20-2-1775525451 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): preserved deterministic first-head discipline and canonical artifact capture, and did not introduce any crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.21: Collapse the post-27.20.2 deterministic Stage D `try_insert` pointer-copy const-destination family generically (starting with `runner.cpp:857` `rusty::ptr::copy` call-shape mismatch from `const auto* p` / `ptr::offset(p, 1)`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.21.1: Implement generic transpiler/runtime fixes for the first deterministic 27.20.2 head (no crate-specific scripts): align pointer local mutability/call lowering in `try_insert`-style unsafe copy/write paths so destination pointers are emitted with writable pointer shape under generated C++ signatures.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.21.1: Implement generic transpiler/runtime fixes for the first deterministic 27.20.2 head (no crate-specific scripts): align pointer local mutability/call lowering in `try_insert`-style unsafe copy/write paths so destination pointers are emitted with writable pointer shape under generated C++ signatures.
+                              - [x] *done* Plan/scope check: transpiler-only implementation remained a focused change set under the <1000 LOC guardrail, so no additional TODO decomposition was required.
+                              - [x] *done* Implemented generic transpiler hardening in `transpiler/src/codegen.rs`:
+                                - immutable local binding emission for mutable raw-pointer locals (`*mut`) now preserves writable pointee shape by emitting const pointer-binding form (`T* const` / `auto* const`) instead of pointer-to-const form (`const T*` / `const auto*`);
+                                - applied consistently in both `let p = ...` (`Pat::Ident`) and `let p: *mut ... = ...` (`Pat::Type`) local emission paths.
+                              - [x] *done* Added focused transpiler regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327211_typed_mut_ptr_local_keeps_writable_pointee_shape`
+                                - `test_leaf41543333333327211_inferred_mut_ptr_local_keeps_writable_pointee_shape`
+                              - [x] *done* Single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-21-1-1775526113 --keep-work-dirs`) removed the deterministic `try_insert` pointer-copy head at `runner.cpp:857` (const-destination mismatch from `const auto* p` / `ptr::offset(p, 1)`).
+                              - [x] *done* New deterministic Stage D first hard error now starts at `runner.cpp:1137` (`std::span<rusty::Vec<int>>` has no member `clone_from_slice`), with canonical artifacts at `/tmp/rusty-parity-27-21-1-1775526113/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Verification for 27.21.1:
+                                - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327211_typed_mut_ptr_local_keeps_writable_pointee_shape`
+                                - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327211_inferred_mut_ptr_local_keeps_writable_pointee_shape`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-21-1-1775526113 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shared and context-gated in AST emission paths, avoids crate-specific scripts/rewrite shortcuts, and preserves deterministic first-head artifact discipline.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.21.2: Re-run full seven-crate parity matrix after 27.21.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

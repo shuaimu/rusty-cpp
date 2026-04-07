@@ -6793,6 +6793,20 @@ impl CodeGen {
                     } else {
                         "const "
                     };
+                // For immutable `let p: *mut T = ...`, preserve Rust binding immutability
+                // without changing mutable pointee semantics:
+                // emit `T* const p`, not `const T* p`.
+                let mut_raw_ptr_binding = get_local_type(local)
+                    .is_some_and(|ty| Self::is_mut_raw_pointer_type(ty))
+                    || inferred_binding_ty
+                        .as_ref()
+                        .is_some_and(|ty| Self::is_mut_raw_pointer_type(ty));
+                let decl_type = if qualifier == "const " && mut_raw_ptr_binding && type_str.contains('*')
+                {
+                    format!("{} const", type_str)
+                } else {
+                    format!("{}{}", qualifier, type_str)
+                };
                 self.record_local_const_binding(
                     &name_str,
                     qualifier == "const " && local.init.is_some(),
@@ -6807,10 +6821,7 @@ impl CodeGen {
                 if let Some(init) = &local.init {
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
                     if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
-                        self.writeln(&format!(
-                            "{}{} {} = [&]() {{",
-                            qualifier, type_str, cpp_name
-                        ));
+                        self.writeln(&format!("{} {} = [&]() {{", decl_type, cpp_name));
                         self.indent += 1;
                         self.writeln("while (true) {");
                         self.indent += 1;
@@ -6886,10 +6897,7 @@ impl CodeGen {
                         if pushed_hints {
                             self.constructor_template_hints.pop();
                         }
-                        self.writeln(&format!(
-                            "{}{} {} = {};",
-                            qualifier, type_str, cpp_name, expr_str
-                        ));
+                        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
                     }
                 } else {
                     // `let x: T;` can be initialized later; emit mutable storage.
@@ -6959,6 +6967,14 @@ impl CodeGen {
                         } else {
                             "const "
                         };
+                    let decl_type = if qualifier == "const "
+                        && Self::is_mut_raw_pointer_type(&resolved_ty)
+                        && ty.contains('*')
+                    {
+                        format!("{} const", ty)
+                    } else {
+                        format!("{}{}", qualifier, ty)
+                    };
                     self.record_local_const_binding(
                         &name_str,
                         qualifier == "const " && local.init.is_some(),
@@ -6976,7 +6992,7 @@ impl CodeGen {
                         } else {
                             self.emit_expr_to_string_with_expected(&init.expr, Some(&resolved_ty))
                         };
-                        self.writeln(&format!("{}{} {} = {};", qualifier, ty, cpp_name, expr_str));
+                        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
                     } else {
                         // `let x: T;` can be initialized later; emit mutable storage.
                         if self.should_use_optional_delayed_init_storage(&pat_type.ty) {
@@ -7004,6 +7020,15 @@ impl CodeGen {
             _ => {
                 self.writeln("// TODO: complex pattern binding");
             }
+        }
+    }
+
+    fn is_mut_raw_pointer_type(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Ptr(ptr) => ptr.mutability.is_some(),
+            syn::Type::Paren(p) => Self::is_mut_raw_pointer_type(&p.elem),
+            syn::Type::Group(g) => Self::is_mut_raw_pointer_type(&g.elem),
+            _ => false,
         }
     }
 
@@ -23473,6 +23498,42 @@ mod tests {
         assert!(!out.contains("static_cast<auto*>"));
         assert!(!out.contains("static_cast<const auto*>"));
         assert!(out.contains("const auto p = &x;"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327211_typed_mut_ptr_local_keeps_writable_pointee_shape() {
+        let out = transpile_str(
+            r#"
+            fn f(buf: &mut [i32; 8], index: usize, len: usize, value: i32) {
+                unsafe {
+                    let p: *mut _ = buf.as_mut_ptr().add(index);
+                    std::ptr::copy(p, p.offset(1), len - index);
+                    std::ptr::write(p, value);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto* const p = rusty::ptr::add("));
+        assert!(out.contains("rusty::ptr::copy(std::move(p), rusty::ptr::offset(p, 1),"));
+        assert!(out.contains("rusty::ptr::write(std::move(p),"));
+        assert!(!out.contains("const auto* p ="));
+    }
+
+    #[test]
+    fn test_leaf41543333333327211_inferred_mut_ptr_local_keeps_writable_pointee_shape() {
+        let out = transpile_str(
+            r#"
+            fn f(buf: &mut [i32; 8], index: usize) {
+                unsafe {
+                    let p = buf.as_mut_ptr().add(index);
+                    std::ptr::copy(p, p.offset(1), 1);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("const auto p = rusty::ptr::add("));
+        assert!(out.contains("rusty::ptr::copy(std::move(p), rusty::ptr::offset(p, 1), 1)"));
+        assert!(!out.contains("const auto* p ="));
     }
 
     #[test]
