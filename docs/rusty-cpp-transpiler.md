@@ -3157,8 +3157,25 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-40-2-rerun-20260407-042145 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-112. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.41.1`.
-   - focus: implement shared transpiler/runtime fixes for the post-27.40.2 `ArrayString` capacity-guard abort head family (starting from `test_arraystring_zero_filled_has_some_sanity_checks`), add fixture-agnostic regressions, then re-run matrix.
+112. `Leaf 4.15.4.3.3.3.3.3.27.41.1` is complete.
+   - plan/scope check: runtime helper + literal lowering hardening with focused regressions stayed well below the <1000 LOC threshold and did not require further decomposition.
+   - implemented shared runtime/transpiler fixes (no crate-specific scripts):
+     - `include/rusty/rusty.hpp`: `rusty::to_string_view` now prefers deref-style string surfaces before `.as_str()` to avoid recursive `as_str() -> to_string_view` loops in generated string-like wrappers.
+     - `transpiler/src/codegen.rs`: embedded-NUL Rust string literals now lower to sized `std::string_view("...", N)` so Rust `&str` byte-length semantics are preserved in assertion/equality paths.
+   - added fixture-agnostic regressions:
+     - `runtime_move_semantics::test_to_string_view_prefers_deref_over_recursive_as_str`
+     - `codegen::tests::test_leaf41543333333327411_embedded_nul_string_literal_uses_sized_string_view`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_to_string_view_prefers_deref_over_recursive_as_str -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327411_embedded_nul_string_literal_uses_sized_string_view -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-41-1b-20260407-050904 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.40.2 head family is collapsed: Stage E now proceeds through `test_arraystring_zero_filled_has_some_sanity_checks PASSED`.
+   - new deterministic first failure shifts to Stage E runtime abort at `test_compact_size`: `run.log` reaches `test_capacity_left PASSED` (`run.log:10`) before abort, and single-wrapper repro (`./runner --rusty-single-test rusty_test_test_compact_size`) aborts with stack at `test_compact_size` (`runner.cpp:2774-2797`).
+   - canonical artifacts: `/tmp/rusty-parity-27-41-1b-20260407-050904/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed in shared runtime/transpiler surfaces, were shape-gated, and introduced no crate-specific rewrites/scripts.
+113. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.41.2`.
+   - focus: re-run the full seven-crate matrix after 27.41.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

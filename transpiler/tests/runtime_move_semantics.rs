@@ -267,3 +267,29 @@ fn test_for_in_zip_temporary_preserves_rvalue_storage_lifetime() {
 
     compile_and_run_cpp(source, "for_in_zip_temporary_lifetime");
 }
+
+#[test]
+fn test_to_string_view_prefers_deref_over_recursive_as_str() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+        #include <string_view>
+
+        struct RecursiveAsStr {
+            std::string_view as_str() const {
+                return rusty::to_string_view(*this);
+            }
+
+            std::string_view operator*() const {
+                return std::string_view("ok");
+            }
+        };
+
+        int main() {
+            const RecursiveAsStr value{};
+            const auto view = rusty::to_string_view(value);
+            return view == "ok" ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "to_string_view_recursive_as_str");
+}

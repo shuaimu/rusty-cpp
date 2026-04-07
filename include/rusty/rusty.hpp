@@ -145,11 +145,15 @@ namespace rusty {
     }
 
     // String-view compatibility helper for transpiled Rust `&str` coercions.
-    // Prefer `.as_str()` surfaces when present (ArrayString, rusty::String, etc.),
-    // otherwise rely on direct `std::string_view` construction.
+    // Prefer deref-style surfaces first to avoid recursive `.as_str() -> to_string_view`
+    // loops on generated string-like wrappers (for example ArrayString), then
+    // fall back to `.as_str()` and direct `std::string_view` construction.
     template<typename T>
     std::string_view to_string_view(T&& value) {
-        if constexpr (requires { value.as_str(); }) {
+        if constexpr (requires { *value; } &&
+                      std::is_convertible_v<decltype(*value), std::string_view>) {
+            return std::string_view(*value);
+        } else if constexpr (requires { value.as_str(); }) {
             return std::string_view(value.as_str());
         } else {
             return std::string_view(std::forward<T>(value));

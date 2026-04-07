@@ -14417,7 +14417,16 @@ impl CodeGen {
             }
             syn::Lit::Float(f) => f.base10_digits().to_string(),
             syn::Lit::Bool(b) => if b.value { "true" } else { "false" }.to_string(),
-            syn::Lit::Str(s) => format!("\"{}\"", escape_cpp_string_literal_content(&s.value())),
+            syn::Lit::Str(s) => {
+                let value = s.value();
+                let escaped = escape_cpp_string_literal_content(&value);
+                if value.as_bytes().contains(&0) {
+                    // Preserve embedded NUL semantics of Rust `&str` literals.
+                    format!("std::string_view(\"{}\", {})", escaped, value.len())
+                } else {
+                    format!("\"{}\"", escaped)
+                }
+            }
             syn::Lit::Char(c) => format!("U'{}'", c.value()),
             syn::Lit::Byte(b) => format!("static_cast<uint8_t>({})", b.value()),
             syn::Lit::ByteStr(bs) => {
@@ -27958,6 +27967,22 @@ mod tests {
                 "rusty::panicking::panic(\"assertion failed: version(\\\"0.0.0\\\") < version(\\\"1.2.3-alpha2\\\")\")"
             ),
             "expected escaped quotes in panic string, output:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf41543333333327411_embedded_nul_string_literal_uses_sized_string_view() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let s = "\0\0\0\0";
+            }
+        "#,
+        );
+        assert!(
+            out.contains("std::string_view(\"\\0\\0\\0\\0\", 4)"),
+            "expected sized string_view for embedded NUL literal, output:\n{}",
             out
         );
     }
