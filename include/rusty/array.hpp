@@ -15,6 +15,7 @@
 #include <tuple>
 #include <variant>
 #include <rusty/vec.hpp>
+#include <rusty/maybe_uninit.hpp>
 
 // GCC/libstdc++ C++23 does not provide span equality operators.
 // Keep a narrow value-comparison overload so transpiled Rust slice assertions compile.
@@ -169,6 +170,75 @@ using option_value_t = std::decay_t<decltype(option_take_value(std::declval<Opt&
 template<typename Range>
 using range_storage_t =
     std::conditional_t<std::is_lvalue_reference_v<Range>, Range, std::decay_t<Range>>;
+
+template<typename T>
+struct maybe_uninit_payload {
+    using type = void;
+};
+
+template<typename U>
+struct maybe_uninit_payload<rusty::MaybeUninit<U>> {
+    using type = U;
+};
+
+template<typename Container>
+using container_item_t = typename std::remove_reference_t<Container>::Item;
+
+template<typename Container, typename = void>
+struct has_container_item : std::false_type {};
+
+template<typename Container>
+struct has_container_item<Container, std::void_t<container_item_t<Container>>> : std::true_type {};
+
+template<typename Ptr>
+using raw_ptr_t = std::remove_cv_t<std::remove_reference_t<Ptr>>;
+
+template<typename Container, typename Ptr>
+decltype(auto) adapt_as_ptr_result(const Container&, Ptr ptr) {
+    using PtrRaw = raw_ptr_t<Ptr>;
+    if constexpr (!std::is_pointer_v<PtrRaw>) {
+        return ptr;
+    } else {
+        using Pointee = std::remove_pointer_t<PtrRaw>;
+        using MaybeUninitT = std::remove_cv_t<Pointee>;
+        using Payload = typename maybe_uninit_payload<MaybeUninitT>::type;
+        if constexpr (std::is_void_v<Payload>) {
+            return ptr;
+        } else if constexpr (has_container_item<Container>::value) {
+            using Item = std::remove_reference_t<container_item_t<Container>>;
+            if constexpr (std::is_same_v<std::remove_cv_t<Item>, std::remove_cv_t<Payload>>) {
+                using ConstItem = std::add_const_t<container_item_t<Container>>;
+                return reinterpret_cast<std::add_pointer_t<ConstItem>>(ptr);
+            }
+            return reinterpret_cast<std::add_pointer_t<std::add_const_t<Payload>>>(ptr);
+        } else {
+            return reinterpret_cast<std::add_pointer_t<std::add_const_t<Payload>>>(ptr);
+        }
+    }
+}
+
+template<typename Container, typename Ptr>
+decltype(auto) adapt_as_mut_ptr_result(Container&, Ptr ptr) {
+    using PtrRaw = raw_ptr_t<Ptr>;
+    if constexpr (!std::is_pointer_v<PtrRaw>) {
+        return ptr;
+    } else {
+        using Pointee = std::remove_pointer_t<PtrRaw>;
+        using MaybeUninitT = std::remove_cv_t<Pointee>;
+        using Payload = typename maybe_uninit_payload<MaybeUninitT>::type;
+        if constexpr (std::is_void_v<Payload>) {
+            return ptr;
+        } else if constexpr (has_container_item<Container>::value) {
+            using Item = std::remove_reference_t<container_item_t<Container>>;
+            if constexpr (std::is_same_v<std::remove_cv_t<Item>, std::remove_cv_t<Payload>>) {
+                return reinterpret_cast<std::add_pointer_t<container_item_t<Container>>>(ptr);
+            }
+            return reinterpret_cast<std::add_pointer_t<Payload>>(ptr);
+        } else {
+            return reinterpret_cast<std::add_pointer_t<Payload>>(ptr);
+        }
+    }
+}
 } // namespace detail
 
 /// Create a vector filled with `count` copies of `value`.
@@ -193,9 +263,9 @@ auto collect_range(Range&& range_like) {
 template<typename T>
 decltype(auto) as_ptr(const T& value) {
     if constexpr (requires { value.as_ptr(); }) {
-        return value.as_ptr();
+        return detail::adapt_as_ptr_result(value, value.as_ptr());
     } else if constexpr (requires { value.data(); }) {
-        return value.data();
+        return detail::adapt_as_ptr_result(value, value.data());
     } else {
         return &value;
     }
@@ -204,9 +274,9 @@ decltype(auto) as_ptr(const T& value) {
 template<typename T>
 decltype(auto) as_mut_ptr(T& value) {
     if constexpr (requires { value.as_mut_ptr(); }) {
-        return value.as_mut_ptr();
+        return detail::adapt_as_mut_ptr_result(value, value.as_mut_ptr());
     } else if constexpr (requires { value.data(); }) {
-        return value.data();
+        return detail::adapt_as_mut_ptr_result(value, value.data());
     } else {
         return &value;
     }

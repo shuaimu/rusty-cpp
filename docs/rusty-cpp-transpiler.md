@@ -2545,8 +2545,23 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-15-2-1775520042 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-62. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.16.1`.
-   - focus: implement generic `MaybeUninit` slice-surface payload-shape fixes for the new deterministic head at `runner.cpp:1022`, then re-run full seven-crate matrix.
+62. `Leaf 4.15.4.3.3.3.3.3.27.16.1` is complete.
+   - plan/scope check: fix stayed under the small-change budget (<1000 LOC), so no additional leaf decomposition was required.
+   - implemented shared runtime payload-pointer adaptation in `include/rusty/array.hpp`:
+     - `rusty::as_ptr`/`rusty::as_mut_ptr` now adapt `MaybeUninit<T>*` storage pointers to payload-pointer shapes (`T*`/`const T*`) through shared detail helpers where payload-facing context is available,
+     - adaptation applies to both member-pointer and `.data()` helper branches so direct storage arrays and wrapper containers follow the same payload pointer contract.
+   - added focused runtime regressions in `tests/rusty_array_test.cpp`:
+     - `test_maybe_uninit_array_payload_pointer_adaptation_shape`
+     - `test_container_item_pointer_adaptation_shape`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-16-1-1775520565 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1022` (`span<MaybeUninit<T>>` to `span<T>` mismatch in `ArrayVec::as_mut_slice`) and adjacent `Option<T>(MaybeUninit<T>)` fallout.
+   - new deterministic first hard error now starts at `runner.cpp:1123`: `no matching function for call to ArrayVec<int, 2>::extend_from_iter(...)` (template parameter `CHECK` could not be deduced), with canonical artifacts at `/tmp/rusty-parity-matrix-27-16-1-1775520565/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `ctest --test-dir build-tests -R rusty_array_test --output-on-failure`
+     - `ctest --test-dir build-tests --output-on-failure`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-16-1-1775520565 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): kept fix shared and context-gated in runtime helper surfaces, avoided crate-specific scripts, and preserved deterministic first-head capture.
+63. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.16.2`.
+   - focus: re-run full seven-crate parity matrix after 27.16.1 and record the deterministic first failure head with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -2647,6 +2662,7 @@ Required approach:
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for raw-pointer helper/receiver lowering (`as_ptr`/`as_mut_ptr`, `ptr::add`/`ptr::offset`), do not preserve storage-pointer pointee shapes when call context expects payload pointers; propagate expected pointer context and adapt pointee shape explicitly
+- for runtime pointer helpers on `MaybeUninit`-backed storage (`as_ptr`/`as_mut_ptr`), do not expose wrapper-element pointers to payload-facing slice/read APIs; normalize helper results to payload pointers (`T*`/`const T*`) via shared runtime adaptation instead of crate-local rewrites
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
 - for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required

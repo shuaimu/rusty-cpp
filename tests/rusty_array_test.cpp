@@ -524,6 +524,51 @@ void test_maybe_uninit_reference_pointer_shape() {
     printf("PASS\n");
 }
 
+void test_maybe_uninit_array_payload_pointer_adaptation_shape() {
+    printf("test_maybe_uninit_array_payload_pointer_adaptation_shape: ");
+    std::array<rusty::MaybeUninit<int>, 4> storage{};
+    static_assert(std::is_same_v<decltype(rusty::as_ptr(storage)), const int*>);
+    static_assert(std::is_same_v<decltype(rusty::as_mut_ptr(storage)), int*>);
+
+    auto* ptr = rusty::as_mut_ptr(storage);
+    ptr[0] = 11;
+    ptr[1] = 29;
+
+    auto span = rusty::from_raw_parts(rusty::as_ptr(storage), 2);
+    assert(span[0] == 11);
+    assert(span[1] == 29);
+    printf("PASS\n");
+}
+
+void test_container_item_pointer_adaptation_shape() {
+    printf("test_container_item_pointer_adaptation_shape: ");
+    struct Probe {
+        using Item = int;
+        std::array<rusty::MaybeUninit<int>, 3> xs{};
+
+        auto as_ptr() const {
+            return xs.data();
+        }
+
+        auto as_mut_ptr() {
+            return xs.data();
+        }
+    };
+
+    Probe probe{};
+    static_assert(std::is_same_v<decltype(rusty::as_ptr(probe)), const int*>);
+    static_assert(std::is_same_v<decltype(rusty::as_mut_ptr(probe)), int*>);
+
+    auto* ptr = rusty::as_mut_ptr(probe);
+    ptr[0] = 3;
+    ptr[1] = 5;
+
+    auto span = rusty::from_raw_parts(rusty::as_ptr(probe), 2);
+    assert(span[0] == 3);
+    assert(span[1] == 5);
+    printf("PASS\n");
+}
+
 void test_io_print_shim_shape() {
     printf("test_io_print_shim_shape: ");
     rusty::io::_print();
@@ -555,6 +600,8 @@ int main() {
     test_rev_enumerate_iterator_adapter_shape();
     test_iter_mut_enumerate_preserves_mutability_shape();
     test_maybe_uninit_reference_pointer_shape();
+    test_maybe_uninit_array_payload_pointer_adaptation_shape();
+    test_container_item_pointer_adaptation_shape();
     test_io_print_shim_shape();
 
     printf("\nAll rusty range tests passed!\n");
