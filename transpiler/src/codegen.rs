@@ -7353,7 +7353,15 @@ impl CodeGen {
                                     self.emit_expr_maybe_move(&init.expr)
                                 }
                             } else if let Some(ty) = inferred_binding_ty.as_ref() {
-                                self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                if self
+                                    .should_skip_expected_cast_for_inferred_as_ptr_u8_fallback(
+                                        &init.expr, ty,
+                                    )
+                                {
+                                    self.emit_expr_maybe_move(&init.expr)
+                                } else {
+                                    self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                }
                             } else {
                                 self.emit_expr_maybe_move(&init.expr)
                             }
@@ -8219,6 +8227,46 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn is_u8_raw_pointer_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Ptr(ptr) = ty else {
+            return false;
+        };
+        let elem = self.peel_reference_paren_group_type(&ptr.elem);
+        matches!(
+            elem,
+            syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "u8"
+        )
+    }
+
+    fn should_skip_expected_cast_for_inferred_as_ptr_u8_fallback(
+        &self,
+        expr: &syn::Expr,
+        inferred_ty: &syn::Type,
+    ) -> bool {
+        if !self.is_u8_raw_pointer_type(inferred_ty) {
+            return false;
+        }
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::MethodCall(mc) = expr else {
+            return false;
+        };
+        if !mc.args.is_empty() {
+            return false;
+        }
+        let method = mc.method.to_string();
+        if method != "as_mut_ptr" {
+            return false;
+        }
+        // If pointee inference fails, the local binder currently falls back to `*mut u8`
+        // solely to keep pointer-flow analyses active. In that case, don't force a
+        // `u8*` cast in emitted initializer expression.
+        self.infer_array_element_type_from_expr(&mc.receiver).is_none()
     }
 
     fn infer_raw_pointer_mutability_for_expr(&self, expr: &syn::Expr) -> Option<bool> {
@@ -24542,6 +24590,50 @@ mod tests {
             "raw_ptr_add<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this)))))>>>(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
         ));
         assert!(!out.contains("raw_ptr_add(rusty::as_mut_ptr((*this)),"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327431_drain_tail_copy_keeps_element_pointer_shape() {
+        let out = transpile_str(
+            r#"
+            use std::ptr;
+
+            struct ArrayVec<T, const CAP: usize> {
+                xs: [T; CAP],
+                len_field: usize,
+            }
+
+            impl<T, const CAP: usize> ArrayVec<T, CAP> {
+                fn as_mut_ptr(&mut self) -> *mut T { self.xs.as_mut_ptr() }
+                fn len(&self) -> usize { self.len_field }
+                fn set_len(&mut self, n: usize) { self.len_field = n; }
+            }
+
+            struct Drain<'a, T, const CAP: usize> {
+                tail_start: usize,
+                tail_len: usize,
+                vec: &'a mut ArrayVec<T, CAP>,
+            }
+
+            impl<'a, T, const CAP: usize> Drop for Drain<'a, T, CAP> {
+                fn drop(&mut self) {
+                    if self.tail_len > 0 {
+                        unsafe {
+                            let source_vec = &mut *self.vec;
+                            let start = source_vec.len();
+                            let tail = self.tail_start;
+                            let ptr = source_vec.as_mut_ptr();
+                            ptr::copy(ptr.add(tail), ptr.add(start), self.tail_len);
+                            source_vec.set_len(start + self.tail_len);
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::as_mut_ptr(source_vec)"));
+        assert!(out.contains("rusty::ptr::copy(rusty::ptr::add(ptr,"));
+        assert!(!out.contains("reinterpret_cast<uint8_t*>(rusty::as_mut_ptr(source_vec))"));
     }
 
     #[test]

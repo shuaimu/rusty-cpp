@@ -3213,8 +3213,22 @@ Active work items:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210 --keep-work-dirs`
      - `cd /tmp/rusty-parity-matrix-27-42-2-rerun-20260407-095210/arrayvec && ./runner --rusty-single-test rusty_test_test_drain`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-116. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.43.1`.
-   - focus: implement shared transpiler/runtime fixes for the deterministic `test_drain` Stage E abort head (no crate-specific scripts), then rerun full matrix in 27.43.2.
+116. `Leaf 4.15.4.3.3.3.3.3.27.43.1` is complete.
+   - plan/scope check: targeted transpiler-only implementation stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fix (no crate-specific scripts):
+     - `transpiler/src/codegen.rs`: added expected-cast skip guard for local initializers inferred as fallback `*mut u8` from `as_mut_ptr(...)` when pointee inference is unavailable. This preserves element-pointer shape in drain-tail copy lowering and avoids emitting `reinterpret_cast<uint8_t*>(rusty::as_mut_ptr(...))` that corrupts pointer-step semantics.
+   - added fixture-agnostic regression:
+     - `codegen::tests::test_leaf41543333333327431_drain_tail_copy_keeps_element_pointer_shape`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327431_drain_tail_copy_keeps_element_pointer_shape -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-43-1b-20260407-120322 --keep-work-dirs`
+   - single-crate repro confirms the deterministic 27.42.2 head family is collapsed: Stage E now proceeds through `test_drain PASSED`, `test_drain_oob PASSED (expected panic)`, and `test_drain_range_inclusive PASSED`.
+   - new deterministic first failure shifts later in Stage E: after `test_drain_range_inclusive_oob PASSED (expected panic)`, run aborts with `ArrayVec: largest supported capacity is u32::MAX` and `slice range out of bounds` messages (`run.log:18-21`).
+   - canonical artifacts: `/tmp/rusty-parity-27-43-1b-20260407-120322/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): kept the fix in shared transpiler surfaces, used shape-gated logic, and introduced no crate-specific rewrites/scripts.
+117. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.43.2`.
+   - focus: re-run full seven-crate parity matrix, capture canonical artifacts, and record the new deterministic first failure head (or mark Leaf 4 complete if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
