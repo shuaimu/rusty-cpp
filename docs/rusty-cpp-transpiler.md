@@ -3149,8 +3149,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler test_stop_after_run_treats_should_panic_tests_as_expected_passes -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler/parity-runner surfaces, remained metadata/shape-gated, and introduced no crate-specific rewrites/scripts.
-111. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.40.2`.
-   - focus: re-run the full seven-crate matrix after 27.40.1, capture the next deterministic first failure head with canonical artifacts, and update active-frontier docs/TODO state.
+111. `Leaf 4.15.4.3.3.3.3.3.27.40.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-40-2-rerun-20260407-042145 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-40-2-rerun-20260407-042145/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure shifts to a new Stage E runtime abort family: after `test_arraystring_const_constructible PASSED` (`run.log:7`), execution aborts with `ArrayVec: largest supported capacity is u32::MAX` (`run.log:9`) and `Aborted` (`run.log:10`), entering `test_arraystring_zero_filled_has_some_sanity_checks` from runner dispatch (`runner.cpp:4749`) and hitting the capacity guard panic path in `ArrayString::zero_filled()` (`runner.cpp:1486`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-40-2-rerun-20260407-042145 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+112. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.41.1`.
+   - focus: implement shared transpiler/runtime fixes for the post-27.40.2 `ArrayString` capacity-guard abort head family (starting from `test_arraystring_zero_filled_has_some_sanity_checks`), add fixture-agnostic regressions, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
