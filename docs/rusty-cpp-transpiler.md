@@ -2798,8 +2798,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-26-1-1775532325 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes are shared transpiler changes, AST/type-context-gated, and avoid crate-specific scripts or post-generation rewrites.
-83. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.26.2`.
-   - focus: re-run full seven-crate matrix after 27.26.1 and capture the updated deterministic frontier.
+83. `Leaf 4.15.4.3.3.3.3.3.27.26.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no code changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-26-2-1775532846 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-26-2-1775532846/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1469`: missing `rusty::MaybeUninit<std::array<...>>::zeroed`, with adjacent fallout at `runner.cpp:1073` (`raw_ptr_add` deduction) and downstream iterator/variant return-shape families.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-26-2-1775532846 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+84. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.27.1`.
+   - focus: implement a generic fix for the deterministic `runner.cpp:1469` `MaybeUninit::zeroed` head, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
