@@ -3035,8 +3035,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-35-2-20260407-012749 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-102. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.36.1`.
-   - focus: collapse the `runner.cpp:4350` assertion RHS payload coercion family generically (starting with `Vec<uint8_t>` vs `Vec<int>` mismatch and adjacent comparator fallout at `/usr/include/c++/14/bits/stl_algobase.h:1196`) via shared transpiler/runtime expected-type coercion updates and fixture-agnostic regressions.
+102. `Leaf 4.15.4.3.3.3.3.3.27.36.1` is complete.
+   - plan/scope check: shared transpiler-only tuple expected-type propagation/inference plus focused regression coverage stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - binding-tuple assertion lowering now derives per-element expected types from peer tuple expressions for array/repeat RHS values when global tuple expected type is unresolved.
+     - iterator item-type inference now handles slice/index/call surfaces (including `slice_full(...)`) for peer-context element recovery, allowing tuple assertion RHS array literals to inherit `Vec<u8>` element context.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327361_tuple_assertion_rhs_into_vec_box_new_uses_peer_u8_hint`
+     - `codegen::tests::test_leaf41543333333327361_tuple_assertion_rhs_into_vec_box_new_non_u8_peer_unchanged`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327361 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-36-1-20260407-014027 --keep-work-dirs`
+   - single-crate reprobe confirms the deterministic 27.35.2 head family is collapsed: `runner.cpp:4350` tuple assertion mismatch (`Vec<uint8_t>` vs `Vec<int>`) is gone.
+   - new deterministic first hard error now starts at `runner.cpp:4145` (`static_cast<auto>(Z{})` invalid in `array_repeat` emission), with immediate adjacent repeats at `runner.cpp:4201` and `runner.cpp:4220`.
+   - canonical artifacts: `/tmp/rusty-parity-27-36-1-20260407-014027/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler inference/lowering surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+103. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.36.2`.
+   - focus: run the full seven-crate matrix after 27.36.1 and capture the post-fix deterministic Stage D frontier (currently headed by `runner.cpp:4145` invalid `static_cast<auto>(Z{})` in `arrayvec`, with adjacent repeats at `runner.cpp:4201/4220`) with canonical artifacts.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

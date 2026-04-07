@@ -4736,25 +4736,33 @@ impl CodeGen {
         for (idx, elem) in tuple_scrutinee.elems.iter().enumerate() {
             let elem_name = format!("_m{}", idx);
             let peer_expr = self.binding_tuple_peer_expr_for_index(tuple_scrutinee, idx);
+            let tuple_elem_expected_from_peer = if tuple_expected_ty.is_none() {
+                self.infer_binding_tuple_element_expected_type_from_peer(elem, peer_expr)
+            } else {
+                None
+            };
+            let tuple_elem_expected_ty = tuple_expected_ty
+                .as_ref()
+                .or(tuple_elem_expected_from_peer.as_ref());
             match elem {
                 syn::Expr::Reference(r) => {
                     let reference_target = self.peel_reference_target_expr(&r.expr);
                     let mut inner_raw = self
                         .emit_result_ctor_expr_with_peer_context(
                             reference_target,
-                            tuple_expected_ty.as_ref(),
+                            tuple_elem_expected_ty,
                             peer_expr,
                         )
                         .unwrap_or_else(|| {
                             self.emit_expr_to_string_with_expected(
                                 reference_target,
-                                tuple_expected_ty.as_ref(),
+                                tuple_elem_expected_ty,
                             )
                         });
                     let inner = self.maybe_wrap_variant_constructor_with_expected_enum(
                         reference_target,
                         inner_raw,
-                        tuple_expected_ty.as_ref(),
+                        tuple_elem_expected_ty,
                     );
                     let is_slice_range_target =
                         self.is_slice_range_index_target_expr(reference_target);
@@ -4797,16 +4805,16 @@ impl CodeGen {
                     let elem_expr_raw = self
                         .emit_result_ctor_expr_with_peer_context(
                             elem,
-                            tuple_expected_ty.as_ref(),
+                            tuple_elem_expected_ty,
                             peer_expr,
                         )
                         .unwrap_or_else(|| {
-                            self.emit_expr_to_string_with_expected(elem, tuple_expected_ty.as_ref())
+                            self.emit_expr_to_string_with_expected(elem, tuple_elem_expected_ty)
                         });
                     let elem_expr = self.maybe_wrap_variant_constructor_with_expected_enum(
                         elem,
                         elem_expr_raw,
-                        tuple_expected_ty.as_ref(),
+                        tuple_elem_expected_ty,
                     );
                     self.writeln(&format!("auto {} = {};", elem_name, elem_expr));
                 }
@@ -4892,6 +4900,25 @@ impl CodeGen {
             return Some(self.peel_reference_target_expr(&r.expr));
         }
         Some(peer)
+    }
+
+    fn infer_binding_tuple_element_expected_type_from_peer(
+        &self,
+        elem: &syn::Expr,
+        peer_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        let elem = self.peel_paren_group_expr(elem);
+        match elem {
+            syn::Expr::Reference(r) => {
+                self.infer_binding_tuple_element_expected_type_from_peer(&r.expr, peer_expr)
+            }
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) => {
+                let peer_expr = peer_expr?;
+                let peer_item_ty = self.infer_iter_item_type_from_expr(peer_expr)?;
+                Some(parse_quote!([#peer_item_ty]))
+            }
+            _ => None,
+        }
     }
 
     fn emit_result_ctor_expr_with_peer_context(
@@ -11342,6 +11369,7 @@ impl CodeGen {
                 match last.ident.to_string().as_str() {
                     "ArrayVec"
                     | "Vec"
+                    | "span"
                     | "range"
                     | "range_inclusive"
                     | "range_from"
@@ -11383,11 +11411,39 @@ impl CodeGen {
                 }
                 self.infer_iter_item_type_from_expr(&mc.receiver)
             }
+            syn::Expr::Call(call) => {
+                if call.args.len() == 1 {
+                    if let syn::Expr::Path(path_expr) =
+                        self.peel_paren_group_expr(call.func.as_ref())
+                    {
+                        let joined = path_expr
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        if matches!(joined.as_str(), "slice_full" | "rusty::slice_full") {
+                            if let Some(source_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                                if let Some(item_ty) = self.extract_iter_item_type_from_type(&source_ty)
+                                {
+                                    return Some(item_ty);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.infer_simple_expr_type(expr)
+                    .and_then(|ty| self.extract_iter_item_type_from_type(&ty))
+            }
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
                     .and_then(|ty| self.extract_iter_item_type_from_type(&ty))
             }
+            syn::Expr::Index(idx) => self
+                .infer_simple_expr_type(&idx.expr)
+                .and_then(|ty| self.extract_iter_item_type_from_type(&ty)),
             _ => self
                 .infer_simple_expr_type(expr)
                 .and_then(|ty| self.extract_iter_item_type_from_type(&ty)),
@@ -27165,6 +27221,44 @@ mod tests {
         assert!(out.contains("auto _m0_tmp = rusty::slice_full(buf);"));
         assert!(out.contains("auto _m1_tmp = rusty::slice_to(mock, rusty::len(buf));"));
         assert!(!out.contains("auto _m1 = &rusty::slice_to(mock, rusty::len(buf));"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327361_tuple_assertion_rhs_into_vec_box_new_uses_peer_u8_hint() {
+        let out = transpile_str(
+            r#"
+            use alloc::boxed::{into_vec, box_new};
+            fn f(var: Vec<Vec<u8>>) {
+                match (&var[..], &[into_vec(box_new([3, 5, 8]))]) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto _m0_tmp = rusty::slice_full(var);"));
+        assert!(out.contains("box_new(std::array{static_cast<uint8_t>(3), static_cast<uint8_t>(5), static_cast<uint8_t>(8)}"));
+        assert!(!out.contains("box_new(std::array{3, 5, 8})"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327361_tuple_assertion_rhs_into_vec_box_new_non_u8_peer_unchanged() {
+        let out = transpile_str(
+            r#"
+            use alloc::boxed::{into_vec, box_new};
+            fn f(var: Vec<Vec<i32>>) {
+                match (&var[..], &[into_vec(box_new([3, 5, 8]))]) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto _m0_tmp = rusty::slice_full(var);"));
+        assert!(out.contains("box_new(std::array{3, 5, 8})"));
+        assert!(!out.contains("static_cast<uint8_t>(3)"));
     }
 
     #[test]
