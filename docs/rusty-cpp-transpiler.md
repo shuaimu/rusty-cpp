@@ -3051,8 +3051,16 @@ Active work items:
    - new deterministic first hard error now starts at `runner.cpp:4145` (`static_cast<auto>(Z{})` invalid in `array_repeat` emission), with immediate adjacent repeats at `runner.cpp:4201` and `runner.cpp:4220`.
    - canonical artifacts: `/tmp/rusty-parity-27-36-1-20260407-014027/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed in shared transpiler inference/lowering surfaces with fixture-agnostic regressions, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-103. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.36.2`.
-   - focus: run the full seven-crate matrix after 27.36.1 and capture the post-fix deterministic Stage D frontier (currently headed by `runner.cpp:4145` invalid `static_cast<auto>(Z{})` in `arrayvec`, with adjacent repeats at `runner.cpp:4201/4220`) with canonical artifacts.
+103. `Leaf 4.15.4.3.3.3.3.3.27.36.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-36-2-20260407-014322 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-36-2-20260407-014322/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error remains at `runner.cpp:4145`: `rusty::array_repeat(static_cast<auto>(Z{}), 5)` emits invalid `static_cast<auto>` for non-primitive repeat seed values in assertion scaffolding, with immediate adjacent repeats at `runner.cpp:4201` and `runner.cpp:4220`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-36-2-20260407-014322 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+104. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.37.1`.
+   - focus: collapse the `runner.cpp:4145` non-primitive repeat-seed cast family generically (invalid `static_cast<auto>(Z{})` in `array_repeat`, with adjacent repeats at `runner.cpp:4201/4220`) via shared transpiler coercion logic and fixture-agnostic regressions.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
