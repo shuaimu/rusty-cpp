@@ -243,6 +243,10 @@ pub struct CodeGen {
     /// Alias names introduced by `use ... as Alias`.
     /// Used to avoid alias-order-sensitive non-void forward declarations.
     import_alias_names: HashSet<String>,
+    /// True while emitting function forward declaration signatures.
+    /// Used to qualify single-segment type paths that depend on `use` aliases
+    /// emitted later in the namespace body.
+    in_forward_decl_signature: bool,
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     declared_item_names: HashSet<String>,
@@ -330,6 +334,7 @@ impl CodeGen {
             macro_rules_names: HashSet::new(),
             option_type_aliases: HashSet::new(),
             import_alias_names: HashSet::new(),
+            in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
             emitted_method_conflict_keys: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
@@ -400,6 +405,7 @@ impl CodeGen {
         self.macro_rules_names.clear();
         self.option_type_aliases.clear();
         self.import_alias_names.clear();
+        self.in_forward_decl_signature = false;
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
         self.emitted_non_method_member_names.clear();
@@ -847,12 +853,15 @@ impl CodeGen {
 
         self.emit_template_prefix(&emitted_generics);
         self.push_type_param_scope(&f.sig.generics);
+        let prev_forward_decl_signature = self.in_forward_decl_signature;
+        self.in_forward_decl_signature = true;
         let mut return_type = if undeduced_return_type_param.is_some() {
             "auto".to_string()
         } else {
             self.map_return_type(&f.sig.output)
         };
         let params = self.map_fn_params(&f.sig.inputs);
+        self.in_forward_decl_signature = prev_forward_decl_signature;
         self.pop_type_param_scope();
 
         if is_async {
@@ -14927,6 +14936,16 @@ impl CodeGen {
             return "(*this)".to_string();
         }
 
+        // Forward declarations are emitted before in-namespace `use` aliases. When
+        // a single-segment path refers to a uniquely declared crate type from a
+        // sibling namespace (for example `Position` imported from `error`), qualify
+        // it explicitly to keep signatures order-independent.
+        if segments.len() == 1 {
+            if let Some(scoped) = self.resolve_unique_forward_decl_type_path(&segments[0]) {
+                return scoped;
+            }
+        }
+
         // Resolve module-relative Rust path prefixes in expression/type paths.
         if let Some(first) = segments.first() {
             match first.as_str() {
@@ -15131,6 +15150,54 @@ impl CodeGen {
 
         // Single segment — escape if keyword
         escape_cpp_keyword(&joined)
+    }
+
+    fn resolve_unique_forward_decl_type_path(&self, name: &str) -> Option<String> {
+        if !self.in_forward_decl_signature
+            || name.is_empty()
+            || name == "Self"
+            || self.is_type_param_in_scope(name)
+            || self.is_local_type_name_in_scope(name)
+        {
+            return None;
+        }
+
+        let mut scoped_matches: Vec<&str> = self
+            .local_declared_types
+            .iter()
+            .filter_map(|decl| {
+                let (_, tail) = decl.rsplit_once("::")?;
+                if tail == name { Some(decl.as_str()) } else { None }
+            })
+            .collect();
+
+        if scoped_matches.is_empty() {
+            return None;
+        }
+
+        // Prefer local namespace declarations where available; unqualified names are
+        // already valid there and should remain stable.
+        let current_scoped = if self.module_stack.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), name)
+        };
+        if scoped_matches.iter().any(|candidate| *candidate == current_scoped) {
+            return None;
+        }
+
+        scoped_matches.sort_unstable();
+        scoped_matches.dedup();
+        if scoped_matches.len() != 1 {
+            return None;
+        }
+
+        let escaped = scoped_matches[0]
+            .split("::")
+            .map(escape_cpp_keyword)
+            .collect::<Vec<String>>()
+            .join("::");
+        Some(format!("::{}", escaped))
     }
 
     fn try_emit_numeric_limits_max_path(
@@ -25891,6 +25958,32 @@ mod tests {
             .find("using char_::encode_utf8;")
             .expect("expected cross-module using declaration");
         assert!(decl_pos < using_pos);
+    }
+
+    #[test]
+    fn test_leaf415446_forward_decl_qualifies_single_segment_imported_type_paths() {
+        let out = transpile_str(
+            r#"
+            mod error {
+                pub enum Position {
+                    Major,
+                }
+            }
+            mod parse {
+                use crate::error::Position;
+                pub struct Error;
+                pub fn numeric_identifier(input: &str, pos: Position) -> Result<u64, Error> {
+                    Ok(0)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "numeric_identifier(std::string_view input, ::error::Position pos);"
+            ),
+            "forward declaration should use explicit crate path for imported type"
+        );
     }
 
     #[test]
