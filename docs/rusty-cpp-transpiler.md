@@ -2816,8 +2816,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-27-1-1775530696 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fix remains shared and context-gated in core runtime/transpiler surfaces, with no crate-specific scripts or post-generation rewrites.
-85. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.27.2`.
-   - focus: re-run full seven-crate parity matrix after 27.27.1 and record the next deterministic frontier (currently led by `runner.cpp:1073`).
+85. `Leaf 4.15.4.3.3.3.3.3.27.27.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-27-2-1775530872 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-27-2-1775530872/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `runner.cpp:1073`: `raw_ptr_add` template-argument deduction failure (`raw_ptr_add(int*, size_t)` call shape), with adjacent fallout at `runner.cpp:1078` (`into_iter` member assumption on iterator-like adapters/ranges) and downstream range-bound visit/return-shape families.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-27-2-1775530872 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+86. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.28.1`.
+   - focus: implement a generic fix for the deterministic `runner.cpp:1073` `raw_ptr_add`/`runner.cpp:1078` iterator-`into_iter` head family, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
