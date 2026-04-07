@@ -71,6 +71,11 @@ pub struct CodeGen {
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
+    /// Module paths from which impl items were collected for each type.
+    /// Used to emit `using namespace` when merging methods from sibling modules.
+    impl_source_modules: HashMap<String, HashSet<String>>,
+    /// Namespace using declarations to emit inside merged method bodies.
+    merged_method_using_namespaces: Vec<String>,
     /// Dedup keys for merged impl methods by type.
     /// Prevents duplicate C++ method emissions when expanded Rust yields
     /// overlapping inherent impl methods with the same callable signature.
@@ -294,6 +299,8 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             impl_blocks: HashMap::new(),
+            impl_source_modules: HashMap::new(),
+            merged_method_using_namespaces: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
             drop_trait_methods: HashSet::new(),
@@ -410,6 +417,7 @@ impl CodeGen {
         self.module_name = module_name.map(|s| s.to_string());
         self.module_stack.clear();
         self.impl_blocks.clear();
+        self.impl_source_modules.clear();
         self.impl_method_conflict_keys.clear();
         self.operator_renames.clear();
         self.drop_trait_methods.clear();
@@ -1075,6 +1083,14 @@ impl CodeGen {
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+
+                    // Record module path for methods merged from sibling modules
+                    if !module_path.is_empty() {
+                        self.impl_source_modules
+                            .entry(type_name.clone())
+                            .or_default()
+                            .insert(module_path.join("::"));
+                    }
 
                     let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                     let seen_method_keys = self
@@ -3134,9 +3150,24 @@ impl CodeGen {
                 named_field_cpp_names.values().cloned().collect();
             self.emitted_non_method_member_names
                 .push(non_method_member_names);
+
+            // Collect source modules for using-namespace inside method bodies
+            let current_module = self.module_stack.join("::");
+            let scoped = self.scoped_type_key(&name_str);
+            let source_modules_for_methods: Vec<String> = self.impl_source_modules
+                .get(&name_str)
+                .or_else(|| self.impl_source_modules.get(&scoped))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m != &current_module && !m.is_empty())
+                .collect();
+            self.merged_method_using_namespaces = source_modules_for_methods;
+
             for impl_item in &methods {
                 self.emit_impl_item(impl_item);
             }
+            self.merged_method_using_namespaces.clear();
             self.emitted_non_method_member_names.pop();
             self.emitted_method_conflict_keys.pop();
             self.current_struct = prev_struct;
@@ -4884,6 +4915,10 @@ impl CodeGen {
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_deref_method_scope(is_deref_method);
         self.push_deref_mut_method_scope(is_deref_mut_method);
+        // Emit using-namespace for methods merged from sibling modules
+        for ns in &self.merged_method_using_namespaces.clone() {
+            self.writeln(&format!("using namespace {};", ns));
+        }
         self.emit_block(&method.block);
         self.pop_deref_mut_method_scope();
         self.pop_deref_method_scope();
