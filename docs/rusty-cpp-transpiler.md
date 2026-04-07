@@ -3027,8 +3027,16 @@ Active work items:
    - new deterministic first hard error now starts at `runner.cpp:4350`, with immediate comparator failure at `/usr/include/c++/14/bits/stl_algobase.h:1196` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` assertion payload mismatch).
    - canonical artifacts: `/tmp/rusty-parity-27-35-1-20260407-012351/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed in shared runtime surfaces with fixture-agnostic coverage, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-101. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.35.2`.
-   - focus: run the full seven-crate matrix after 27.35.1 and capture the post-fix deterministic Stage D frontier (currently headed by `runner.cpp:4350` / `/usr/include/c++/14/bits/stl_algobase.h:1196` in `arrayvec`) with canonical artifacts.
+101. `Leaf 4.15.4.3.3.3.3.3.27.35.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-35-2-20260407-012749 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-35-2-20260407-012749/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error is now `runner.cpp:4350`: assertion tuple equality compares `std::span<rusty::Vec<unsigned char>>` with `std::array<rusty::Vec<int>, 1>` payloads, with immediate comparator hard diagnostic at `/usr/include/c++/14/bits/stl_algobase.h:1196` (`operator==` mismatch between `rusty::Vec<unsigned char>` and `rusty::Vec<int>`).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-35-2-20260407-012749 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+102. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.36.1`.
+   - focus: collapse the `runner.cpp:4350` assertion RHS payload coercion family generically (starting with `Vec<uint8_t>` vs `Vec<int>` mismatch and adjacent comparator fallout at `/usr/include/c++/14/bits/stl_algobase.h:1196`) via shared transpiler/runtime expected-type coercion updates and fixture-agnostic regressions.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
