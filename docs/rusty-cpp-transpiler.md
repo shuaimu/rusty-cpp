@@ -2921,8 +2921,16 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
      - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-31-1-20260407-002720 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): fixes are shared and type-gated in core lowering paths, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
-93. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.31.2`.
-   - focus: run the full seven-crate matrix and capture/post the new deterministic first-failing head family after 27.31.1.
+93. `Leaf 4.15.4.3.3.3.3.3.27.31.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-31-2-verify-20260407-010640 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-31-2-verify-20260407-010640/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first hard error now starts at `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72`: `Result::Err` still default-constructs non-default-constructible move-only payloads (surfacing as `no matching function for call to 'arrayvec::ArrayVec<int, 2>::ArrayVec()'`), with immediate adjacent fallout at `runner.cpp:1013` (move-only array copy surface) and `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:132` (`ptr::write` assignment requirement on move-only payloads).
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-31-2-verify-20260407-010640 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+94. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.32.1`.
+   - focus: collapse the `result.hpp:72` default-construction head family generically (plus immediate adjacent move-only write/copy surfaces), add fixture-agnostic regressions, then reprobe parity.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
