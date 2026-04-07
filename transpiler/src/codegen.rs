@@ -86,6 +86,9 @@ pub struct CodeGen {
     /// Stack of in-scope generic parameter names (type + const).
     /// Used for dependent-type emission and generic-argument recovery.
     type_param_scopes: Vec<HashSet<String>>,
+    /// Trait default static methods (no receiver) keyed by trait name.
+    /// Used to inject these methods into implementing types.
+    trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
     /// Generic type parameters declared by enum name.
     /// Used to recover variant template arguments in pattern lowering.
     enum_type_params: HashMap<String, Vec<String>>,
@@ -293,6 +296,7 @@ impl CodeGen {
             drop_trait_methods: HashSet::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
+            trait_static_default_methods: HashMap::new(),
             enum_type_params: HashMap::new(),
             declared_type_params: HashMap::new(),
             declared_type_param_kinds: HashMap::new(),
@@ -478,7 +482,9 @@ impl CodeGen {
         self.collect_extension_trait_impl_methods(&file.items, &[]);
         self.extension_method_names
             .extend(self.external_extension_method_hints.iter().cloned());
-        // Pass 1f: collect all impl blocks (including inline-module nested ones)
+        // Pass 1f: collect trait static default methods before impl blocks.
+        self.collect_trait_static_default_methods(&file.items);
+        // Pass 1g: collect all impl blocks (including inline-module nested ones)
         // by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
         // Pass 1g: collect macro_rules! names so macro-only imports can be skipped.
@@ -1118,12 +1124,80 @@ impl CodeGen {
                         }
                         entry.push(collected_item);
                     }
+
+                    // Inject trait static default methods (no receiver) into the type.
+                    // These are methods like `Flags::empty()`, `Flags::all()` that have
+                    // default implementations in the trait but aren't in the explicit impl block.
+                    if let Some(trait_name_str) = trait_name.as_ref() {
+                        if let Some(static_defaults) =
+                            self.trait_static_default_methods.get(trait_name_str).cloned()
+                        {
+                            let entry = self.impl_blocks.entry(type_name.clone()).or_default();
+                            let seen_keys = self
+                                .impl_method_conflict_keys
+                                .entry(type_name.clone())
+                                .or_default();
+                            for default_fn in &static_defaults {
+                                let key = impl_method_conflict_key(default_fn);
+                                if !seen_keys.contains(&key) {
+                                    seen_keys.insert(key);
+                                    entry.push(syn::ImplItem::Fn(default_fn.clone()));
+                                }
+                            }
+                        }
+                    }
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested_items)) = &m.content {
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
                         self.collect_impl_blocks(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect trait default static methods (no `self` receiver) so they can be
+    /// injected into implementing types' struct definitions.
+    /// Instance methods (with receivers) are NOT injected because they have
+    /// complex dependencies on `Self::Bits`, `Self::FLAGS`, etc. that don't
+    /// resolve correctly when transplanted to a different type context.
+    fn collect_trait_static_default_methods(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let trait_name = t.ident.to_string();
+                    let mut static_defaults = Vec::new();
+                    for trait_item in &t.items {
+                        if let syn::TraitItem::Fn(method) = trait_item {
+                            let has_default = method.default.is_some();
+                            let has_receiver = matches!(
+                                method.sig.inputs.first(),
+                                Some(syn::FnArg::Receiver(_))
+                            );
+                            // Only collect static methods (no receiver) with default bodies
+                            if has_default && !has_receiver {
+                                let impl_fn = syn::ImplItemFn {
+                                    attrs: method.attrs.clone(),
+                                    vis: syn::Visibility::Public(syn::token::Pub::default()),
+                                    defaultness: None,
+                                    sig: method.sig.clone(),
+                                    block: method.default.clone().unwrap(),
+                                };
+                                static_defaults.push(impl_fn);
+                            }
+                        }
+                    }
+                    if !static_defaults.is_empty() {
+                        self.trait_static_default_methods
+                            .insert(trait_name, static_defaults);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        self.collect_trait_static_default_methods(nested_items);
                     }
                 }
                 _ => {}
@@ -27002,6 +27076,33 @@ mod tests {
             "inner binding should be renamed to flag_shadow1, got: {}", out);
         assert!(!out.contains("const auto flag = flag"),
             "should not redeclare flag in same scope, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154427_trait_static_default_methods_injected_into_impl_type() {
+        let out = transpile_str(
+            r#"
+            trait Flags {
+                fn from_bits_retain(bits: u32) -> Self;
+                fn empty() -> Self {
+                    Self::from_bits_retain(0)
+                }
+                fn all() -> Self {
+                    Self::from_bits_retain(!0)
+                }
+            }
+            struct MyFlags(u32);
+            impl Flags for MyFlags {
+                fn from_bits_retain(bits: u32) -> Self {
+                    MyFlags(bits)
+                }
+            }
+            "#,
+        );
+        // The trait's static default methods (empty, all) should be merged
+        // into MyFlags as static methods
+        assert!(out.contains("empty()"), "empty() should be injected, got: {}", out);
+        assert!(out.contains("all()"), "all() should be injected, got: {}", out);
     }
 
     #[test]
