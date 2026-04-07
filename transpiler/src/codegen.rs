@@ -6087,10 +6087,19 @@ impl CodeGen {
 
     /// Emit a switch-style match as an expression (returns string for IIFE body).
     fn emit_match_expr_switch(&self, arms: &[syn::Arm], expected_ty: Option<&syn::Type>) -> String {
+        let tuple_literal_hints = self.collect_switch_match_tuple_literal_hints(arms);
         let mut parts = Vec::new();
         for arm in arms {
+            let arm_value_expr = self.extract_value_expr(&arm.body).unwrap_or(&arm.body);
             let body = {
-                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                let emitted = if let (Some(hints), syn::Expr::Tuple(tuple)) = (
+                    tuple_literal_hints.as_ref(),
+                    self.peel_paren_group_expr(arm_value_expr),
+                ) {
+                    self.emit_switch_arm_tuple_expr_with_hints(tuple, expected_ty, hints)
+                } else {
+                    self.emit_expr_to_string_with_expected(&arm.body, expected_ty)
+                };
                 self.maybe_wrap_variant_constructor_with_expected_enum(
                     &arm.body,
                     emitted,
@@ -6135,6 +6144,93 @@ impl CodeGen {
             }
         }
         parts.join(" ")
+    }
+
+    fn collect_switch_match_tuple_literal_hints(
+        &self,
+        arms: &[syn::Arm],
+    ) -> Option<Vec<Option<String>>> {
+        let mut tuple_exprs: Vec<&syn::ExprTuple> = Vec::new();
+        let mut tuple_len: Option<usize> = None;
+        for arm in arms {
+            let arm_value_expr = self.extract_value_expr(&arm.body).unwrap_or(&arm.body);
+            let syn::Expr::Tuple(tuple) = self.peel_paren_group_expr(arm_value_expr) else {
+                return None;
+            };
+            if let Some(expected_len) = tuple_len {
+                if tuple.elems.len() != expected_len {
+                    return None;
+                }
+            } else {
+                tuple_len = Some(tuple.elems.len());
+            }
+            tuple_exprs.push(tuple);
+        }
+        let tuple_len = tuple_len?;
+        if tuple_len == 0 {
+            return None;
+        }
+
+        let mut hints = vec![None; tuple_len];
+        for idx in 0..tuple_len {
+            for tuple in &tuple_exprs {
+                let elem = self.peel_paren_group_expr(&tuple.elems[idx]);
+                if Self::is_unsuffixed_int_literal_expr(elem) {
+                    continue;
+                }
+                hints[idx] = Some(self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &tuple.elems[idx],
+                    None,
+                ));
+                break;
+            }
+        }
+
+        if hints.iter().all(|hint| hint.is_none()) {
+            None
+        } else {
+            Some(hints)
+        }
+    }
+
+    fn emit_switch_arm_tuple_expr_with_hints(
+        &self,
+        tuple: &syn::ExprTuple,
+        expected_ty: Option<&syn::Type>,
+        hints: &[Option<String>],
+    ) -> String {
+        let elems: Vec<String> = tuple
+            .elems
+            .iter()
+            .enumerate()
+            .map(|(idx, elem)| {
+                let peeled = self.peel_paren_group_expr(elem);
+                if Self::is_unsuffixed_int_literal_expr(peeled) {
+                    if let Some(Some(type_hint_expr)) = hints.get(idx) {
+                        let lit = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            elem,
+                            expected_ty,
+                        );
+                        return format!(
+                            "static_cast<std::remove_cvref_t<decltype(({}))>>({})",
+                            type_hint_expr, lit
+                        );
+                    }
+                }
+                self.emit_expr_to_string_with_expected_and_move_if_needed(elem, expected_ty)
+            })
+            .collect();
+        format!("std::make_tuple({})", elems.join(", "))
+    }
+
+    fn is_unsuffixed_int_literal_expr(expr: &syn::Expr) -> bool {
+        matches!(
+            expr,
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(lit),
+                ..
+            }) if lit.suffix().is_empty()
+        )
     }
 
     /// Emit a variant match as expression body (returns string for visit lambdas).
@@ -12889,6 +12985,9 @@ impl CodeGen {
                 if expected_cpp.starts_with("rusty::Result<") {
                     return format!("{}::Ok({})", expected_cpp, arg);
                 }
+                if expected_cpp == "rusty::fmt::Result" {
+                    return format!("{}::Ok({})", expected_cpp, arg);
+                }
                 if expected_cpp.starts_with("rusty::io::Result<")
                     || expected_cpp.starts_with("io::Result<")
                 {
@@ -12908,6 +13007,9 @@ impl CodeGen {
             if let Some(expected) = expected_ty {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Result<") {
+                    return format!("{}::Err({})", expected_cpp, arg);
+                }
+                if expected_cpp == "rusty::fmt::Result" {
                     return format!("{}::Err({})", expected_cpp, arg);
                 }
                 if expected_cpp.starts_with("rusty::io::Result<")
@@ -17464,29 +17566,29 @@ auto partial_cmp(A&& a, B&& b) {\n\
     return std::forward<A>(a).partial_cmp(std::forward<B>(b));\n\
 }\n\
 namespace fmt {\n\
-using Result = bool;\n\
-struct Arguments {};\n\
 struct Error {};\n\
+using Result = rusty::Result<std::tuple<>, Error>;\n\
+struct Arguments {};\n\
 enum class Alignment { Left, Right, Center };\n\
 struct DebugList {\n\
     template<typename... Args>\n\
     DebugList& entries(Args&&...) { return *this; }\n\
-    Result finish() { return true; }\n\
+    Result finish() { return Result::Ok(std::make_tuple()); }\n\
 };\n\
 struct Formatter {\n\
     template<typename... Args>\n\
-    static Result debug_tuple_field1_finish(Args&&...) { return true; }\n\
+    static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
-    static Result debug_struct_field1_finish(Args&&...) { return true; }\n\
+    static Result debug_struct_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
-    Result write_fmt(Args&&...) const { return true; }\n\
+    Result write_fmt(Args&&...) const { return Result::Ok(std::make_tuple()); }\n\
     rusty::Option<size_t> width() const { return rusty::Option<size_t>(rusty::None); }\n\
     rusty::Option<Alignment> align() const { return rusty::Option<Alignment>(rusty::None); }\n\
     char fill() const { return ' '; }\n\
     template<typename Ch>\n\
-    Result write_char(Ch&&) const { return true; }\n\
+    Result write_char(Ch&&) const { return Result::Ok(std::make_tuple()); }\n\
     template<typename Str>\n\
-    Result write_str(Str&&) const { return true; }\n\
+    Result write_str(Str&&) const { return Result::Ok(std::make_tuple()); }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
 };\n\
 }\n\
@@ -17956,6 +18058,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_io_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_fmt_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
@@ -18121,6 +18226,24 @@ fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
         "stdout" => UseImportAction::Using("rusty::io::stdout_".to_string()),
         "stderr" => UseImportAction::Using("rusty::io::stderr_".to_string()),
         // Read/Write/Seek/BufRead and related trait imports are Rust-only.
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_fmt_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::fmt" {
+        return Some(UseImportAction::Raw(
+            "namespace fmt = rusty::fmt;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("std::fmt::")?;
+    let action = match item {
+        // Keep concrete formatter runtime surfaces mapped; trait imports remain Rust-only.
+        "Formatter" | "Result" | "Arguments" | "Alignment" | "Error" => {
+            UseImportAction::Using(format!("rusty::fmt::{}", item))
+        }
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -25987,6 +26110,51 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415447_fmt_import_rewrites_keep_concrete_runtime_surfaces() {
+        let out = transpile_str(
+            r#"
+            use core::fmt::{self, Alignment, Arguments, Formatter, Result, Display};
+            "#,
+        );
+        assert!(out.contains("namespace fmt = rusty::fmt;"));
+        assert!(out.contains("using rusty::fmt::Alignment;"));
+        assert!(out.contains("using rusty::fmt::Arguments;"));
+        assert!(out.contains("using rusty::fmt::Formatter;"));
+        assert!(out.contains("using rusty::fmt::Result;"));
+        assert!(out.contains("// Rust-only: using std::fmt::Display;"));
+    }
+
+    #[test]
+    fn test_leaf415447_fmt_result_ok_lowering_uses_fmt_result_ctor_surface() {
+        let out = transpile_str(
+            r#"
+            fn done() -> core::fmt::Result {
+                Ok(())
+            }
+            "#,
+        );
+        assert!(out.contains("return rusty::fmt::Result::Ok(std::make_tuple());"));
+        assert!(!out.contains("return Ok(std::make_tuple());"));
+    }
+
+    #[test]
+    fn test_leaf415447_switch_match_tuple_casts_unsuffixed_int_literals_from_peer_type() {
+        let out = transpile_str(
+            r#"
+            use core::fmt::Alignment;
+            fn split(align: Alignment, padding: usize) -> (usize, usize) {
+                match align {
+                    Alignment::Left => (0, padding),
+                    Alignment::Right => (padding, 0),
+                    Alignment::Center => (padding / 2, (padding + 1) / 2),
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<std::remove_cvref_t<decltype((std::move(padding)))>>(0)"));
+    }
+
+    #[test]
     fn test_leaf415433333333_ok_err_lower_to_io_result_constructors_with_expected_type() {
         let out = transpile_str(
             r#"
@@ -26041,14 +26209,16 @@ mod tests {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("struct DebugList {"));
         assert!(helpers.contains("DebugList& entries(Args&&...)"));
-        assert!(helpers.contains("Result finish() { return true; }"));
+        assert!(helpers.contains("Result finish() { return Result::Ok(std::make_tuple()); }"));
         assert!(helpers.contains("DebugList debug_list() const { return DebugList{}; }"));
     }
 
     #[test]
     fn test_leaf4154333333361_runtime_fallback_formatter_supports_write_fmt() {
         let helpers = runtime_path_fallback_helpers_text();
-        assert!(helpers.contains("Result write_fmt(Args&&...) const { return true; }"));
+        assert!(helpers.contains(
+            "Result write_fmt(Args&&...) const { return Result::Ok(std::make_tuple()); }"
+        ));
     }
 
     #[test]
@@ -26061,11 +26231,16 @@ mod tests {
     fn test_leaf415441_runtime_fallback_formatter_supports_padding_surface() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("enum class Alignment { Left, Right, Center };"));
+        assert!(helpers.contains("using Result = rusty::Result<std::tuple<>, Error>;"));
         assert!(helpers.contains("rusty::Option<size_t> width() const"));
         assert!(helpers.contains("rusty::Option<Alignment> align() const"));
         assert!(helpers.contains("char fill() const { return ' '; }"));
-        assert!(helpers.contains("Result write_char(Ch&&) const { return true; }"));
-        assert!(helpers.contains("Result write_str(Str&&) const { return true; }"));
+        assert!(helpers.contains(
+            "Result write_char(Ch&&) const { return Result::Ok(std::make_tuple()); }"
+        ));
+        assert!(helpers.contains(
+            "Result write_str(Str&&) const { return Result::Ok(std::make_tuple()); }"
+        ));
     }
 
     #[test]

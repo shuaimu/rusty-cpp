@@ -2179,6 +2179,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `semver` still fails first in single-crate Stage D on formatter padding/import surface (`Alignment` + related `write_char`/`Ok` fallout from `/tmp/rusty-parity-4-15-4-4-6-semver-20260407-1/semver/build.log`).
                                 - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixed the first deterministic blocker family in shared AST-aware lowering, used deterministic artifact capture, and introduced no crate-specific rewrites/scripts.
+                            - [x] *done* Leaf 4.15.4.4.7: Collapse current `semver` Stage D formatter/import head generically (starting with unresolved `Alignment` in `display::pad`, tuple return-type mismatch from unsuffixed integer literals, and `fmt::Result`/`Ok(())` surface mismatch), add fixture-agnostic regressions, then re-run `semver` parity.
+                              - [x] *done* Plan/scope check: shared transpiler-only updates plus regression coverage stayed well below the <1000 LOC guardrail and required no additional decomposition.
+                              - [x] *done* Implemented shared fixes in `transpiler/src/codegen.rs` (no crate-specific scripts):
+                                - added `std/core::fmt` use-import rewrites so concrete runtime surfaces are not dropped as Rust-only (`std::fmt` namespace alias and `Alignment`/`Formatter`/`Result`/`Arguments`/`Error` mappings).
+                                - hardened runtime fallback formatter surface: `rusty::fmt::Result` is now `rusty::Result<std::tuple<>, rusty::fmt::Error>` with Result-shaped `write_fmt`/`write_char`/`write_str`/debug helper returns.
+                                - extended `Ok`/`Err` lowering so expected `rusty::fmt::Result` contexts emit qualified constructors (`rusty::fmt::Result::Ok(...)` / `Err(...)`) instead of bare `Ok(...)`.
+                                - added generic switch-match tuple-literal harmonization: unsuffixed integer literals in tuple arms are cast via peer-expression type hints to avoid inconsistent lambda return tuple deduction.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_leaf415447_fmt_import_rewrites_keep_concrete_runtime_surfaces`
+                                - `codegen::tests::test_leaf415447_fmt_result_ok_lowering_uses_fmt_result_ctor_surface`
+                                - `codegen::tests::test_leaf415447_switch_match_tuple_casts_unsuffixed_int_literals_from_peer_type`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler leaf415447 -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-7-semver-20260407-1 --keep-work-dirs`
+                              - [x] *done* Single-crate semver parity confirms the prior formatter/import head family is collapsed:
+                                - generated output now imports `rusty::fmt::Alignment` (`runner.cpp:481`) and `display::pad` uses typed zero casts in tuple match arms (`runner.cpp:492`) with `rusty::fmt::Result::Ok(std::make_tuple())` return (`runner.cpp:501`).
+                              - [x] *done* New deterministic first Stage D head moved to incomplete-type ordering in `eval` helpers:
+                                - first compile blocker is `invalid use of incomplete type` for `VersionReq`/`Version`/`Comparator` in `eval::*` function bodies (`build.log:43+`, rooted at `runner.cpp:621/626/629/642` before full type definitions).
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-7-semver-20260407-1/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Gate check for resuming `arrayvec` progression remains **not yet satisfied** under `4.15.4.4`:
+                                - `semver` still fails first in single-crate Stage D on incomplete-type ordering head in `eval` (`/tmp/rusty-parity-4-15-4-4-7-semver-20260407-1/semver/build.log`).
+                                - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed AST-aware and shape-gated in shared transpiler/runtime surfaces; no crate-specific rewrites/scripts were introduced.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.1: Implement shared transpiler/runtime fixes for the first deterministic 27.45.2 runtime head (no crate-specific scripts): restore Rust-parity retain/equality behavior so Stage E progresses past `test_retain` without assertion abort.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.2: Re-run full seven-crate parity matrix after 27.46.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).

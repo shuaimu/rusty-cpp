@@ -3307,8 +3307,27 @@ Active work items:
      - `cd /tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec && timeout 30s ./runner --rusty-single-test rusty_test_test_retain`
      - `cd /tmp/rusty-parity-matrix-27-45-2-20260407-1/arrayvec && gdb -q ./runner -ex 'set args --rusty-single-test rusty_test_test_retain' -ex run -ex bt -ex quit`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow, kept fixes in shared transpiler/runtime surfaces, and introduced no crate-specific rewrites/scripts.
-122. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.46.1`.
-   - focus: collapse the deterministic Stage E `test_retain` assertion-abort family generically so the matrix can progress past the new first failure head.
+122. `Leaf 4.15.4.4.7` is complete.
+   - plan/scope check: shared transpiler-only updates plus regression coverage stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes in `transpiler/src/codegen.rs` (no crate-specific scripts):
+     - added `std/core::fmt` use-import rewrites so concrete runtime surfaces are not dropped as Rust-only (`std::fmt` namespace alias and `Alignment`/`Formatter`/`Result`/`Arguments`/`Error` mappings).
+     - hardened runtime fallback formatter surface: `rusty::fmt::Result` now maps to `rusty::Result<std::tuple<>, rusty::fmt::Error>` with Result-shaped `write_fmt`/`write_char`/`write_str`/debug helper returns.
+     - extended `Ok`/`Err` lowering so expected `rusty::fmt::Result` contexts emit qualified constructors (`rusty::fmt::Result::Ok(...)` / `Err(...)`) instead of bare `Ok(...)`.
+     - added generic switch-match tuple-literal harmonization: unsuffixed integer literals in tuple arms are cast via peer-expression type hints to avoid inconsistent lambda return tuple deduction.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf415447_fmt_import_rewrites_keep_concrete_runtime_surfaces`
+     - `codegen::tests::test_leaf415447_fmt_result_ok_lowering_uses_fmt_result_ctor_surface`
+     - `codegen::tests::test_leaf415447_switch_match_tuple_casts_unsuffixed_int_literals_from_peer_type`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf415447 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-7-semver-20260407-1 --keep-work-dirs`
+   - single-crate semver repro confirms the prior formatter/import head family is collapsed (`Alignment` import now emitted at `runner.cpp:481`; tuple-literal cast harmonization in `display::pad` at `runner.cpp:492`; `rusty::fmt::Result::Ok(std::make_tuple())` emitted at `runner.cpp:501`).
+   - new deterministic first Stage D head moves to incomplete-type ordering in `eval` helpers, with first compile blocker at `runner.cpp:621` (`invalid use of incomplete type` for `VersionReq` and related `Version`/`Comparator` surfaces).
+   - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-7-semver-20260407-1/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed AST-aware and shape-gated in shared transpiler/runtime surfaces; no crate-specific rewrites/scripts were introduced.
+123. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
+   - focus: collapse the new deterministic `semver` Stage D incomplete-type ordering head in `eval` helper bodies before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
