@@ -11582,11 +11582,23 @@ impl CodeGen {
                 raw
             }
         });
-        if struct_expr.rest.is_none()
-            && resolved_struct_name
-                .as_ref()
-                .is_some_and(|name| self.type_has_drop_impl(name))
-        {
+        // Use positional constructor syntax (not designated initializers) when the
+        // struct has impl blocks that make it non-aggregate in C++.
+        let has_impl_methods = resolved_struct_name.as_ref().is_some_and(|name| {
+            self.type_has_drop_impl(name)
+                || self
+                    .impl_blocks
+                    .get(name)
+                    .or_else(|| self.impl_blocks.get(&self.scoped_type_key(name)))
+                    .is_some_and(|items| {
+                        items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_)))
+                    })
+                || self
+                    .operator_renames
+                    .keys()
+                    .any(|(t, _)| t == name || t == &self.scoped_type_key(name))
+        });
+        if struct_expr.rest.is_none() && has_impl_methods {
             if let Some(struct_name) = resolved_struct_name.as_ref() {
                 if let Some(field_order) = self.lookup_struct_field_order(struct_name) {
                     let field_exprs: HashMap<String, &syn::Expr> = struct_expr
