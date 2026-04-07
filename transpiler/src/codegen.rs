@@ -508,6 +508,7 @@ impl CodeGen {
         self.writeln("#include <string_view>");
         self.writeln("#include <charconv>");
         self.writeln("#include <cstdlib>");
+        self.writeln("#include <bit>");
         self.writeln("#include <stdexcept>");
         self.writeln("#include <rusty/rusty.hpp>");
         self.writeln("#include <rusty/try.hpp>");
@@ -6174,15 +6175,18 @@ impl CodeGen {
                     expected_ty,
                 )
             };
+            // Detect diverging (never-returning) arm bodies to avoid `return <void>;`
+            let diverging = self.is_expr_diverging(&arm.body);
+            let ret_prefix = if diverging { "" } else { "return " };
             match &arm.pat {
-                syn::Pat::Wild(_) => parts.push(format!("return {};", body)),
+                syn::Pat::Wild(_) => parts.push(format!("{}{};", ret_prefix, body)),
                 syn::Pat::Lit(lit) => {
                     let val = self.emit_lit(&lit.lit);
-                    parts.push(format!("if (_m == {}) return {};", val, body));
+                    parts.push(format!("if (_m == {}) {}{};", val, ret_prefix, body));
                 }
                 syn::Pat::Path(pp) => {
                     let val = self.emit_path_to_string(&pp.path);
-                    parts.push(format!("if (_m == {}) return {};", val, body));
+                    parts.push(format!("if (_m == {}) {}{};", val, ret_prefix, body));
                 }
                 syn::Pat::Or(or_pat) => {
                     let mut conds = Vec::new();
@@ -6203,12 +6207,12 @@ impl CodeGen {
                         }
                     }
                     if conds.is_empty() {
-                        parts.push(format!("return {};", body));
+                        parts.push(format!("{}{};", ret_prefix, body));
                     } else {
-                        parts.push(format!("if ({}) return {};", conds.join(" || "), body));
+                        parts.push(format!("if ({}) {}{};", conds.join(" || "), ret_prefix, body));
                     }
                 }
-                _ => parts.push(format!("return {};", body)),
+                _ => parts.push(format!("{}{};", ret_prefix, body)),
             }
         }
         parts.join(" ")
@@ -6491,6 +6495,9 @@ impl CodeGen {
                     expected_ty,
                 )
             };
+            // Detect diverging (never-returning) arm bodies to avoid `return <void>;`
+            let diverging = self.is_expr_diverging(&arm.body);
+            let ret_prefix = if diverging { "" } else { "return " };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -6538,9 +6545,9 @@ impl CodeGen {
 
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
-                        out.push_str(&format!("if ({}) {{ return {}; }} ", guard_str, body));
+                        out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
                     } else {
-                        out.push_str(&format!("return {}; ", body));
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
                     }
                     out.push_str("} ");
                 }
@@ -6554,9 +6561,9 @@ impl CodeGen {
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
-                        out.push_str(&format!("if ({}) {{ return {}; }} ", guard_str, body));
+                        out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
                     } else {
-                        out.push_str(&format!("return {}; ", body));
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
                     }
                     out.push_str("} ");
                 }
@@ -6564,9 +6571,9 @@ impl CodeGen {
                     out.push_str("if (true) { ");
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
-                        out.push_str(&format!("if ({}) {{ return {}; }} ", guard_str, body));
+                        out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
                     } else {
-                        out.push_str(&format!("return {}; ", body));
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
                     }
                     out.push_str("} ");
                 }
@@ -6575,9 +6582,9 @@ impl CodeGen {
                     out.push_str(&format!("const auto& {} = _m; ", pi.ident));
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
-                        out.push_str(&format!("if ({}) {{ return {}; }} ", guard_str, body));
+                        out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
                     } else {
-                        out.push_str(&format!("return {}; ", body));
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
                     }
                     out.push_str("} ");
                 }
@@ -10046,6 +10053,59 @@ impl CodeGen {
         }
     }
 
+    /// Detect whether a Rust expression is diverging (never returns), e.g. calls
+    /// to `panic!`, `unreachable!`, `unreachable_display`, `abort`, etc.
+    /// Used to avoid emitting `return <void-expr>` in match arm bodies.
+    fn is_expr_diverging(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Call(call) => {
+                let path_str = self.expr_path_string(&call.func);
+                Self::is_diverging_function_path(&path_str)
+            }
+            syn::Expr::Block(eb) => {
+                // Block is diverging if its last statement/expression is diverging
+                if let Some(syn::Stmt::Expr(e, _)) = eb.block.stmts.last() {
+                    self.is_expr_diverging(e)
+                } else {
+                    false
+                }
+            }
+            syn::Expr::Macro(m) => {
+                let macro_name = m.mac.path.segments.last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                matches!(macro_name.as_str(),
+                    "panic" | "unreachable" | "unimplemented" | "todo" | "abort")
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_path_string(& self, expr: &syn::Expr) -> String {
+        match expr {
+            syn::Expr::Path(ep) => {
+                ep.path.segments.iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn is_diverging_function_path(path: &str) -> bool {
+        matches!(path,
+            "panic" | "panic_fmt" | "unreachable" | "unreachable_display"
+            | "abort" | "std::process::abort" | "std::abort"
+            | "core::panicking::panic" | "core::panicking::panic_fmt"
+            | "core::panicking::unreachable_display"
+            | "core::intrinsics::unreachable"
+            | "panicking::panic" | "panicking::panic_fmt"
+            | "panicking::unreachable_display"
+            | "intrinsics::unreachable"
+        )
+    }
+
     fn is_expr_raw_pointer_like(&self, expr: &syn::Expr) -> bool {
         let peeled = self.peel_paren_group_expr(expr);
         if self
@@ -10860,6 +10920,16 @@ impl CodeGen {
                 return format!("rusty::ptr::write({}, {})", receiver, args[0]);
             }
         }
+        // Rust `ptr.is_null()` → C++ `ptr == nullptr`
+        if method_name == "is_null" && args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("({} == nullptr)", receiver);
+        }
         if method_name == "cast" && args.is_empty() && self.is_expr_raw_pointer_like(&mc.receiver) {
             if let Some(target_ty) = self.method_call_single_turbofish_type(mc) {
                 let is_mut = self
@@ -10977,6 +11047,43 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+        }
+        // Rust integer intrinsic methods → C++ equivalents
+        if matches!(method_name.as_str(), "rotate_right" | "rotate_left")
+            && args.len() == 1
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let cpp_fn = if method_name == "rotate_right" {
+                "std::rotr"
+            } else {
+                "std::rotl"
+            };
+            return format!("{}(static_cast<size_t>({}), {})", cpp_fn, receiver, args[0]);
+        }
+        if matches!(method_name.as_str(), "wrapping_add" | "wrapping_sub" | "wrapping_mul")
+            && args.len() == 1
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let op = match method_name.as_str() {
+                "wrapping_add" => "+",
+                "wrapping_sub" => "-",
+                "wrapping_mul" => "*",
+                _ => unreachable!(),
+            };
+            // C++ unsigned arithmetic wraps naturally; cast to size_t to ensure unsigned
+            return format!("(static_cast<size_t>({}) {} static_cast<size_t>({}))", receiver, op, args[0]);
         }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
@@ -13989,7 +14096,20 @@ impl CodeGen {
                     && source_is_raw_pointer_type
                     && !source_is_explicit_reference
                 {
-                    format!("reinterpret_cast<{}>({})", ty, expr)
+                    // Detect `*const T as *mut T` pattern: Rust allows casting away
+                    // const on raw pointers, but C++ reinterpret_cast cannot.
+                    // Use const_cast to strip const when target is a mutable pointer.
+                    let target_is_mut_ptr = matches!(c.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some());
+                    let target_pointee_str = ty.trim_end_matches('*').trim();
+                    if target_is_mut_ptr && !target_pointee_str.starts_with("const ") {
+                        // E.g. `*const u8 as *mut u8`: ty = "uint8_t*", pointee = "uint8_t"
+                        // → const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(expr))
+                        let const_ty = format!("const {}*", target_pointee_str);
+                        format!("const_cast<{}>(reinterpret_cast<{}>({}))",
+                            ty, const_ty, expr)
+                    } else {
+                        format!("reinterpret_cast<{}>({})", ty, expr)
+                    }
                 } else if target_is_pointer_type
                     && self.is_expr_reference_like(&c.expr)
                     && !source_is_explicit_reference
@@ -26212,6 +26332,114 @@ mod tests {
         assert!(!out.contains(
             "rusty::array_repeat(static_cast<uint8_t>(0), rusty::mem::size_of<S>())"
         ));
+    }
+
+    #[test]
+    fn test_leaf4154410_is_null_on_pointer_emits_nullptr_comparison() {
+        let out = transpile_str(
+            r#"
+            fn check(p: *const u8) -> bool {
+                p.is_null()
+            }
+            "#,
+        );
+        assert!(out.contains("(p == nullptr)"), "is_null should emit nullptr comparison, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_rotate_right_on_integer_emits_std_rotr() {
+        let out = transpile_str(
+            r#"
+            fn rotate(x: usize) -> usize {
+                x.rotate_right(1)
+            }
+            "#,
+        );
+        assert!(out.contains("std::rotr("), "rotate_right should emit std::rotr, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_wrapping_sub_on_integer_emits_plain_subtraction() {
+        let out = transpile_str(
+            r#"
+            fn wrap(a: usize, b: usize) -> usize {
+                a.wrapping_sub(b)
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<size_t>(a) -"),
+            "wrapping_sub on integer should emit plain arithmetic, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_wrapping_add_on_integer_emits_plain_addition() {
+        let out = transpile_str(
+            r#"
+            fn wrap(a: usize, b: usize) -> usize {
+                a.wrapping_add(b)
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<size_t>(a) +"),
+            "wrapping_add on integer should emit plain arithmetic, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_const_to_mut_pointer_cast_uses_const_cast() {
+        let out = transpile_str(
+            r#"
+            fn cast_mut(p: *const u8) -> *mut u8 {
+                p as *mut u8
+            }
+            "#,
+        );
+        assert!(out.contains("const_cast<uint8_t*>"),
+            "const→mut pointer cast should use const_cast, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_diverging_match_arm_omits_return_keyword() {
+        let out = transpile_str(
+            r#"
+            fn foo(x: u32) -> u32 {
+                match x {
+                    0 => 42,
+                    _ => panic!("bad"),
+                }
+            }
+            "#,
+        );
+        // The panic arm should not have `return` before it
+        // (panic expands to a diverging call)
+        assert!(!out.contains("return std::abort()"), "diverging arm should not have return, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154410_diverging_nested_block_unreachable_display_omits_return() {
+        // Mirrors the semver `Identifier::new_unchecked` pattern:
+        // last match arm is `{ { core::panicking::unreachable_display("msg"); }; }`
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn empty() -> S { S }
+            }
+            fn make(x: u64) -> S {
+                match x {
+                    0 => S::empty(),
+                    1..=255 => S::empty(),
+                    _ => {
+                        {
+                            ::core::panicking::unreachable_display(&"too big");
+                        };
+                    }
+                }
+            }
+            "#,
+        );
+        // The unreachable arm should NOT have `return` producing void/typed mismatch
+        assert!(!out.contains("return [&]() { [&]() { rusty::panicking::unreachable_display"),
+            "diverging arm body should not have return keyword, got: {}", out);
     }
 
     #[test]

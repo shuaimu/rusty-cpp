@@ -2269,6 +2269,38 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `semver` still fails first in single-crate Stage D on the new `identifier::new_unchecked` control-flow/lambda-return head (`/tmp/rusty-parity-4-15-4-4-9-semver-20260407-2/semver/build.log`).
                                 - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed in shared AST-aware transpiler/runtime surfaces, remained shape-gated, and introduced no crate-specific rewrites/scripts.
+                            - [x] *done* Leaf 4.15.4.4.10: Collapse current `semver` Stage D control-flow/lambda-return + integer-intrinsic-method + const-pointer-cast head family generically (starting with diverging match arm `return void` inconsistency, `is_null`/`rotate_right`/`wrapping_sub` member calls on primitives, and `reinterpret_cast` const-stripping failure), add fixture-agnostic regressions, then re-run `semver` parity.
+                              - [x] *done* Plan/scope check: shared transpiler-only updates plus regression coverage stayed well below the <1000 LOC guardrail and required no additional decomposition.
+                              - [x] *done* Implemented shared fixes in `transpiler/src/codegen.rs` (no crate-specific scripts):
+                                - `ptr.is_null()` lowered to `(ptr == nullptr)` for raw pointers.
+                                - `x.rotate_right(n)` / `x.rotate_left(n)` on integers lowered to `std::rotr(static_cast<size_t>(x), n)` / `std::rotl(...)` (C++20 `<bit>` header).
+                                - `x.wrapping_add(y)` / `x.wrapping_sub(y)` / `x.wrapping_mul(y)` on non-pointer integers lowered to plain unsigned arithmetic with `static_cast<size_t>` wrapping.
+                                - Diverging match arm bodies (calls to `panic`, `unreachable_display`, `abort`, etc.) no longer emit `return` prefix in both `emit_match_expr_switch` and `emit_runtime_match_expr`, avoiding `return <void>` type mismatch.
+                                - `*const T as *mut T` pointer casts now use `const_cast<T*>(reinterpret_cast<const T*>(...))` instead of bare `reinterpret_cast` which cannot strip const.
+                                - Added `#include <bit>` to generated runner headers for `std::rotr`/`std::rotl`.
+                                - Added `is_expr_diverging()` helper with recursive block/call/macro detection for `[[noreturn]]` function paths.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_leaf4154410_is_null_on_pointer_emits_nullptr_comparison`
+                                - `codegen::tests::test_leaf4154410_rotate_right_on_integer_emits_std_rotr`
+                                - `codegen::tests::test_leaf4154410_wrapping_sub_on_integer_emits_plain_subtraction`
+                                - `codegen::tests::test_leaf4154410_wrapping_add_on_integer_emits_plain_addition`
+                                - `codegen::tests::test_leaf4154410_const_to_mut_pointer_cast_uses_const_cast`
+                                - `codegen::tests::test_leaf4154410_diverging_match_arm_omits_return_keyword`
+                                - `codegen::tests::test_leaf4154410_diverging_nested_block_unreachable_display_omits_return`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler` (758 unit + 15 integration + 33 parity = all pass)
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-10-semver-20260407-2 --keep-work-dirs`
+                              - [x] *done* Single-crate semver parity confirms the prior deterministic head family is collapsed:
+                                - prior first blocker `inconsistent types 'Identifier' and 'void' deduced for lambda return type` at `runner.cpp:666` is absent.
+                                - prior adjacent blockers (`is_null` at 708, `rotate_right` at 748, `wrapping_sub` at 760, `reinterpret_cast` const-strip at 765) are absent.
+                              - [x] *done* New deterministic first Stage D head moved to struct-to-integer transmute cast surface:
+                                - first compile blocker is `invalid 'static_cast' from type 'const identifier::Identifier' to type 'uintptr_t'` at `runner.cpp:770`.
+                                - adjacent deterministic follow-ons include undeclared `second`/`first` variables (`runner.cpp:793/796`), missing `decode_len_cold` (`runner.cpp:799`), and `unreachable()` void-to-bool conversion (`runner.cpp:905`).
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-10-semver-20260407-2/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Gate check for resuming `arrayvec` progression remains **not yet satisfied** under `4.15.4.4`:
+                                - `semver` still fails first in single-crate Stage D on struct-to-integer transmute/cast head (`/tmp/rusty-parity-4-15-4-4-10-semver-20260407-2/semver/build.log`).
+                                - `bitflags` still fails first in single-crate Stage D on parser writer-surface typing (`void*` receiver head from `/tmp/rusty-parity-4-15-4-4-4-bitflags-20260407-1/bitflags/build.log`).
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed in shared AST-aware transpiler surfaces, remained shape-gated, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.1: Implement shared transpiler/runtime fixes for the first deterministic 27.45.2 runtime head (no crate-specific scripts): restore Rust-parity retain/equality behavior so Stage E progresses past `test_retain` without assertion abort.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.2: Re-run full seven-crate parity matrix after 27.46.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
