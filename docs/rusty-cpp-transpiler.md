@@ -3326,8 +3326,28 @@ Active work items:
    - new deterministic first Stage D head moves to incomplete-type ordering in `eval` helpers, with first compile blocker at `runner.cpp:621` (`invalid use of incomplete type` for `VersionReq` and related `Version`/`Comparator` surfaces).
    - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-7-semver-20260407-1/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed AST-aware and shape-gated in shared transpiler/runtime surfaces; no crate-specific rewrites/scripts were introduced.
-123. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
-   - focus: collapse the new deterministic `semver` Stage D incomplete-type ordering head in `eval` helper bodies before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
+123. `Leaf 4.15.4.4.8` is complete.
+   - plan/scope check: targeted transpiler-only ordering changes plus focused regression coverage stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs` (no crate-specific scripts):
+     - `order_items_for_emission` now delays function-only inline namespaces (modules containing only `use`/`fn`/nested function-only modules) until after sibling non-module items, ensuring function bodies are emitted after complete sibling type definitions.
+     - when inline-module dependency sorting is cyclic/incomplete, fallback now keeps original module order while still applying delayable-module logic (instead of returning early and skipping delay).
+     - added shape-gated helpers `module_is_delayable_function_namespace` and `module_contains_fn_items`.
+   - added fixture-agnostic regression:
+     - `codegen::tests::test_leaf415448_function_only_inline_module_emits_after_sibling_type_definitions`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf415433333335_inline_module_emission_orders_local_use_dependencies_first -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf415448_function_only_inline_module_emits_after_sibling_type_definitions -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-8-semver-20260407-3 --keep-work-dirs`
+   - single-crate semver repro confirms the prior `eval` incomplete-type ordering head is collapsed:
+     - `eval` function-body namespace now emits after sibling type definitions (`struct Version` at `runner.cpp:1110`; `namespace eval` body at `runner.cpp:1612`, with only forward declarations at `runner.cpp:426`).
+     - previous first blockers (`invalid use of incomplete type` from `eval::*` around `runner.cpp:621+`) are absent.
+   - new deterministic first Stage D head moved to identifier pointer/memory lowering surfaces:
+     - first compile blocker at `runner.cpp:654`: invalid pointer cast shape in `identifier::Identifier::empty`.
+     - adjacent deterministic failures at `runner.cpp:664` (`copy_nonoverlapping` `char*` vs `uint8_t*` mismatch and unresolved `mem::transmute`) and `runner.cpp:668/673/694` (`NonNull` equality/cast surface).
+   - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-8-semver-20260407-3/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in emission-ordering logic, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
+124. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
+   - focus: collapse the new deterministic `semver` Stage D identifier pointer/memory lowering head before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

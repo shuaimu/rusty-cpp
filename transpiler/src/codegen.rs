@@ -563,7 +563,7 @@ impl CodeGen {
             })
             .collect();
 
-        if inline_modules.len() <= 1 {
+        if inline_modules.is_empty() {
             return items.iter().collect();
         }
 
@@ -628,26 +628,83 @@ impl CodeGen {
         }
 
         if sorted_positions.len() != inline_modules.len() {
-            return items.iter().collect();
+            // Keep original relative module order when dependency analysis is cyclic
+            // or incomplete, but still allow delayable function-only namespaces to
+            // move after sibling type definitions.
+            sorted_positions = (0..inline_modules.len()).collect();
         }
 
-        let sorted_inline_items: Vec<&syn::Item> = sorted_positions
+        let delayable_module_positions: HashSet<usize> = (0..inline_modules.len())
+            .filter(|module_pos| {
+                matches!(
+                    inline_modules[*module_pos].1,
+                    syn::Item::Mod(m)
+                        if m.content.as_ref().is_some_and(|(_, nested_items)| {
+                            Self::module_is_delayable_function_namespace(nested_items)
+                        })
+                )
+            })
+            .collect();
+
+        let sorted_inline_items: Vec<(usize, &syn::Item)> = sorted_positions
             .into_iter()
-            .map(|module_pos| inline_modules[module_pos].1)
+            .map(|module_pos| (module_pos, inline_modules[module_pos].1))
             .collect();
         let mut sorted_inline_iter = sorted_inline_items.into_iter();
 
         let mut ordered: Vec<&syn::Item> = Vec::with_capacity(items.len());
+        let mut delayed_modules: Vec<&syn::Item> = Vec::new();
         for item in items {
             if matches!(item, syn::Item::Mod(m) if m.content.is_some()) {
-                if let Some(sorted_module) = sorted_inline_iter.next() {
-                    ordered.push(sorted_module);
+                if let Some((module_pos, sorted_module)) = sorted_inline_iter.next() {
+                    if delayable_module_positions.contains(&module_pos) {
+                        delayed_modules.push(sorted_module);
+                    } else {
+                        ordered.push(sorted_module);
+                    }
                     continue;
                 }
             }
             ordered.push(item);
         }
+        ordered.extend(delayed_modules);
         ordered
+    }
+
+    fn module_is_delayable_function_namespace(items: &[syn::Item]) -> bool {
+        let mut has_fn = false;
+        for item in items {
+            match item {
+                syn::Item::Fn(_) => {
+                    has_fn = true;
+                }
+                syn::Item::Use(_) => {}
+                syn::Item::Mod(m) => {
+                    let Some((_, nested_items)) = &m.content else {
+                        return false;
+                    };
+                    if !Self::module_is_delayable_function_namespace(nested_items) {
+                        return false;
+                    }
+                    if Self::module_contains_fn_items(nested_items) {
+                        has_fn = true;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        has_fn
+    }
+
+    fn module_contains_fn_items(items: &[syn::Item]) -> bool {
+        items.iter().any(|item| match item {
+            syn::Item::Fn(_) => true,
+            syn::Item::Mod(m) => m
+                .content
+                .as_ref()
+                .is_some_and(|(_, nested_items)| Self::module_contains_fn_items(nested_items)),
+            _ => false,
+        })
     }
 
     fn collect_scope_module_dependencies(
@@ -29505,5 +29562,29 @@ mod tests {
         let b_pos = out.rfind("namespace b {").expect("namespace b emitted");
         let a_pos = out.rfind("namespace a {").expect("namespace a emitted");
         assert!(b_pos < a_pos);
+    }
+
+    #[test]
+    fn test_leaf415448_function_only_inline_module_emits_after_sibling_type_definitions() {
+        let out = transpile_str(
+            r#"
+            mod eval {
+                use super::Version;
+                fn major_is_nonzero(ver: &Version) -> bool {
+                    ver.major > 0
+                }
+            }
+            struct Version {
+                major: u64
+            }
+            "#,
+        );
+
+        let version_pos = out.find("struct Version {").expect("Version emitted");
+        let eval_ns_pos = out.rfind("namespace eval {").expect("eval namespace emitted");
+        assert!(
+            version_pos < eval_ns_pos,
+            "function-only inline module should be delayed until after sibling type definitions"
+        );
     }
 }
