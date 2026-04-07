@@ -9093,6 +9093,21 @@ impl CodeGen {
             .is_some_and(|ty| self.type_uses_as_str_string_view_coercion(&ty))
     }
 
+    fn expr_is_self_typed_local_path(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Path(path) = expr else {
+            return false;
+        };
+        if path.path.segments.len() != 1 {
+            return false;
+        }
+        let Some(ty) = self.infer_simple_expr_type(expr) else {
+            return false;
+        };
+        let peeled = self.peel_reference_paren_group_type(&ty);
+        matches!(peeled, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Self")
+    }
+
     fn classify_into_receiver_expr(&self, expr: &syn::Expr) -> Option<IntoReceiverKind> {
         let expr = self.peel_paren_group_expr(expr);
         match expr {
@@ -12026,8 +12041,9 @@ impl CodeGen {
             };
             // When local-path type inference is unavailable in expanded assertion tuple
             // scaffolding, use a runtime helper that prefers `.as_str()` if available.
-            if self.infer_simple_expr_type(source_expr).is_none()
-                && matches!(source_expr, syn::Expr::Path(path) if path.path.segments.len() == 1)
+            if matches!(source_expr, syn::Expr::Path(path) if path.path.segments.len() == 1)
+                && (self.infer_simple_expr_type(source_expr).is_none()
+                    || self.expr_is_self_typed_local_path(source_expr))
             {
                 return format!("rusty::to_string_view({})", source);
             }
@@ -25300,6 +25316,28 @@ mod tests {
             out
         );
         assert!(!out.contains("auto _m0_tmp = std::string_view(v);"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327251_self_typed_path_expected_str_uses_string_view_helper() {
+        let out = transpile_str(
+            r#"
+            struct ArrayString<const CAP: usize>;
+            impl<const CAP: usize> ArrayString<CAP> {
+                fn as_str(&self) -> &str { "" }
+                fn try_push_str(&mut self, _s: &str) {}
+                fn clone_from(&mut self, rhs: &Self) {
+                    self.try_push_str(rhs);
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("rusty::to_string_view(rhs)"),
+            "expected helper-based coercion for &Self path, output:\n{}",
+            out
+        );
+        assert!(!out.contains("try_push_str(std::string_view(rhs))"));
     }
 
     #[test]

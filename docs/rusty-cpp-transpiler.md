@@ -2762,8 +2762,21 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-24-2-1775529801 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-80. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.25.1`.
-   - focus: implement a generic fix for the deterministic `include/rusty/array.hpp:309` C-string length/coercion head, then re-run matrix.
+80. `Leaf 4.15.4.3.3.3.3.3.27.25.1` is complete.
+   - plan/scope check: transpiler/runtime implementation remained under the <1000 LOC guardrail and required no additional decomposition.
+   - implemented generic runtime C-string length fallback in `include/rusty/array.hpp`: added `rusty::len(const char*)` and `rusty::len(char*)` overloads (null-safe `std::strlen`) so transpiled `&str` pointer-like surfaces no longer hit the generic `std::size(container)` path.
+   - implemented generic string-view coercion hardening in `transpiler/src/codegen.rs`: expected-`std::string_view` lowering now routes `&Self`-typed local path expressions through `rusty::to_string_view(...)`, preserving `.as_str()` preference for string-like owners and eliminating invalid `std::string_view(rhs)` shapes.
+   - added focused regression in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327251_self_typed_path_expected_str_uses_string_view_helper`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-25-1-1775531207 --keep-work-dirs`) removed deterministic heads at `include/rusty/array.hpp:309` and adjacent `runner.cpp:1617`; generated site now lowers to `try_push_str(rusty::to_string_view(rhs))`.
+   - new deterministic first hard error now starts at `runner.cpp:710`: `MakeMaybeUninit` constexpr/materialization family (`usize::MAX` array-capacity fallout), with adjacent errors at `runner.cpp:711` and downstream `MaybeUninit` constexpr/zeroed surfaces.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327251_self_typed_path_expected_str_uses_string_view_helper -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-25-1-1775531207 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes are shared runtime/transpiler changes, AST/type-context-gated, and avoid crate-specific scripts or post-generation rewrites.
+81. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.25.2`.
+   - focus: re-run full seven-crate matrix after 27.25.1 and capture the updated deterministic frontier.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

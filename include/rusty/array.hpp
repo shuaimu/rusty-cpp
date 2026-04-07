@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 #include <optional>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -299,6 +300,14 @@ auto zip(Left&& left, Right&& right) {
 
 /// Unified length helper for transpiled `.len()` calls.
 /// Supports rusty types (`.len()`), STL/span (`.size()`), and native arrays.
+inline size_t len(const char* cstr) {
+    return cstr ? std::strlen(cstr) : 0;
+}
+
+inline size_t len(char* cstr) {
+    return cstr ? std::strlen(cstr) : 0;
+}
+
 template<typename Container>
 size_t len(const Container& container) {
     if constexpr (requires { container.len(); }) {
