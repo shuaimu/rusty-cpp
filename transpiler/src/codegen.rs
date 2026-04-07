@@ -12995,6 +12995,12 @@ impl CodeGen {
             }
         }
 
+        // General data enum variant constructor: `EnumName::VariantName(args)`
+        // → `EnumName_VariantName{args}` when EnumName is a known data enum.
+        if let Some(variant_ctor) = self.try_emit_data_enum_variant_constructor(call) {
+            return variant_ctor;
+        }
+
         // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
         // `Trait::method(&receiver, args...)` to `receiver.method(args...)`.
         if let Some(ufcs) = self.detect_ufcs_trait_method_call(call) {
@@ -13381,6 +13387,67 @@ impl CodeGen {
             return Some(last);
         }
         None
+    }
+
+    /// Detect and emit a general data enum variant constructor call.
+    /// E.g., `ErrorKind::LeadingZero(pos)` → `ErrorKind_LeadingZero{pos}`
+    /// when `ErrorKind` is a known data enum type.
+    fn try_emit_data_enum_variant_constructor(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(ep) = call.func.as_ref() else {
+            return None;
+        };
+        // Need at least 2 segments: EnumName::VariantName
+        if ep.path.segments.len() < 2 {
+            return None;
+        }
+        // Extract enum name and variant name from path
+        let segments: Vec<String> = ep
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+
+        // Skip crate/self/super prefixes
+        let (enum_name, variant_name) = {
+            let mut start = 0;
+            while start < segments.len()
+                && matches!(segments[start].as_str(), "crate" | "self" | "super")
+            {
+                start += 1;
+            }
+            if start + 2 > segments.len() {
+                return None;
+            }
+            // The second-to-last is the enum name, the last is the variant name
+            let enum_idx = segments.len() - 2;
+            let variant_idx = segments.len() - 1;
+            if enum_idx < start {
+                return None;
+            }
+            (&segments[enum_idx], &segments[variant_idx])
+        };
+
+        // Check if enum_name is a known data enum
+        if !self.data_enum_types.contains(enum_name) {
+            return None;
+        }
+
+        // Build the C++ variant struct name: EnumName_VariantName
+        let cpp_variant_struct = format!("{}_{}", enum_name, variant_name);
+
+        // Emit args
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+
+        if args.is_empty() {
+            Some(format!("{}{{}}", cpp_variant_struct))
+        } else {
+            Some(format!("{}{{{}}}", cpp_variant_struct, args.join(", ")))
+        }
     }
 
     fn is_string_from_call_expr(&self, expr: &syn::Expr) -> bool {
@@ -26549,6 +26616,44 @@ mod tests {
         );
         assert!(out.contains("rusty::str_runtime::strip_prefix("),
             "strip_prefix should emit str_runtime::strip_prefix, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154414_data_enum_variant_constructor_uses_underscore_naming() {
+        let out = transpile_str(
+            r#"
+            enum ErrorKind {
+                Empty,
+                Overflow(usize),
+                LeadingZero(usize),
+            }
+            fn make_err(pos: usize) -> ErrorKind {
+                ErrorKind::LeadingZero(pos)
+            }
+            "#,
+        );
+        assert!(out.contains("ErrorKind_LeadingZero"),
+            "data enum variant ctor should use underscore naming, got: {}", out);
+        assert!(!out.contains("ErrorKind::LeadingZero"),
+            "should not use :: for variant ctor, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf4154414_data_enum_unit_variant_constructor_call_uses_underscore() {
+        let out = transpile_str(
+            r#"
+            enum ErrorKind {
+                Empty,
+                Overflow(usize),
+            }
+            fn make_empty() -> ErrorKind {
+                ErrorKind::Empty()
+            }
+            "#,
+        );
+        // Unit variant called as constructor in data enums should use underscore naming
+        assert!(out.contains("ErrorKind_Empty"),
+            "unit variant constructor in data enum should use underscore naming, got: {}", out);
     }
 
     #[test]

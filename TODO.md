@@ -2333,6 +2333,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                               - [x] *done* Added fixture-agnostic regressions: `test_leaf4154413_str_trim_emits_str_runtime_trim`, `test_leaf4154413_str_strip_prefix_emits_str_runtime_strip_prefix`.
                               - [x] *done* Verification: 762 unit tests + all integration/parity tests pass.
                               - [x] *done* Bitflags parity: error count reduced from 961 to 951; `trim`/`split`/`strip_prefix` errors collapsed; next head is `write_hex` + `is_empty`/`empty` naming + incomplete `ParseError` type.
+                            - [x] *done* Leaf 4.15.4.4.14: Collapse current `semver` Stage D enum variant constructor head generically (starting with `ErrorKind::LeadingZero(pos)` emitting C++ `::` method-call syntax instead of `ErrorKind_LeadingZero{pos}` variant struct constructor), add fixture-agnostic regressions, then re-run `semver` parity.
+                              - [x] *done* Plan/scope check: targeted shared transpiler fix plus regression coverage stayed well below the <1000 LOC guardrail and required no additional decomposition.
+                              - [x] *done* Root-cause analysis: `variant_ctor_name_from_path` only recognized "Left"/"Right" variants; all other data enum variant constructor calls fell through to generic function call emission, producing invalid `EnumName::VariantName(args)` C++ syntax.
+                              - [x] *done* Implemented shared fix in `transpiler/src/codegen.rs` (no crate-specific scripts):
+                                - Added `try_emit_data_enum_variant_constructor()`: detects when a call path's prefix is a known data enum, rewrites `EnumName::VariantName(args)` → `EnumName_VariantName{args}` (brace-init variant struct).
+                                - Placed in `emit_call_expr_to_string` after existing variant constructor strategies and before UFCS fallback.
+                                - Correctly limits to `ExprCall` nodes only (not `ExprPath` values used as function references like `l.map(Either::Left)`), avoiding regression on either crate's constructor-as-function patterns.
+                              - [x] *done* Added fixture-agnostic regressions:
+                                - `codegen::tests::test_leaf4154414_data_enum_variant_constructor_uses_underscore_naming`
+                                - `codegen::tests::test_leaf4154414_data_enum_unit_variant_constructor_call_uses_underscore`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler` (764 unit + 15 integration + 7 either parity = all pass)
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-4-15-4-4-14-semver-20260407-1 --keep-work-dirs`
+                              - [x] *done* Single-crate semver parity confirms the prior `ErrorKind::*` variant constructor errors are collapsed:
+                                - 24 errors eliminated (437 → 413); `'LeadingZero' is not a member of 'error::ErrorKind'` and similar variant access errors no longer appear.
+                              - [x] *done* New deterministic first Stage D head remains struct-to-integer transmute cast (`invalid 'static_cast' from 'Identifier' to 'uintptr_t'` at `runner.cpp:807`).
+                              - [x] *done* Canonical artifacts: `/tmp/rusty-parity-4-15-4-4-14-semver-20260407-1/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+                              - [x] *done* Gate check for resuming `arrayvec` progression remains **not yet satisfied** under `4.15.4.4`:
+                                - `semver` still fails at Stage D (413 errors remaining).
+                                - `bitflags` still fails at Stage D (951 errors remaining).
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shared and AST-shape-gated in call expression emission, with no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.1: Implement shared transpiler/runtime fixes for the first deterministic 27.45.2 runtime head (no crate-specific scripts): restore Rust-parity retain/equality behavior so Stage E progresses past `test_retain` without assertion abort.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.46.2: Re-run full seven-crate parity matrix after 27.46.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
