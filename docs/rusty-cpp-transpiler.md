@@ -3126,8 +3126,16 @@ Active work items:
    - new deterministic first failure shifts to Stage E runner semantics: `deny_max_capacity_arrayvec_value FAILED: ArrayVec: largest supported capacity is u32::MAX` (`run.log:6`), rooted at panic-expected test body `runner.cpp:4290-4297` (libtest metadata skipped) with fail accounting in runner dispatch at `runner.cpp:4619-4621`.
    - canonical artifacts: `/tmp/rusty-parity-27-39-1-20260407-032937/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed in shared runtime iteration/lifetime surfaces with fixture-agnostic regression coverage, avoided crate-specific rewrites/scripts, and preserved deterministic first-head artifact capture.
-109. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.39.2`.
-   - focus: re-run full seven-crate parity matrix after 27.39.1, record first deterministic failure head with canonical artifacts, and update active-frontier/TODO status (or close Leaf 4 if all crates pass).
+109. `Leaf 4.15.4.3.3.3.3.3.27.39.2` is complete.
+   - plan/scope check: rerun/documentation-only leaf with no implementation changes; work stayed well below the <1000 LOC threshold and required no further decomposition.
+   - full seven-crate matrix rerun (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-39-2-20260407-034412 --keep-work-dirs`) remains deterministic with first failing crate `arrayvec` (`total=5`, `pass=4`, `fail=1`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-27-39-2-20260407-034412/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - deterministic first failure remains Stage E runtime/runner semantics: `deny_max_capacity_arrayvec_value FAILED: ArrayVec: largest supported capacity is u32::MAX` (`run.log:6`), rooted at panic-expected test body `runner.cpp:4290-4297` with fail-accounting catch branch at `runner.cpp:4619-4621`.
+   - verification:
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-39-2-20260407-034412 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
+110. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.40.1`.
+   - focus: implement shared parity-runner semantics for panic-expected (`should_panic`) tests so Stage E classification matches Rust test behavior (starting from `deny_max_capacity_arrayvec_value`), add fixture-agnostic regressions, then re-run matrix.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
