@@ -2567,8 +2567,24 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-16-2-1775520852 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and introduced no crate-specific rewrites.
-64. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.17.1`.
-   - focus: implement generic iterator-template deduction hardening for the new deterministic head at `runner.cpp:1123`, then re-run full seven-crate matrix.
+64. `Leaf 4.15.4.3.3.3.3.3.27.17.1` is complete.
+   - implemented generic transpiler hardening in `transpiler/src/codegen.rs`:
+     - const generic defaults are now preserved in emitted template parameter lists (for example `template<typename I, bool CHECK = false>`),
+     - method-call turbofish const args are now preserved (including `::<_, true/false>`), with infer type placeholders lowered to `std::remove_cvref_t<decltype((arg))>` rather than being dropped.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf41543333333327171_method_const_generic_default_is_preserved`
+     - `test_leaf41543333333327171_free_fn_const_generic_default_is_preserved`
+     - `test_leaf41543333333327171_method_turbofish_const_args_are_preserved`
+     - `test_leaf41543333333327171_nonself_method_turbofish_const_args_are_preserved`
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-17-1-1775521581 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1123` (`extend_from_iter` template-parameter deduction failure).
+   - new deterministic first hard error now starts at `runner.cpp:1043`: invalid `static_cast` from `const std::array<int, 3>*` to `const std::array<rusty::MaybeUninit<int>, 3>*`, with canonical artifacts at `/tmp/rusty-parity-matrix-27-17-1-1775521581/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327171 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-17-1-1775521581 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fix remains generic and fixture-agnostic (no crate-specific scripts), inference/template adaptation is context-gated, and deterministic first-head artifact capture was preserved.
+65. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.17.2`.
+   - focus: re-run the full seven-crate parity matrix after 27.17.1, record canonical first-head artifacts, and update frontier status.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

@@ -3791,7 +3791,12 @@ impl CodeGen {
                     if !self.is_type_param_in_scope(&cp.ident.to_string()) =>
                 {
                     let const_ty = self.map_type(&cp.ty);
-                    params.push(format!("{} {}", const_ty, cp.ident));
+                    if let Some(default) = &cp.default {
+                        let default_expr = self.emit_expr_to_string(default);
+                        params.push(format!("{} {} = {}", const_ty, cp.ident, default_expr));
+                    } else {
+                        params.push(format!("{} {}", const_ty, cp.ident));
+                    }
                 }
                 _ => {}
             }
@@ -8943,6 +8948,7 @@ impl CodeGen {
         &self,
         receiver_expr: &syn::Expr,
         method_name: &str,
+        method_template_args: Option<&str>,
         args: &[String],
         receiver_expected_ty: Option<&syn::Type>,
     ) -> String {
@@ -8961,11 +8967,17 @@ impl CodeGen {
         } else {
             "."
         };
+        let escaped_method_name = escape_cpp_keyword(method_name);
+        let method_call = if let Some(template_args) = method_template_args {
+            format!("template {}{}", escaped_method_name, template_args)
+        } else {
+            escaped_method_name
+        };
         format!(
             "{}{}{}({})",
             receiver,
             member_op,
-            escape_cpp_keyword(method_name),
+            method_call,
             args.join(", ")
         )
     }
@@ -9166,6 +9178,7 @@ impl CodeGen {
                 .or(inferred_expected.as_ref());
             args.push(self.emit_call_arg_with_pass_style(arg, style, arg_expected, false));
         }
+        let method_template_args = self.emit_method_call_template_args(mc, &args);
         if method_name == "write_fmt" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -9177,7 +9190,13 @@ impl CodeGen {
         }
         if method_name == "map_err" && mc.args.len() == 1 {
             if let Some(callable_arg) = self.try_emit_map_err_callable_arg(&mc.args[0]) {
-                return self.emit_receiver_member_call(&mc.receiver, &method_name, &[callable_arg], None);
+                return self.emit_receiver_member_call(
+                    &mc.receiver,
+                    &method_name,
+                    None,
+                    &[callable_arg],
+                    None,
+                );
             }
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
@@ -9293,15 +9312,30 @@ impl CodeGen {
         let is_self = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
             if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
         if is_self {
+            let escaped_method = escape_cpp_keyword(&method_name);
             if let Some(self_name) = self.current_self_path_override() {
-                format!(
-                    "{}.{}({})",
-                    self_name,
-                    escape_cpp_keyword(&method_name),
-                    args.join(", ")
-                )
+                if let Some(template_args) = method_template_args.as_deref() {
+                    format!(
+                        "{}.template {}{}({})",
+                        self_name,
+                        escaped_method,
+                        template_args,
+                        args.join(", ")
+                    )
+                } else {
+                    format!("{}.{}({})", self_name, escaped_method, args.join(", "))
+                }
             } else {
-                format!("{}({})", escape_cpp_keyword(&method_name), args.join(", "))
+                if let Some(template_args) = method_template_args.as_deref() {
+                    format!(
+                        "this->template {}{}({})",
+                        escaped_method,
+                        template_args,
+                        args.join(", ")
+                    )
+                } else {
+                    format!("{}({})", escaped_method, args.join(", "))
+                }
             }
         } else {
             let receiver_expected = if method_name == "unwrap" && mc.args.is_empty() {
@@ -9309,7 +9343,13 @@ impl CodeGen {
             } else {
                 None
             };
-            self.emit_receiver_member_call(&mc.receiver, &method_name, &args, receiver_expected)
+            self.emit_receiver_member_call(
+                &mc.receiver,
+                &method_name,
+                method_template_args.as_deref(),
+                &args,
+                receiver_expected,
+            )
         }
     }
 
@@ -11527,6 +11567,62 @@ impl CodeGen {
         match turbofish.args.first()? {
             syn::GenericArgument::Type(ty) => Some(ty),
             _ => None,
+        }
+    }
+
+    fn infer_method_turbofish_type_arg_from_call_arg(
+        &self,
+        mc: &syn::ExprMethodCall,
+        emitted_args: &[String],
+        type_param_idx: usize,
+    ) -> Option<String> {
+        let call_arg_cpp = emitted_args
+            .get(type_param_idx)
+            .cloned()
+            .or_else(|| mc.args.iter().nth(type_param_idx).map(|arg| self.emit_expr_maybe_move(arg)))?;
+        Some(format!(
+            "std::remove_cvref_t<decltype(({}))>",
+            call_arg_cpp
+        ))
+    }
+
+    fn emit_method_call_template_args(
+        &self,
+        mc: &syn::ExprMethodCall,
+        emitted_args: &[String],
+    ) -> Option<String> {
+        let turbofish = mc.turbofish.as_ref()?;
+        let mut mapped_args: Vec<String> = Vec::new();
+        let mut type_param_idx = 0usize;
+        for arg in turbofish.args.iter() {
+            match arg {
+                syn::GenericArgument::Type(t) => {
+                    if matches!(t, syn::Type::Infer(_)) {
+                        mapped_args.push(
+                            self.infer_method_turbofish_type_arg_from_call_arg(
+                                mc,
+                                emitted_args,
+                                type_param_idx,
+                            )?,
+                        );
+                    } else {
+                        mapped_args.push(self.map_type(t));
+                    }
+                    type_param_idx += 1;
+                }
+                syn::GenericArgument::Const(c) => {
+                    if matches!(c, syn::Expr::Infer(_)) {
+                        return None;
+                    }
+                    mapped_args.push(self.emit_expr_to_string(c));
+                }
+                _ => {}
+            }
+        }
+        if mapped_args.is_empty() {
+            None
+        } else {
+            Some(format!("<{}>", mapped_args.join(", ")))
         }
     }
 
@@ -22260,6 +22356,83 @@ mod tests {
         assert!(out.contains("template<typename T, size_t CAP>"));
         assert!(out.contains("std::array<T, rusty::sanitize_array_capacity<CAP>()> xs;"));
         assert!(out.contains("ArrayVec<int32_t, 8> v"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327171_method_const_generic_default_is_preserved() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                fn extend<I>(&mut self, iter: I) {
+                    self.extend_from_iter(iter);
+                }
+                fn extend_from_iter<I, const CHECK: bool = false>(&mut self, iterable: I) {}
+            }
+            "#,
+        );
+        assert!(out.contains("template<typename I, bool CHECK = false>"));
+        assert!(out.contains("extend_from_iter(std::move(iter));"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327171_free_fn_const_generic_default_is_preserved() {
+        let out = transpile_str(
+            r#"
+            fn with_default<const CHECK: bool = false>(x: i32) -> i32 {
+                if CHECK { x + 1 } else { x }
+            }
+            fn call_default() -> i32 {
+                with_default(7)
+            }
+            "#,
+        );
+        assert!(out.contains("template<bool CHECK = false>"));
+        assert!(out.contains("return with_default(7);"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327171_method_turbofish_const_args_are_preserved() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                fn call_true<I>(&mut self, iter: I) {
+                    self.extend_from_iter::<_, true>(iter);
+                }
+                fn call_false<I>(&mut self, iter: I) {
+                    self.extend_from_iter::<_, false>(iter);
+                }
+                fn extend_from_iter<I, const CHECK: bool>(&mut self, _iterable: I) {
+                    if CHECK {}
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "this->template extend_from_iter<std::remove_cvref_t<decltype((std::move(iter)))>, true>(std::move(iter));",
+        ));
+        assert!(out.contains(
+            "this->template extend_from_iter<std::remove_cvref_t<decltype((std::move(iter)))>, false>(std::move(iter));",
+        ));
+    }
+
+    #[test]
+    fn test_leaf41543333333327171_nonself_method_turbofish_const_args_are_preserved() {
+        let out = transpile_str(
+            r#"
+            struct S {}
+            impl S {
+                fn extend_from_iter<I, const CHECK: bool>(&mut self, _iterable: I) {}
+            }
+            fn call<I>(s: &mut S, iter: I) {
+                s.extend_from_iter::<_, true>(iter);
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "s.template extend_from_iter<std::remove_cvref_t<decltype((std::move(iter)))>, true>(std::move(iter));",
+        ));
     }
 
     #[test]

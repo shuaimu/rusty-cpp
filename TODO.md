@@ -1341,7 +1341,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-16-2-1775520852 --keep-work-dirs`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head discipline, recorded canonical matrix artifacts before opening the next implementation leaf, and avoided crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.17: Collapse the post-27.16.2 deterministic Stage D iterator-template deduction family generically (starting with `ArrayVec::extend_from_iter` template-parameter deduction failure at `runner.cpp:1123`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.17.1: Implement generic transpiler/runtime fixes for the first deterministic 27.16.2 head (no crate-specific scripts): preserve required const-template arguments/defaults in iterator-extension call lowering so `extend_from_iter` surfaces remain callable under generated C++ signatures.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.17.1: Implement generic transpiler/runtime fixes for the first deterministic 27.16.2 head (no crate-specific scripts): preserve required const-template arguments/defaults in iterator-extension call lowering so `extend_from_iter` surfaces remain callable under generated C++ signatures.
+                              - [x] *done* Implemented generic transpiler fixes in `transpiler/src/codegen.rs`:
+                                - preserved const-generic defaults in emitted template parameter lists for method/free-function signatures (`template<..., bool CHECK = false>`),
+                                - preserved method-call turbofish const args (`::<_, true/false>`) by emitting member-template arguments and lowering infer type placeholders to `std::remove_cvref_t<decltype((arg))>` instead of dropping turbofish entirely.
+                              - [x] *done* Added focused transpiler regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327171_method_const_generic_default_is_preserved`
+                                - `test_leaf41543333333327171_free_fn_const_generic_default_is_preserved`
+                                - `test_leaf41543333333327171_method_turbofish_const_args_are_preserved`
+                                - `test_leaf41543333333327171_nonself_method_turbofish_const_args_are_preserved`
+                              - [x] *done* Single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-17-1-1775521581 --keep-work-dirs`) removed the prior deterministic first hard error at `runner.cpp:1123` (`no matching function for call to extend_from_iter(...)`; `CHECK` deduction failure).
+                              - [x] *done* New deterministic Stage D first hard error now starts at `runner.cpp:1043` (`invalid static_cast` from `const std::array<int, 3>*` to `const std::array<rusty::MaybeUninit<int>, 3>*`), with canonical artifacts at `/tmp/rusty-parity-matrix-27-17-1-1775521581/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Verification for 27.17.1:
+                                - `cargo test -p rusty-cpp-transpiler leaf41543333333327171 -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-matrix-27-17-1-1775521581 --keep-work-dirs`
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix remains generic transpiler logic (no crate-specific scripts), template/turbofish adaptation is context-gated (not blanket rewriting), and deterministic first-head artifact discipline is preserved.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.17.2: Re-run full seven-crate parity matrix after 27.17.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
