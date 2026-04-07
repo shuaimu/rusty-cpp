@@ -4673,6 +4673,7 @@ impl CodeGen {
 
     fn impl_const_type_requires_inline_const(&self, ty_cpp: &str) -> bool {
         ty_cpp.contains("rusty::MaybeUninit<")
+            || ty_cpp.contains("std::span<")
     }
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
