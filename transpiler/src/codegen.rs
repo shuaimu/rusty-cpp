@@ -674,7 +674,19 @@ impl CodeGen {
             ordered.push(item);
         }
         ordered.extend(delayed_modules);
-        ordered
+
+        // Move C-like enum definitions (no data variants) before structs that may
+        // reference them. C-like enums have no dependencies on other types, so they
+        // can always be emitted first. This fixes forward-declaration ordering where
+        // `enum class Op` is defined after structs that use `Op::Wildcard`.
+        let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
+            ordered.into_iter().partition(|item| {
+                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+            });
+        let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
+        final_ordered.extend(early_enums);
+        final_ordered.extend(rest);
+        final_ordered
     }
 
     fn module_is_delayable_function_namespace(items: &[syn::Item]) -> bool {
