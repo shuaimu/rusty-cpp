@@ -2015,7 +2015,20 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                                 - `cd /tmp/rusty-parity-matrix-27-43-2b-20260407-080242/arrayvec && timeout 25s ./runner --rusty-single-test rusty_test_char_test_encode_utf8`
                               - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): maintained deterministic first-head workflow and canonical artifact capture, and introduced no crate-specific rewrites/scripts.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.44: Collapse the post-27.43.2 deterministic Stage E `char_test_encode_utf8` non-terminating range-bound family generically (starting with `runner.cpp:582` using `std::numeric_limits<char32_t>::max()` as loop bound), add fixture-agnostic regressions, then re-run full seven-crate matrix.
-                            - [ ] Leaf 4.15.4.3.3.3.3.3.27.44.1: Implement shared transpiler/runtime fixes for the first deterministic 27.43.2 runtime head (no crate-specific scripts): align char-range max/value lowering so `char_test_encode_utf8` uses Rust-parity Unicode upper bound semantics and Stage E can progress past this head.
+                            - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.44.1: Implement shared transpiler/runtime fixes for the first deterministic 27.43.2 runtime head (no crate-specific scripts): align char-range max/value lowering so `char_test_encode_utf8` uses Rust-parity Unicode upper bound semantics and Stage E can progress past this head.
+                              - [x] *done* Plan/scope check: targeted transpiler-only fix stayed well below the <1000 LOC guardrail and did not require further decomposition.
+                              - [x] *done* Implemented shared transpiler fix in `transpiler/src/codegen.rs` (no crate-specific scripts): `char::MAX`/`std::char::MAX`/`core::char::MAX` constant lowering now emits Rust Unicode scalar upper bound (`static_cast<char32_t>(0x10FFFF)`) rather than `std::numeric_limits<char32_t>::max()`.
+                              - [x] *done* Added fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+                                - `test_leaf41543333333327441_std_char_max_uses_unicode_scalar_upper_bound`
+                                - `test_leaf41543333333327441_char_max_range_does_not_use_char32_storage_max`
+                              - [x] *done* Verification:
+                                - `cargo test -p rusty-cpp-transpiler leaf41543333333327441 -- --nocapture`
+                                - `cargo test -p rusty-cpp-transpiler`
+                                - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-44-1-20260407-081914 --keep-work-dirs`
+                              - [x] *done* Single-crate parity repro confirms the deterministic 27.43.2 head family is collapsed: Stage E now proceeds through `char_test_encode_utf8 PASSED` and `char_test_encode_utf8_oob PASSED`.
+                              - [x] *done* New deterministic first failure shifts later in Stage E (same downstream family observed before 27.43.2): after `test_drain_range_inclusive_oob PASSED (expected panic)`, runtime aborts with `ArrayVec: largest supported capacity is u32::MAX` plus `slice range out of bounds` messages.
+                              - [x] *done* Canonical artifacts for this leaf’s reprobe are at `/tmp/rusty-parity-27-44-1-20260407-081914/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+                              - [x] *done* Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): change stayed in shared lowering logic with shape-gated behavior and introduced no crate-specific rewrites/scripts.
                             - [ ] Leaf 4.15.4.3.3.3.3.3.27.44.2: Re-run full seven-crate parity matrix after 27.44.1, record first deterministic failure head with canonical artifacts, and update active-frontier docs/TODO status (or mark Leaf 4 complete if all seven pass).
       - [ ] Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`

@@ -3244,8 +3244,23 @@ Active work items:
        - `rusty_test_char_test_encode_utf8_oob` → `EXIT_CODE=0`
    - canonical artifacts: `/tmp/rusty-parity-matrix-27-43-2b-20260407-080242/arrayvec/{baseline.txt,build.log,matrix.log,runner.cpp,run-timeout.log,*.single.log}`.
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-118. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.44.1`.
-   - focus: implement shared transpiler/runtime fixes for the deterministic `char_test_encode_utf8` Stage E non-terminating head (Unicode max/range-bound lowering parity), then rerun full matrix in 27.44.2.
+118. `Leaf 4.15.4.3.3.3.3.3.27.44.1` is complete.
+   - plan/scope check: targeted transpiler-only implementation stayed well below the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fix (no crate-specific scripts):
+     - `transpiler/src/codegen.rs`: `char::MAX`/`std::char::MAX`/`core::char::MAX` lowering now emits Rust Unicode scalar upper bound (`static_cast<char32_t>(0x10FFFF)`) instead of `std::numeric_limits<char32_t>::max()`, restoring Rust-parity loop bounds for char-range surfaces.
+   - added fixture-agnostic regressions:
+     - `codegen::tests::test_leaf41543333333327441_std_char_max_uses_unicode_scalar_upper_bound`
+     - `codegen::tests::test_leaf41543333333327441_char_max_range_does_not_use_char32_storage_max`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327441 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-44-1-20260407-081914 --keep-work-dirs`
+   - single-crate repro confirms the deterministic 27.43.2 head family is collapsed: Stage E now proceeds through `char_test_encode_utf8 PASSED` and `char_test_encode_utf8_oob PASSED`.
+   - new deterministic first failure shifts later in Stage E (same downstream family previously observed): after `test_drain_range_inclusive_oob PASSED (expected panic)`, run aborts with `ArrayVec: largest supported capacity is u32::MAX` and `slice range out of bounds` messages.
+   - canonical artifacts: `/tmp/rusty-parity-27-44-1-20260407-081914/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - guardrail check against wrong-approach checklist (§11): kept the fix in shared transpiler surfaces, used shape-gated logic, and introduced no crate-specific rewrites/scripts.
+119. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.44.2`.
+   - focus: re-run full seven-crate parity matrix, capture canonical artifacts, and record the new deterministic first failure head (or mark Leaf 4 complete if all seven pass).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

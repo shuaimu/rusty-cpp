@@ -14780,6 +14780,11 @@ impl CodeGen {
         };
         if let Some(candidate) = primitive_candidate {
             if let Some(cpp_prim) = types::map_primitive_type(candidate) {
+                if candidate == "char" {
+                    // Rust `char::MAX` is the largest Unicode scalar value, not the full
+                    // storage range of `char32_t`.
+                    return Some("static_cast<char32_t>(0x10FFFF)".to_string());
+                }
                 return Some(format!("std::numeric_limits<{}>::max()", cpp_prim));
             }
         }
@@ -20135,6 +20140,28 @@ mod tests {
         let out = transpile_str("fn is_max(v: usize) -> bool { v == std::usize::MAX }");
         assert!(out.contains("v == std::numeric_limits<size_t>::max()"));
         assert!(!out.contains("std::usize::MAX"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327441_std_char_max_uses_unicode_scalar_upper_bound() {
+        let out = transpile_str("fn upper() -> u32 { std::char::MAX as u32 }");
+        assert!(out.contains("0x10FFFF"));
+        assert!(!out.contains("std::numeric_limits<char32_t>::max()"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327441_char_max_range_does_not_use_char32_storage_max() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                for codepoint in 0..=core::char::MAX as u32 {
+                    let _ = codepoint;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("0x10FFFF"));
+        assert!(!out.contains("std::numeric_limits<char32_t>::max()"));
     }
 
     #[test]
