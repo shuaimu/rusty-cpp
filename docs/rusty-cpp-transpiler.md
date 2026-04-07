@@ -2904,8 +2904,25 @@ Active work items:
    - verification:
      - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-27-30-2-20260407-001457 --keep-work-dirs`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head + canonical-artifact workflow and introduced no crate-specific rewrites/scripts.
-92. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.31.1`.
-   - focus: implement shared transpiler/runtime normalization for `drain` bound-visit return-shape unification and slice materialization pointer-shape correctness, then reprobe `arrayvec`.
+92. `Leaf 4.15.4.3.3.3.3.3.27.31.1` is complete.
+   - plan/scope check: transpiler-only implementation with focused regressions stayed under the <1000 LOC threshold and required no further decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - untyped `start_bound()` / `end_bound()` match-expression lowering now forces `std::visit<size_t>(...)` return shape to prevent mixed integral alternative return mismatches in bound visitors.
+     - typed raw-pointer locals initialized from slice-range references now materialize local slice backing storage first, then bind pointer locals to backing address (avoids direct span-to-pointer assignment assumptions while preserving pointer call-sites).
+   - added/updated fixture-agnostic regressions:
+     - `test_leaf415433333333311_bound_match_without_expected_type_forces_size_t_visit_return`
+     - `test_leaf41543333331_typed_raw_pointer_local_does_not_emit_duplicate_const` (extended to assert backing storage materialization + pointer binding shape)
+   - single-crate reprobe (`tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-31-1-20260407-002720 --keep-work-dirs`) removed the deterministic `runner.cpp:968`/`runner.cpp:973` drain-family head.
+   - new deterministic first hard error now starts at `/home/shuai/git/rusty-cpp/include/rusty/result.hpp:72` (`Result::Err` default-constructs non-default-constructible `E` payload), with immediate adjacent fallout at `runner.cpp:1013` (move-only array copy surface) and `/home/shuai/git/rusty-cpp/include/rusty/ptr.hpp:132` (`ptr::write` assignment requirement on move-only payloads).
+   - canonical artifacts: `/tmp/rusty-parity-27-31-1-20260407-002720/arrayvec/{baseline.txt,build.log,run.log,matrix.log}`.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf415433333333311_bound_match_without_expected_type_forces_size_t_visit_return -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333331_typed_raw_pointer_local_does_not_emit_duplicate_const -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate arrayvec --work-root /tmp/rusty-parity-27-31-1-20260407-002720 --keep-work-dirs`
+   - guardrail check against wrong-approach checklist (§11): fixes are shared and type-gated in core lowering paths, avoid crate-specific scripts/post-generation rewrites, and preserve deterministic first-head artifact capture.
+93. Current active next leaf is `Leaf 4.15.4.3.3.3.3.3.27.31.2`.
+   - focus: run the full seven-crate matrix and capture/post the new deterministic first-failing head family after 27.31.1.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3007,6 +3024,7 @@ Required approach:
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for runtime move-transfer helpers (`ptr::read`, `mem::replace`, `ptr::write`), do not rely on copy-return or copy-assignment fallbacks that require copyable payloads; preserve move-only behavior with move-out/placement-style reconstruction in shared runtime paths
 - for range-bound visitor lowering (`start_bound`/`end_bound` in `drain`-style code), do not emit mixed return categories across `std::visit` alternatives and do not force slice helper results into pointer declarators (`const auto*`) when runtime helpers return span/slice values; unify return/value shapes from local type context first
+- for runtime `Result` construction surfaces, do not default-construct inactive `T`/`E` storage arms in ways that require both payload types to be default-constructible; construct only the active arm and preserve move-only/non-default payload support
 - for raw-pointer helper/receiver lowering (`as_ptr`/`as_mut_ptr`, `ptr::add`/`ptr::offset`), do not preserve storage-pointer pointee shapes when call context expects payload pointers; propagate expected pointer context and adapt pointee shape explicitly
 - for runtime pointer helpers on `MaybeUninit`-backed storage (`as_ptr`/`as_mut_ptr`), do not expose wrapper-element pointers to payload-facing slice/read APIs; normalize helper results to payload pointers (`T*`/`const T*`) via shared runtime adaptation instead of crate-local rewrites
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context

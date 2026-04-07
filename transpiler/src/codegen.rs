@@ -7240,14 +7240,45 @@ impl CodeGen {
                             .and_then(|scope| scope.remove(&name_str));
                     }
                     if let Some(init) = &local.init {
-                        let expr_str = if let Some(callable_item_expr) =
-                            self.emit_callable_path_item_expr(&init.expr)
-                        {
-                            callable_item_expr
+                        if self.should_materialize_slice_range_pointer_storage(
+                            &resolved_ty,
+                            &init.expr,
+                        ) {
+                            let syn::Expr::Reference(ref_expr) =
+                                self.peel_paren_group_expr(&init.expr)
+                            else {
+                                unreachable!(
+                                    "slice range pointer materialization requires reference init"
+                                );
+                            };
+                            let backing_name = format!("{}_backing", cpp_name);
+                            let backing_decl = if Self::is_mut_raw_pointer_type(&resolved_ty) {
+                                "auto"
+                            } else {
+                                "const auto"
+                            };
+                            let slice_expr = self.emit_expr_to_string_with_expected(
+                                &ref_expr.expr,
+                                Some(&resolved_ty),
+                            );
+                            self.writeln(&format!(
+                                "{} {} = {};",
+                                backing_decl, backing_name, slice_expr
+                            ));
+                            self.writeln(&format!(
+                                "{} {} = &{};",
+                                decl_type, cpp_name, backing_name
+                            ));
                         } else {
-                            self.emit_expr_to_string_with_expected(&init.expr, Some(&resolved_ty))
-                        };
-                        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
+                            let expr_str = if let Some(callable_item_expr) =
+                                self.emit_callable_path_item_expr(&init.expr)
+                            {
+                                callable_item_expr
+                            } else {
+                                self.emit_expr_to_string_with_expected(&init.expr, Some(&resolved_ty))
+                            };
+                            self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
+                        }
                     } else {
                         // `let x: T;` can be initialized later; emit mutable storage.
                         if self.should_use_optional_delayed_init_storage(&pat_type.ty) {
@@ -7285,6 +7316,29 @@ impl CodeGen {
             syn::Type::Group(g) => Self::is_mut_raw_pointer_type(&g.elem),
             _ => false,
         }
+    }
+
+    fn is_raw_pointer_type(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Ptr(_) => true,
+            syn::Type::Paren(p) => Self::is_raw_pointer_type(&p.elem),
+            syn::Type::Group(g) => Self::is_raw_pointer_type(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn should_materialize_slice_range_pointer_storage(
+        &self,
+        resolved_ty: &syn::Type,
+        init_expr: &syn::Expr,
+    ) -> bool {
+        if !Self::is_raw_pointer_type(resolved_ty) {
+            return false;
+        }
+        let syn::Expr::Reference(r) = self.peel_paren_group_expr(init_expr) else {
+            return false;
+        };
+        self.is_slice_range_index_target_expr(self.peel_reference_target_expr(&r.expr))
     }
 
     fn emit_repeat_expr_with_element_hint(
@@ -13609,12 +13663,34 @@ impl CodeGen {
             let scrutinee =
                 self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
             // Variant match → IIFE with std::visit
-            format!(
-                "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
-                scrutinee,
-                self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
-            )
+            if self.should_force_size_t_visit_return_for_bound_match(match_expr, expected_ty) {
+                format!(
+                    "[&]() {{ auto&& _m = {}; return std::visit<size_t>(overloaded {{ {} }}, _m); }}()",
+                    scrutinee,
+                    self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
+                )
+            } else {
+                format!(
+                    "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
+                    scrutinee,
+                    self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
+                )
+            }
         }
+    }
+
+    fn should_force_size_t_visit_return_for_bound_match(
+        &self,
+        match_expr: &syn::ExprMatch,
+        expected_ty: Option<&syn::Type>,
+    ) -> bool {
+        if expected_ty.is_some() {
+            return false;
+        }
+        let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&match_expr.expr) else {
+            return false;
+        };
+        matches!(mc.method.to_string().as_str(), "start_bound" | "end_bound")
     }
 
     fn match_expr_has_explicit_return_arm(&self, match_expr: &syn::ExprMatch) -> bool {
@@ -23658,6 +23734,24 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415433333333311_bound_match_without_expected_type_forces_size_t_visit_return() {
+        let out = transpile_str(
+            r#"
+            use std::ops::{Bound, RangeBounds};
+            fn end_index<R: RangeBounds<i32>>(range: R, len: usize) -> usize {
+                let end = match range.end_bound() {
+                    Bound::Excluded(&j) => j,
+                    Bound::Included(&j) => j.saturating_add(1),
+                    Bound::Unbounded => len,
+                };
+                end
+            }
+            "#,
+        );
+        assert!(out.contains("std::visit<size_t>(overloaded {"));
+    }
+
+    #[test]
     fn test_leaf41543333_bound_type_path_maps_to_runtime_bound_type() {
         let out = transpile_str(
             r#"
@@ -24064,6 +24158,9 @@ mod tests {
         );
         assert!(!out.contains("const const auto* range_slice"));
         assert!(out.contains("const auto* range_slice"));
+        assert!(out.contains("const auto range_slice_backing = rusty::slice(values, start, end);"));
+        assert!(out.contains("const auto* range_slice = &range_slice_backing;"));
+        assert!(!out.contains("const auto* range_slice = rusty::slice(values, start, end);"));
     }
 
     #[test]
