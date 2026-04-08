@@ -196,4 +196,14 @@ namespace rusty {
     } // namespace boxed
 }
 
+// std::formatter specialization for char32_t (Rust char → C++ char32_t)
+// Required for std::format with char32_t arguments.
+#include <format>
+template<>
+struct std::formatter<char32_t> : std::formatter<uint32_t> {
+    auto format(char32_t c, std::format_context& ctx) const {
+        return std::formatter<uint32_t>::format(static_cast<uint32_t>(c), ctx);
+    }
+};
+
 #endif // RUSTY_HPP

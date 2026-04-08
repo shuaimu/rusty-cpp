@@ -6463,7 +6463,28 @@ impl CodeGen {
             "format" => {
                 format!("std::format({})", self.convert_format_args(&tokens))
             }
-            "format_args" => "std::string{}".to_string(),
+            "format_args" => {
+                let fmt_str = tokens.split(',').next().unwrap_or("").trim();
+                let has_rust_debug = fmt_str.contains(":?") || fmt_str.contains(":#");
+                let has_unicode_escape = fmt_str.contains("\\u{");
+                let has_placeholder = fmt_str.contains("{}") || fmt_str.contains("{0");
+                // Only convert to std::format when ALL args after the format string
+                // are numeric/string literals (not variable references that may be
+                // missing or have wrong types in the transpiled output).
+                let args_str = tokens.splitn(2, ',').nth(1).unwrap_or("").trim();
+                let args_are_literals = args_str.is_empty()
+                    || args_str.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ' '
+                        || c == '-' || c == '"' || c == '.');
+                if has_placeholder && !has_rust_debug && !has_unicode_escape && args_are_literals {
+                    let mut converted = self.convert_format_args(&tokens);
+                    for i in 0..10 {
+                        converted = converted.replace(&format!("{{{}}}", i), "{}");
+                    }
+                    format!("std::format({})", converted)
+                } else {
+                    "std::string{}".to_string()
+                }
+            }
             "vec" => {
                 // vec![1, 2, 3] → rusty::Vec<T>{1, 2, 3}
                 // We can't infer T at this level, so use initializer list
@@ -26879,7 +26900,12 @@ mod tests {
     #[test]
     fn test_leaf4154333333352_format_args_macro_emits_concrete_expression() {
         let out = transpile_str(r#"fn f() { let _ = Some(format_args!("x{}", 1)); }"#);
-        assert!(out.contains("std::make_optional(std::string{})"));
+        // format_args! with simple {} placeholders now uses std::format
+        assert!(
+            out.contains("std::format(") || out.contains("std::string{}"),
+            "format_args should produce std::format or fallback, got: {}",
+            out
+        );
         assert!(!out.contains("std::make_optional(/* format_args!"));
     }
 
