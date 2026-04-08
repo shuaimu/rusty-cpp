@@ -8195,6 +8195,17 @@ impl CodeGen {
                 let name = &pat_ident.ident;
                 let name_str = name.to_string();
                 let cpp_name = self.allocate_local_cpp_name(&name_str);
+                // If the new name shadows the Rust name, temporarily hide the
+                // new mapping while emitting the init expression so that
+                // `let rhs = rhs.next()` references the OUTER `rhs`, not the
+                // newly allocated `rhs_shadow1`.
+                let shadows_outer = cpp_name != escape_cpp_keyword(&name_str);
+                if shadows_outer {
+                    // Temporarily remove the new mapping from the current scope
+                    if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                        scope.remove(&name_str);
+                    }
+                }
                 let shadows_param = self
                     .param_bindings
                     .last()
@@ -8363,6 +8374,14 @@ impl CodeGen {
                     self.writeln(&format!("{} {};", type_str, cpp_name));
                 }
                 if shadows_param {
+                    if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                        scope.insert(name_str.clone(), cpp_name.clone());
+                    }
+                }
+                // Restore the shadow name mapping after init expression emission.
+                // This was temporarily removed to prevent self-referential init
+                // (e.g., `let rhs = rhs.next()` → `rhs_shadow2 = rhs_shadow1.next()`).
+                if shadows_outer {
                     if let Some(scope) = self.local_cpp_bindings.last_mut() {
                         scope.insert(name_str, cpp_name);
                     }
