@@ -4489,6 +4489,15 @@ impl CodeGen {
                 UseImportAction::Using(mapped_path) => {
                     let using_path = make_using_path_cpp_legal(&mapped_path);
                     self.writeln(&format!("{}using {};", export_prefix, using_path));
+                    // When importing a data enum type, also import its namespace
+                    // so variant structs (EnumName_VariantName) are accessible.
+                    let imported_name = mapped_path.rsplit("::").next().unwrap_or(&mapped_path);
+                    if self.data_enum_types.contains(imported_name) {
+                        if let Some(ns) = mapped_path.rsplit_once("::").map(|(ns, _)| ns) {
+                            let ns_path = make_using_path_cpp_legal(ns);
+                            self.writeln(&format!("using namespace {};", ns_path));
+                        }
+                    }
                 }
                 UseImportAction::Raw(statement) => {
                     self.writeln(&format!("{}{}", export_prefix, statement));
@@ -14047,7 +14056,19 @@ impl CodeGen {
         }
 
         // Build the C++ variant struct name: EnumName_VariantName
-        let cpp_variant_struct = format!("{}_{}", enum_name, variant_name);
+        // Use emit_path_to_string on the enum path (without the variant) to get
+        // proper C++ namespace qualification, then append _VariantName.
+        let enum_path: syn::Path = {
+            let segs: Vec<syn::PathSegment> = ep.path.segments.iter()
+                .take(ep.path.segments.len() - 1) // Remove last (variant name)
+                .cloned()
+                .collect();
+            let mut p = ep.path.clone();
+            p.segments = segs.into_iter().collect();
+            p
+        };
+        let cpp_enum_name = self.emit_path_to_string(&enum_path);
+        let cpp_variant_struct = format!("{}_{}", cpp_enum_name, variant_name);
 
         // Emit args
         let args: Vec<String> = call
