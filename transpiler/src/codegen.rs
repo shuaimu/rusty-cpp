@@ -11692,6 +11692,20 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::is_char_boundary({}, {})", receiver, args[0]);
         }
+        // Rust `u8::is_ascii_digit()` → `rusty::is_ascii_digit(b)`.
+        // C++ `uint8_t` has no `.is_ascii_digit()` member.
+        if method_name == "is_ascii_digit" && mc.args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::is_ascii_digit({})", receiver);
+        }
+        // Note: `.as_bytes()`, `.first()`, `.get()` on slices are NOT rewritten
+        // generically — `.as_bytes()` would require full Rust slice API on the
+        // returned span, and `.get()`/`.first()` are too broad for universal rewrite.
         // Rust `is_empty()` → dispatch to `.is_empty()` or `.empty()` depending on type
         if method_name == "is_empty" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -19385,6 +19399,8 @@ std::string to_string(const T& value) {\n\
         return \"<unprintable>\";\n\
     }\n\
 }\n\
+// Rust u8::is_ascii_digit() — check if byte is in '0'..='9'.\n\
+inline bool is_ascii_digit(uint8_t b) { return b >= '0' && b <= '9'; }\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
     if (opt.is_none()) return std::partial_ordering::unordered;\n\
@@ -32372,6 +32388,30 @@ mod tests {
         assert!(
             out.contains("?") && out.contains(":"),
             "simple if-expression should use ternary\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154451_is_ascii_digit_emits_rusty_helper() {
+        let out = transpile_str(
+            r#"
+            fn check(b: u8) -> bool {
+                b.is_ascii_digit()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::is_ascii_digit("),
+            ".is_ascii_digit() should emit rusty::is_ascii_digit()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154451_runtime_has_is_ascii_digit_helper() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("is_ascii_digit(uint8_t"),
+            "runtime should have is_ascii_digit helper"
         );
     }
 }
