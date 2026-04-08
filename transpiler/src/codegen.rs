@@ -1541,6 +1541,9 @@ impl CodeGen {
                                         entry.push(impl_item.clone());
                                     }
                                     // Collect operator trait methods from const _ blocks
+                                    // (BitOr, BitAnd, etc.). Non-operator inherent
+                                    // methods are skipped — they reference const-block-
+                                    // local types like InternalBitFlags.
                                     if let syn::ImplItem::Fn(method) = impl_item {
                                         if op_name.is_some() {
                                             let mut merged = method.clone();
@@ -1552,7 +1555,7 @@ impl CodeGen {
                                             if !seen_method_keys.contains(&key) {
                                                 seen_method_keys.insert(key);
                                                 let method_name = merged.sig.ident.to_string();
-                                                if let Some(ref op) = op_name {
+                                                if let Some(op) = &op_name {
                                                     self.operator_renames.insert(
                                                         (type_name.clone(), method_name),
                                                         op.clone(),
