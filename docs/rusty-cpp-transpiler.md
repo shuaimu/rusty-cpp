@@ -3563,7 +3563,23 @@ Required approach:
 - deterministic first-failure diagnostics
 - stable artifact contract for repro
 
-### 11.9 Do Not Expand This Doc as a Chronological Diary
+### 11.9 Known Architecture Gaps (as of 2026-04-09)
+
+The following Rust→C++ translation gaps remain and require fundamental transpiler architecture changes to resolve:
+
+1. **Circular type ordering** — Some Rust crates have circular module dependencies where `mod A` defines a struct used by `mod B`'s function signatures, and `mod B` defines a struct used by `mod A`. C++ requires types to be complete before use in `std::tuple<T>`, creating ordering cycles. Example: semver's `parse::Error` ↔ `Prerelease` ↔ `Version` cycle. Fix requires: module-level dependency analysis and potential struct extraction.
+
+2. **Rust iterator protocol** — `collect::<Vec<_>>()`, `into_iter()`, `map()`, `fold()` on C++ types. Rust desugars iterators through `IntoIterator` trait. No C++ equivalent exists for the full Rust iterator adapter chain. Fix requires: iterator trait protocol translation or runtime adapter layer.
+
+3. **Trait instance method dispatch** — Default trait methods with `&self`/`&mut self` receivers can't be injected into implementing types because return types reference sibling namespace types causing name collisions. Example: `Flags::iter()` returns `iter::Iter<Self>` which collides with `tests::iter` namespace. Fix requires: qualified return type emission for injected trait methods.
+
+4. **Deleted copy constructors in test runners** — The parity test runner's sequential execution uses `std::move(r)` on each variable use, but some variables are used multiple times. The multi-use detection works for transpiled code but not for test runner-generated assertion scaffolding. Fix requires: test runner awareness of variable lifetimes.
+
+5. **Complex if-let patterns** — Some `if let` chain patterns (nested `if let Some(x) = expr.strip_prefix(...)`) emit `/* TODO: if-expression */` placeholders. Fix requires: comprehensive if-let chain lowering to C++ if-init statements.
+
+6. **`format_args!` with complex patterns** — `format_args!` with Rust-specific format specs (`:?`, `:#x`), non-formattable types (`char32_t` in some contexts), or variable references is limited to `std::string{}` fallback. Simple cases with `{}` or `{0}` with literal args work via `std::format()`.
+
+### 11.10 Do Not Expand This Doc as a Chronological Diary
 
 Rejected pattern:
 
