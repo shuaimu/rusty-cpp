@@ -6481,6 +6481,16 @@ impl CodeGen {
                         converted = converted.replace(&format!("{{{}}}", i), "{}");
                     }
                     format!("std::format({})", converted)
+                } else if !has_placeholder && args_str.is_empty() {
+                    // No placeholders, no args — just a literal string.
+                    // Try to parse and emit as a proper C++ string literal.
+                    if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_str) {
+                        let value = lit.value();
+                        let escaped = escape_cpp_string_literal_content(&value);
+                        format!("std::string(\"{}\")", escaped)
+                    } else {
+                        "std::string{}".to_string()
+                    }
                 } else {
                     "std::string{}".to_string()
                 }
