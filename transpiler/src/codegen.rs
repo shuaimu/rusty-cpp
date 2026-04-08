@@ -9152,19 +9152,24 @@ impl CodeGen {
                     })
                 })
                 // When pointee type cannot be recovered from receiver context,
-                // try to use the current struct's first TYPE parameter (for generic
-                // containers like ArrayVec<T, CAP>), otherwise fall back to u8.
-                // Only use single-letter uppercase names (T, U, etc.) to avoid
-                // picking up const generic params like CAP.
+                // use the CURRENT STRUCT's first TYPE parameter if available.
+                // Skip const generic params (like CAP) — they're not types.
                 .or_else(|| {
-                    self.type_param_scopes.iter().rev()
-                        .find_map(|scope| {
-                            scope.iter().find(|name| {
-                                name.len() <= 2 && name.chars().next().is_some_and(|c| c.is_uppercase())
-                                    && name.chars().all(|c| c.is_alphabetic())
-                            })
-                        })
-                        .and_then(|param| syn::parse_str::<syn::Type>(param).ok())
+                    if let Some(struct_name) = &self.current_struct {
+                        let params = self.declared_type_params.get(struct_name)?;
+                        let kinds = self.declared_type_param_kinds.get(struct_name);
+                        for (idx, param) in params.iter().enumerate() {
+                            let is_type = kinds
+                                .and_then(|k| k.get(idx))
+                                .is_some_and(|k| matches!(k, GenericParamKind::Type));
+                            if is_type {
+                                return syn::parse_str::<syn::Type>(param).ok();
+                            }
+                        }
+                        None
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or_else(|| parse_quote!(u8));
             if method == "as_mut_ptr" {
