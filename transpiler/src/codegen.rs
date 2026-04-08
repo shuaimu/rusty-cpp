@@ -5574,7 +5574,20 @@ impl CodeGen {
                 .or(tuple_elem_expected_from_peer.as_ref());
             match elem {
                 syn::Expr::Reference(r) => {
-                    let reference_target = self.peel_reference_target_expr(&r.expr);
+                    let mut reference_target = self.peel_reference_target_expr(&r.expr);
+                    // Collapse `&*variable` reborrow for non-pointer paths:
+                    // `&*r` where `r` is a value/ref → just `r`
+                    // Do NOT collapse for raw pointers (`*p` is a real dereference)
+                    if let syn::Expr::Unary(un) = reference_target {
+                        if matches!(un.op, syn::UnOp::Deref(_)) {
+                            let operand = self.peel_paren_group_expr(&un.expr);
+                            let is_simple_non_pointer = matches!(operand, syn::Expr::Path(_) | syn::Expr::Field(_))
+                                && !self.is_expr_raw_pointer_like(&un.expr);
+                            if is_simple_non_pointer {
+                                reference_target = &un.expr;
+                            }
+                        }
+                    }
                     let mut inner_raw = self
                         .emit_result_ctor_expr_with_peer_context(
                             reference_target,
@@ -8186,11 +8199,13 @@ impl CodeGen {
                     || inferred_binding_ty
                         .as_ref()
                         .is_some_and(|ty| Self::is_mut_raw_pointer_type(ty));
+                // `let ref r = expr` → `const auto& r = expr;` (reference binding)
+                let ref_suffix = if pat_ident.by_ref.is_some() { "&" } else { "" };
                 let decl_type = if qualifier == "const " && mut_raw_ptr_binding && type_str.contains('*')
                 {
                     format!("{} const", type_str)
                 } else {
-                    format!("{}{}", qualifier, type_str)
+                    format!("{}{}{}", qualifier, type_str, ref_suffix)
                 };
                 self.record_local_const_binding(
                     &name_str,
@@ -14687,10 +14702,24 @@ impl CodeGen {
                     }
                 }
                 if let syn::Expr::Unary(un) = ref_inner {
-                    if matches!(un.op, syn::UnOp::Deref(_))
-                        && self.should_collapse_reborrow_of_deref_operand(&un.expr)
-                    {
-                        return self.emit_expr_to_string(ref_inner);
+                    if matches!(un.op, syn::UnOp::Deref(_)) {
+                        let operand = self.peel_paren_group_expr(&un.expr);
+                        // Collapse &*expr reborrow for simple single-deref cases:
+                        // - `&*r` where r is a simple path variable → just `r`
+                        // Do NOT collapse for:
+                        // - Raw pointers (`*p` is a real dereference)
+                        // - ManuallyDrop types (`*md` calls operator* for unwrapping)
+                        // - Nested derefs like `&**self` (Deref trait)
+                        if matches!(operand, syn::Expr::Path(_) | syn::Expr::Field(_))
+                            && !self.is_expr_raw_pointer_like(&un.expr)
+                            && !self.method_receiver_is_manually_drop_expr(&un.expr)
+                        {
+                            return self.emit_expr_to_string(&un.expr);
+                        }
+                        // Original collapse guard for reference-like operands
+                        if self.should_collapse_reborrow_of_deref_operand(&un.expr) {
+                            return self.emit_expr_to_string(ref_inner);
+                        }
                     }
                 }
                 let inner = self.emit_expr_to_string(&r.expr);
