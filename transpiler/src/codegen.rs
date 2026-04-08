@@ -78,6 +78,9 @@ pub struct CodeGen {
     merged_method_using_namespaces: Vec<String>,
     /// When true, emit_mod only emits function items (deferred second pass).
     deferred_module_function_pass: bool,
+    /// Self-referential const definitions deferred until after the struct closes.
+    /// E.g., `static const Prerelease EMPTY;` declared inside, definition after.
+    deferred_self_const_defs: Vec<String>,
     /// Modules whose function pass was deferred for later emission.
     deferred_module_items: Vec<syn::ItemMod>,
     /// Dedup keys for merged impl methods by type.
@@ -319,6 +322,7 @@ impl CodeGen {
             impl_source_modules: HashMap::new(),
             merged_method_using_namespaces: Vec::new(),
             deferred_module_function_pass: false,
+            deferred_self_const_defs: Vec::new(),
             deferred_module_items: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
@@ -3570,6 +3574,15 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("};");
 
+        // Emit deferred self-referential const definitions after struct body.
+        // E.g., `inline const Prerelease Prerelease::EMPTY = Prerelease(...);`
+        if !self.deferred_self_const_defs.is_empty() {
+            let deferred = std::mem::take(&mut self.deferred_self_const_defs);
+            for def in &deferred {
+                self.writeln(def);
+            }
+        }
+
         // Post-struct derives (Hash specialization)
         if derives.contains(&"Hash".to_string()) {
             self.newline();
@@ -5127,12 +5140,24 @@ impl CodeGen {
                 }
                 let ty = self.map_type(&c.ty);
                 let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
-                let storage_spec = if self.impl_const_type_requires_inline_const(&ty) {
-                    "static inline const"
+                // Self-referential const (type is the enclosing struct):
+                // split into declaration inside struct + definition after.
+                if self.is_self_referential_const_type(&ty) {
+                    self.writeln(&format!("static const {} {};", ty, name));
+                    if let Some(ref struct_name) = self.current_struct.clone() {
+                        self.deferred_self_const_defs.push(format!(
+                            "inline const {} {}::{} = {};",
+                            ty, struct_name, name, expr
+                        ));
+                    }
                 } else {
-                    "static constexpr"
-                };
-                self.writeln(&format!("{} {} {} = {};", storage_spec, ty, name, expr));
+                    let storage_spec = if self.impl_const_type_requires_inline_const(&ty) {
+                        "static inline const"
+                    } else {
+                        "static constexpr"
+                    };
+                    self.writeln(&format!("{} {} {} = {};", storage_spec, ty, name, expr));
+                }
             }
             syn::ImplItem::Type(t) => {
                 if self.should_soften_dependent_assoc_mode()
@@ -5179,6 +5204,16 @@ impl CodeGen {
     fn impl_const_type_requires_inline_const(&self, ty_cpp: &str) -> bool {
         ty_cpp.contains("rusty::MaybeUninit<")
             || ty_cpp.contains("std::span<")
+    }
+
+    /// Check if a const member's type is the enclosing struct (self-referential).
+    /// These need split declaration (inside struct) + definition (after struct).
+    fn is_self_referential_const_type(&self, ty_cpp: &str) -> bool {
+        if let Some(ref struct_name) = self.current_struct {
+            ty_cpp == *struct_name || ty_cpp.starts_with(&format!("{}<", struct_name))
+        } else {
+            false
+        }
     }
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
@@ -32412,6 +32447,37 @@ mod tests {
         assert!(
             helpers.contains("is_ascii_digit(uint8_t"),
             "runtime should have is_ascii_digit helper"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154452_self_referential_const_split_declaration() {
+        // `impl Prerelease { const EMPTY: Self = Prerelease(..); }` should
+        // emit declaration inside struct + definition outside.
+        let out = transpile_str(
+            r#"
+            pub struct Prerelease {
+                pub identifier: String,
+            }
+            impl Prerelease {
+                pub const EMPTY: Self = Prerelease { identifier: String::new() };
+            }
+            "#,
+        );
+        // Should have split declaration: `static const Prerelease EMPTY;` inside struct
+        assert!(
+            out.contains("static const Prerelease EMPTY;"),
+            "should declare const inside struct without initializer\nGot: {out}"
+        );
+        // Should have definition outside: `inline const Prerelease Prerelease::EMPTY = ...;`
+        assert!(
+            out.contains("inline const Prerelease Prerelease::EMPTY ="),
+            "should define const after struct\nGot: {out}"
+        );
+        // Should NOT have constexpr self-ref inside struct
+        assert!(
+            !out.contains("static constexpr Prerelease EMPTY ="),
+            "should not have constexpr self-referential const inside struct\nGot: {out}"
         );
     }
 }
