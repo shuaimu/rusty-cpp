@@ -409,8 +409,9 @@ fn is_overloaded_deduction_line(trimmed: &str) -> bool {
 
 /// Detect lines that define top-level functions or namespace blocks that
 /// may collide across test targets flattened into one runner.
+/// Note: namespace dedup is cross-file only (within a single cppm,
+/// reopened namespaces with different content are preserved).
 fn is_duplicatable_definition(trimmed: &str) -> bool {
-    // Strip leading `export ` if present (cppm syntax).
     let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
     // `namespace util {`
     if t.starts_with("namespace ")
@@ -421,7 +422,7 @@ fn is_duplicatable_definition(trimmed: &str) -> bool {
     {
         return true;
     }
-    // `void test_eq() {` or `void rusty_test_test_eq() {`
+    // `void test_eq() {` or `void rusty_test_test_eq() {` or `template<...> void f() {`
     if (t.starts_with("void ") || t.starts_with("template<"))
         && t.contains('(')
         && (t.ends_with('{') || t.ends_with(") {"))
@@ -435,11 +436,7 @@ fn is_duplicatable_definition(trimmed: &str) -> bool {
 /// Extract a dedup key from a definition line.
 fn extract_definition_key(trimmed: &str) -> Option<String> {
     let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-    // For namespaces: use the namespace name as key
-    if t.starts_with("namespace ") && t.ends_with('{') {
-        return Some(t.to_string());
-    }
-    // For functions: use everything before '{'
+    // For functions and namespaces: use everything before '{'
     if let Some(before_brace) = t.split('{').next() {
         let key = before_brace.trim().to_string();
         if !key.is_empty() {
@@ -1466,6 +1463,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
 
             let is_test_target = cppm_index > 0;
+            // Definitions collected from THIS cppm file — added to
+            // `seen_definitions` at end of file so within-file reopened
+            // namespaces are not falsely deduplicated.
+            let mut this_file_definitions: Vec<String> = Vec::new();
 
             // Strip module syntax and add code
             runner_src.push_str(&format!(
@@ -1477,6 +1478,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 if skip_shared_prelude {
                     // For additional module units, skip the duplicated runtime prelude and
                     // resume at crate/test payloads (extern crate/use/export item region).
+                    // Also stop skipping when encountering user namespace/struct
+                    // definitions that precede the extern crate marker (e.g.,
+                    // `namespace util { forward decls }` in test targets).
                     if trimmed.starts_with("// extern crate")
                         || trimmed.starts_with("// Rust-only:")
                         || (trimmed.starts_with("export ")
@@ -1553,7 +1557,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 }
                 if is_test_target && is_duplicatable_definition(trimmed) {
                     if let Some(sig) = extract_definition_key(trimmed) {
-                        if !seen_definitions.insert(sig) {
+                        if seen_definitions.contains(&sig) {
+                            // Already emitted in a previous cppm — skip this one.
                             skip_dup_depth = 0;
                             for ch in trimmed.chars() {
                                 if ch == '{' {
@@ -1565,9 +1570,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                             if skip_dup_depth > 0 {
                                 continue;
                             }
-                            // Single-line definition: just skip this line
                             continue;
                         }
+                        // Record for cross-file dedup (added at end of file).
+                        this_file_definitions.push(sig);
                     }
                 }
                 runner_src.push_str(line);
@@ -1582,6 +1588,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
             if pending_overloaded_template {
                 runner_src.push_str("template<class... Ts>\n");
+            }
+            // Add this file's definitions to the cross-file dedup set.
+            for def in this_file_definitions {
+                seen_definitions.insert(def);
             }
             // Reset skip depth for next module unit
             skip_dup_depth = 0;
