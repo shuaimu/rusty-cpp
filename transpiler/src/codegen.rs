@@ -162,6 +162,9 @@ pub struct CodeGen {
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
     reassigned_vars: std::collections::HashSet<String>,
+    /// Variables used more than once in the current block.
+    /// std::move is skipped for these to avoid use-after-move errors.
+    multi_use_vars: std::collections::HashSet<String>,
     /// Immutable local names in the current block that are consumed through
     /// by-value method/function calls or returned by value.
     /// Such bindings must not be emitted as `const auto`.
@@ -328,6 +331,7 @@ impl CodeGen {
             method_arg_pass_styles: HashMap::new(),
             method_arg_expected_types: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
+            multi_use_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
@@ -1373,7 +1377,10 @@ impl CodeGen {
                                 method.sig.inputs.first(),
                                 Some(syn::FnArg::Receiver(_))
                             );
-                            // Only collect static methods (no receiver) with default bodies
+                            // Only collect static methods (no receiver) with default bodies.
+                            // Instance methods have complex dependencies (Self::Bits,
+                            // iter::Iter<Self>) that cause namespace collisions and type
+                            // resolution issues when injected into implementing types.
                             if has_default && !has_receiver {
                                 let impl_fn = syn::ImplItemFn {
                                     attrs: method.attrs.clone(),
@@ -5095,6 +5102,9 @@ impl CodeGen {
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
+        // Pre-scan: find variables used multiple times (skip std::move for these)
+        let multi_use = collect_multi_use_vars(&block.stmts);
+        let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         let consuming = collect_consuming_method_receiver_vars(&block.stmts);
@@ -5210,6 +5220,7 @@ impl CodeGen {
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
         self.repeat_elem_type_hints = prev_repeat_hints;
+        self.multi_use_vars = prev_multi_use;
     }
 
     fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -17480,6 +17491,28 @@ impl CodeGen {
                     return false;
                 }
 
+                // Multi-use const LOCAL variables of non-Copy types should not be moved.
+                // In Rust, immutable bindings are borrowed on each use, not consumed.
+                // For Copy types (primitives, pointers), std::move is a no-op and safe.
+                let is_param = self.param_bindings.iter().any(|scope| scope.contains_key(&name));
+                let is_multi = self.multi_use_vars.contains(&name);
+                let is_const = self.is_const_local_binding_in_scope(&name);
+                if is_multi && is_const && !is_param
+                {
+                    // Check if the variable's type is likely non-Copy (not a primitive/pointer)
+                    let is_likely_copy_type = self
+                        .lookup_local_binding_type(&name)
+                        .is_some_and(|ty| {
+                            matches!(&ty,
+                                syn::Type::Ptr(_)
+                                | syn::Type::Reference(_)
+                            ) || self.map_type(&ty).chars().next().is_some_and(|c| c.is_lowercase())
+                        });
+                    if !is_likely_copy_type {
+                        return false;
+                    }
+                }
+
                 true
             }
             _ => false,
@@ -19674,6 +19707,84 @@ fn escape_cpp_keyword(name: &str) -> String {
 /// Scan a list of statements and collect the names of variables that are reassigned.
 /// This is used for reference rebinding detection: `let mut r = &x; r = &y;`
 /// means `r` should be emitted as a pointer, not a reference.
+/// Collect variable names that are used more than once in a block's statements.
+/// When a variable is used multiple times, std::move should be skipped to avoid
+/// use-after-move errors (e.g., `let r = req("1.0.0"); assert(r); match(r);`).
+fn collect_multi_use_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for stmt in stmts {
+        count_var_uses_in_stmt(stmt, &mut counts);
+    }
+    counts.into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn count_var_uses_in_stmt(stmt: &syn::Stmt, counts: &mut std::collections::HashMap<String, usize>) {
+    match stmt {
+        syn::Stmt::Expr(expr, _) => count_var_uses_in_expr(expr, counts),
+        syn::Stmt::Local(local) => {
+            if let Some(init) = &local.init {
+                count_var_uses_in_expr(&init.expr, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn count_var_uses_in_expr(expr: &syn::Expr, counts: &mut std::collections::HashMap<String, usize>) {
+    match expr {
+        syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+            let name = p.path.segments[0].ident.to_string();
+            if name.chars().next().is_some_and(|c| c.is_lowercase()) && name != "self" {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        syn::Expr::Call(c) => {
+            count_var_uses_in_expr(&c.func, counts);
+            for arg in &c.args {
+                count_var_uses_in_expr(arg, counts);
+            }
+        }
+        syn::Expr::MethodCall(mc) => {
+            count_var_uses_in_expr(&mc.receiver, counts);
+            for arg in &mc.args {
+                count_var_uses_in_expr(arg, counts);
+            }
+        }
+        syn::Expr::Binary(b) => {
+            count_var_uses_in_expr(&b.left, counts);
+            count_var_uses_in_expr(&b.right, counts);
+        }
+        syn::Expr::Unary(u) => count_var_uses_in_expr(&u.expr, counts),
+        syn::Expr::Reference(r) => count_var_uses_in_expr(&r.expr, counts),
+        syn::Expr::Paren(p) => count_var_uses_in_expr(&p.expr, counts),
+        syn::Expr::Group(g) => count_var_uses_in_expr(&g.expr, counts),
+        syn::Expr::Field(f) => count_var_uses_in_expr(&f.base, counts),
+        syn::Expr::Index(i) => {
+            count_var_uses_in_expr(&i.expr, counts);
+            count_var_uses_in_expr(&i.index, counts);
+        }
+        syn::Expr::If(i) => {
+            count_var_uses_in_expr(&i.cond, counts);
+        }
+        syn::Expr::Block(b) => {
+            for stmt in &b.block.stmts {
+                count_var_uses_in_stmt(stmt, counts);
+            }
+        }
+        syn::Expr::Tuple(t) => {
+            for elem in &t.elems {
+                count_var_uses_in_expr(elem, counts);
+            }
+        }
+        syn::Expr::Cast(c) => count_var_uses_in_expr(&c.expr, counts),
+        syn::Expr::Match(m) => count_var_uses_in_expr(&m.expr, counts),
+        _ => {}
+    }
+}
+
 fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
     let mut result = std::collections::HashSet::new();
     for stmt in stmts {
