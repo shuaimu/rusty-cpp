@@ -35,7 +35,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Fix "Cannot modify field in const method" - interior mutability types like Cell/RefCell from system headers are already skipped via is_system_header() check; their methods use internal @unsafe blocks
       - [x] *done* Fix false field borrow conflicts - added smart method mutation heuristic to distinguish const vs non-const methods
     - [x] *done* Remove hard-coded interior mutability types - removed unused is_interior_mutability_type() function and field_type tracking. Interior mutability is properly handled: (1) rusty::Cell etc. headers use @unsafe blocks internally, (2) system headers are skipped from analysis via is_system_header() check
-  - [ ] Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs
+  - [x] *done* Rust std library equivalents - C++ types in rusty:: namespace that mirror Rust's safe APIs (all scoped type milestones in this section are complete)
     - [x] *done* rusty::Box<T> - heap-allocated single-owner pointer, like unique_ptr but with Rust semantics
     - [x] *done* rusty::Arc<T> - atomic reference-counted pointer for thread-safe shared ownership
     - [x] *done* rusty::Rc<T> - reference-counted pointer for single-threaded shared ownership
