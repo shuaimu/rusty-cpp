@@ -8022,10 +8022,10 @@ impl CodeGen {
             _ => self.emit_expr_to_string(&for_expr.expr),
         };
         let iter_expr = if iter_is_borrowed {
-            // Borrowed Rust `for` inputs should drop the borrow shell (`&expr`/`&mut expr`)
-            // but still route through shared iterator adaptation to handle next()-style
-            // iterators and non-range iterator providers.
-            format!("rusty::for_in({})", iter)
+            // Borrowed Rust `for x in &expr` iterates by reference, NOT consuming.
+            // Use `rusty::iter(expr)` to get a non-consuming iterator, then
+            // `rusty::for_in(...)` to adapt it for range-based for.
+            format!("rusty::for_in(rusty::iter({}))", iter)
         } else {
             // Rust `for x in expr` desugars through IntoIterator; `for_in` handles:
             // - types with `.into_iter()`
@@ -26848,7 +26848,7 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("for (auto&& x : rusty::for_in(data))"));
+        assert!(out.contains("for (auto&& x : rusty::for_in(rusty::iter(data)))"));
         assert!(!out.contains("for (auto&& x : &data)"));
     }
 
