@@ -2518,7 +2518,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                               - [x] *done* For `let (a, b) = if let Some(x) = expr { ...?...; (v1, v2) } else { (d1, d2) };`, emit as pre-declared `_iflet_result` variable + if/else statement block instead of IIFE. This keeps `?` and `return` in the outer function scope.
                               - [x] *done* Handles both tuple destructuring (`Pat::Tuple`) and single binding (`Pat::Ident`) patterns.
                               - [x] *done* Semver TODO if-expression placeholders: 11 → 7 (4 fewer placeholders lowered to compilable code).
-                              - [x] *done* Semver errors: 61 → 63 (slight increase from cascading secondary effects of newly-emitted code). Full matrix: 5/6 pass; no regressions.
+                              - [x] *done* Semver TODO placeholders: 11 → 7. Semver errors: 61 → 61 (stable after Leaf 59 fix below).
+                            - [x] *done* Leaf 4.15.4.4.59: Fix if-let-try result variable name collisions and move semantics.
+                              - [x] *done* Added `iflet_result_counter` for unique `_iflet_resultN` variable names — fixes `conflicting declaration` when multiple if-let-try blocks appear in the same scope.
+                              - [x] *done* Used `std::move` in tuple destructuring from the result variable — fixes non-copyable type assignment errors.
+                              - [x] *done* Semver errors: 63 → 61 (2 fewer); eliminated conflicting-declaration and deleted-operator= cascading errors from Leaf 58.
+                              - [x] *done* Full matrix: 5/6 pass; no regressions.
                           - [ ] Leaf 4.15.4.3.3.3.3.3.27.46: [Deferred by 4.15.4.4 priority pivot] Collapse the post-27.45.2 deterministic Stage E `test_retain` assertion-abort family generically (starting with abort immediately after `test_pop_at PASSED`, next scheduled wrapper `rusty_test_test_retain` at `runner.cpp:4840`, and failing assertion surface in `test_retain` at `runner.cpp:3133-3136`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.1: Fix `as_mut_ptr()` type inference fallback: use current scope's type parameter (e.g., `T`) instead of `u8` when pointee type can't be recovered from receiver context. Fixes `retain` function using `uint8_t*` arithmetic instead of `T*`, causing wrong element stride and assertion failure.
                               - [x] *done* Arrayvec: `test_retain` now PASSES. 37/37 discovered-and-reached tests pass. Remaining 14 undiscovered tests crash from `free(): double free` during expected-panic exception unwinding (separate issue).

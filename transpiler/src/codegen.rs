@@ -146,6 +146,7 @@ pub struct CodeGen {
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
     type_arg_nesting: std::cell::Cell<usize>,
+    iflet_result_counter: usize,
     /// Named struct field types for local type-context recovery in match lowering.
     struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
     /// Named struct field declaration order keyed by struct name.
@@ -348,6 +349,7 @@ impl CodeGen {
             data_enum_unit_variants: HashSet::new(),
             c_like_enum_consts: HashSet::new(),
             type_arg_nesting: std::cell::Cell::new(0),
+            iflet_result_counter: 0,
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
             struct_field_cpp_names: HashMap::new(),
@@ -15759,8 +15761,10 @@ impl CodeGen {
             other => self.emit_expr_to_string(other),
         };
 
-        // Declare result variable initialized from the else value
-        self.writeln(&format!("auto _iflet_result = {};", else_value));
+        // Declare result variable with unique name
+        let result_var = format!("_iflet_result{}", self.iflet_result_counter);
+        self.iflet_result_counter += 1;
+        self.writeln(&format!("auto {} = {};", result_var, else_value));
 
         // Emit the if block as a statement
         self.writeln("{");
@@ -15790,7 +15794,7 @@ impl CodeGen {
             if is_last {
                 if let syn::Stmt::Expr(expr, None) = stmt {
                     let val = self.emit_expr_to_string(expr);
-                    self.writeln(&format!("_iflet_result = {};", val));
+                    self.writeln(&format!("{} = {};", result_var, val));
                     continue;
                 }
             }
@@ -15815,7 +15819,7 @@ impl CodeGen {
                 }
             })
             .collect();
-        self.writeln(&format!("auto [{}] = _iflet_result;", names.join(", ")));
+        self.writeln(&format!("auto [{}] = std::move({});", names.join(", "), result_var));
         Some(())
     }
 
