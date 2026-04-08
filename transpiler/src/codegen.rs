@@ -15739,6 +15739,17 @@ impl CodeGen {
             let is_last = i == stmts.len() - 1;
             if is_last {
                 if let syn::Stmt::Expr(expr, None) = stmt {
+                    // Recursive: if tail is another if-expression with ?, lower it
+                    if let syn::Expr::If(inner_if) = expr {
+                        if self.block_contains_early_return_or_try(&inner_if.then_branch)
+                            || inner_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                                self.expr_contains_early_return_or_try(e)
+                            })
+                        {
+                            self.emit_if_assign_as_statement_block(cpp_name, inner_if);
+                            continue;
+                        }
+                    }
                     let val = self.emit_expr_to_string(expr);
                     self.writeln(&format!("{} = {};", cpp_name, val));
                     continue;
@@ -15780,6 +15791,85 @@ impl CodeGen {
     /// auto [a, b] = _iflet_result;
     /// ```
     /// This avoids IIFE, so `?` and `return` work in the outer function scope.
+
+    /// Lower `result_var = if cond { ...?... } else { val };` as a statement block
+    /// that assigns to `result_var` in each branch. Handles nested if-expressions
+    /// with `?` recursively.
+    fn emit_if_assign_as_statement_block(
+        &mut self,
+        result_var: &str,
+        if_expr: &syn::ExprIf,
+    ) {
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+            let binding = self.extract_if_let_binding_name(&let_expr.pat);
+            let (some_check, _none, unwrap, _neg) =
+                self.option_like_pattern_surface_for_expr(&let_expr.expr);
+            self.writeln(&format!("{{ auto&& _iflet_s = {};", scrutinee));
+            self.writeln(&format!("if (_iflet_s.{}()) {{", some_check));
+            self.indent += 1;
+            if let Some(name) = binding {
+                self.writeln(&format!("auto {} = _iflet_s.{}();", name, unwrap));
+            }
+        } else {
+            let cond = self.emit_expr_to_string(&if_expr.cond);
+            self.writeln(&format!("{{ if ({}) {{", cond));
+            self.indent += 1;
+        }
+
+        // Emit then-branch; tail assigns to result_var
+        let stmts = &if_expr.then_branch.stmts;
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last = i == stmts.len() - 1;
+            if is_last {
+                if let syn::Stmt::Expr(expr, None) = stmt {
+                    if let syn::Expr::If(inner_if) = expr {
+                        if self.block_contains_early_return_or_try(&inner_if.then_branch)
+                            || inner_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                                self.expr_contains_early_return_or_try(e)
+                            })
+                        {
+                            self.emit_if_assign_as_statement_block(result_var, inner_if);
+                            self.indent -= 1;
+                            self.writeln("}}");
+                            return;
+                        }
+                    }
+                    let val = self.emit_expr_to_string(expr);
+                    self.writeln(&format!("{} = {};", result_var, val));
+                    continue;
+                }
+            }
+            self.emit_stmt(stmt, false);
+        }
+
+        self.indent -= 1;
+        if let Some((_, else_expr)) = &if_expr.else_branch {
+            match else_expr.as_ref() {
+                syn::Expr::Block(b) => {
+                    if let Some(single) = self.extract_single_expr_from_block(&b.block) {
+                        let val = self.emit_expr_to_string(single);
+                        self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
+                    } else {
+                        self.writeln("} else {");
+                        self.indent += 1;
+                        for stmt in &b.block.stmts {
+                            self.emit_stmt(stmt, false);
+                        }
+                        self.indent -= 1;
+                        self.writeln("}}");
+                    }
+                }
+                other => {
+                    let val = self.emit_expr_to_string(other);
+                    self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
+                }
+            }
+        } else {
+            self.writeln("}}");
+        }
+    }
+
     fn emit_if_let_as_statement_block(
         &mut self,
         tuple: &syn::PatTuple,
@@ -15846,6 +15936,19 @@ impl CodeGen {
             let is_last = i == stmts.len() - 1;
             if is_last {
                 if let syn::Stmt::Expr(expr, None) = stmt {
+                    // If the tail expression is itself an if-expression with
+                    // ?/return, recursively lower it as a statement block
+                    // that assigns to result_var.
+                    if let syn::Expr::If(inner_if) = expr {
+                        if self.block_contains_early_return_or_try(&inner_if.then_branch)
+                            || inner_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                                self.expr_contains_early_return_or_try(e)
+                            })
+                        {
+                            self.emit_if_assign_as_statement_block(&result_var, inner_if);
+                            continue;
+                        }
+                    }
                     let val = self.emit_expr_to_string(expr);
                     self.writeln(&format!("{} = {};", result_var, val));
                     continue;
