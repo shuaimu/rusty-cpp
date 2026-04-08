@@ -617,7 +617,9 @@ impl CodeGen {
             .collect();
 
         if inline_modules.is_empty() {
-            return items.iter().collect();
+            let mut result: Vec<&syn::Item> = items.iter().collect();
+            Self::topological_sort_structs(&mut result);
+            return result;
         }
 
         let module_names: Vec<String> = inline_modules
@@ -733,7 +735,165 @@ impl CodeGen {
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);
         final_ordered.extend(rest);
+
+        // Topologically sort structs and data enums so types used as fields are
+        // emitted before the types that contain them.  Forward declarations are
+        // not enough when a type is used as a by-value field.
+        Self::topological_sort_structs(&mut final_ordered);
         final_ordered
+    }
+
+    /// Topologically sort top-level struct and data-enum items so that types
+    /// used as direct fields are emitted before the types that contain them.
+    fn topological_sort_structs(items: &mut Vec<&syn::Item>) {
+        // 1. Collect all top-level type names (structs + data enums).
+        let type_names: HashSet<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                    Some(e.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+
+        if type_names.len() < 2 {
+            return;
+        }
+
+        // 2. Build name → position map and dependency edges for struct/enum items.
+        let mut struct_indices: Vec<usize> = Vec::new();
+        let mut name_to_struct_pos: HashMap<String, usize> = HashMap::new();
+        for (idx, item) in items.iter().enumerate() {
+            let name = match item {
+                syn::Item::Struct(s) => s.ident.to_string(),
+                syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                    e.ident.to_string()
+                }
+                _ => continue,
+            };
+            if type_names.contains(&name) {
+                name_to_struct_pos.insert(name, struct_indices.len());
+                struct_indices.push(idx);
+            }
+        }
+
+        let n = struct_indices.len();
+        if n < 2 {
+            return;
+        }
+
+        // 3. For each struct/enum, find which other type names appear in its fields.
+        let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+        let mut indegree: Vec<usize> = vec![0; n];
+        for (pos, &idx) in struct_indices.iter().enumerate() {
+            let field_types = match items[idx] {
+                syn::Item::Struct(s) => Self::collect_field_type_names(&s.fields, &type_names),
+                syn::Item::Enum(e) => {
+                    let mut deps = HashSet::new();
+                    for variant in &e.variants {
+                        deps.extend(Self::collect_field_type_names(&variant.fields, &type_names));
+                    }
+                    deps
+                }
+                _ => continue,
+            };
+            for dep_name in &field_types {
+                if let Some(&dep_pos) = name_to_struct_pos.get(dep_name.as_str()) {
+                    if dep_pos != pos && outgoing[dep_pos].insert(pos) {
+                        indegree[pos] += 1;
+                    }
+                }
+            }
+        }
+
+        // 4. Kahn's algorithm with stable original-index tie-breaking.
+        let mut ready: BinaryHeap<(Reverse<usize>, usize)> = BinaryHeap::new();
+        for pos in 0..n {
+            if indegree[pos] == 0 {
+                ready.push((Reverse(struct_indices[pos]), pos));
+            }
+        }
+        let mut sorted_indices: Vec<usize> = Vec::with_capacity(n);
+        while let Some((_, pos)) = ready.pop() {
+            sorted_indices.push(pos);
+            for &next in &outgoing[pos] {
+                if indegree[next] > 0 {
+                    indegree[next] -= 1;
+                    if indegree[next] == 0 {
+                        ready.push((Reverse(struct_indices[next]), next));
+                    }
+                }
+            }
+        }
+        if sorted_indices.len() != n {
+            // Cyclic dependency — keep original order.
+            return;
+        }
+
+        // 5. Reorder: replace struct items at their original positions with the
+        //    sorted order.
+        let original_items_at_struct_positions: Vec<&syn::Item> =
+            struct_indices.iter().map(|&idx| items[idx]).collect();
+        for (new_pos, &sorted_pos) in sorted_indices.iter().enumerate() {
+            items[struct_indices[new_pos]] = original_items_at_struct_positions[sorted_pos];
+        }
+    }
+
+    /// Extract type-name segments from struct/enum fields that match any name
+    /// in `known`.  Only extracts the final segment of paths (e.g. `Prerelease`
+    /// from `Option<Prerelease>`).
+    fn collect_field_type_names(fields: &syn::Fields, known: &HashSet<String>) -> HashSet<String> {
+        let mut result = HashSet::new();
+        for field in fields {
+            Self::collect_type_name_segments(&field.ty, known, &mut result);
+        }
+        result
+    }
+
+    fn collect_type_name_segments(
+        ty: &syn::Type,
+        known: &HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
+        match ty {
+            syn::Type::Path(tp) => {
+                // Check the final segment name.
+                if let Some(last) = tp.path.segments.last() {
+                    let name = last.ident.to_string();
+                    if known.contains(&name) {
+                        out.insert(name);
+                    }
+                    // Recurse into generic arguments.
+                    if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+                        for arg in &ab.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                Self::collect_type_name_segments(inner, known, out);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(r) => {
+                Self::collect_type_name_segments(&r.elem, known, out);
+            }
+            syn::Type::Slice(s) => {
+                Self::collect_type_name_segments(&s.elem, known, out);
+            }
+            syn::Type::Array(a) => {
+                Self::collect_type_name_segments(&a.elem, known, out);
+            }
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    Self::collect_type_name_segments(elem, known, out);
+                }
+            }
+            syn::Type::Paren(p) => {
+                Self::collect_type_name_segments(&p.elem, known, out);
+            }
+            _ => {}
+        }
     }
 
     /// Reorder impl items so static const members that reference other consts
@@ -11555,6 +11715,42 @@ impl CodeGen {
             };
             return format!("rusty::hash::hash({}, {})", receiver, args[0]);
         }
+        // Rust `.clone()` → `rusty::clone(receiver)`.
+        // Expanded `#[derive(Clone)]` calls `.clone()` on every field, but C++
+        // primitives (`uint64_t`, `bool`, etc.) and enum classes don't have a
+        // `.clone()` member.  `rusty::clone()` dispatches via SFINAE: calls
+        // `.clone()` if available, falls back to copy construction otherwise.
+        if method_name == "clone" && mc.args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::clone({})", receiver);
+        }
+        // Rust `.cmp(&other)` on primitives → `rusty::cmp::cmp(a, b)`.
+        // Expanded `#[derive(Ord)]` calls `.cmp()` on every field.
+        if method_name == "cmp" && mc.args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::cmp::cmp({}, {})", receiver, args[0]);
+        }
+        // Rust `.partial_cmp(&other)` on primitives → `rusty::partial_cmp(a, b)`.
+        // Expanded `#[derive(PartialOrd)]` calls `.partial_cmp()` on every field.
+        if method_name == "partial_cmp" && mc.args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::partial_cmp({}, {})", receiver, args[0]);
+        }
         if method_name == "zip" && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -18789,6 +18985,26 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
     "namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+// Compare two values and return Ordering (works for primitives and types with </>).\n\
+template<typename A, typename B>\n\
+Ordering cmp(const A& a, const B& b) {\n\
+    if constexpr (requires { a.cmp(b); }) {\n\
+        return a.cmp(b);\n\
+    } else {\n\
+        if (a < b) return Ordering::Less;\n\
+        if (b < a) return Ordering::Greater;\n\
+        return Ordering::Equal;\n\
+    }\n\
+}\n\
+}\n\
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.\n\
+template<typename T>\n\
+auto clone(const T& value) {\n\
+    if constexpr (requires { value.clone(); }) {\n\
+        return value.clone();\n\
+    } else {\n\
+        return value;\n\
+    }\n\
 }\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
@@ -18801,8 +19017,14 @@ inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp:
     }\n\
 }\n\
 template<typename A, typename B>\n\
-auto partial_cmp(A&& a, B&& b) {\n\
-    return std::forward<A>(a).partial_cmp(std::forward<B>(b));\n\
+auto partial_cmp(const A& a, const B& b) {\n\
+    if constexpr (requires { a.partial_cmp(b); }) {\n\
+        return a.partial_cmp(b);\n\
+    } else {\n\
+        if (a < b) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
+        if (b < a) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
+        return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);\n\
+    }\n\
 }\n\
 namespace fmt {\n\
 struct Error {};\n\
@@ -29924,8 +30146,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("auto u = p.clone();"));
-        assert!(!out.contains("const auto u = p.clone();"));
+        assert!(out.contains("auto u = rusty::clone(p);"));
+        assert!(!out.contains("const auto u = rusty::clone(p);"));
         assert!(out.contains("_ResultCtorCtx::Err(std::move(u))"));
     }
 
@@ -29954,8 +30176,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("auto u = p.clone();"));
-        assert!(!out.contains("const auto u = p.clone();"));
+        assert!(out.contains("auto u = rusty::clone(p);"));
+        assert!(!out.contains("const auto u = rusty::clone(p);"));
         assert!(out.contains("_ResultCtorCtx::Ok(std::move(u))"));
     }
 
@@ -31295,6 +31517,183 @@ mod tests {
         assert!(
             version_pos < eval_ns_pos,
             "function-only inline module should be delayed until after sibling type definitions"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_struct_field_dependency_ordering_puts_field_types_first() {
+        // Version has fields of type Prerelease and BuildMetadata.
+        // The topological sort must emit Prerelease and BuildMetadata
+        // before Version so the fields are complete types.
+        let out = transpile_str(
+            r#"
+            pub struct Version {
+                pub major: u64,
+                pub pre: Prerelease,
+                pub build: BuildMetadata,
+            }
+            pub struct Prerelease {
+                pub identifier: String,
+            }
+            pub struct BuildMetadata {
+                pub identifier: String,
+            }
+            "#,
+        );
+
+        // Search for "struct Name {" (definition with opening brace) to skip
+        // forward declarations ("struct Name;").
+        let version_pos = out.find("struct Version {").expect("Version definition emitted");
+        let prerelease_pos = out
+            .find("struct Prerelease {")
+            .expect("Prerelease definition emitted");
+        let build_pos = out
+            .find("struct BuildMetadata {")
+            .expect("BuildMetadata definition emitted");
+        assert!(
+            prerelease_pos < version_pos,
+            "Prerelease must be emitted before Version (field dependency)\n\
+             Prerelease at {prerelease_pos}, Version at {version_pos}"
+        );
+        assert!(
+            build_pos < version_pos,
+            "BuildMetadata must be emitted before Version (field dependency)\n\
+             BuildMetadata at {build_pos}, Version at {version_pos}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_struct_field_dependency_chain_ordering() {
+        // C depends on B, B depends on A → emission order: A, B, C
+        let out = transpile_str(
+            r#"
+            pub struct C {
+                pub b: B,
+            }
+            pub struct B {
+                pub a: A,
+            }
+            pub struct A {
+                pub value: i32,
+            }
+            "#,
+        );
+
+        let a_pos = out.find("struct A {").expect("A definition emitted");
+        let b_pos = out.find("struct B {").expect("B definition emitted");
+        let c_pos = out.find("struct C {").expect("C definition emitted");
+        assert!(a_pos < b_pos, "A before B: A at {a_pos}, B at {b_pos}");
+        assert!(b_pos < c_pos, "B before C: B at {b_pos}, C at {c_pos}");
+    }
+
+    #[test]
+    fn test_leaf4154442_struct_field_dependency_with_option_wrapper() {
+        // Field type inside Option<T> should still be detected as dependency.
+        let out = transpile_str(
+            r#"
+            pub struct Outer {
+                pub inner: Option<Inner>,
+            }
+            pub struct Inner {
+                pub value: i32,
+            }
+            "#,
+        );
+
+        let outer_pos = out.find("struct Outer {").expect("Outer definition emitted");
+        let inner_pos = out.find("struct Inner {").expect("Inner definition emitted");
+        assert!(
+            inner_pos < outer_pos,
+            "Inner must be emitted before Outer (used in Option<Inner> field)\n\
+             Inner at {inner_pos}, Outer at {outer_pos}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_struct_no_dependency_preserves_original_order() {
+        // Independent structs should keep their original source order.
+        let out = transpile_str(
+            r#"
+            pub struct A {
+                pub value: i32,
+            }
+            pub struct B {
+                pub value: i32,
+            }
+            "#,
+        );
+        let a_pos = out.find("struct A {").expect("A definition emitted");
+        let b_pos = out.find("struct B {").expect("B definition emitted");
+        assert!(a_pos < b_pos, "Independent structs keep original order");
+    }
+
+    #[test]
+    fn test_leaf4154442_clone_on_field_emits_rusty_clone() {
+        let out = transpile_str(
+            r#"
+            fn clone_value(x: &u64) -> u64 {
+                x.clone()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::clone("),
+            "x.clone() should emit rusty::clone(x)\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".clone()"),
+            "should not emit literal .clone() method call\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_cmp_on_primitive_emits_rusty_cmp() {
+        let out = transpile_str(
+            r#"
+            fn compare(a: &u64, b: &u64) -> i32 {
+                a.cmp(b)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::cmp::cmp("),
+            "a.cmp(b) should emit rusty::cmp::cmp(a, b)\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_partial_cmp_on_primitive_emits_rusty_partial_cmp() {
+        let out = transpile_str(
+            r#"
+            fn partial_compare(a: &u64, b: &u64) -> bool {
+                a.partial_cmp(b)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::partial_cmp("),
+            "a.partial_cmp(b) should emit rusty::partial_cmp(a, b)\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154442_runtime_fallback_has_clone_cmp_helpers() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("auto clone("),
+            "runtime should contain rusty::clone() helper"
+        );
+        assert!(
+            helpers.contains("Ordering cmp("),
+            "runtime should contain rusty::cmp::cmp() helper"
+        );
+        assert!(
+            helpers.contains("a.partial_cmp(b)"),
+            "runtime should contain partial_cmp with SFINAE dispatch"
+        );
+        assert!(
+            helpers.contains("Ordering::Less"),
+            "runtime partial_cmp should have primitive fallback"
         );
     }
 }
