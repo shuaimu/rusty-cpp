@@ -3425,6 +3425,11 @@ impl CodeGen {
                     self.writeln("}");
                     self.indent -= 1;
                     self.writeln("}");
+                    // Rule of Five: when copy ctor and move ctor are declared,
+                    // also declare assignment operators to prevent them from
+                    // being implicitly deleted.
+                    self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
                 }
                 syn::Fields::Unnamed(fields) => {
                     let ctor_params: Vec<String> = fields
@@ -3485,6 +3490,8 @@ impl CodeGen {
                     self.writeln("}");
                     self.indent -= 1;
                     self.writeln("}");
+                    self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
                 }
                 syn::Fields::Unit => {
                     self.writeln(&format!("{}() = default;", name));
@@ -3503,6 +3510,8 @@ impl CodeGen {
                     self.writeln("}");
                     self.indent -= 1;
                     self.writeln("}");
+                    self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
                 }
             }
             self.writeln(
