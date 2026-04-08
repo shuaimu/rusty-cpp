@@ -76,6 +76,10 @@ pub struct CodeGen {
     impl_source_modules: HashMap<String, HashSet<String>>,
     /// Namespace using declarations to emit inside merged method bodies.
     merged_method_using_namespaces: Vec<String>,
+    /// When true, emit_mod only emits function items (deferred second pass).
+    deferred_module_function_pass: bool,
+    /// Modules whose function pass was deferred for later emission.
+    deferred_module_items: Vec<syn::ItemMod>,
     /// Dedup keys for merged impl methods by type.
     /// Prevents duplicate C++ method emissions when expanded Rust yields
     /// overlapping inherent impl methods with the same callable signature.
@@ -304,6 +308,8 @@ impl CodeGen {
             impl_blocks: HashMap::new(),
             impl_source_modules: HashMap::new(),
             merged_method_using_namespaces: Vec::new(),
+            deferred_module_function_pass: false,
+            deferred_module_items: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
             operator_renames: HashMap::new(),
             drop_trait_methods: HashSet::new(),
@@ -569,6 +575,18 @@ impl CodeGen {
             }
             self.emit_item(item);
             self.newline();
+        }
+
+        // Deferred module function pass: emit function-only portions of
+        // split modules after all sibling struct definitions are complete.
+        if !self.deferred_module_items.is_empty() {
+            let deferred = std::mem::take(&mut self.deferred_module_items);
+            self.deferred_module_function_pass = true;
+            for m in &deferred {
+                self.emit_mod(m);
+                self.newline();
+            }
+            self.deferred_module_function_pass = false;
         }
 
         self.emit_expanded_test_wrappers();
@@ -4401,23 +4419,56 @@ impl CodeGen {
 
         // If the mod has inline content (mod foo { ... }), emit it
         if let Some((_, items)) = &m.content {
-            self.writeln(&format!("namespace {} {{", mod_cpp_name));
-            self.indent += 1;
-            self.module_stack.push(mod_name.to_string());
-            if self.emit_item_forward_decls(items, self.module_stack.len()) {
-                self.newline();
-            }
-            let ordered_items = self.order_items_for_emission(items);
-            for item in ordered_items {
-                if matches!(item, syn::Item::Impl(_)) {
-                    continue;
+            if self.deferred_module_function_pass {
+                // Deferred pass: only emit functions and nested modules
+                self.writeln(&format!("namespace {} {{", mod_cpp_name));
+                self.indent += 1;
+                self.module_stack.push(mod_name.to_string());
+                let ordered_items = self.order_items_for_emission(items);
+                for item in ordered_items {
+                    match item {
+                        syn::Item::Fn(_) | syn::Item::Mod(_) => {
+                            self.emit_item(item);
+                            self.newline();
+                        }
+                        _ => {}
+                    }
                 }
-                self.emit_item(item);
-                self.newline();
+                self.module_stack.pop();
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                // Check if this module has both structs and functions
+                let has_structs = items.iter().any(|i| matches!(i, syn::Item::Struct(_)));
+                let has_fns = items.iter().any(|i| matches!(i, syn::Item::Fn(_)));
+                let should_split = has_structs && has_fns && self.module_stack.is_empty();
+
+                self.writeln(&format!("namespace {} {{", mod_cpp_name));
+                self.indent += 1;
+                self.module_stack.push(mod_name.to_string());
+                if self.emit_item_forward_decls(items, self.module_stack.len()) {
+                    self.newline();
+                }
+                let ordered_items = self.order_items_for_emission(items);
+                for item in ordered_items {
+                    if matches!(item, syn::Item::Impl(_)) {
+                        continue;
+                    }
+                    if should_split && matches!(item, syn::Item::Fn(_)) {
+                        // Skip functions — they'll be emitted in deferred pass
+                        continue;
+                    }
+                    self.emit_item(item);
+                    self.newline();
+                }
+                self.module_stack.pop();
+                self.indent -= 1;
+                self.writeln("}");
+
+                if should_split {
+                    self.deferred_module_items.push(m.clone());
+                }
             }
-            self.module_stack.pop();
-            self.indent -= 1;
-            self.writeln("}");
         }
     }
 
