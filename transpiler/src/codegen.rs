@@ -11429,6 +11429,15 @@ impl CodeGen {
             };
             return format!("rusty::str_runtime::trim({})", receiver);
         }
+        if matches!(method_name.as_str(), "trim_start_matches" | "trim_end_matches") && args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::str_runtime::{}({}, {})", method_name, receiver, args[0]);
+        }
         if method_name == "strip_prefix" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -18658,6 +18667,8 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::is_char_boundary(",
         "rusty::str_runtime::parse<",
         "rusty::str_runtime::trim(",
+        "rusty::str_runtime::trim_start_matches(",
+        "rusty::str_runtime::trim_end_matches(",
         "rusty::str_runtime::strip_prefix(",
         "rusty::str_runtime::split(",
         "rusty::char_runtime::from_u32",
@@ -18976,6 +18987,16 @@ inline std::string_view trim(std::string_view s) {\n\
     if (start == std::string_view::npos) return {};\n\
     auto end = s.find_last_not_of(\" \\t\\n\\r\");\n\
     return s.substr(start, end - start + 1);\n\
+}\n\
+inline std::string_view trim_start_matches(std::string_view s, char32_t ch) {\n\
+    size_t start = 0;\n\
+    while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;\n\
+    return s.substr(start);\n\
+}\n\
+inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {\n\
+    size_t end = s.size();\n\
+    while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;\n\
+    return s.substr(0, end);\n\
 }\n\
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {\n\
     if (s.starts_with(prefix)) {\n\
