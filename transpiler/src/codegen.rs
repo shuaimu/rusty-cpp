@@ -11949,6 +11949,18 @@ impl CodeGen {
                         format!("&{}", inner)
                     }
                 } else {
+                    // For simple local variable paths, strip & when the expression
+                    // is NOT a raw pointer type. In C++, passing a value to
+                    // const T& doesn't need explicit &.
+                    // Do NOT strip for Field access (&self.field) which may need
+                    // the address-of for pointer/reference semantics.
+                    let ref_inner_peeled = self.peel_paren_group_expr(&r.expr);
+                    if matches!(ref_inner_peeled, syn::Expr::Path(_))
+                        && r.mutability.is_none()
+                        && !self.is_expr_raw_pointer_like(&r.expr)
+                    {
+                        return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                    }
                     let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                     if inner.starts_with('&') {
                         format!("&({})", inner)
