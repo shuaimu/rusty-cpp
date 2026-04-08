@@ -5386,8 +5386,14 @@ impl CodeGen {
                         (" const".to_string(), false)
                     }
                 } else {
-                    // self (by value) → non-const method (consumes)
-                    ("".to_string(), false)
+                    // self (by value) → for operators (which return a new value
+                    // without modifying this), emit as const. For other by-value
+                    // methods (consuming self), emit as non-const.
+                    if name.starts_with("operator") {
+                        (" const".to_string(), false)
+                    } else {
+                        ("".to_string(), false)
+                    }
                 }
             }
             _ => {
