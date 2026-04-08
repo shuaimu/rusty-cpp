@@ -18956,13 +18956,13 @@ decltype(auto) deref_mut(T& value) {\n\
 namespace panicking {\n\
 enum class AssertKind { Eq, Ne };\n\
 template<typename... Args>\n\
-[[noreturn]] inline void assert_failed(Args&&...) { std::abort(); }\n\
+[[noreturn]] inline void assert_failed(Args&&...) { throw std::runtime_error(\"assertion failed\"); }\n\
 template<typename... Args>\n\
-[[noreturn]] inline void panic(Args&&...) { std::abort(); }\n\
+[[noreturn]] inline void panic(Args&&...) { throw std::runtime_error(\"panic\"); }\n\
 template<typename... Args>\n\
-[[noreturn]] inline void panic_fmt(Args&&...) { std::abort(); }\n\
+[[noreturn]] inline void panic_fmt(Args&&...) { throw std::runtime_error(\"panic\"); }\n\
 template<typename... Args>\n\
-[[noreturn]] inline void unreachable_display(Args&&...) { std::abort(); }\n\
+[[noreturn]] inline void unreachable_display(Args&&...) { throw std::runtime_error(\"unreachable\"); }\n\
 }\n\
 namespace intrinsics {\n\
 struct Discriminant {\n\
@@ -18985,7 +18985,7 @@ template<typename V>\n\
 Discriminant discriminant_value(const V& value) {\n\
     return Discriminant{static_cast<std::size_t>(value.index())};\n\
 }\n\
-[[noreturn]] inline void unreachable() { std::abort(); }\n\
+[[noreturn]] inline void unreachable() { throw std::runtime_error(\"unreachable\"); }\n\
 }\n\
 }\n\
 \n\
