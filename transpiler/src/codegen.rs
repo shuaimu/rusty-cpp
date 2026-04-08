@@ -11427,6 +11427,13 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::len({})", receiver);
         }
+        // Rust `value.to_string()` (Display trait) → `rusty::to_string(value)`.
+        // C++ user-defined types don't have a `.to_string()` member; dispatch
+        // through a SFINAE helper that tries `.to_string()`, then `std::to_string()`.
+        if mc.method == "to_string" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::to_string({})", receiver);
+        }
         if mc.method == "to_vec"
             && mc.args.is_empty()
             && self.is_to_vec_runtime_receiver_expr(&mc.receiver)
@@ -19120,6 +19127,18 @@ auto clone(const T& value) {\n\
         return value.clone();\n\
     } else {\n\
         return value;\n\
+    }\n\
+}\n\
+// to_string: dispatches to .to_string() if available, then std::to_string for\n\
+// arithmetic types, then falls back to \"<unprintable>\".\n\
+template<typename T>\n\
+std::string to_string(const T& value) {\n\
+    if constexpr (requires { value.to_string(); }) {\n\
+        return value.to_string();\n\
+    } else if constexpr (requires { std::to_string(value); }) {\n\
+        return std::to_string(value);\n\
+    } else {\n\
+        return \"<unprintable>\";\n\
     }\n\
 }\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
@@ -31043,7 +31062,8 @@ mod tests {
         );
         assert!(out.contains("auto res = "));
         assert!(!out.contains("const auto res = "));
-        assert!(out.contains("res.unwrap_err().to_string();"));
+        // .to_string() is lowered to rusty::to_string() for SFINAE dispatch
+        assert!(out.contains("rusty::to_string(res.unwrap_err())"));
     }
 
     #[test]
@@ -32015,6 +32035,57 @@ mod tests {
         assert!(
             out.contains("ErrorKind_Empty{}"),
             "namespaced unit variant path should emit brace-init\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154448_to_string_emits_rusty_to_string() {
+        let out = transpile_str(
+            r#"
+            fn f(x: i32) -> String {
+                x.to_string()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::to_string("),
+            ".to_string() should emit rusty::to_string()\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".to_string()"),
+            "should not emit .to_string() member call\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154448_to_string_on_method_chain() {
+        let out = transpile_str(
+            r#"
+            fn f(x: Result<i32, i32>) {
+                x.unwrap_err().to_string();
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::to_string("),
+            "chained .to_string() should emit rusty::to_string()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154448_runtime_fallback_has_to_string_helper() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("std::string to_string("),
+            "runtime should contain rusty::to_string() helper"
+        );
+        assert!(
+            helpers.contains("value.to_string()"),
+            "runtime to_string should try .to_string() first"
+        );
+        assert!(
+            helpers.contains("std::to_string(value)"),
+            "runtime to_string should fall back to std::to_string"
         );
     }
 }
