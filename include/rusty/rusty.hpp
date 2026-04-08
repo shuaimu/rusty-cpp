@@ -153,8 +153,9 @@ namespace rusty {
     // fall back to `.as_str()` and direct `std::string_view` construction.
     template<typename T>
     std::string_view to_string_view(T&& value) {
-        if constexpr (requires { *value; } &&
-                      std::is_convertible_v<decltype(*value), std::string_view>) {
+        // Use a single requires expression so decltype(*value) is not
+        // evaluated eagerly when *value is not a valid expression.
+        if constexpr (requires { { *value } -> std::convertible_to<std::string_view>; }) {
             return std::string_view(*value);
         } else if constexpr (requires { value.as_str(); }) {
             return std::string_view(value.as_str());

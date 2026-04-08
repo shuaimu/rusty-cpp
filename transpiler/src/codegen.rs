@@ -135,6 +135,10 @@ pub struct CodeGen {
     /// Tracks unit variant names of data enums (e.g., "ErrorKind_Empty").
     /// Used to distinguish unit variant path values from constructor references.
     data_enum_unit_variants: HashSet<String>,
+    /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
+    /// to a concept/facade name instead of `const auto&` (which is invalid
+    /// inside generic argument lists like `SafeFn<T(auto)>`).
+    type_arg_nesting: std::cell::Cell<usize>,
     /// Named struct field types for local type-context recovery in match lowering.
     struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
     /// Named struct field declaration order keyed by struct name.
@@ -334,6 +338,7 @@ impl CodeGen {
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
+            type_arg_nesting: std::cell::Cell::new(0),
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
             struct_field_cpp_names: HashMap::new(),
@@ -3029,7 +3034,7 @@ impl CodeGen {
             && !return_type.contains("/* TODO:")
             && !param_types
                 .iter()
-                .any(|ty| ty == "auto" || ty.contains("/* TODO:"));
+                .any(|ty| ty == "auto" || ty.contains("auto") || ty.contains("/* TODO:"));
 
         if can_emit_safe_fn && !needs_sibling_capture {
             let signature = format!("{}({})", return_type, param_types.join(", "));
@@ -17334,6 +17339,7 @@ impl CodeGen {
                 // Check if the last segment has generic arguments
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                        self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);
                         let generic_args: Vec<String> = args
                             .args
                             .iter()
@@ -17343,6 +17349,7 @@ impl CodeGen {
                                 _ => None,
                             })
                             .collect();
+                        self.type_arg_nesting.set(self.type_arg_nesting.get() - 1);
 
                         if !generic_args.is_empty() {
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
@@ -17545,7 +17552,10 @@ impl CodeGen {
                 // copying non-copyable types.  Rust's `impl Trait` params accept
                 // both owned values and references; C++ `const auto&` handles both
                 // via reference binding / lifetime extension.
-                if self.module_name.is_some() {
+                // However, `auto` cannot appear inside type arguments like
+                // `SafeFn<uint64_t(auto)>`.  When inside a generic argument
+                // context, fall through to the facade/concept path instead.
+                if self.module_name.is_some() && self.type_arg_nesting.get() == 0 {
                     return "const auto&".to_string();
                 }
                 // Collect all trait names
@@ -19000,7 +19010,14 @@ fn merge_impl_type_generics_into_method(
 }
 
 fn normalize_token_text(tokens: String) -> String {
-    tokens.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed = tokens.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Normalize equivalent Rust path prefixes so `::core::fmt::Formatter`
+    // and `fmt::Formatter` produce the same key for dedup purposes.
+    collapsed
+        .replace(":: core :: fmt ::", "fmt ::")
+        .replace(":: std :: fmt ::", "fmt ::")
+        .replace("core :: fmt ::", "fmt ::")
+        .replace("std :: fmt ::", "fmt ::")
 }
 
 fn is_numeric_cpp_scalar_type(cpp_type: &str) -> bool {
