@@ -15388,12 +15388,21 @@ impl CodeGen {
             return "/* TODO: if-expression */".to_string();
         };
         let cond = self.emit_expr_to_string(&if_expr.cond);
-        let Some(then_expr) = self.extract_single_expr_from_block(&if_expr.then_branch) else {
+        let then_single = self.extract_single_expr_from_block(&if_expr.then_branch);
+        let else_single = self.extract_single_value_expr(else_branch);
+        // When either branch is a multi-statement block, try IIFE only if
+        // the branches don't contain early returns or `?` operators (which
+        // would escape to the lambda instead of the enclosing function).
+        if then_single.is_none() || else_single.is_none() {
+            if !self.block_contains_early_return_or_try(&if_expr.then_branch)
+                && !self.expr_contains_early_return_or_try(else_branch)
+            {
+                return self.emit_if_expr_as_iife(if_expr, expected_ty);
+            }
             return "/* TODO: if-expression */".to_string();
-        };
-        let Some(else_expr) = self.extract_single_value_expr(else_branch) else {
-            return "/* TODO: if-expression */".to_string();
-        };
+        }
+        let then_expr = then_single.unwrap();
+        let else_expr = else_single.unwrap();
 
         let inferred_expected_ty = if expected_ty.is_none() {
             self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
@@ -15436,6 +15445,224 @@ impl CodeGen {
             expected_cpp_ty.as_deref(),
         );
         format!("({} ? {} : {})", cond, then_val, else_val)
+    }
+
+    /// Check if a block contains early return statements or `?` (try) operators
+    /// that would incorrectly escape from an IIFE lambda.
+    fn block_contains_early_return_or_try(&self, block: &syn::Block) -> bool {
+        for stmt in &block.stmts {
+            match stmt {
+                syn::Stmt::Expr(expr, _) => {
+                    if self.expr_tree_has_return_or_try(expr) {
+                        return true;
+                    }
+                }
+                syn::Stmt::Local(local) => {
+                    if let Some(init) = &local.init {
+                        if self.expr_tree_has_return_or_try(&init.expr) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn expr_contains_early_return_or_try(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
+            syn::Expr::If(if_expr) => {
+                self.block_contains_early_return_or_try(&if_expr.then_branch)
+                    || if_expr
+                        .else_branch
+                        .as_ref()
+                        .is_some_and(|(_, e)| self.expr_contains_early_return_or_try(e))
+            }
+            _ => self.expr_tree_has_return_or_try(expr),
+        }
+    }
+
+    fn expr_tree_has_return_or_try(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Return(_) => true,
+            syn::Expr::Try(_) => true,
+            syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
+            syn::Expr::If(if_expr) => {
+                self.block_contains_early_return_or_try(&if_expr.then_branch)
+                    || if_expr
+                        .else_branch
+                        .as_ref()
+                        .is_some_and(|(_, e)| self.expr_tree_has_return_or_try(e))
+            }
+            syn::Expr::MethodCall(mc) => {
+                self.expr_tree_has_return_or_try(&mc.receiver)
+                    || mc
+                        .args
+                        .iter()
+                        .any(|a| self.expr_tree_has_return_or_try(a))
+            }
+            syn::Expr::Call(c) => {
+                self.expr_tree_has_return_or_try(&c.func)
+                    || c.args
+                        .iter()
+                        .any(|a| self.expr_tree_has_return_or_try(a))
+            }
+            syn::Expr::Binary(b) => {
+                self.expr_tree_has_return_or_try(&b.left)
+                    || self.expr_tree_has_return_or_try(&b.right)
+            }
+            syn::Expr::Assign(a) => {
+                self.expr_tree_has_return_or_try(&a.left)
+                    || self.expr_tree_has_return_or_try(&a.right)
+            }
+            syn::Expr::Macro(m) => {
+                // Check if macro is a try! or ? equivalent
+                m.mac
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "try_")
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower an if-expression with multi-statement branches into a C++ IIFE
+    /// (immediately-invoked function expression): `[&]() { if (...) { ... } else { ... } }()`.
+    fn emit_if_expr_as_iife(
+        &self,
+        if_expr: &syn::ExprIf,
+        _expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let mut parts = Vec::new();
+        parts.push("[&]() {".to_string());
+
+        // Emit the if condition
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            // if let Some(x) = expr { ... } else { ... }
+            let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+            let (some_check, _none_check, unwrap_method, _negated) =
+                self.option_like_pattern_surface_for_expr(&let_expr.expr);
+            // Extract the binding name from the pattern
+            let binding = self.extract_if_let_binding_name(&let_expr.pat);
+            parts.push(format!("auto&& _iflet_scrutinee = {};", scrutinee));
+            parts.push(format!("if (_iflet_scrutinee.{}()) {{", some_check));
+            if let Some(name) = &binding {
+                parts.push(format!("auto {} = _iflet_scrutinee.{}();", name, unwrap_method));
+            }
+        } else {
+            let cond = self.emit_expr_to_string(&if_expr.cond);
+            parts.push(format!("if ({}) {{", cond));
+        }
+
+        // Emit then-branch body
+        for stmt in &if_expr.then_branch.stmts {
+            let stmt_str = self.emit_stmt_to_string(stmt);
+            if !stmt_str.trim().is_empty() {
+                parts.push(stmt_str);
+            }
+        }
+        parts.push("} else {".to_string());
+
+        // Emit else-branch body
+        if let Some((_, else_expr)) = &if_expr.else_branch {
+            match else_expr.as_ref() {
+                syn::Expr::Block(block) => {
+                    for stmt in &block.block.stmts {
+                        let stmt_str = self.emit_stmt_to_string(stmt);
+                        if !stmt_str.trim().is_empty() {
+                            parts.push(stmt_str);
+                        }
+                    }
+                }
+                syn::Expr::If(nested_if) => {
+                    // else if ... — emit as nested if
+                    let nested = self.emit_if_expr_as_iife(nested_if, _expected_ty);
+                    parts.push(format!("return {};", nested));
+                }
+                other => {
+                    let else_str = self.emit_expr_to_string(other);
+                    parts.push(format!("return {};", else_str));
+                }
+            }
+        }
+        parts.push("}".to_string());
+        parts.push("}()".to_string());
+
+        parts.join(" ")
+    }
+
+    /// Extract the binding name from an if-let pattern like `Some(x)` → "x"
+    fn extract_if_let_binding_name(&self, pat: &syn::Pat) -> Option<String> {
+        match pat {
+            syn::Pat::TupleStruct(ts) => {
+                if let Some(inner) = ts.elems.first() {
+                    if let syn::Pat::Ident(pi) = inner {
+                        return Some(escape_cpp_keyword(&pi.ident.to_string()));
+                    }
+                }
+                None
+            }
+            syn::Pat::Ident(pi) => Some(escape_cpp_keyword(&pi.ident.to_string())),
+            _ => None,
+        }
+    }
+
+    /// Emit a single statement as a string (for use inside IIFE blocks).
+    fn emit_stmt_to_string(&self, stmt: &syn::Stmt) -> String {
+        match stmt {
+            syn::Stmt::Expr(expr, Some(_semi)) => {
+                let expr_str = self.emit_expr_to_string(expr);
+                format!("{};", expr_str)
+            }
+            syn::Stmt::Expr(expr, None) => {
+                // Tail expression — emit as return
+                let expr_str = self.emit_expr_to_string(expr);
+                format!("return {};", expr_str)
+            }
+            syn::Stmt::Local(local) => {
+                // let binding
+                let mut result = String::new();
+                let pat_name = match &local.pat {
+                    syn::Pat::Ident(pi) => {
+                        let name = escape_cpp_keyword(&pi.ident.to_string());
+                        if pi.mutability.is_some() {
+                            format!("auto {}", name)
+                        } else {
+                            format!("const auto {}", name)
+                        }
+                    }
+                    syn::Pat::Tuple(pt) => {
+                        let bindings: Vec<String> = pt
+                            .elems
+                            .iter()
+                            .map(|p| match p {
+                                syn::Pat::Ident(pi) => {
+                                    escape_cpp_keyword(&pi.ident.to_string())
+                                }
+                                _ => "_".to_string(),
+                            })
+                            .collect();
+                        format!("auto [{}]", bindings.join(", "))
+                    }
+                    _ => "auto _".to_string(),
+                };
+                if let Some(init) = &local.init {
+                    let init_str = self.emit_expr_to_string(&init.expr);
+                    result.push_str(&format!("{} = {};", pat_name, init_str));
+                } else {
+                    result.push_str(&format!("{};", pat_name));
+                }
+                result
+            }
+            syn::Stmt::Item(_) => String::new(), // Skip items inside expression blocks
+            syn::Stmt::Macro(m) => {
+                let mac_str = self.emit_macro_expr(&m.mac);
+                format!("{};", mac_str)
+            }
+        }
     }
 
     fn emit_if_let_expr_to_string(
@@ -32103,6 +32330,48 @@ mod tests {
         assert!(
             helpers.contains("std::to_string(value)"),
             "runtime to_string should fall back to std::to_string"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154450_if_expression_multi_stmt_uses_iife() {
+        let out = transpile_str(
+            r#"
+            fn f(x: Option<i32>) -> i32 {
+                let val = if let Some(v) = x {
+                    let doubled = v * 2;
+                    doubled + 1
+                } else {
+                    0
+                };
+                val
+            }
+            "#,
+        );
+        assert!(
+            out.contains("[&]()"),
+            "multi-statement if-let expression should use IIFE\nGot: {out}"
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "should not contain TODO placeholder\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154450_simple_if_expression_still_uses_ternary() {
+        let out = transpile_str(
+            r#"
+            fn f(x: bool) -> i32 {
+                let val = if x { 1 } else { 0 };
+                val
+            }
+            "#,
+        );
+        // Simple single-expression branches should still use ternary
+        assert!(
+            out.contains("?") && out.contains(":"),
+            "simple if-expression should use ternary\nGot: {out}"
         );
     }
 }
