@@ -4836,6 +4836,17 @@ impl CodeGen {
                     };
                     ty = format!("::{}{}", ns_prefix, ty);
                 }
+                // When inside a namespace that shadows a sibling module (e.g.,
+                // tests::iter shadows ::iter), qualify with :: to avoid collision
+                if !self.module_stack.is_empty() && !ty.starts_with("::") {
+                    let first_segment = ty.split("::").next().unwrap_or("");
+                    if !first_segment.is_empty()
+                        && self.declared_item_names.contains(first_segment)
+                        && first_segment.chars().next().is_some_and(|c| c.is_lowercase())
+                    {
+                        ty = format!("::{}", ty);
+                    }
+                }
                 if !self.mark_emitted_non_method_member_name(&name) {
                     return;
                 }
