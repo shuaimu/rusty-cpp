@@ -407,6 +407,48 @@ fn is_overloaded_deduction_line(trimmed: &str) -> bool {
     trimmed.contains("overloaded(Ts...) -> overloaded<Ts...>;")
 }
 
+/// Detect lines that define top-level functions or namespace blocks that
+/// may collide across test targets flattened into one runner.
+fn is_duplicatable_definition(trimmed: &str) -> bool {
+    // Strip leading `export ` if present (cppm syntax).
+    let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    // `namespace util {`
+    if t.starts_with("namespace ")
+        && t.ends_with('{')
+        && !t.starts_with("namespace rusty")
+        && !t.starts_with("namespace std")
+        && !t.starts_with("namespace core")
+    {
+        return true;
+    }
+    // `void test_eq() {` or `void rusty_test_test_eq() {`
+    if (t.starts_with("void ") || t.starts_with("template<"))
+        && t.contains('(')
+        && (t.ends_with('{') || t.ends_with(") {"))
+        && !t.contains("::")
+    {
+        return true;
+    }
+    false
+}
+
+/// Extract a dedup key from a definition line.
+fn extract_definition_key(trimmed: &str) -> Option<String> {
+    let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    // For namespaces: use the namespace name as key
+    if t.starts_with("namespace ") && t.ends_with('{') {
+        return Some(t.to_string());
+    }
+    // For functions: use everything before '{'
+    if let Some(before_brace) = t.split('{').next() {
+        let key = before_brace.trim().to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    None
+}
+
 fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
     let line = trimmed.strip_prefix("export ").unwrap_or(trimmed);
     let rest = line.strip_prefix("void rusty_test_")?;
@@ -1406,6 +1448,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Collect test names and transpiled code
         let mut test_entries: Vec<RunnerTestEntry> = Vec::new();
         let mut seen_test_fns: HashSet<String> = HashSet::new();
+        let mut seen_definitions: HashSet<String> = HashSet::new();
+        let mut skip_dup_depth: i32 = 0;
         let mut runtime_prelude_emitted = false;
         let module_namespace_markers: Vec<String> = targets
             .iter()
@@ -1421,6 +1465,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             let mut skip_shared_prelude = cppm_index > 0 && runtime_prelude_emitted;
             collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
 
+            let is_test_target = cppm_index > 0;
+
             // Strip module syntax and add code
             runner_src.push_str(&format!(
                 "// ── from {} ──\n",
@@ -1428,7 +1474,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             ));
             for line in content.lines() {
                 let trimmed = line.trim();
-                // (Namespace/function dedup removed — too aggressive across targets.)
                 if skip_shared_prelude {
                     // For additional module units, skip the duplicated runtime prelude and
                     // resume at crate/test payloads (extern crate/use/export item region).
@@ -1493,7 +1538,38 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 } else {
                     line
                 };
-                // (Namespace/function dedup detection removed.)
+                // Skip duplicate top-level definitions across test targets.
+                // Multiple test targets may define identical helpers (e.g.,
+                // `namespace util { ... }` or `void test_eq() { ... }`).
+                if skip_dup_depth > 0 {
+                    for ch in trimmed.chars() {
+                        if ch == '{' {
+                            skip_dup_depth += 1;
+                        } else if ch == '}' {
+                            skip_dup_depth -= 1;
+                        }
+                    }
+                    continue;
+                }
+                if is_test_target && is_duplicatable_definition(trimmed) {
+                    if let Some(sig) = extract_definition_key(trimmed) {
+                        if !seen_definitions.insert(sig) {
+                            skip_dup_depth = 0;
+                            for ch in trimmed.chars() {
+                                if ch == '{' {
+                                    skip_dup_depth += 1;
+                                } else if ch == '}' {
+                                    skip_dup_depth -= 1;
+                                }
+                            }
+                            if skip_dup_depth > 0 {
+                                continue;
+                            }
+                            // Single-line definition: just skip this line
+                            continue;
+                        }
+                    }
+                }
                 runner_src.push_str(line);
                 runner_src.push('\n');
                 if trimmed == "namespace rusty {"
@@ -1507,6 +1583,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             if pending_overloaded_template {
                 runner_src.push_str("template<class... Ts>\n");
             }
+            // Reset skip depth for next module unit
+            skip_dup_depth = 0;
             if unit_emitted_runtime_prelude {
                 runtime_prelude_emitted = true;
             }
