@@ -24,6 +24,17 @@ pub fn transpile_with_type_map_and_extension_hints(
     type_map: &UserTypeMap,
     extension_method_hints: &HashSet<String>,
 ) -> Result<String, String> {
+    transpile_full(rust_source, module_name, type_map, extension_method_hints, None)
+}
+
+/// Transpile with all options including crate name for path stripping.
+pub fn transpile_full(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    crate_name: Option<&str>,
+) -> Result<String, String> {
     let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
 
     let mut codegen = if extension_method_hints.is_empty() {
@@ -31,6 +42,9 @@ pub fn transpile_with_type_map_and_extension_hints(
     } else {
         CodeGen::with_type_map_and_extension_hints(type_map.clone(), extension_method_hints.clone())
     };
+    if let Some(name) = crate_name {
+        codegen.set_crate_name(name);
+    }
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
 }

@@ -234,6 +234,9 @@ pub struct CodeGen {
     self_path_overrides: Vec<Option<String>>,
     /// When set, emit C++20 module declarations and `export` for pub items.
     module_name: Option<String>,
+    /// The crate name being transpiled (e.g., "semver").  Used to strip
+    /// crate-qualified paths like `semver::Version` → `Version` in test targets.
+    crate_name: Option<String>,
     /// Current inline module nesting path while emitting items.
     module_stack: Vec<String>,
     /// Traits intentionally skipped in module mode (Proxy facade unavailable),
@@ -357,6 +360,7 @@ impl CodeGen {
             deref_mut_method_scopes: Vec::new(),
             self_path_overrides: Vec::new(),
             module_name: None,
+            crate_name: None,
             module_stack: Vec::new(),
             crate_reexports: HashMap::new(),
             skipped_module_traits: HashSet::new(),
@@ -417,6 +421,11 @@ impl CodeGen {
 
     fn newline(&mut self) {
         self.output.push('\n');
+    }
+
+    /// Set the crate name for stripping crate-qualified paths in test targets.
+    pub fn set_crate_name(&mut self, name: &str) {
+        self.crate_name = Some(name.replace('-', "_"));
     }
 
     /// Emit a complete Rust file as C++ code.
@@ -16484,6 +16493,20 @@ impl CodeGen {
             }
         }
 
+        // Strip crate-name prefix from paths in test targets.
+        // E.g., `semver::Version` → `Version` when the crate is `semver`.
+        if segments.len() >= 2 {
+            if let Some(ref crate_name) = self.crate_name {
+                if segments[0] == *crate_name {
+                    let mut resolved = segments[1..].to_vec();
+                    for seg in &mut resolved {
+                        *seg = escape_cpp_keyword(seg);
+                    }
+                    return resolved.join("::");
+                }
+            }
+        }
+
         // Recover omitted template arguments for local associated paths where the
         // base generic type is known in this scope (for example `IterNames::new_`
         // inside `Iter<B>` should become `IterNames<B>::new_`).
@@ -31830,6 +31853,58 @@ mod tests {
         assert!(
             out.contains("rusty::partial_cmp("),
             "UFCS PartialOrd::partial_cmp should emit rusty::partial_cmp()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154445_crate_name_prefix_stripped_from_type_paths() {
+        // When crate_name is set, paths like `semver::Version` should be
+        // stripped to just `Version`.
+        let code = r#"
+            struct Version { major: u64 }
+            fn f() {
+                let _v: semver::Version = Version { major: 1 };
+            }
+        "#;
+        let file: syn::File = syn::parse_str(code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_crate_name("semver");
+        cg.emit_file(&file, None);
+        let out = cg.into_output();
+        // Should NOT contain `semver::Version` — it should be just `Version`
+        assert!(
+            !out.contains("semver::Version"),
+            "crate prefix should be stripped from type paths\nGot: {out}"
+        );
+        assert!(
+            out.contains("Version"),
+            "type name should still be present\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154445_crate_name_prefix_stripped_from_turbofish() {
+        // Turbofish type args like `assert_send_sync::<semver::Version>()`
+        // should be stripped.
+        let code = r#"
+            struct Version {}
+            fn assert_send_sync<T>() {}
+            fn test() {
+                assert_send_sync::<semver::Version>();
+            }
+        "#;
+        let file: syn::File = syn::parse_str(code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_crate_name("semver");
+        cg.emit_file(&file, None);
+        let out = cg.into_output();
+        assert!(
+            !out.contains("semver::"),
+            "crate prefix in turbofish should be stripped\nGot: {out}"
+        );
+        assert!(
+            out.contains("assert_send_sync<Version>()"),
+            "should emit assert_send_sync<Version>()\nGot: {out}"
         );
     }
 }

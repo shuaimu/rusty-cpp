@@ -1371,11 +1371,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     } else {
         for (target, source) in &expanded_sources {
-            let cpp = transpile::transpile_with_type_map_and_extension_hints(
+            let cpp = transpile::transpile_full(
                 source,
                 Some(&target.module_name),
                 &type_map,
                 &extension_method_hints,
+                Some(crate_name),
             )?;
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
