@@ -586,12 +586,27 @@ impl CodeGen {
         // We only insert the helper if code generation actually emits `std::visit(overloaded { ... })`.
         let helper_insert_pos = self.output.len();
 
+        // Emit ExternCrate items BEFORE forward declarations so that
+        // forward decls appear after `// extern crate` markers in the output.
+        // This ensures the parity runner's prelude-skip logic doesn't
+        // accidentally skip forward declarations.
+        // Note: Use items stay AFTER forward decls (they may depend on them).
+        let ordered_items = self.order_items_for_emission(&file.items);
+        let mut deferred_items: Vec<&syn::Item> = Vec::new();
+        for item in &ordered_items {
+            if matches!(item, syn::Item::ExternCrate(_)) {
+                self.emit_item(item);
+                self.newline();
+            } else {
+                deferred_items.push(item);
+            }
+        }
+
         if self.emit_item_forward_decls(&file.items, 0) {
             self.newline();
         }
 
-        let ordered_items = self.order_items_for_emission(&file.items);
-        for item in ordered_items {
+        for item in deferred_items {
             // Skip impl blocks — they've been merged into structs
             if matches!(item, syn::Item::Impl(_)) {
                 continue;
