@@ -11853,7 +11853,13 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::hash::hash({}, {})", receiver, args[0]);
+            // Strip `&` from the state argument — Rust passes `&mut state`
+            // but rusty::hash::hash takes `State&` by reference, not pointer.
+            let state_arg = match mc.args.first() {
+                Some(syn::Expr::Reference(r)) => self.emit_expr_to_string(&r.expr),
+                _ => args[0].clone(),
+            };
+            return format!("rusty::hash::hash({}, {})", receiver, state_arg);
         }
         // Rust `.clone()` → `rusty::clone(receiver)`.
         // Expanded `#[derive(Clone)]` calls `.clone()` on every field, but C++
@@ -19608,9 +19614,18 @@ constexpr T* get_unchecked_mut(T& value) {\n\
 namespace hash {\n\
 template<typename State>\n\
 inline void combine(State& state, std::size_t value) {\n\
-    auto seed = static_cast<std::size_t>(state);\n\
+    std::size_t seed;\n\
+    if constexpr (requires { state.state; }) {\n\
+        seed = state.state;\n\
+    } else {\n\
+        seed = static_cast<std::size_t>(state);\n\
+    }\n\
     seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);\n\
-    state = static_cast<State>(seed);\n\
+    if constexpr (requires { state.state; }) {\n\
+        state.state = seed;\n\
+    } else {\n\
+        state = static_cast<State>(seed);\n\
+    }\n\
 }\n\
 template<typename T, typename State>\n\
 void hash(const T& value, State& state) {\n\
