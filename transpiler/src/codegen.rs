@@ -17534,9 +17534,12 @@ impl CodeGen {
                     }
                 }
                 // In argument position, `impl Trait` is equivalent to a template parameter.
-                // Use C++20 abbreviated function template: `auto` creates an implicit template param.
+                // Use C++20 abbreviated function template with `const auto&` to avoid
+                // copying non-copyable types.  Rust's `impl Trait` params accept
+                // both owned values and references; C++ `const auto&` handles both
+                // via reference binding / lifetime extension.
                 if self.module_name.is_some() {
-                    return "auto".to_string();
+                    return "const auto&".to_string();
                 }
                 // Collect all trait names
                 let trait_paths: Vec<&syn::Path> = it
@@ -27979,7 +27982,7 @@ mod tests {
             "#,
             "test_crate",
         );
-        assert!(out.contains("auto writer"), "impl Trait arg should use auto, got: {}", out);
+        assert!(out.contains("const auto& writer"), "impl Trait arg should use const auto&, got: {}", out);
         assert!(!out.contains("void*"), "impl Trait should not use void*, got: {}", out);
     }
 
