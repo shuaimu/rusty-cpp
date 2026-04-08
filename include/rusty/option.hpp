@@ -196,6 +196,26 @@ public:
         return Option<U>(None);
     }
     
+    // and_then: flatMap — f returns Option<U>, None propagates
+    template<typename F>
+    auto and_then(F&& f) {
+        using ResultType = decltype(f(std::move(value)));
+        if (has_value) {
+            return f(std::move(value));
+        }
+        return ResultType(None);
+    }
+
+    // and_then on const reference
+    template<typename F>
+    auto and_then(F&& f) const {
+        using ResultType = decltype(f(value));
+        if (has_value) {
+            return f(value);
+        }
+        return ResultType(None);
+    }
+
     // Map function over reference
     template<typename F>
     // @lifetime: (&'a) -> owned

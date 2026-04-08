@@ -197,17 +197,21 @@ public:
     void reserve(size_t new_capacity) {
         if (new_capacity > capacity_) {
             T* new_data = static_cast<T*>(::operator new(new_capacity * sizeof(T)));
-            
+
             // Move existing elements
             for (size_t i = 0; i < size_; ++i) {
                 new (&new_data[i]) T(std::move(data_[i]));
                 data_[i].~T();
             }
-            
+
             ::operator delete(data_);
             data_ = new_data;
             capacity_ = new_capacity;
         }
+    }
+
+    void reserve_exact(size_t additional) {
+        reserve(size_ + additional);
     }
     
     // Clear all elements
