@@ -5535,34 +5535,49 @@ impl CodeGen {
             return None;
         }
         let helper_name = mc.method.to_string();
-        // Map known bitwise helpers to C++ operators on `_0` field
+        // Map known bitwise helpers to C++ operators on `_0` field.
+        // `return_val`: true for operators returning a value, false for
+        // compound assignment operators that modify in place.
         let struct_name = self.current_struct.as_ref()?;
-        let (cpp_op, is_binary) = match helper_name.as_str() {
-            "union" | "union_" => ("|", true),
-            "intersection" => ("&", true),
-            "symmetric_difference" => ("^", true),
-            "difference" => ("& ~", true), // a & ~b
-            "complement" => ("~", false),
+        let (cpp_op, is_binary, return_val) = match helper_name.as_str() {
+            "union" | "union_" => ("|", true, true),
+            "intersection" => ("&", true, true),
+            "symmetric_difference" => ("^", true, true),
+            "difference" => ("& ~", true, true),
+            "complement" => ("~", false, true),
+            // Compound assignment helpers (modify self in place)
+            "insert" => ("|=", true, false),
+            "remove" => ("remove", true, false), // special: a &= ~b
+            "toggle" => ("^=", true, false),
             _ => return None,
         };
         if is_binary && mc.args.len() == 1 {
-            // binary: `Self{this->_0 OP other._0}`
             let arg = self.emit_pat_to_string(
                 &match method.sig.inputs.iter().nth(1) {
                     Some(syn::FnArg::Typed(pt)) => pt.pat.as_ref().clone(),
                     _ => return None,
                 },
             );
-            if cpp_op == "& ~" {
-                Some(format!(
-                    "return {}{{static_cast<decltype(this->_0)>(this->_0 & ~{}._0)}};",
-                    struct_name, arg
-                ))
+            if return_val {
+                // binary returning value: `Self{this->_0 OP other._0}`
+                if cpp_op == "& ~" {
+                    Some(format!(
+                        "return {}{{static_cast<decltype(this->_0)>(this->_0 & ~{}._0)}};",
+                        struct_name, arg
+                    ))
+                } else {
+                    Some(format!(
+                        "return {}{{static_cast<decltype(this->_0)>(this->_0 {} {}._0)}};",
+                        struct_name, cpp_op, arg
+                    ))
+                }
             } else {
-                Some(format!(
-                    "return {}{{static_cast<decltype(this->_0)>(this->_0 {} {}._0)}};",
-                    struct_name, cpp_op, arg
-                ))
+                // compound assignment: `this->_0 OP= other._0`
+                if cpp_op == "remove" {
+                    Some(format!("this->_0 &= ~{}._0;", arg))
+                } else {
+                    Some(format!("this->_0 {} {}._0;", cpp_op, arg))
+                }
             }
         } else if !is_binary && mc.args.is_empty() {
             // unary: `Self{~this->_0}`
