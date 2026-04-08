@@ -4,6 +4,7 @@
 #include <optional>
 #include <utility>
 #include <stdexcept>
+#include <type_traits>
 
 // Option<T> - Represents an optional value
 // Equivalent to Rust's Option<T>
@@ -65,9 +66,15 @@ public:
         }
     }
     
-    // Copy constructor - deleted to enforce Rust-like move semantics
-    // Use clone() for explicit copying
-    Option(const Option& other) = delete;
+    // Copy constructor - allowed for trivially copyable types (like Rust's Copy),
+    // deleted for non-trivial types to enforce Rust-like move semantics.
+    Option(const Option& other) requires std::is_trivially_copyable_v<T>
+        : has_value(other.has_value) {
+        if (has_value) {
+            new (&value) T(other.value);
+        }
+    }
+    Option(const Option& other) requires (!std::is_trivially_copyable_v<T>) = delete;
 
     // Move constructor
     Option(Option&& other) noexcept : has_value(other.has_value) {
@@ -77,9 +84,16 @@ public:
         }
     }
 
-    // Copy assignment - deleted to enforce Rust-like move semantics
-    // Use clone() for explicit copying
-    Option& operator=(const Option& other) = delete;
+    // Copy assignment - allowed for trivially copyable types.
+    Option& operator=(const Option& other) requires std::is_trivially_copyable_v<T> {
+        if (this != &other) {
+            if (has_value) value.~T();
+            has_value = other.has_value;
+            if (has_value) new (&value) T(other.value);
+        }
+        return *this;
+    }
+    Option& operator=(const Option& other) requires (!std::is_trivially_copyable_v<T>) = delete;
 
     // Move assignment
     // @lifetime: (&'a mut self) -> &'a mut self
@@ -299,16 +313,16 @@ public:
     
     Option(T& ref) : ptr(&ref) {}
 
-    // Copy constructor - deleted to enforce Rust-like move semantics
-    Option(const Option& other) = delete;
+    // Copy constructor - pointer/reference options are always copyable
+    Option(const Option& other) = default;
 
     // Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
 
-    // Copy assignment - deleted to enforce Rust-like move semantics
-    Option& operator=(const Option& other) = delete;
+    // Copy assignment - pointer/reference options are always copyable
+    Option& operator=(const Option& other) = default;
 
     // Move assignment
     // @lifetime: (&'a mut self) -> &'a mut self
@@ -441,16 +455,16 @@ public:
     
     Option(const T& ref) : ptr(&ref) {}
 
-    // Copy constructor - deleted to enforce Rust-like move semantics
-    Option(const Option& other) = delete;
+    // Copy constructor - pointer/reference options are always copyable
+    Option(const Option& other) = default;
 
     // Move constructor
     Option(Option&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;
     }
 
-    // Copy assignment - deleted to enforce Rust-like move semantics
-    Option& operator=(const Option& other) = delete;
+    // Copy assignment - pointer/reference options are always copyable
+    Option& operator=(const Option& other) = default;
 
     // Move assignment
     // @lifetime: (&'a mut self) -> &'a mut self
