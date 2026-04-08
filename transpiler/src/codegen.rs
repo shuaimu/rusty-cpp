@@ -8370,7 +8370,15 @@ impl CodeGen {
             }
             syn::Pat::Tuple(tuple) => {
                 // let (a, b) = expr; → auto [a, b] = expr;
-                // Use allocate_local_cpp_name for each element to handle shadowing
+                // Emit the init expression FIRST (using current scope names),
+                // THEN allocate shadow names for the pattern elements.
+                // This prevents self-referential initialization like
+                // `auto [major, text_shadow1] = f(text_shadow1)`.
+                let expr_str = if let Some(init) = &local.init {
+                    Some(self.emit_expr_to_string(&init.expr))
+                } else {
+                    None
+                };
                 let names: Vec<String> = tuple
                     .elems
                     .iter()
@@ -8383,8 +8391,7 @@ impl CodeGen {
                         }
                     })
                     .collect();
-                if let Some(init) = &local.init {
-                    let expr_str = self.emit_expr_to_string(&init.expr);
+                if let Some(expr_str) = expr_str {
                     self.writeln(&format!("auto [{}] = {};", names.join(", "), expr_str));
                 }
             }
