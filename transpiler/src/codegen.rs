@@ -138,6 +138,10 @@ pub struct CodeGen {
     /// Tracks unit variant names of data enums (e.g., "ErrorKind_Empty").
     /// Used to distinguish unit variant path values from constructor references.
     data_enum_unit_variants: HashSet<String>,
+    /// Tracks associated constants on C-like enums (e.g., "Op_DEFAULT").
+    /// These are emitted as standalone constants since enum class can't
+    /// have static members; path references are rewritten accordingly.
+    c_like_enum_consts: HashSet<String>,
     /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
@@ -342,6 +346,7 @@ impl CodeGen {
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
+            c_like_enum_consts: HashSet::new(),
             type_arg_nesting: std::cell::Cell::new(0),
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
@@ -3948,6 +3953,31 @@ impl CodeGen {
             self.writeln(&variants.join(",\n    "));
             self.indent -= 1;
             self.writeln("};");
+
+            // Emit associated constants from impl blocks for C-like enums.
+            // C++ enum class can't have static members, so emit as standalone
+            // inline constexpr with a namespaced name.
+            let name_str = name.to_string();
+            if let Some(items) = self.impl_blocks.get(&name_str) {
+                for item in items.clone() {
+                    if let syn::ImplItem::Const(c) = &item {
+                        let const_name = escape_cpp_keyword(&c.ident.to_string());
+                        let ty = self.map_type(&c.ty);
+                        let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
+                        // Use a namespace wrapper so `Op::DEFAULT` syntax works:
+                        // namespace Op_ { inline constexpr Op DEFAULT = Op::Caret; }
+                        // using Op_::DEFAULT; // — no, this doesn't help.
+                        // Instead, emit as free-standing constant and rewrite
+                        // path references from `Op::DEFAULT` to just `Op_DEFAULT`.
+                        let key = format!("{}_{}", name, const_name);
+                        self.c_like_enum_consts.insert(key);
+                        self.writeln(&format!(
+                            "inline constexpr {} {}_{} = {};",
+                            ty, name, const_name, expr
+                        ));
+                    }
+                }
+            }
         }
         self.pop_type_param_scope();
     }
@@ -17180,6 +17210,19 @@ impl CodeGen {
                     variant_key
                 );
             }
+            // C-like enum associated const: `Op::DEFAULT` → `Op_DEFAULT`
+            if self.c_like_enum_consts.contains(&variant_key) {
+                let prefix_segments: Vec<String> = path
+                    .segments
+                    .iter()
+                    .take(path.segments.len() - 2)
+                    .map(|s| escape_cpp_keyword(&s.ident.to_string()))
+                    .collect();
+                if prefix_segments.is_empty() {
+                    return variant_key;
+                }
+                return format!("{}::{}", prefix_segments.join("::"), variant_key);
+            }
         }
         let mut emitted = self.emit_path_to_string(path);
         if let Some(template_args) = self.emit_expr_path_template_args(path) {
@@ -19484,6 +19527,14 @@ std::string to_string(const T& value) {\n\
 }\n\
 // Rust u8::is_ascii_digit() — check if byte is in '0'..='9'.\n\
 inline bool is_ascii_digit(uint8_t b) { return b >= '0' && b <= '9'; }\n\
+} // namespace rusty\n\
+// DefaultHasher stub — used by expanded #[derive(Hash)] test code.\n\
+struct DefaultHasher {\n\
+    std::size_t state = 14695981039346656037ULL;\n\
+    static DefaultHasher new_() { return DefaultHasher{}; }\n\
+    std::size_t finish() const { return state; }\n\
+};\n\
+namespace rusty {\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
     if (opt.is_none()) return std::partial_ordering::unordered;\n\
@@ -32550,6 +32601,51 @@ mod tests {
         assert!(
             out.contains("auto string"),
             "ref mut binding to rvalue should emit 'auto string ='\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154456_default_hasher_runtime_stub() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("struct DefaultHasher"),
+            "runtime should have DefaultHasher stub"
+        );
+        assert!(
+            helpers.contains("DefaultHasher new_()"),
+            "DefaultHasher should have new_() static method"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154456_c_like_enum_associated_const() {
+        let out = transpile_str(
+            r#"
+            enum Op {
+                Exact,
+                Caret,
+            }
+            impl Op {
+                const DEFAULT: Self = Op::Caret;
+            }
+            fn f() -> Op {
+                Op::DEFAULT
+            }
+            "#,
+        );
+        // Emitted as standalone constexpr `Op_DEFAULT = Op::Caret;`
+        assert!(
+            out.contains("Op_DEFAULT"),
+            "associated const should emit Op_DEFAULT\nGot: {out}"
+        );
+        assert!(
+            out.contains("Op::Caret"),
+            "DEFAULT should reference Op::Caret\nGot: {out}"
+        );
+        // Path `Op::DEFAULT` should be rewritten to `Op_DEFAULT`
+        assert!(
+            !out.contains("Op::DEFAULT"),
+            "Op::DEFAULT path should be rewritten to Op_DEFAULT\nGot: {out}"
         );
     }
 }
