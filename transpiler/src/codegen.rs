@@ -15691,15 +15691,28 @@ impl CodeGen {
             return None;
         };
 
-        let else_value = match else_branch.as_ref() {
-            syn::Expr::Block(b) => {
-                self.extract_single_expr_from_block(&b.block)
-                    .map(|e| self.emit_expr_to_string(e))?
-            }
-            other => self.emit_expr_to_string(other),
+        // Try to extract else-branch value for initialization.
+        // If else-branch is multi-statement with early return (no value),
+        // use default initialization and emit else as statements.
+        let else_result = match else_branch.as_ref() {
+            syn::Expr::Block(b) => self
+                .extract_single_expr_from_block(&b.block)
+                .map(|e| self.emit_expr_to_string(e)),
+            other => Some(self.emit_expr_to_string(other)),
+        };
+        let else_has_early_return = match else_branch.as_ref() {
+            syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
+            _ => false,
         };
 
-        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, else_value));
+        if let Some(else_value) = &else_result {
+            self.writeln(&format!("{} {} = {};", decl_type, cpp_name, else_value));
+        } else if else_has_early_return {
+            // Else always returns early — use default-init (never reached via else path)
+            self.writeln(&format!("{} {} {{}};", decl_type, cpp_name));
+        } else {
+            return None;
+        }
 
         self.writeln("{");
         self.indent += 1;
@@ -15735,7 +15748,22 @@ impl CodeGen {
         }
 
         self.indent -= 1;
-        self.writeln("}");
+        // Emit else-branch statements if it has early returns
+        if else_result.is_none() && else_has_early_return {
+            self.writeln("} else {");
+            self.indent += 1;
+            if let Some((_, else_expr)) = &if_expr.else_branch {
+                if let syn::Expr::Block(b) = else_expr.as_ref() {
+                    for stmt in &b.block.stmts {
+                        self.emit_stmt(stmt, false);
+                    }
+                }
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        } else {
+            self.writeln("}");
+        }
         self.indent -= 1;
         self.writeln("}");
         Some(())
@@ -15762,20 +15790,36 @@ impl CodeGen {
         };
 
         // Emit else-branch value as default for the result variable.
-        let else_value = match else_branch.as_ref() {
-            syn::Expr::Block(b) => {
-                self.extract_single_expr_from_block(&b.block)
-                    .map(|e| self.emit_expr_to_string(e))?
-            }
-            other => self.emit_expr_to_string(other),
+        let else_result = match else_branch.as_ref() {
+            syn::Expr::Block(b) => self
+                .extract_single_expr_from_block(&b.block)
+                .map(|e| self.emit_expr_to_string(e)),
+            other => Some(self.emit_expr_to_string(other)),
+        };
+        let else_has_early_return = match else_branch.as_ref() {
+            syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
+            _ => false,
         };
 
-        // Declare result variable with unique name
         let result_var = format!("_iflet_result{}", self.iflet_result_counter);
         self.iflet_result_counter += 1;
-        self.writeln(&format!("auto {} = {};", result_var, else_value));
+        if let Some(else_value) = &else_result {
+            self.writeln(&format!("auto {} = {};", result_var, else_value));
+        } else if else_has_early_return {
+            // Else always returns early — we need a dummy init.
+            // Extract then-branch tail expr to get the type via decltype.
+            let then_tail = if_expr.then_branch.stmts.last()
+                .and_then(|s| if let syn::Stmt::Expr(e, None) = s { Some(e) } else { None })
+                .map(|e| self.emit_expr_to_string(e));
+            if let Some(tail_str) = then_tail {
+                self.writeln(&format!("decltype({}) {} {{}};", tail_str, result_var));
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
 
-        // Emit the if block as a statement
         self.writeln("{");
         self.indent += 1;
 
