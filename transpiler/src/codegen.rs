@@ -9151,8 +9151,21 @@ impl CodeGen {
                         }
                     })
                 })
-                // Keep local raw-pointer flow analyzable even when pointee type
-                // cannot be recovered from receiver context.
+                // When pointee type cannot be recovered from receiver context,
+                // try to use the current struct's first TYPE parameter (for generic
+                // containers like ArrayVec<T, CAP>), otherwise fall back to u8.
+                // Only use single-letter uppercase names (T, U, etc.) to avoid
+                // picking up const generic params like CAP.
+                .or_else(|| {
+                    self.type_param_scopes.iter().rev()
+                        .find_map(|scope| {
+                            scope.iter().find(|name| {
+                                name.len() <= 2 && name.chars().next().is_some_and(|c| c.is_uppercase())
+                                    && name.chars().all(|c| c.is_alphabetic())
+                            })
+                        })
+                        .and_then(|param| syn::parse_str::<syn::Type>(param).ok())
+                })
                 .unwrap_or_else(|| parse_quote!(u8));
             if method == "as_mut_ptr" {
                 return Some(parse_quote!(*mut #pointee_ty));
