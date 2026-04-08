@@ -132,6 +132,9 @@ pub struct CodeGen {
     /// Enum names that lower to `std::variant` wrappers (enums with data).
     /// Used to decide when match-path patterns require `std::visit` rather than `switch`.
     data_enum_types: HashSet<String>,
+    /// Tracks unit variant names of data enums (e.g., "ErrorKind_Empty").
+    /// Used to distinguish unit variant path values from constructor references.
+    data_enum_unit_variants: HashSet<String>,
     /// Named struct field types for local type-context recovery in match lowering.
     struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
     /// Named struct field declaration order keyed by struct name.
@@ -330,6 +333,7 @@ impl CodeGen {
             extension_method_names: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
+            data_enum_unit_variants: HashSet::new(),
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
             struct_field_cpp_names: HashMap::new(),
@@ -465,6 +469,7 @@ impl CodeGen {
         self.extension_trait_impl_methods.clear();
         self.extension_method_names.clear();
         self.data_enum_types.clear();
+        self.data_enum_unit_variants.clear();
         self.struct_field_types.clear();
         self.struct_field_order.clear();
         self.struct_field_cpp_names.clear();
@@ -3601,6 +3606,13 @@ impl CodeGen {
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
         if has_data {
             self.data_enum_types.insert(name.to_string());
+            // Track which variants are unit variants (no fields)
+            for variant in &e.variants {
+                if variant.fields.is_empty() {
+                    self.data_enum_unit_variants
+                        .insert(format!("{}_{}", name, variant.ident));
+                }
+            }
         } else {
             self.data_enum_types.remove(&name.to_string());
         }
@@ -16826,6 +16838,32 @@ impl CodeGen {
         }
         if self.is_unit_struct_path(path) {
             return format!("{}{{}}", self.emit_path_to_string(path));
+        }
+        // Data enum unit variant path: `ErrorKind::Empty` → `ErrorKind_Empty{}`
+        // Only applies to unit variants (no fields) — data variants like
+        // `Either::Left` used as constructor references are NOT rewritten.
+        if path.segments.len() >= 2 {
+            let variant_seg = &path.segments[path.segments.len() - 1];
+            let enum_seg = &path.segments[path.segments.len() - 2];
+            let enum_name = enum_seg.ident.to_string();
+            let variant_name = variant_seg.ident.to_string();
+            let variant_key = format!("{}_{}", enum_name, variant_name);
+            if self.data_enum_unit_variants.contains(&variant_key) {
+                let prefix_segments: Vec<String> = path
+                    .segments
+                    .iter()
+                    .take(path.segments.len() - 2)
+                    .map(|s| escape_cpp_keyword(&s.ident.to_string()))
+                    .collect();
+                if prefix_segments.is_empty() {
+                    return format!("{}{{}}", variant_key);
+                }
+                return format!(
+                    "{}::{}{{}}",
+                    prefix_segments.join("::"),
+                    variant_key
+                );
+            }
         }
         let mut emitted = self.emit_path_to_string(path);
         if let Some(template_args) = self.emit_expr_path_template_args(path) {
@@ -31905,6 +31943,75 @@ mod tests {
         assert!(
             out.contains("assert_send_sync<Version>()"),
             "should emit assert_send_sync<Version>()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154446_data_enum_unit_variant_path_emits_brace_init() {
+        // `ErrorKind::Empty` (unit variant of data enum) used as a value
+        // should emit `ErrorKind_Empty{}`, not `ErrorKind::Empty`.
+        let out = transpile_str(
+            r#"
+            enum ErrorKind {
+                Empty,
+                Overflow,
+                Other(String),
+            }
+            fn make_error() -> ErrorKind {
+                ErrorKind::Empty
+            }
+            "#,
+        );
+        assert!(
+            out.contains("ErrorKind_Empty{}"),
+            "unit variant path should emit brace-init\nGot: {out}"
+        );
+        assert!(
+            !out.contains("ErrorKind::Empty"),
+            "should not emit ErrorKind::Empty path\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154446_data_enum_unit_variant_in_call_arg() {
+        // Unit variant used as a function argument.
+        let out = transpile_str(
+            r#"
+            enum ErrorKind {
+                Empty,
+                Other(String),
+            }
+            fn process(kind: ErrorKind) {}
+            fn f() {
+                process(ErrorKind::Empty);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("ErrorKind_Empty{}"),
+            "unit variant in call arg should emit brace-init\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154446_data_enum_unit_variant_with_namespace_prefix() {
+        // `error::ErrorKind::Empty` with module prefix.
+        let out = transpile_str(
+            r#"
+            mod error {
+                pub enum ErrorKind {
+                    Empty,
+                    Other(String),
+                }
+            }
+            fn f() -> error::ErrorKind {
+                error::ErrorKind::Empty
+            }
+            "#,
+        );
+        assert!(
+            out.contains("ErrorKind_Empty{}"),
+            "namespaced unit variant path should emit brace-init\nGot: {out}"
         );
     }
 }
