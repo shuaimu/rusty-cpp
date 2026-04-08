@@ -714,6 +714,68 @@ impl CodeGen {
         final_ordered
     }
 
+    /// Reorder impl items so static const members that reference other consts
+    /// come after their dependencies. E.g., `const ABC = A.bits() | B.bits()`
+    /// must be emitted after `const A` and `const B`.
+    fn reorder_const_members_by_dependency(items: &[syn::ImplItem]) -> Vec<&syn::ImplItem> {
+        // Collect const item names
+        let const_names: HashSet<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                syn::ImplItem::Const(c) => Some(c.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        if const_names.is_empty() {
+            return items.iter().collect();
+        }
+
+        // Check which const items reference other const names in their expressions
+        fn expr_references_name(expr: &syn::Expr, name: &str) -> bool {
+            match expr {
+                syn::Expr::Path(p) => p.path.segments.iter().any(|s| s.ident == name),
+                syn::Expr::MethodCall(mc) => {
+                    expr_references_name(&mc.receiver, name)
+                        || mc.args.iter().any(|a| expr_references_name(a, name))
+                }
+                syn::Expr::Call(c) => {
+                    expr_references_name(&c.func, name)
+                        || c.args.iter().any(|a| expr_references_name(a, name))
+                }
+                syn::Expr::Binary(b) => {
+                    expr_references_name(&b.left, name) || expr_references_name(&b.right, name)
+                }
+                syn::Expr::Paren(p) => expr_references_name(&p.expr, name),
+                syn::Expr::Group(g) => expr_references_name(&g.expr, name),
+                syn::Expr::Field(f) => expr_references_name(&f.base, name),
+                syn::Expr::Reference(r) => expr_references_name(&r.expr, name),
+                syn::Expr::Unary(u) => expr_references_name(&u.expr, name),
+                _ => false,
+            }
+        }
+
+        let mut result: Vec<&syn::ImplItem> = Vec::with_capacity(items.len());
+        let mut deferred: Vec<&syn::ImplItem> = Vec::new();
+        for item in items {
+            if let syn::ImplItem::Const(c) = item {
+                let self_name = c.ident.to_string();
+                let references_other = const_names.iter().any(|name| {
+                    *name != self_name && expr_references_name(&c.expr, name)
+                });
+                if references_other {
+                    deferred.push(item);
+                } else {
+                    result.push(item);
+                }
+            } else {
+                result.push(item);
+            }
+        }
+        result.extend(deferred);
+        result
+    }
+
     fn module_is_delayable_function_namespace(items: &[syn::Item]) -> bool {
         let mut has_fn = false;
         for item in items {
@@ -3247,7 +3309,10 @@ impl CodeGen {
                 .collect();
             self.merged_method_using_namespaces = source_modules_for_methods;
 
-            for impl_item in &methods {
+            // Reorder static const members so dependencies come before dependents.
+            // E.g., `const ABC = A.bits() | B.bits()` must come after `const A`, `const B`.
+            let reordered = Self::reorder_const_members_by_dependency(&methods);
+            for impl_item in &reordered {
                 self.emit_impl_item(impl_item);
             }
             self.merged_method_using_namespaces.clear();
