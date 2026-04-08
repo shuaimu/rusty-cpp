@@ -13945,6 +13945,13 @@ impl CodeGen {
             return variant_ctor;
         }
 
+        // Intercept derived-trait UFCS calls with arbitrary arg shapes
+        // (including `std::move(arg)` from expanded derive code) that the
+        // main UFCS handler below won't catch (it requires `&receiver`).
+        if let Some(trait_call) = self.try_emit_known_trait_ufcs_call(call) {
+            return trait_call;
+        }
+
         // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
         // `Trait::method(&receiver, args...)` to `receiver.method(args...)`.
         if let Some(ufcs) = self.detect_ufcs_trait_method_call(call) {
@@ -13963,6 +13970,16 @@ impl CodeGen {
                     .collect();
                 if self.is_ufcs_io_write_fmt_call_path(&ufcs.function_path) && args.len() == 1 {
                     return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+                }
+                // Intercept derived-trait UFCS calls that map to rusty:: free
+                // functions.  Without this, `Clone::clone(&self.field)` would
+                // emit `this->field.clone()` which fails on C++ primitives.
+                match (ufcs.method_name.as_str(), args.len()) {
+                    ("clone", 0) => return format!("rusty::clone({})", receiver),
+                    ("cmp", 1) => return format!("rusty::cmp::cmp({}, {})", receiver, args[0]),
+                    ("partial_cmp", 1) => return format!("rusty::partial_cmp({}, {})", receiver, args[0]),
+                    ("hash", 1) => return format!("rusty::hash::hash({}, {})", receiver, args[0]),
+                    _ => {}
                 }
                 let is_self = matches!(
                     receiver_ref.expr.as_ref(),
@@ -14739,6 +14756,41 @@ impl CodeGen {
             }
             _ => self.emit_expr_to_string(expr),
         }
+    }
+
+    /// Intercept known derived-trait UFCS calls where args may not be
+    /// references (e.g., `core::cmp::Ord::cmp(std::move(a), std::move(b))`).
+    /// Returns `Some(emitted)` if the call matches a known trait method.
+    fn try_emit_known_trait_ufcs_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(p) => &p.path,
+            _ => return None,
+        };
+        if func_path.segments.len() < 2 {
+            return None;
+        }
+        let method = func_path.segments.last()?.ident.to_string();
+        let trait_seg = func_path.segments.iter().nth_back(1)?.ident.to_string();
+
+        // Match known trait methods by trait name + method name.
+        let emit_fn = match (trait_seg.as_str(), method.as_str()) {
+            ("Clone", "clone") if call.args.len() == 1 => "rusty::clone",
+            ("Ord", "cmp") if call.args.len() == 2 => "rusty::cmp::cmp",
+            ("PartialOrd", "partial_cmp") if call.args.len() == 2 => "rusty::partial_cmp",
+            ("Hash", "hash") if call.args.len() == 2 => "rusty::hash::hash",
+            _ => return None,
+        };
+
+        // Emit args, stripping outer & references (UFCS passes &receiver).
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| match a {
+                syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                _ => self.emit_expr_maybe_move(a),
+            })
+            .collect();
+        Some(format!("{}({})", emit_fn, args.join(", ")))
     }
 
     /// Detect UFCS trait method calls in the form `Trait::method(&self, args...)`
@@ -28989,6 +29041,8 @@ mod tests {
 
     #[test]
     fn test_leaf410_core_cmp_fallback_helpers_emitted_for_core_cmp_calls() {
+        // UFCS `core::cmp::Ord::cmp(a, b)` is now intercepted and lowered to
+        // `rusty::cmp::cmp(a, b)` (Leaf 4.15.4.4.43).
         let out = transpile_str(
             r#"
             fn f<T>(a: T, b: T) {
@@ -28997,11 +29051,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("core::cmp::Ord::cmp("));
-        assert!(out.contains("core::cmp::PartialOrd::partial_cmp("));
-        assert!(out.contains("namespace core {"));
-        assert!(out.contains("struct PartialOrd {"));
-        assert!(out.contains("struct Ord {"));
+        assert!(out.contains("rusty::cmp::cmp("));
+        assert!(out.contains("rusty::partial_cmp("));
     }
 
     #[test]
@@ -31694,6 +31745,91 @@ mod tests {
         assert!(
             helpers.contains("Ordering::Less"),
             "runtime partial_cmp should have primitive fallback"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154443_ufcs_clone_emits_rusty_clone() {
+        // UFCS `Clone::clone(&self.field)` should emit `rusty::clone(this->field)`
+        let out = transpile_str(
+            r#"
+            struct Foo {
+                x: u64,
+            }
+            impl Foo {
+                fn dup(&self) -> u64 {
+                    Clone::clone(&self.x)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::clone("),
+            "UFCS Clone::clone should emit rusty::clone()\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".clone()"),
+            "should not emit .clone() method call\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154443_ufcs_cmp_emits_rusty_cmp() {
+        let out = transpile_str(
+            r#"
+            struct Foo {
+                x: u64,
+            }
+            impl Foo {
+                fn compare(&self, other: &Foo) -> i32 {
+                    Ord::cmp(&self.x, &other.x)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::cmp::cmp("),
+            "UFCS Ord::cmp should emit rusty::cmp::cmp()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154443_ufcs_hash_emits_rusty_hash() {
+        let out = transpile_str(
+            r#"
+            struct Foo {
+                x: u64,
+            }
+            impl Foo {
+                fn do_hash(&self, state: &mut u64) {
+                    Hash::hash(&self.x, state)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::hash::hash("),
+            "UFCS Hash::hash should emit rusty::hash::hash()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154443_ufcs_partial_cmp_emits_rusty_partial_cmp() {
+        let out = transpile_str(
+            r#"
+            struct Foo {
+                x: u64,
+            }
+            impl Foo {
+                fn pcmp(&self, other: &Foo) -> bool {
+                    PartialOrd::partial_cmp(&self.x, &other.x)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::partial_cmp("),
+            "UFCS PartialOrd::partial_cmp should emit rusty::partial_cmp()\nGot: {out}"
         );
     }
 }

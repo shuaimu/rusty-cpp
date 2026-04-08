@@ -1428,6 +1428,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             ));
             for line in content.lines() {
                 let trimmed = line.trim();
+                // (Namespace/function dedup removed — too aggressive across targets.)
                 if skip_shared_prelude {
                     // For additional module units, skip the duplicated runtime prelude and
                     // resume at crate/test payloads (extern crate/use/export item region).
@@ -1492,6 +1493,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 } else {
                     line
                 };
+                // (Namespace/function dedup detection removed.)
                 runner_src.push_str(line);
                 runner_src.push('\n');
                 if trimmed == "namespace rusty {"
