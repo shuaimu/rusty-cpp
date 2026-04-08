@@ -5471,6 +5471,25 @@ impl CodeGen {
         for ns in &self.merged_method_using_namespaces.clone() {
             self.writeln(&format!("using namespace {};", ns));
         }
+        // For operator methods from const _ blocks whose body calls a
+        // known bitwise helper (union, intersection, etc.), emit the
+        // body as a direct bitwise operation on `_0` field instead of
+        // calling the unavailable method.
+        if name.starts_with("operator") && !is_drop_destructor {
+            if let Some(inline_body) = self.try_inline_operator_body(&name, method) {
+                self.writeln(&inline_body);
+                self.pop_deref_mut_method_scope();
+                self.pop_deref_method_scope();
+                self.pop_self_receiver_ref_scope();
+                self.pop_param_bindings();
+                self.pop_return_type_hint();
+                self.pop_return_value_scope();
+                self.indent -= 1;
+                self.writeln("}");
+                self.pop_type_param_scope();
+                return;
+            }
+        }
         self.emit_block(&method.block);
         self.pop_deref_mut_method_scope();
         self.pop_deref_method_scope();
@@ -5485,6 +5504,75 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
+    }
+
+    /// Try to inline operator method bodies that call known bitwise helpers.
+    /// Returns `Some(inline_body)` if the body is `self.union(other)` etc.
+    fn try_inline_operator_body(
+        &self,
+        op_name: &str,
+        method: &syn::ImplItemFn,
+    ) -> Option<String> {
+        // Only handle methods with exactly one expression in the body
+        if method.block.stmts.len() != 1 {
+            return None;
+        }
+        let stmt = method.block.stmts.first()?;
+        let expr = match stmt {
+            syn::Stmt::Expr(e, _) => e,
+            _ => return None,
+        };
+        // The expression should be `self.method(other)`
+        let mc = match expr {
+            syn::Expr::MethodCall(mc) => mc,
+            _ => return None,
+        };
+        // Receiver should be `self`
+        let is_self = matches!(&*mc.receiver,
+            syn::Expr::Path(p) if p.path.segments.len() == 1 && p.path.segments[0].ident == "self"
+        );
+        if !is_self {
+            return None;
+        }
+        let helper_name = mc.method.to_string();
+        // Map known bitwise helpers to C++ operators on `_0` field
+        let struct_name = self.current_struct.as_ref()?;
+        let (cpp_op, is_binary) = match helper_name.as_str() {
+            "union" | "union_" => ("|", true),
+            "intersection" => ("&", true),
+            "symmetric_difference" => ("^", true),
+            "difference" => ("& ~", true), // a & ~b
+            "complement" => ("~", false),
+            _ => return None,
+        };
+        if is_binary && mc.args.len() == 1 {
+            // binary: `Self{this->_0 OP other._0}`
+            let arg = self.emit_pat_to_string(
+                &match method.sig.inputs.iter().nth(1) {
+                    Some(syn::FnArg::Typed(pt)) => pt.pat.as_ref().clone(),
+                    _ => return None,
+                },
+            );
+            if cpp_op == "& ~" {
+                Some(format!(
+                    "return {}{{static_cast<decltype(this->_0)>(this->_0 & ~{}._0)}};",
+                    struct_name, arg
+                ))
+            } else {
+                Some(format!(
+                    "return {}{{static_cast<decltype(this->_0)>(this->_0 {} {}._0)}};",
+                    struct_name, cpp_op, arg
+                ))
+            }
+        } else if !is_binary && mc.args.is_empty() {
+            // unary: `Self{~this->_0}`
+            Some(format!(
+                "return {}{{static_cast<decltype(this->_0)>(~this->_0)}};",
+                struct_name
+            ))
+        } else {
+            None
+        }
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
