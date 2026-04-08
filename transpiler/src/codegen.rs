@@ -8560,6 +8560,17 @@ impl CodeGen {
                 }
 
                 if let Some(init) = &local.init {
+                    // Special case: `let x = if let Some(y) = ... { ...?... } else { val };`
+                    // Emit as statement block to keep ? in outer function scope.
+                    if let syn::Expr::If(if_expr) = init.expr.as_ref() {
+                        if self.block_contains_early_return_or_try(&if_expr.then_branch) {
+                            if let Some(emitted) =
+                                self.emit_single_if_let_as_statement_block(&cpp_name, &decl_type, if_expr)
+                            {
+                                return;
+                            }
+                        }
+                    }
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
                     if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
                         self.writeln(&format!("{} {} = [&]() {{", decl_type, cpp_name));
@@ -8668,6 +8679,21 @@ impl CodeGen {
             }
             syn::Pat::Tuple(tuple) => {
                 // let (a, b) = expr; → auto [a, b] = expr;
+                // Special case: if the init is an if-let expression with ?/return,
+                // emit as a statement block instead of an expression (since the
+                // IIFE approach can't propagate ? to the outer function).
+                if let Some(init) = &local.init {
+                    if let syn::Expr::If(if_expr) = &*init.expr {
+                        if self.block_contains_early_return_or_try(&if_expr.then_branch) {
+                            if let Some(emitted) =
+                                self.emit_if_let_as_statement_block(tuple, if_expr)
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 // Emit the init expression FIRST (using current scope names),
                 // THEN allocate shadow names for the pattern elements.
                 // This prevents self-referential initialization like
@@ -15640,6 +15666,157 @@ impl CodeGen {
             }
             _ => false,
         }
+    }
+
+    /// Lower `let x = if let Some(y) = expr { ...?...; val } else { default };`
+    /// as a statement block with pre-declared result variable.
+    fn emit_single_if_let_as_statement_block(
+        &mut self,
+        cpp_name: &str,
+        decl_type: &str,
+        if_expr: &syn::ExprIf,
+    ) -> Option<()> {
+        let Some((_, else_branch)) = &if_expr.else_branch else {
+            return None;
+        };
+
+        let else_value = match else_branch.as_ref() {
+            syn::Expr::Block(b) => {
+                self.extract_single_expr_from_block(&b.block)
+                    .map(|e| self.emit_expr_to_string(e))?
+            }
+            other => self.emit_expr_to_string(other),
+        };
+
+        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, else_value));
+
+        self.writeln("{");
+        self.indent += 1;
+
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+            let binding = self.extract_if_let_binding_name(&let_expr.pat);
+            let (some_check, _none, unwrap, _neg) =
+                self.option_like_pattern_surface_for_expr(&let_expr.expr);
+            self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
+            self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
+            self.indent += 1;
+            if let Some(name) = binding {
+                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", name, unwrap));
+            }
+        } else {
+            let cond = self.emit_expr_to_string(&if_expr.cond);
+            self.writeln(&format!("if ({}) {{", cond));
+            self.indent += 1;
+        }
+
+        let stmts = &if_expr.then_branch.stmts;
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last = i == stmts.len() - 1;
+            if is_last {
+                if let syn::Stmt::Expr(expr, None) = stmt {
+                    let val = self.emit_expr_to_string(expr);
+                    self.writeln(&format!("{} = {};", cpp_name, val));
+                    continue;
+                }
+            }
+            self.emit_stmt(stmt, false);
+        }
+
+        self.indent -= 1;
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+        Some(())
+    }
+
+    /// Lower `let (a, b) = if let Some(x) = expr { ...?...; (v1, v2) } else { (d1, d2) };`
+    /// as a statement block with pre-declared result variable:
+    /// ```cpp
+    /// decltype(else_tuple) _iflet_result = else_tuple;  // default
+    /// { auto&& _s = expr; if (_s.is_some()) { auto x = _s.unwrap();
+    ///     ...statements...
+    ///     _iflet_result = make_tuple(v1, v2);
+    /// }}
+    /// auto [a, b] = _iflet_result;
+    /// ```
+    /// This avoids IIFE, so `?` and `return` work in the outer function scope.
+    fn emit_if_let_as_statement_block(
+        &mut self,
+        tuple: &syn::PatTuple,
+        if_expr: &syn::ExprIf,
+    ) -> Option<()> {
+        let Some((_, else_branch)) = &if_expr.else_branch else {
+            return None;
+        };
+
+        // Emit else-branch value as default for the result variable.
+        let else_value = match else_branch.as_ref() {
+            syn::Expr::Block(b) => {
+                self.extract_single_expr_from_block(&b.block)
+                    .map(|e| self.emit_expr_to_string(e))?
+            }
+            other => self.emit_expr_to_string(other),
+        };
+
+        // Declare result variable initialized from the else value
+        self.writeln(&format!("auto _iflet_result = {};", else_value));
+
+        // Emit the if block as a statement
+        self.writeln("{");
+        self.indent += 1;
+
+        if let syn::Expr::Let(let_expr) = &*if_expr.cond {
+            let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+            let binding = self.extract_if_let_binding_name(&let_expr.pat);
+            let (some_check, _none, unwrap, _neg) =
+                self.option_like_pattern_surface_for_expr(&let_expr.expr);
+            self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
+            self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
+            self.indent += 1;
+            if let Some(name) = binding {
+                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", name, unwrap));
+            }
+        } else {
+            let cond = self.emit_expr_to_string(&if_expr.cond);
+            self.writeln(&format!("if ({}) {{", cond));
+            self.indent += 1;
+        }
+
+        // Emit then-branch statements; assign tail expression to _iflet_result
+        let stmts = &if_expr.then_branch.stmts;
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last = i == stmts.len() - 1;
+            if is_last {
+                if let syn::Stmt::Expr(expr, None) = stmt {
+                    let val = self.emit_expr_to_string(expr);
+                    self.writeln(&format!("_iflet_result = {};", val));
+                    continue;
+                }
+            }
+            self.emit_stmt(stmt, false);
+        }
+
+        self.indent -= 1;
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+
+        // Destructure the result into the pattern bindings
+        let names: Vec<String> = tuple
+            .elems
+            .iter()
+            .map(|p| {
+                let raw = self.emit_pat_to_string(p);
+                if raw == "_" {
+                    raw
+                } else {
+                    self.allocate_local_cpp_name(&raw)
+                }
+            })
+            .collect();
+        self.writeln(&format!("auto [{}] = _iflet_result;", names.join(", ")));
+        Some(())
     }
 
     /// Lower an if-expression with multi-statement branches into a C++ IIFE
@@ -32661,6 +32838,36 @@ mod tests {
         assert!(
             !out.contains("Op::DEFAULT"),
             "Op::DEFAULT path should be rewritten to Op_DEFAULT\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154458_if_let_try_statement_block_lowering() {
+        // `let (a, b) = if let Some(x) = opt { ...?...; (v1, v2) } else { (d1, d2) };`
+        // should be emitted as a statement block, not an expression.
+        let out = transpile_str(
+            r#"
+            fn f(opt: Option<i32>) -> Result<(i32, i32), String> {
+                let (a, b) = if let Some(x) = opt {
+                    let y = g(x)?;
+                    (x, y)
+                } else {
+                    (0, 0)
+                };
+                Ok((a, b))
+            }
+            fn g(x: i32) -> Result<i32, String> { Ok(x) }
+            "#,
+        );
+        // Should NOT contain /* TODO: if-expression */
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "if-let-try should be lowered, not TODO\nGot: {out}"
+        );
+        // Should contain the statement block pattern
+        assert!(
+            out.contains("_iflet_result"),
+            "should use _iflet_result variable\nGot: {out}"
         );
     }
 }
