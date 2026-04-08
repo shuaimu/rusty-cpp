@@ -15,7 +15,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
 -->
 
 - [ ] Bring Rust's memory safety guarantees to C++ through static analysis and safe type wrappers
-  - [ ] Static borrow checking - analyze C++ code to detect use-after-free, dangling references, and double-free at compile time
+  - [x] *done* Static borrow checking - analyze C++ code to detect use-after-free, dangling references, and double-free at compile time (all scoped milestones in this section are complete)
     - [x] *done* Detect returning a struct whose reference member points to a local variable that will be destroyed
     - [x] *done* Track which parameter's lifetime flows to return value when function has multiple reference parameters with different lifetimes
     - [x] *done* Detect iterator use after container modification (e.g., using iterator after push_back which may reallocate)
