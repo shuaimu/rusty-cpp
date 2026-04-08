@@ -8497,8 +8497,21 @@ impl CodeGen {
                     || inferred_binding_ty
                         .as_ref()
                         .is_some_and(|ty| Self::is_mut_raw_pointer_type(ty));
-                // `let ref r = expr` → `const auto& r = expr;` (reference binding)
-                let ref_suffix = if pat_ident.by_ref.is_some() { "&" } else { "" };
+                // `let ref r = expr` → `const auto& r = expr;` (reference binding).
+                // Exception: `let ref mut r = rvalue_expr;` — when the init is
+                // an rvalue (e.g., function call), binding a mutable reference
+                // to it is invalid in C++. Emit as owned value instead.
+                let ref_suffix = if pat_ident.by_ref.is_some()
+                    && !(is_mut
+                        && local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| self.is_rvalue_expr(&init.expr)))
+                {
+                    "&"
+                } else {
+                    ""
+                };
                 let decl_type = if qualifier == "const " && mut_raw_ptr_binding && type_str.contains('*')
                 {
                     format!("{} const", type_str)
@@ -18352,6 +18365,26 @@ impl CodeGen {
     /// Check if an initializer expression is a reference (`&expr` or `&mut expr`).
     fn is_ref_init(&self, expr: &syn::Expr) -> bool {
         matches!(expr, syn::Expr::Reference(_))
+    }
+
+    /// Check if an expression is an rvalue (temporary/function-call result)
+    /// rather than an lvalue (variable/field access).
+    fn is_rvalue_expr(&self, expr: &syn::Expr) -> bool {
+        matches!(
+            expr,
+            syn::Expr::Call(_)
+                | syn::Expr::MethodCall(_)
+                | syn::Expr::Lit(_)
+                | syn::Expr::Struct(_)
+                | syn::Expr::Tuple(_)
+                | syn::Expr::Array(_)
+                | syn::Expr::Binary(_)
+                | syn::Expr::Unary(_)
+                | syn::Expr::If(_)
+                | syn::Expr::Match(_)
+                | syn::Expr::Block(_)
+                | syn::Expr::Closure(_)
+        )
     }
 
     /// Extract the inner expression from a reference expression, as a string.
@@ -32493,6 +32526,30 @@ mod tests {
         assert!(
             !out.contains("static constexpr Prerelease EMPTY ="),
             "should not have constexpr self-referential const inside struct\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154455_ref_mut_rvalue_emits_owned_local() {
+        // `let ref mut string = String::new();` should emit an owned local,
+        // not a reference to a temporary.
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let ref mut string = String::new();
+                string.push('x');
+            }
+            "#,
+        );
+        // Should NOT contain `auto& string = ` (reference to temporary)
+        assert!(
+            !out.contains("auto& string"),
+            "ref mut binding to rvalue should emit owned local, not reference\nGot: {out}"
+        );
+        // Should contain `auto string = ` (owned value)
+        assert!(
+            out.contains("auto string"),
+            "ref mut binding to rvalue should emit 'auto string ='\nGot: {out}"
         );
     }
 }
