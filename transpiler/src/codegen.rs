@@ -8319,10 +8319,18 @@ impl CodeGen {
             }
             syn::Pat::Tuple(tuple) => {
                 // let (a, b) = expr; → auto [a, b] = expr;
+                // Use allocate_local_cpp_name for each element to handle shadowing
                 let names: Vec<String> = tuple
                     .elems
                     .iter()
-                    .map(|p| self.emit_pat_to_string(p))
+                    .map(|p| {
+                        let raw = self.emit_pat_to_string(p);
+                        if raw == "_" {
+                            raw
+                        } else {
+                            self.allocate_local_cpp_name(&raw)
+                        }
+                    })
                     .collect();
                 if let Some(init) = &local.init {
                     let expr_str = self.emit_expr_to_string(&init.expr);
