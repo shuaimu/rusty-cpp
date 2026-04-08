@@ -1502,6 +1502,21 @@ impl CodeGen {
                                     &self.declared_item_names,
                                 );
                                 let entry = self.impl_blocks.entry(type_name.clone()).or_default();
+                                // Check if this is an operator trait impl (BitOr, BitAnd, etc.)
+                                let trait_name = impl_block
+                                    .trait_
+                                    .as_ref()
+                                    .and_then(|(_, path, _)| path.segments.last())
+                                    .map(|seg| seg.ident.to_string());
+                                let op_name = trait_name
+                                    .as_ref()
+                                    .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+
+                                let seen_method_keys = self
+                                    .impl_method_conflict_keys
+                                    .entry(type_name.clone())
+                                    .or_default();
+
                                 for impl_item in &impl_block.items {
                                     if let syn::ImplItem::Type(assoc) = impl_item {
                                         // Check if the alias target is a const-block-local type
@@ -1513,14 +1528,39 @@ impl CodeGen {
                                         };
                                         if let Some(ref target) = target_name {
                                             if let Some(inner_ty) = local_newtypes.get(target) {
-                                                // Replace alias target with the newtype's inner type
                                                 let mut resolved_assoc = assoc.clone();
                                                 resolved_assoc.ty = inner_ty.clone();
                                                 entry.push(syn::ImplItem::Type(resolved_assoc));
                                                 continue;
                                             }
                                         }
+                                        // Skip Output type aliases for operator traits
+                                        if op_name.is_some() && assoc.ident == "Output" {
+                                            continue;
+                                        }
                                         entry.push(impl_item.clone());
+                                    }
+                                    // Collect operator trait methods from const _ blocks
+                                    if let syn::ImplItem::Fn(method) = impl_item {
+                                        if op_name.is_some() {
+                                            let mut merged = method.clone();
+                                            merge_impl_type_generics_into_method(
+                                                &mut merged,
+                                                &impl_block.generics,
+                                            );
+                                            let key = impl_method_conflict_key(&merged);
+                                            if !seen_method_keys.contains(&key) {
+                                                seen_method_keys.insert(key);
+                                                let method_name = merged.sig.ident.to_string();
+                                                if let Some(ref op) = op_name {
+                                                    self.operator_renames.insert(
+                                                        (type_name.clone(), method_name),
+                                                        op.clone(),
+                                                    );
+                                                }
+                                                entry.push(syn::ImplItem::Fn(merged));
+                                            }
+                                        }
                                     }
                                 }
                             }
