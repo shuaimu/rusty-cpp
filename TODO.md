@@ -2601,9 +2601,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Leaf 4: Fix deleted copy constructor usage (fixes 3 semver errors)
         - [ ] Leaf 4.1: Detect types with deleted copy constructors (e.g., `VersionReq`) and emit `std::move()` or restructure to avoid copies
         - [ ] Leaf 4.2: Add regression tests for non-copyable type usage in assignments and function calls
-      - [ ] Leaf 5: Emit missing trait instance methods for bitflag types (fixes ~30 bitflags errors)
-        - [ ] Leaf 5.1: Synthesize `iter()`, `iter_names()`, `complement()`, `set()` methods for bitflag newtype structs (detected via `const _: () = { impl ... }` blocks)
-        - [ ] Leaf 5.2: Add regression tests for bitflag trait method synthesis
+      - [x] *done* Leaf 5: Emit missing trait instance methods for bitflag types (fixes ~85 bitflags errors)
+        - [x] *done* Leaf 5.1: Synthesize `empty()`, `all()`, `from_bits_retain()`, `is_all()`, `insert()`, `remove()`, `toggle()`, `set()`, `intersection()`, `union_()`, `difference()`, `symmetric_difference()`, `iter()`, `iter_names()`, `extend()` methods for bitflag newtype structs
+        - [x] *done* Leaf 5.2: Add regression tests for bitflag trait method synthesis (2 tests: all methods emitted, dedup when already present)
       - [ ] Leaf 6: Fix `core::fmt` and unresolved path prefixes (fixes ~4 bitflags errors)
         - [ ] Leaf 6.1: Map remaining `core::fmt::*` paths to `rusty::fmt::*` in expanded output emission
         - [ ] Leaf 6.2: Add regression tests for core::fmt path resolution

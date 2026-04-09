@@ -3739,6 +3739,24 @@ impl CodeGen {
                     // from_bits_retain is typically already provided by
                     // trait static default method injection (Leaf 27).
                     // Skip synthetic emission to avoid overload conflicts.
+                    if !merged_methods.contains("empty") {
+                        self.writeln(&format!(
+                            "static {} empty() {{ return {}{{0}}; }}",
+                            n, n
+                        ));
+                    }
+                    if !merged_methods.contains("all") {
+                        self.writeln(&format!(
+                            "static {} all() {{ return {}{{static_cast<decltype(std::declval<{}>()._0)>(~0)}}; }}",
+                            n, n, n
+                        ));
+                    }
+                    if !merged_methods.contains("from_bits_retain") {
+                        self.writeln(&format!(
+                            "static {} from_bits_retain(decltype(std::declval<{}>()._0) bits) {{ return {}{{bits}}; }}",
+                            n, n, n
+                        ));
+                    }
                     if !merged_methods.contains("is_empty") {
                         self.writeln("bool is_empty() const { return this->_0 == 0; }");
                     }
@@ -3758,6 +3776,80 @@ impl CodeGen {
                         self.writeln(&format!(
                             "{} complement() const {{ return {}{{static_cast<decltype(this->_0)>(~this->_0)}}; }}",
                             n, n
+                        ));
+                    }
+                    if !merged_methods.contains("is_all") {
+                        self.writeln(&format!(
+                            "bool is_all() const {{ return (this->_0 & {}::all()._0) == {}::all()._0; }}",
+                            n, n
+                        ));
+                    }
+                    if !merged_methods.contains("insert") {
+                        self.writeln(&format!(
+                            "void insert({} other) {{ this->_0 |= other._0; }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("remove") {
+                        self.writeln(&format!(
+                            "void remove({} other) {{ this->_0 &= ~other._0; }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("toggle") {
+                        self.writeln(&format!(
+                            "void toggle({} other) {{ this->_0 ^= other._0; }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("set") {
+                        self.writeln(&format!(
+                            "void set({} other, bool value) {{ if (value) {{ insert(std::move(other)); }} else {{ remove(std::move(other)); }} }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("intersection") {
+                        self.writeln(&format!(
+                            "{} intersection({} other) const {{ return {}{{static_cast<decltype(this->_0)>(this->_0 & other._0)}}; }}",
+                            n, n, n
+                        ));
+                    }
+                    if !merged_methods.contains("union_") {
+                        self.writeln(&format!(
+                            "{} union_({} other) const {{ return {}{{static_cast<decltype(this->_0)>(this->_0 | other._0)}}; }}",
+                            n, n, n
+                        ));
+                    }
+                    if !merged_methods.contains("difference") {
+                        self.writeln(&format!(
+                            "{} difference({} other) const {{ return {}{{static_cast<decltype(this->_0)>(this->_0 & ~other._0)}}; }}",
+                            n, n, n
+                        ));
+                    }
+                    if !merged_methods.contains("symmetric_difference") {
+                        self.writeln(&format!(
+                            "{} symmetric_difference({} other) const {{ return {}{{static_cast<decltype(this->_0)>(this->_0 ^ other._0)}}; }}",
+                            n, n, n
+                        ));
+                    }
+                    // iter: iterate over individual set flags using FLAGS constant
+                    if !merged_methods.contains("iter") {
+                        self.writeln(&format!(
+                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push_back(FLAGS[i].value()); }} return result; }}",
+                            n = n
+                        ));
+                    }
+                    // iter_names: iterate over (name, flag) pairs for set flags
+                    if !merged_methods.contains("iter_names") {
+                        self.writeln(&format!(
+                            "rusty::Vec<std::tuple<std::string_view, {n}>> iter_names() const {{ rusty::Vec<std::tuple<std::string_view, {n}>> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push_back(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); }} return result; }}",
+                            n = n
+                        ));
+                    }
+                    // extend: OR in flags from an iterator
+                    if !merged_methods.contains("extend") {
+                        self.writeln(&format!(
+                            "template<typename Iter> void extend(Iter&& iter) {{ for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) this->_0 |= item._0; }}",
                         ));
                     }
                     // from_iter: collect iterator elements via bitwise OR
@@ -33383,5 +33475,77 @@ mod tests {
             out.contains("_iflet_result"),
             "should use _iflet_result variable\nGot: {out}"
         );
+    }
+
+    #[test]
+    fn test_bitflags_synthetic_methods_all_emitted() {
+        // Bitflags-pattern struct: single unnamed field + operator trait impls
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            impl std::ops::BitAnd for Flags {
+                type Output = Self;
+                fn bitand(self, rhs: Self) -> Self { Flags(self.0 & rhs.0) }
+            }
+            "#,
+        );
+        // Core accessors
+        assert!(out.contains("auto bits() const"), "missing bits()\nGot: {out}");
+        assert!(out.contains("static Flags empty()"), "missing empty()\nGot: {out}");
+        assert!(out.contains("static Flags all()"), "missing all()\nGot: {out}");
+        assert!(out.contains("static Flags from_bits_retain("), "missing from_bits_retain()\nGot: {out}");
+        // Predicate methods
+        assert!(out.contains("bool is_empty()"), "missing is_empty()\nGot: {out}");
+        assert!(out.contains("bool is_all()"), "missing is_all()\nGot: {out}");
+        assert!(out.contains("bool contains("), "missing contains()\nGot: {out}");
+        assert!(out.contains("bool intersects("), "missing intersects()\nGot: {out}");
+        // Mutation methods
+        assert!(out.contains("void insert("), "missing insert()\nGot: {out}");
+        assert!(out.contains("void remove("), "missing remove()\nGot: {out}");
+        assert!(out.contains("void toggle("), "missing toggle()\nGot: {out}");
+        assert!(out.contains("void set("), "missing set()\nGot: {out}");
+        // Set algebra methods
+        assert!(out.contains("Flags complement()"), "missing complement()\nGot: {out}");
+        assert!(out.contains("Flags intersection("), "missing intersection()\nGot: {out}");
+        assert!(out.contains("Flags union_("), "missing union_()\nGot: {out}");
+        assert!(out.contains("Flags difference("), "missing difference()\nGot: {out}");
+        assert!(out.contains("Flags symmetric_difference("), "missing symmetric_difference()\nGot: {out}");
+        // Iterator methods
+        assert!(out.contains("iter() const"), "missing iter()\nGot: {out}");
+        assert!(out.contains("iter_names() const"), "missing iter_names()\nGot: {out}");
+        // Collection methods
+        assert!(out.contains("void extend("), "missing extend()\nGot: {out}");
+        assert!(out.contains("from_iter("), "missing from_iter()\nGot: {out}");
+    }
+
+    #[test]
+    fn test_bitflags_synthetic_methods_not_duplicated_when_already_present() {
+        // If a method is already defined in an impl block, synthetic should skip it
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+
+            impl Flags {
+                fn bits(&self) -> u8 { self.0 }
+                fn is_empty(&self) -> bool { self.0 == 0 }
+            }
+
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            "#,
+        );
+        // bits() should appear exactly once (from the impl, not synthetic)
+        let bits_count = out.matches("bits()").count();
+        assert!(bits_count >= 1, "bits() should appear at least once\nGot: {out}");
+        // is_empty should also not be duplicated
+        let is_empty_count = out.matches("is_empty()").count();
+        assert!(is_empty_count >= 1, "is_empty() should appear at least once\nGot: {out}");
     }
 }
