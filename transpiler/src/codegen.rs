@@ -14748,6 +14748,31 @@ impl CodeGen {
             }
         }
 
+        // Handle `Type::method(self)` / `Type::method(value)` UFCS where the
+        // first arg is NOT a reference — convert to `receiver.method()`.
+        // Catches patterns like `TestFlags::bits(self)` inside impl methods.
+        if let syn::Expr::Path(func_path) = call.func.as_ref() {
+            if func_path.path.segments.len() == 2 && call.args.len() == 1 {
+                let type_name = func_path.path.segments[0].ident.to_string();
+                let method_name = func_path.path.segments[1].ident.to_string();
+                // Only convert if the type matches the current struct (self-call)
+                // and the method is not a known constructor/static method.
+                let is_current_struct = self.current_struct.as_deref() == Some(&type_name);
+                let is_constructor = matches!(method_name.as_str(),
+                    "new" | "new_" | "empty" | "all" | "from_bits" | "from_bits_retain"
+                    | "from_bits_truncate" | "from_name" | "default_" | "from_iter"
+                );
+                if is_current_struct && !is_constructor {
+                    let arg = &call.args[0];
+                    let receiver = match arg {
+                        syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                        _ => self.emit_expr_to_string(arg),
+                    };
+                    return format!("{}.{}()", receiver, escape_cpp_keyword(&method_name));
+                }
+            }
+        }
+
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         if matches!(
             func.as_str(),
@@ -33977,6 +34002,31 @@ mod tests {
         assert!(
             out.contains("_destruct_param") || out.contains("[a, b]"),
             "tuple destructuring should use body-level structured binding\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_self_ufcs_method_call_converted_to_dot_call() {
+        // `Type::method(self)` inside an impl method should become
+        // `(*this).method()` (dot call), not `Type::method((*this))` (static call).
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+            impl Flags {
+                fn bits(&self) -> u8 { self.0 }
+                fn get_bits(&self) -> u8 {
+                    Flags::bits(self)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("(*this).bits()"),
+            "Flags::bits(self) should become (*this).bits()\nGot: {out}"
+        );
+        assert!(
+            !out.contains("Flags::bits((*this))"),
+            "Should NOT emit static UFCS call\nGot: {out}"
         );
     }
 }
