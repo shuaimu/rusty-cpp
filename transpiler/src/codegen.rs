@@ -2694,6 +2694,17 @@ impl CodeGen {
         {
             return None;
         }
+        // Known static methods should NOT be wrapped in an instance lambda —
+        // they're function pointers, not member function references.
+        // Return None to let them fall through to normal path emission
+        // (e.g., `TestFlags::all` emits as `TestFlags::all`).
+        let is_static = matches!(method_name.as_str(),
+            "all" | "empty" | "from_bits" | "from_bits_retain" | "from_bits_truncate"
+            | "from_name" | "default_" | "new_" | "new_const" | "from_iter"
+        );
+        if is_static {
+            return None;
+        }
         let escaped = escape_cpp_keyword(&method_name);
         Some(format!(
             "[](const auto& _f) {{ return _f.{}(); }}",
@@ -18916,14 +18927,12 @@ impl CodeGen {
                 }
             }
             syn::Type::ImplTrait(it) => {
-                // In module/argument position, prefer `auto&&` for all impl Trait
-                // (including Fn traits) to allow generic lambdas and avoid
-                // template deduction failures with rusty::Function<T(...)>.
-                // Only fall through to concrete Fn type mapping when NOT in
-                // argument position (e.g., return types, type aliases).
+                // In module/argument position, prefer `auto&&`/`const auto&` for
+                // Fn trait bounds to allow generic lambdas with auto params.
+                // In non-argument position (return types), use concrete
+                // rusty::Function wrapper.
                 let in_argument_position = self.module_name.is_some() && self.type_arg_nesting.get() == 0;
                 if !in_argument_position {
-                    // Check for Fn traits in non-argument positions
                     if let Some(first) = it.bounds.first() {
                         if let syn::TypeParamBound::Trait(tb) = first {
                             if let Some(fn_type) = self.try_map_fn_trait(tb) {
@@ -34039,10 +34048,9 @@ mod tests {
     }
 
     #[test]
-    fn test_impl_fn_trait_arg_uses_auto_not_function_wrapper() {
-        // impl FnOnce() -> T in argument position should use auto&&
-        // (abbreviated template) not rusty::Function<T()>, to allow
-        // generic lambdas to be passed without template deduction failure.
+    fn test_impl_fn_trait_arg_uses_auto_in_module_mode() {
+        // impl FnOnce() -> T in argument position uses const auto& in module mode
+        // to allow generic lambdas to be passed without conversion issues.
         let out = transpile_str_module(
             r#"
             fn test_fn<F: FnOnce() -> i32>(f: F) -> i32 { f() }
@@ -34050,10 +34058,9 @@ mod tests {
             "#,
             "test_crate",
         );
-        // Should use auto&& for the callable parameter, not rusty::Function
         assert!(
             !out.contains("rusty::Function"),
-            "impl Fn* in arg position should use auto&& not rusty::Function\nGot: {out}"
+            "impl Fn* in module arg position should use auto, not rusty::Function\nGot: {out}"
         );
     }
 }
