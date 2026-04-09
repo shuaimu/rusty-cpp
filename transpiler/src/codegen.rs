@@ -1541,9 +1541,8 @@ impl CodeGen {
                                         entry.push(impl_item.clone());
                                     }
                                     // Collect operator trait methods from const _ blocks
-                                    // (BitOr, BitAnd, etc.). Non-operator inherent
-                                    // methods are skipped — they reference const-block-
-                                    // local types like InternalBitFlags.
+                                    // (BitOr, BitAnd, etc.). Non-operator methods are
+                                    // handled separately via synthetic inline methods.
                                     if let syn::ImplItem::Fn(method) = impl_item {
                                         if op_name.is_some() {
                                             let mut merged = method.clone();
@@ -3641,6 +3640,71 @@ impl CodeGen {
                 }
                 _ => {
                     self.writeln(&format!("// TODO: derive({})", derive));
+                }
+            }
+        }
+
+        // For single-field newtype wrappers with operator traits (bitflags pattern),
+        // emit synthetic inline methods for common Flags trait methods that
+        // are defined inside const _ blocks and can't be directly extracted.
+        if let syn::Fields::Unnamed(fields) = &s.fields {
+            if fields.unnamed.len() == 1 {
+                let name_str = name.to_string();
+                let scoped_key = self.scoped_type_key(&name_str);
+                let has_operators = self
+                    .operator_renames
+                    .keys()
+                    .any(|(type_key, _)| *type_key == name_str || *type_key == scoped_key);
+                if has_operators {
+                    let n = name.to_string();
+                    // Only emit synthetic methods that aren't already merged
+                    // from the normal impl block collection.
+                    let merged_methods: std::collections::HashSet<String> = self
+                        .impl_blocks
+                        .get(&n)
+                        .or_else(|| self.impl_blocks.get(&scoped_key))
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    if let syn::ImplItem::Fn(m) = item {
+                                        Some(m.sig.ident.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.newline();
+                    self.writeln("// Synthetic bitwise trait methods (from const _ block impls)");
+                    if !merged_methods.contains("bits") {
+                        self.writeln("auto bits() const { return this->_0; }");
+                    }
+                    // from_bits_retain is typically already provided by
+                    // trait static default method injection (Leaf 27).
+                    // Skip synthetic emission to avoid overload conflicts.
+                    if !merged_methods.contains("is_empty") {
+                        self.writeln("bool is_empty() const { return this->_0 == 0; }");
+                    }
+                    if !merged_methods.contains("contains") {
+                        self.writeln(&format!(
+                            "bool contains(const {}& other) const {{ return (this->_0 & other._0) == other._0; }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("intersects") {
+                        self.writeln(&format!(
+                            "bool intersects(const {}& other) const {{ return (this->_0 & other._0) != 0; }}",
+                            n
+                        ));
+                    }
+                    if !merged_methods.contains("complement") {
+                        self.writeln(&format!(
+                            "{} complement() const {{ return {}{{static_cast<decltype(this->_0)>(~this->_0)}}; }}",
+                            n, n
+                        ));
+                    }
                 }
             }
         }
