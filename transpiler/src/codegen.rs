@@ -5695,7 +5695,20 @@ impl CodeGen {
     /// These need split declaration (inside struct) + definition (after struct).
     fn is_self_referential_const_type(&self, ty_cpp: &str) -> bool {
         if let Some(ref struct_name) = self.current_struct {
-            ty_cpp == *struct_name || ty_cpp.starts_with(&format!("{}<", struct_name))
+            // Direct self-reference: const type IS the struct
+            if ty_cpp == *struct_name || ty_cpp.starts_with(&format!("{}<", struct_name)) {
+                return true;
+            }
+            // Indirect self-reference: const type contains the struct name
+            // in a template argument (e.g., `std::span<const Flag<TestFlags>>`)
+            // which requires the struct to be complete at instantiation.
+            if ty_cpp.contains(&format!("<{}>", struct_name))
+                || ty_cpp.contains(&format!("<{},", struct_name))
+                || ty_cpp.contains(&format!(", {}>", struct_name))
+            {
+                return true;
+            }
+            false
         } else {
             false
         }
@@ -33885,6 +33898,41 @@ mod tests {
         assert!(
             !out.contains("const auto& writer"),
             "impl Write should NOT be const\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_self_referential_const_deferred_for_indirect_reference() {
+        // When a struct has a const whose type contains Self in a template
+        // argument (e.g., `std::span<const Flag<Self>>`), the initializer
+        // must be deferred outside the class body to avoid incomplete type.
+        let out = transpile_str(
+            r#"
+            struct Flag<B> {
+                name: &'static str,
+                value: B,
+            }
+            struct MyFlags(u8);
+            impl MyFlags {
+                const A: MyFlags = MyFlags(1);
+                const FLAGS: &'static [Flag<Self>] = &[
+                    Flag { name: "A", value: MyFlags::A },
+                ];
+            }
+            impl std::ops::BitOr for MyFlags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { MyFlags(self.0 | rhs.0) }
+            }
+            "#,
+        );
+        // FLAGS should be deferred (declared in-class, defined after class body)
+        assert!(
+            out.contains("static const") && out.contains("FLAGS;"),
+            "FLAGS should have a declaration inside the class\nGot: {out}"
+        );
+        assert!(
+            out.contains("inline const") && out.contains("MyFlags::FLAGS"),
+            "FLAGS should have a deferred definition after class body\nGot: {out}"
         );
     }
 }

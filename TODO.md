@@ -2616,9 +2616,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Leaf 8: Fix `case_()` function signature mismatches (fixes ~10 bitflags errors)
         - [ ] Leaf 8.1: Detect test helper function call argument type mismatches (e.g., `case_(int, TestFlags(uint8_t))` vs `case_(int, int, TestFlags(Bits))`) and emit correct overload or cast
         - [ ] Leaf 8.2: Add regression tests for test helper call patterns
-      - [ ] Leaf 9: Fix trait associated type resolution for `Flag<B>` (fixes ~9 bitflags errors)
-        - [ ] Leaf 9.1: Resolve `traits::Flag<B>::value_field` incomplete type by emitting complete trait-associated type definitions or inlining the associated type
-        - [ ] Leaf 9.2: Add regression tests for trait associated type usage in template contexts
+      - [x] *done* Leaf 9: Fix `Flag<B>::value_field` incomplete type (fixes 82 bitflags errors including 21 direct + cascading)
+        - [x] *done* Leaf 9.1: Extend `is_self_referential_const_type()` to detect indirect self-references where the struct name appears inside template arguments (e.g., `std::span<const Flag<TestFlags>>`). Defers FLAGS initialization outside class body to avoid incomplete type. Bitflags: 338 → 256.
+        - [x] *done* Leaf 9.2: Add regression test for indirect self-referential const deferral
       - [ ] Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
         - [ ] Leaf 10.1: Map `string_view::as_bytes()` → appropriate C++ equivalent (e.g., `reinterpret_cast<const uint8_t*>(sv.data())` with size)
         - [ ] Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
