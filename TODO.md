@@ -2619,8 +2619,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Leaf 9: Fix `Flag<B>::value_field` incomplete type (fixes 82 bitflags errors including 21 direct + cascading)
         - [x] *done* Leaf 9.1: Extend `is_self_referential_const_type()` to detect indirect self-references where the struct name appears inside template arguments (e.g., `std::span<const Flag<TestFlags>>`). Defers FLAGS initialization outside class body to avoid incomplete type. Bitflags: 338 → 256.
         - [x] *done* Leaf 9.2: Add regression test for indirect self-referential const deferral
-      - [ ] Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
-        - [ ] Leaf 10.1: Map `string_view::as_bytes()` → appropriate C++ equivalent (e.g., `reinterpret_cast<const uint8_t*>(sv.data())` with size)
+      - [x] *done* Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
+        - [x] *done* Leaf 10.1: Added `rusty::as_bytes(std::string_view)` helper function and transpiler handling for `str::as_bytes()` method calls. The helper returns `std::span<const uint8_t>` representing the raw bytes. Fixed by adding handling in `emit_method_call_expr_to_string` and a helper function in `include/rusty/string.hpp`.
         - [ ] Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
         - [ ] Leaf 10.3: Fix `Vec` used without template arguments in emitted code
         - [ ] Leaf 10.4: Add regression tests for string API and iterator translations

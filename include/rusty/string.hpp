@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 #include <cctype>
+#include <span>
 #include "rusty/fmt.hpp"
 
 // @safe
@@ -640,6 +641,13 @@ public:
     
     bool operator!=(const str& other) const { return !(*this == other); }
 };
+
+// Helper function: Rust str::as_bytes() equivalent for std::string_view.
+// Returns a std::span<const uint8_t> representing the raw bytes of the string.
+// @lifetime: (&'a) -> &'a
+inline std::span<const uint8_t> as_bytes(std::string_view sv) {
+    return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
+}
 
 // Symmetric comparison: allow `"str" == rusty::String` and `"str" == rusty::str`
 inline bool operator==(const char* lhs, const String& rhs) { return rhs == lhs; }

@@ -12244,6 +12244,12 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::len({})", receiver);
         }
+        // Rust `str::as_bytes()` → `rusty::as_bytes()`.
+        // In C++, std::string_view doesn't have as_bytes(), so we use a helper.
+        if mc.method == "as_bytes" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::as_bytes({})", receiver);
+        }
         // Rust `value.to_string()` (Display trait) → `rusty::to_string(value)`.
         // C++ user-defined types don't have a `.to_string()` member; dispatch
         // through a SFINAE helper that tries `.to_string()`, then `std::to_string()`.
@@ -24752,6 +24758,17 @@ mod tests {
     fn test_for_in_variable() {
         let out = transpile_str("fn f() { for x in items { x; } }");
         assert!(out.contains("for (auto&& x : rusty::for_in(items)) {"));
+    }
+
+    #[test]
+    fn test_str_as_bytes_method() {
+        // Rust str::as_bytes() on &str should map to rusty::as_bytes()
+        let out = transpile_str("fn f(s: &str) { let _ = s.as_bytes(); }");
+        assert!(
+            out.contains("rusty::as_bytes("),
+            "str::as_bytes() should emit rusty::as_bytes(), got:\n{}",
+            out
+        );
     }
 
     #[test]
