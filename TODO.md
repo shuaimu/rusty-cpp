@@ -2601,9 +2601,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
         - [x] *done* Leaf 3.1: Added fallback to `lookup_local_placeholder_type_hint` in `infer_local_binding_type_from_initializer` for Path expressions. When `let x = y;` references `y` before `y` is declared, the pre-scanned placeholder hints provide `y`'s type so we emit explicit type `T x = y;` instead of invalid `auto x = y;` in C++.
         - [x] *done* Leaf 3.2: Added `test_forward_reference_uses_explicit_type_not_auto` regression test verifying forward reference `let x = y; let y = 5;` emits explicit type for `x` based on `y`'s type.
-      - [ ] Leaf 4: Fix deleted copy constructor usage (fixes 3 semver errors)
-        - [ ] Leaf 4.1: Detect types with deleted copy constructors (e.g., `VersionReq`) and emit `std::move()` or restructure to avoid copies
-        - [ ] Leaf 4.2: Add regression tests for non-copyable type usage in assignments and function calls
+      - [x] *done* Leaf 4: Fix deleted copy constructor usage (fixes 3 semver errors)
+        - [x] *done* Leaf 4.1: Removed the check in `should_insert_move` that returned false for multi-use const locals of non-Copy types. In Rust, `let x = y` where y: T (Clone but not Copy) always calls Clone, not a hypothetical copy operation. In C++, the copy constructor may be deleted/invalid for types containing Vec. Now std::move() is always inserted for local variable assignments, ensuring the move constructor is called. For Copy types (primitives), std::move is a no-op so it's safe.
+        - [x] *done* Leaf 4.2: Added `test_non_copy_struct_uses_std_move_in_assignment` regression test verifying that struct types containing Vec use std::move in assignments.
       - [x] *done* Leaf 5: Emit missing trait instance methods for bitflag types (fixes ~85 bitflags errors)
         - [x] *done* Leaf 5.1: Synthesize `empty()`, `all()`, `from_bits_retain()`, `is_all()`, `insert()`, `remove()`, `toggle()`, `set()`, `intersection()`, `union_()`, `difference()`, `symmetric_difference()`, `iter()`, `iter_names()`, `extend()` methods for bitflag newtype structs
         - [x] *done* Leaf 5.2: Add regression tests for bitflag trait method synthesis (2 tests: all methods emitted, dedup when already present)

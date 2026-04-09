@@ -19521,27 +19521,12 @@ impl CodeGen {
                     return false;
                 }
 
-                // Multi-use const LOCAL variables of non-Copy types should not be moved.
-                // In Rust, immutable bindings are borrowed on each use, not consumed.
-                // For Copy types (primitives, pointers), std::move is a no-op and safe.
-                let is_param = self.param_bindings.iter().any(|scope| scope.contains_key(&name));
-                let is_multi = self.multi_use_vars.contains(&name);
-                let is_const = self.is_const_local_binding_in_scope(&name);
-                if is_multi && is_const && !is_param
-                {
-                    // Check if the variable's type is likely non-Copy (not a primitive/pointer)
-                    let is_likely_copy_type = self
-                        .lookup_local_binding_type(&name)
-                        .is_some_and(|ty| {
-                            matches!(&ty,
-                                syn::Type::Ptr(_)
-                                | syn::Type::Reference(_)
-                            ) || self.map_type(&ty).chars().next().is_some_and(|c| c.is_lowercase())
-                        });
-                    if !is_likely_copy_type {
-                        return false;
-                    }
-                }
+                // For non-Copy types (structs containing Vec, String, etc.), always insert
+                // std::move. In Rust, `let x = y` where y: T (Clone but not Copy) calls Clone,
+                // not a hypothetical copy operation. In C++, the copy constructor may be deleted
+                // or invalid (e.g., for structs containing Vec). Using std::move() calls the
+                // move constructor which is valid for all types and in C++ effectively calls
+                // the same clone/move semantics as Rust.
 
                 true
             }
@@ -25081,6 +25066,18 @@ mod tests {
         assert!(out.contains("int32_t x = y") || out.contains("auto y = 5"));
         // y should still be declared as auto (it's defined before being used)
         assert!(out.contains("auto y = 5") || out.contains("int32_t y = 5"));
+    }
+
+    #[test]
+    fn test_non_copy_struct_uses_std_move_in_assignment() {
+        // For non-Copy types (structs containing Vec, String, etc.), std::move should
+        // be inserted in assignments to ensure the move constructor is called instead
+        // of the copy constructor (which may be deleted/invalid).
+        let out = transpile_str("struct Foo { x: Vec<i32> } fn f() { let foo = Foo { x: Vec::new_() }; let foo2 = foo; }");
+        // foo2 = foo should use std::move, not copy
+        assert!(out.contains("std::move(foo)"));
+        // Should NOT have bare `foo` without std::move in the assignment
+        assert!(!out.contains("foo2 = foo;") || out.contains("foo2 = std::move"));
     }
 
     #[test]
