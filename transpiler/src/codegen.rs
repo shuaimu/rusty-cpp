@@ -18916,11 +18916,19 @@ impl CodeGen {
                 }
             }
             syn::Type::ImplTrait(it) => {
-                // Check for Fn traits first
-                if let Some(first) = it.bounds.first() {
-                    if let syn::TypeParamBound::Trait(tb) = first {
-                        if let Some(fn_type) = self.try_map_fn_trait(tb) {
-                            return fn_type;
+                // In module/argument position, prefer `auto&&` for all impl Trait
+                // (including Fn traits) to allow generic lambdas and avoid
+                // template deduction failures with rusty::Function<T(...)>.
+                // Only fall through to concrete Fn type mapping when NOT in
+                // argument position (e.g., return types, type aliases).
+                let in_argument_position = self.module_name.is_some() && self.type_arg_nesting.get() == 0;
+                if !in_argument_position {
+                    // Check for Fn traits in non-argument positions
+                    if let Some(first) = it.bounds.first() {
+                        if let syn::TypeParamBound::Trait(tb) = first {
+                            if let Some(fn_type) = self.try_map_fn_trait(tb) {
+                                return fn_type;
+                            }
                         }
                     }
                 }
@@ -34027,6 +34035,25 @@ mod tests {
         assert!(
             !out.contains("Flags::bits((*this))"),
             "Should NOT emit static UFCS call\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_impl_fn_trait_arg_uses_auto_not_function_wrapper() {
+        // impl FnOnce() -> T in argument position should use auto&&
+        // (abbreviated template) not rusty::Function<T()>, to allow
+        // generic lambdas to be passed without template deduction failure.
+        let out = transpile_str_module(
+            r#"
+            fn test_fn<F: FnOnce() -> i32>(f: F) -> i32 { f() }
+            fn call_it(f: impl FnOnce(i32) -> bool) -> bool { f(42) }
+            "#,
+            "test_crate",
+        );
+        // Should use auto&& for the callable parameter, not rusty::Function
+        assert!(
+            !out.contains("rusty::Function"),
+            "impl Fn* in arg position should use auto&& not rusty::Function\nGot: {out}"
         );
     }
 }
