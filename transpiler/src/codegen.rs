@@ -3599,6 +3599,7 @@ impl CodeGen {
         }
 
         // Emit methods from impl blocks (merged)
+        let mut emitted_methods_in_struct = std::collections::HashSet::<String>::new();
         if let Some(methods) = merged_impl_items {
             if !matches!(&s.fields, syn::Fields::Unit if methods.is_empty()) {
                 self.newline();
@@ -3634,6 +3635,16 @@ impl CodeGen {
             }
             self.merged_method_using_namespaces.clear();
             self.emitted_non_method_member_names.pop();
+            // Save emitted method names before popping for synthetic check
+            emitted_methods_in_struct = self
+                .emitted_method_conflict_keys
+                .last()
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(|k| k.split('|').next().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             self.emitted_method_conflict_keys.pop();
             self.current_struct = prev_struct;
         }
@@ -3693,25 +3704,8 @@ impl CodeGen {
                     .any(|(type_key, _)| *type_key == name_str || *type_key == scoped_key);
                 if has_operators {
                     let n = name.to_string();
-                    // Only emit synthetic methods that aren't already merged
-                    // from the normal impl block collection.
-                    let merged_methods: std::collections::HashSet<String> = self
-                        .impl_blocks
-                        .get(&n)
-                        .or_else(|| self.impl_blocks.get(&scoped_key))
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|item| {
-                                    if let syn::ImplItem::Fn(m) = item {
-                                        Some(m.sig.ident.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    // Use the saved emitted method names from before the pop.
+                    let merged_methods = &emitted_methods_in_struct;
                     self.newline();
                     self.writeln("// Synthetic bitwise trait methods (from const _ block impls)");
                     if !merged_methods.contains("bits") {
