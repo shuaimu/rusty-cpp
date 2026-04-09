@@ -292,6 +292,8 @@ pub struct CodeGen {
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     declared_item_names: HashSet<String>,
+    /// Maps function names declared inside inline modules to qualified paths.
+    module_qualified_functions: HashMap<String, String>,
     /// Per-type method signature keys already emitted in the current type body.
     /// This catches collisions that only appear after Rust-path → C++ mapping.
     emitted_method_conflict_keys: Vec<HashSet<String>>,
@@ -393,6 +395,7 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
+            module_qualified_functions: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
             return_value_scopes: Vec::new(),
@@ -1189,6 +1192,28 @@ impl CodeGen {
             let mod_cpp_name = escape_cpp_keyword(&mod_name);
             self.writeln(&format!("namespace {} {{", mod_cpp_name));
             self.indent += 1;
+            // Record UNIQUE function names for qualified path resolution.
+            // Functions that appear in multiple modules are NOT tracked
+            // (qualification would be ambiguous).
+            for nested in nested_items {
+                if let syn::Item::Fn(f) = nested {
+                    let fn_name = f.sig.ident.to_string();
+                    let escaped_fn = escape_cpp_keyword(&fn_name);
+                    let qualified = format!("{}::{}", mod_cpp_name, escaped_fn);
+                    let entry = self.module_qualified_functions.entry(fn_name);
+                    match entry {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(qualified);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            // Ambiguous — remove the mapping
+                            if e.get() != &qualified {
+                                e.insert(String::new()); // empty = ambiguous
+                            }
+                        }
+                    }
+                }
+            }
             self.module_stack.push(mod_name);
             self.emit_item_forward_decls(nested_items, module_depth + 1);
             self.module_stack.pop();
@@ -17468,6 +17493,12 @@ impl CodeGen {
             }
         }
 
+        // Note: non-turbofish function qualification is NOT done here — the
+        // module_qualified_functions map is first-match and doesn't handle
+        // overloaded function names across modules (e.g., `case_` in `all`,
+        // `bits`, `iter`). Only turbofish paths are qualified in
+        // emit_expr_path_to_string.
+
         // Recover omitted template arguments for local associated paths where the
         // base generic type is known in this scope (for example `IterNames::new_`
         // inside `Iter<B>` should become `IterNames<B>::new_`).
@@ -17825,6 +17856,32 @@ impl CodeGen {
                     return variant_key;
                 }
                 return format!("{}::{}", prefix_segments.join("::"), variant_key);
+            }
+        }
+        // For single-segment paths that match a function declared in an
+        // inline module, qualify with the module name to avoid name collision
+        // with identically-named test namespaces. Only applies when there's
+        // a turbofish arg (to distinguish from variable/type references).
+        // E.g., `from_str::<TestFlags>(s)` → `parser::from_str<TestFlags>(s)`
+        if path.segments.len() == 1 {
+            let seg = &path.segments[0];
+            let has_turbofish =
+                matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+            if has_turbofish {
+                let fn_name = seg.ident.to_string();
+                if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
+                    if !qualified.is_empty() {
+                        let module_prefix = qualified.split("::").next().unwrap_or("");
+                        let inside_module = self.module_stack.iter().any(|m| m == module_prefix);
+                        if !inside_module {
+                            let mut emitted = qualified.clone();
+                            if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                                emitted.push_str(&template_args);
+                            }
+                            return emitted;
+                        }
+                    }
+                }
             }
         }
         let mut emitted = self.emit_path_to_string(path);
