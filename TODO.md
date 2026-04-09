@@ -2613,9 +2613,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Leaf 7: Fix method-as-function-pointer and impl Fn argument emission
         - [x] *done* Leaf 7.1: Method reference lambdas now wrap with explicit type instead of `auto` for proper `rusty::Function<R(const T&)>` conversion. UFCS `Type::method(self)` converted to `receiver.method()` dot call.
         - [x] *done* Leaf 7.2: `impl FnOnce/Fn/FnMut` in argument position now uses `const auto&` (abbreviated template) instead of `rusty::Function<T(...)>`, allowing generic lambdas to pass without template deduction failure. Bitflags: 156 → 126 (30 fewer).
-      - [ ] Leaf 8: Fix `case_()` function signature mismatches (64 remaining bitflags errors)
-        - [ ] Leaf 8.1: Root cause: `typename T::Bits` in function parameters is non-deducible in C++. When `impl Fn` args become `const auto&`, `T` can't be deduced at all. Needs explicit template args at call sites or rewriting `case_()` signatures to avoid associated types in parameter position.
-        - [ ] Leaf 8.2: Add regression tests for test helper call patterns
+      - [x] *done* Leaf 8: Fix `case_()` function signature mismatches (64 remaining bitflags errors)
+        - [x] *done* Leaf 8.1: Added `infer_template_args_from_fn_path_return_type()` function that detects when a call's last argument is a function path like `TypeName::method` and uses `TypeName` as explicit template argument. This fixes the `typename T::Bits` non-deducibility issue. Bitflags all.rs: 0 errors (previously 64). Remaining case_ errors in other test files (difference.rs, insert.rs, etc.) are due to separate method reference lambda wrapping issues.
+        - [x] *done* Leaf 8.2: Added regression test `test_leaf8_generic_fn_with_fn_path_arg_emits_explicit_template_args`.
       - [x] *done* Leaf 9: Fix `Flag<B>::value_field` incomplete type (fixes 82 bitflags errors including 21 direct + cascading)
         - [x] *done* Leaf 9.1: Extend `is_self_referential_const_type()` to detect indirect self-references where the struct name appears inside template arguments (e.g., `std::span<const Flag<TestFlags>>`). Defers FLAGS initialization outside class body to avoid incomplete type. Bitflags: 338 → 256.
         - [x] *done* Leaf 9.2: Add regression test for indirect self-referential const deferral

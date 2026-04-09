@@ -3292,6 +3292,61 @@ impl CodeGen {
         )])
     }
 
+    /// Infer template arguments from a function-path argument's return type.
+    ///
+    /// Handles patterns like `case_(bits, TypeName::all)` where `TypeName::all` is a
+    /// static method returning `TypeName`, but C++ template deduction cannot infer T
+    /// from `typename T::Bits` alone.
+    ///
+    /// Returns Some(vec![type_name]) if the last argument is a path like `TypeName::method`
+    /// and we can infer that T should be `TypeName`.
+    fn infer_template_args_from_fn_path_return_type(&self, call: &syn::ExprCall) -> Option<Vec<String>> {
+        // Only handle free functions (not UFCS method calls)
+        let syn::Expr::Path(_func_path) = call.func.as_ref() else {
+            return None;
+        };
+
+        // Check if the called function has type parameters
+        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
+        if type_params.is_empty() {
+            return None;
+        }
+
+        // Get the last argument
+        let last_arg = call.args.last()?;
+
+        // Check if the last argument is a path expression (e.g., `TypeName::method`)
+        let syn::Expr::Path(arg_path) = last_arg else {
+            return None;
+        };
+
+        // Need at least 2 segments for `TypeName::method` pattern
+        if arg_path.path.segments.len() < 2 {
+            return None;
+        }
+
+        // The second-to-last segment is the type name (e.g., `TestFlags` in `TestFlags::all`)
+        // For `tests::TestFlags::all`, segments are ["tests", "TestFlags", "all"]
+        let type_seg = arg_path.path.segments.get(arg_path.path.segments.len() - 2)?;
+
+        // Verify this looks like a type name (starts with uppercase)
+        let type_name = &type_seg.ident.to_string();
+        if !type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return None;
+        }
+
+        // Check if this type name is actually a declared type (avoids false positives)
+        if !self.local_declared_types.contains(type_name)
+            && !self.is_local_type_name_in_scope(type_name)
+        {
+            return None;
+        }
+
+        // For now, return a single type argument (matches the first type parameter)
+        // This handles the common case of `fn case<T: Flags>(expected: T::Bits, inherent: impl FnOnce() -> T)`
+        Some(vec![type_name.clone()])
+    }
+
     /// Emit a nested function definition as a local callable.
     /// Rust nested `fn` items cannot capture non-item locals, so emit
     /// captureless callables by default. If a nested function references a
@@ -15127,6 +15182,13 @@ impl CodeGen {
         let mut args = call_args.clone();
         let recovered_function_template_args =
             self.infer_function_type_template_args_from_pointer_call(call, &call_args);
+        // Also try to infer template args from a function-path last argument like `TypeName::all`
+        // This handles cases where C++ template deduction cannot infer T from `typename T::Bits`
+        let fn_path_template_args = if recovered_function_template_args.is_some() {
+            None
+        } else {
+            self.infer_template_args_from_fn_path_return_type(call)
+        };
         let const_generic_args = self.local_function_const_generic_call_args(call);
         if !const_generic_args.is_empty() {
             let mut merged = const_generic_args;
@@ -15134,6 +15196,8 @@ impl CodeGen {
             args = merged;
         }
         let func = if let Some(template_args) = recovered_function_template_args {
+            format!("{}<{}>", func, template_args.join(", "))
+        } else if let Some(template_args) = fn_path_template_args {
             format!("{}<{}>", func, template_args.join(", "))
         } else {
             func
@@ -25944,6 +26008,32 @@ mod tests {
             "#,
         );
         assert!(out.contains("rusty::Function<::iter::Iter<T>(const T&)> f"));
+    }
+
+    #[test]
+    fn test_leaf8_generic_fn_with_fn_path_arg_emits_explicit_template_args() {
+        // Regression test for bitflags parity: when calling a generic function like
+        // `case<T>(expected: T::Bits, inherent: impl FnOnce() -> T)` with a function path
+        // argument like `TestFlags::all`, the transpiler must emit explicit template
+        // args `case_<TestFlags>(...)` so C++ can deduce T from `typename T::Bits`.
+        let out = transpile_str(
+            r#"
+            struct TestFlags(u32);
+            impl TestFlags {
+                fn all() -> Self { TestFlags(7) }
+            }
+            fn case_<T>(expected: u32, func: impl Fn() -> T) {}
+            fn test() {
+                case_(1 | 2 | 4, TestFlags::all);
+            }
+            "#,
+        );
+        // The call should use turbofish syntax with explicit type argument
+        assert!(
+            out.contains("case_<TestFlags>"),
+            "Generic call with fn path arg should emit explicit template args, got:\n{}",
+            out
+        );
     }
 
     // ── Phase 7: C++20 module tests ─────────────────────────────
