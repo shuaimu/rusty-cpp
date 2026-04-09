@@ -18918,7 +18918,10 @@ impl CodeGen {
                         }
                     });
                     return if has_mutable_trait {
-                        "auto&".to_string()
+                        // Use forwarding reference to accept both lvalues and
+                        // std::move'd rvalues (Rust passes impl Write by value,
+                        // so the transpiler may emit std::move on last use).
+                        "auto&&".to_string()
                     } else {
                         "const auto&".to_string()
                     };
@@ -29423,7 +29426,7 @@ mod tests {
             "test_crate",
         );
         // impl Write is a mutable trait — should emit `auto&` not `const auto&`
-        assert!(out.contains("auto& writer"), "impl Write arg should use auto&, got: {}", out);
+        assert!(out.contains("auto&& writer"), "impl Write arg should use auto&& (forwarding ref), got: {}", out);
         assert!(!out.contains("const auto& writer"), "impl Write should not be const, got: {}", out);
         assert!(!out.contains("void*"), "impl Trait should not use void*, got: {}", out);
     }
@@ -33892,7 +33895,7 @@ mod tests {
             "test_crate",
         );
         assert!(
-            out.contains("auto& writer"),
+            out.contains("auto&& writer"),
             "impl Write should emit auto& (mutable)\nGot: {out}"
         );
         assert!(

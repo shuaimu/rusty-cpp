@@ -21,6 +21,9 @@
 // @unsafe
 namespace rusty {
 
+// Forward declaration for Result (defined in result.hpp, included later)
+template<typename T, typename E> class Result;
+
 // Tag types for Option variants
 struct None_t {
     constexpr None_t() noexcept = default;
@@ -228,6 +231,26 @@ public:
             return f(value);
         }
         return ResultType(None);
+    }
+
+    // ok_or_else: convert Option<T> to Result<T, E> using closure for error
+    template<typename F>
+    auto ok_or_else(F&& err_fn) -> Result<T, decltype(err_fn())> {
+        using E = decltype(err_fn());
+        if (has_value) {
+            return Result<T, E>::Ok(std::move(value));
+        }
+        return Result<T, E>::Err(err_fn());
+    }
+
+    // ok_or_else on const reference
+    template<typename F>
+    auto ok_or_else(F&& err_fn) const -> Result<T, decltype(err_fn())> {
+        using E = decltype(err_fn());
+        if (has_value) {
+            return Result<T, E>::Ok(value);
+        }
+        return Result<T, E>::Err(err_fn());
     }
 
     // Map function over reference

@@ -290,7 +290,13 @@ public:
     std::string_view as_str() const {
         return data_ ? std::string_view(data_, len_) : std::string_view();
     }
-    
+
+    // Implicit conversion to string_view — enables passing String where
+    // std::string_view is expected (mirrors Rust's Deref<Target=str>).
+    operator std::string_view() const {
+        return as_str();
+    }
+
     // Convert to std::string (copies data)
     // @lifetime: owned
     std::string to_string() const {
