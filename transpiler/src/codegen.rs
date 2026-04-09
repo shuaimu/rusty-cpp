@@ -12972,8 +12972,10 @@ impl CodeGen {
                     // Do NOT strip for Field access (&self.field) which may need
                     // the address-of for pointer/reference semantics.
                     let ref_inner_peeled = self.peel_paren_group_expr(&r.expr);
+                    // In Rust, both `&x` and `&mut x` borrow the variable.
+                    // In C++, passing to const T& or T& doesn't need `&` — just pass the name.
+                    // For `&mut path`, we also strip because C++ references bind automatically.
                     if matches!(ref_inner_peeled, syn::Expr::Path(_))
-                        && r.mutability.is_none()
                         && !self.is_expr_raw_pointer_like(&r.expr)
                     {
                         return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
@@ -23622,8 +23624,9 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("static_cast<void>(f(&self_));"));
-        assert!(!out.contains("static_cast<void>(f(self_));"));
+        // `&mut self` should emit just `self_` (not `&self_`) because
+        // C++ references bind automatically — no address-of needed.
+        assert!(out.contains("static_cast<void>(f(self_));"));
     }
 
     #[test]

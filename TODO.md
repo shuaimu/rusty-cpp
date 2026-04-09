@@ -2594,6 +2594,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 1.3: Add regression test for namespace/function collision rename pattern
         - [x] *done* Leaf 1.4: Fix path resolution for function calls inside renamed scopes — emit absolute `::parser::from_str<T>(...)` paths when calling functions from a parent module whose name is shadowed by a same-named namespace in the current scope. Handles both turbofish and non-turbofish calls. Bitflags errors: 447 → 363 (84 fewer).
       - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
+        - [x] *done* Leaf 2.0: Strip `&` from `&mut path` expressions — in C++, references bind automatically, no address-of needed. Fixes `&mut x` emitting `&x` (pointer) instead of `x` (reference). Changes `write_str` errors from "pointer type" to "const has no member named" (next step: add fmt::Write to rusty::String and fix const qualifier).
         - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring
         - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
       - [ ] Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
