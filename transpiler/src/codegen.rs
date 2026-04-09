@@ -18107,32 +18107,52 @@ impl CodeGen {
         }
         // For single-segment paths that match a function declared in an
         // inline module, qualify with the module name to avoid name collision
-        // with identically-named test namespaces. Only applies when there's
-        // a turbofish arg (to distinguish from variable/type references).
-        // E.g., `from_str::<TestFlags>(s)` → `parser::from_str<TestFlags>(s)`
+        // with identically-named test namespaces.
+        // E.g., `from_str::<TestFlags>(s)` → `::parser::from_str<TestFlags>(s)`
+        // Also handles non-turbofish calls: `to_writer(f, &s)` → `::parser::to_writer(f, &s)`
         if path.segments.len() == 1 {
-            let seg = &path.segments[0];
-            let has_turbofish =
-                matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
-            if has_turbofish {
-                let fn_name = seg.ident.to_string();
-                if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
-                    if !qualified.is_empty() {
-                        let module_prefix = qualified.split("::").next().unwrap_or("");
-                        // Only skip qualification if the INNERMOST module scope
-                        // is the target module. Being in a nested sub-module
-                        // (e.g., `parser::from_str`) still needs qualification
-                        // because `namespace from_str` shadows `parser::from_str`.
-                        let inside_module = self.module_stack.last().is_some_and(|m| m == module_prefix);
-                        if !inside_module {
-                            let mut emitted = qualified.clone();
-                            if let Some(template_args) = self.emit_expr_path_template_args(path) {
-                                emitted.push_str(&template_args);
-                            }
-                            return emitted;
+            let fn_name = path.segments[0].ident.to_string();
+            if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
+                if !qualified.is_empty() {
+                    let module_prefix = qualified.split("::").next().unwrap_or("");
+                    // Only skip qualification if the module stack is EXACTLY
+                    // [module_prefix] — i.e., we're directly inside that module.
+                    // Being in a nested sub-module with the same name
+                    // (e.g., `tests::parser` vs `parser`) is NOT the same scope.
+                    let directly_inside = self.module_stack.len() == 1
+                        && self.module_stack.last().is_some_and(|m| m == module_prefix);
+                    if !directly_inside {
+                        // Use absolute path (::prefix::fn) to avoid shadowing
+                        // by same-named inner namespaces
+                        let needs_root = self.module_stack.iter().any(|m| m == module_prefix);
+                        let mut emitted = if needs_root {
+                            format!("::{}", qualified)
+                        } else {
+                            qualified.clone()
+                        };
+                        if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                            emitted.push_str(&template_args);
                         }
+                        return emitted;
                     }
                 }
+            }
+        }
+        // For multi-segment paths where the first segment matches a module name
+        // that is shadowed by a same-named namespace in the current scope,
+        // prefix with `::` to force absolute lookup.
+        // E.g., inside `tests::parser`, `parser::from_str<T>(...)` needs
+        // `::parser::from_str<T>(...)` to avoid resolving to `tests::parser::from_str`.
+        if path.segments.len() >= 2 {
+            let first_seg = path.segments[0].ident.to_string();
+            let is_shadowed = self.module_stack.iter().any(|m| *m == first_seg)
+                && self.module_stack.first().map(|m| m.as_str()) != Some(&first_seg);
+            if is_shadowed {
+                let mut emitted = format!("::{}", self.emit_path_to_string(path));
+                if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                    emitted.push_str(&template_args);
+                }
+                return emitted;
             }
         }
         let mut emitted = self.emit_path_to_string(path);
@@ -33707,6 +33727,40 @@ mod tests {
         assert!(
             out.contains("from_str("),
             "outer from_str function should keep its name\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_namespace_collision_absolute_path_qualification() {
+        // When calling a function from a parent module whose name is shadowed
+        // by a same-named namespace in the current scope, the transpiler
+        // should emit absolute path qualification.
+        let out = transpile_str(
+            r#"
+            mod parser {
+                pub fn from_str<B>(input: &str) -> i32 { 0 }
+                pub fn to_writer(flags: i32, s: &mut String) {}
+            }
+            mod tests {
+                mod parser {
+                    fn roundtrip() {
+                        let s = String::new();
+                        to_writer(42, &mut s);
+                    }
+                    mod from_str {
+                        fn valid() {
+                            let r = from_str::<i32>("hello");
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+        // Inside tests::parser, calls to from_str/to_writer should use
+        // absolute paths to avoid shadowing by the inner parser namespace
+        assert!(
+            out.contains("::parser::to_writer(") || out.contains("::parser::to_writer<"),
+            "to_writer call inside tests::parser should use absolute path\nGot: {out}"
         );
     }
 }

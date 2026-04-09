@@ -2592,7 +2592,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 1.1: Pre-scan all items to detect inline module names that collide with function names anywhere in the file; rename colliding namespaces by appending `_tests` suffix
         - [x] *done* Leaf 1.2: Apply renames consistently in forward declarations, full namespace body emission, and test wrapper call paths via `escape_and_rename_qualified_name()`
         - [x] *done* Leaf 1.3: Add regression test for namespace/function collision rename pattern
-        - [ ] Leaf 1.4: Fix remaining path resolution for function calls inside renamed scopes — `from_str<T>(s)` inside `tests::parser` can't find `::parser::from_str<B>()` by unqualified lookup; needs either `using namespace ::parser;` injection or absolute path qualification
+        - [x] *done* Leaf 1.4: Fix path resolution for function calls inside renamed scopes — emit absolute `::parser::from_str<T>(...)` paths when calling functions from a parent module whose name is shadowed by a same-named namespace in the current scope. Handles both turbofish and non-turbofish calls. Bitflags errors: 447 → 363 (84 fewer).
       - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
         - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring
         - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
@@ -2630,7 +2630,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
         - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)
         - [x] *done* Leaf 12.3: Add regression tests for namespace/function collision patterns (done in Leaf 1.3)
-        - [ ] Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (see Leaf 1.4)
+        - [x] *done* Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (done in Leaf 1.4)
       - [ ] Leaf 13: Re-run parity matrix after all fixes and verify 7/7 crates pass
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
