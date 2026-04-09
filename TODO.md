@@ -2596,8 +2596,8 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
         - [x] *done* Leaf 2.0: Strip `&` from `&mut path` expressions — in C++, references bind automatically, no address-of needed. Fixes `&mut x` emitting `&x` (pointer) instead of `x` (reference).
         - [x] *done* Leaf 2.0.1: Add `rusty::fmt::Error`, `rusty::fmt::Result` in new `include/rusty/fmt.hpp` header; add `write_str()`/`write_char()` methods to `rusty::String`; emit `auto&` (not `const auto&`) for `impl Write` parameters. Bitflags errors: 363 → 338 (25 fewer). All 30 `write_str` pointer/const errors eliminated.
-        - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring (root cause: `Vec::new_()` without template arg → CTAD failure → cascading void deduction)
-        - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
+        - [x] *done* Leaf 2.1: Added `init_expr_is_incomplete_constructor_call` helper to detect constructor calls without template args (e.g., `Vec::new_()`, `HashMap::new_()`) that cause C++ CTAD failure. When such constructor calls appear in tuple destructuring context (`let (a, b) = Vec::new_()`), emit `static_cast<void>(expr)` to avoid invalid C++ structured binding. Regular tuple destructuring (`let (a, b) = pair;`) and Try expressions (`let (a, b) = func()?`) are unaffected.
+        - [x] *done* Leaf 2.2: Added `test_tuple_destructuring_void_expr_falls_back_to_static_cast_void` regression test verifying that `Vec::new_()` in tuple context emits `static_cast<void>` fallback.
       - [ ] Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
         - [ ] Leaf 3.1: Detect forward references to `auto`-typed variables within the same scope and either reorder declarations or emit explicit types
         - [ ] Leaf 3.2: Add regression tests for variable ordering with auto deduction

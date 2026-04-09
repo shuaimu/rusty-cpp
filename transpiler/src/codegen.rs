@@ -9290,7 +9290,24 @@ impl CodeGen {
                     })
                     .collect();
                 if let Some(expr_str) = expr_str {
-                    self.writeln(&format!("auto [{}] = {};", names.join(", "), expr_str));
+                    // Check if this is a constructor call without template args that would
+                    // cause CTAD failure. These have incomplete types and can't be used in
+                    // structured bindings. Fall back to static_cast<void> to preserve side
+                    // effects while avoiding invalid C++ code.
+                    let is_incomplete_constructor = local.init.as_ref().is_some_and(|init| {
+                        self.init_expr_is_incomplete_constructor_call(&init.expr)
+                    });
+                    if is_incomplete_constructor {
+                        // Constructor call without template args → incomplete type.
+                        // Can't use in structured binding, fall back to void cast.
+                        self.writeln(&format!("static_cast<void>({});", expr_str));
+                    } else {
+                        self.writeln(&format!(
+                            "auto [{}] = {};",
+                            names.join(", "),
+                            expr_str
+                        ));
+                    }
                 }
             }
             syn::Pat::Wild(_) => {
@@ -10496,6 +10513,50 @@ impl CodeGen {
             ("Err", "Ok") => Some(parse_quote!(Result<#rhs_ty, #lhs_ty>)),
             _ => None,
         }
+    }
+
+    /// Detects constructor calls like `Vec::new_()` or `HashMap::new_()` that lack
+    /// template arguments and would cause C++ CTAD failure in structured bindings.
+    /// Returns true for zero-argument method calls on type paths with no template args.
+    fn init_expr_is_incomplete_constructor_call(&self, expr: &syn::Expr) -> bool {
+        let expr = match self.extract_value_expr(expr) {
+            Some(e) => e,
+            None => return false,
+        };
+        // Check for Call(expr::Path) with zero args where the path is a type::method
+        // pattern that lacks template arguments (causing CTAD failure).
+        let syn::Expr::Call(call) = expr else { return false };
+        if !call.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else { return false };
+        // Must be a two-segment path: Type::method (e.g., Vec::new_, HashMap::new_)
+        if path_expr.path.segments.len() != 2 {
+            return false;
+        }
+        let type_seg = path_expr.path.segments.first();
+        let method_seg = path_expr.path.segments.last();
+        let Some(type_seg) = type_seg else { return false };
+        let Some(method_seg) = method_seg else { return false };
+        // Check if type segment has no template arguments (no <...>)
+        if !matches!(type_seg.arguments, syn::PathArguments::None) {
+            return false;
+        }
+        // Check if it's a known constructor pattern: Type::new_() or Type::new()
+        // These need template args for CTAD and will fail in structured bindings.
+        let type_name = type_seg.ident.to_string();
+        let method_name = method_seg.ident.to_string();
+        let is_known_constructor_type = matches!(
+            type_name.as_str(),
+            "Vec" | "rusty::Vec"
+                | "HashMap" | "rusty::HashMap"
+                | "HashSet" | "rusty::HashSet"
+                | "ArrayVec" | "rusty::ArrayVec"
+                | "ArrayString" | "rusty::ArrayString"
+                | "String" | "rusty::String"
+        );
+        let is_factory_method = matches!(method_name.as_str(), "new" | "new_");
+        is_known_constructor_type && is_factory_method
     }
 
     fn infer_simple_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
@@ -24991,6 +25052,18 @@ mod tests {
     fn test_tuple_destructuring() {
         let out = transpile_str("fn f() { let (a, b) = pair; }");
         assert!(out.contains("auto [a, b] = pair;"));
+    }
+
+    #[test]
+    fn test_tuple_destructuring_void_expr_falls_back_to_static_cast_void() {
+        // Constructor calls without template args (e.g., Vec::new_()) have incomplete
+        // types in C++ and can't be used in structured bindings. We fall back to
+        // static_cast<void> to preserve side effects while avoiding invalid C++.
+        let out = transpile_str("fn f() { let (a, b) = Vec::new_(); }");
+        // Should NOT emit "auto [a, b] = Vec::new_();" (invalid C++ - CTAD failure)
+        assert!(!out.contains("auto [a, b] = Vec::new_()"));
+        // Should emit static_cast<void> to handle the incomplete type
+        assert!(out.contains("static_cast<void>(Vec::new_())"));
     }
 
     #[test]
