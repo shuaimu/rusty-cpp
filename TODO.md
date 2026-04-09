@@ -2587,6 +2587,49 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.3: Fix borrowed for-loop iteration: `for elt in &vec` (Rust borrows) was consuming vec via `rusty::for_in(vec)` calling `into_iter()`. Now emits `rusty::for_in(rusty::iter(vec))` for borrowed iteration, preserving vec for subsequent use. Also fixes `as_mut_ptr()` fallback to use struct-level TYPE params (not const params like CAP).
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.4: Fix `format_args!` transpilation for simple cases with literal args. `format_args!("Hello {0}", 123)` now produces `std::format("Hello {}", 123)` when args are numeric/string literals. Strips Rust positional indices (`{0}`→`{}`). Added `std::formatter<char32_t>` specialization for Rust char formatting.
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.5: Fix `format_args!` with no-placeholder literal strings (e.g., `format_args!("\u{1}\u{2}\u{3}")`). When format_args has no placeholders and no args, parse the format string as a Rust string literal via `syn::LitStr` and emit as proper C++ string with `escape_cpp_string_literal_content`. Result: arrayvec **51/51 tests pass (100%)**. Full matrix: **5/6 crates pass** (either ✅, tap ✅, cfg-if ✅, take_mut ✅, arrayvec ✅, semver ❌ Stage D).
+    - [ ] Phase 21: Semver and bitflags parity — fix remaining Stage D compilation errors (59 semver, 396 bitflags)
+      - [ ] Leaf 1: Fix turbofish syntax lowering in complex expression positions (fixes ~99 bitflags errors)
+        - [ ] Leaf 1.1: Detect residual `::<Type>` turbofish patterns in emitted C++ expressions and lower to valid C++ template syntax (e.g., `func::<T>(args)` → `func<T>(args)`)
+        - [ ] Leaf 1.2: Handle turbofish on method calls in chained expressions (e.g., `.collect::<Vec<_>>()`) where the `::` before `<` is invalid C++
+        - [ ] Leaf 1.3: Add regression tests for turbofish in function calls, method calls, and nested generic positions
+      - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
+        - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring
+        - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
+      - [ ] Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
+        - [ ] Leaf 3.1: Detect forward references to `auto`-typed variables within the same scope and either reorder declarations or emit explicit types
+        - [ ] Leaf 3.2: Add regression tests for variable ordering with auto deduction
+      - [ ] Leaf 4: Fix deleted copy constructor usage (fixes 3 semver errors)
+        - [ ] Leaf 4.1: Detect types with deleted copy constructors (e.g., `VersionReq`) and emit `std::move()` or restructure to avoid copies
+        - [ ] Leaf 4.2: Add regression tests for non-copyable type usage in assignments and function calls
+      - [ ] Leaf 5: Emit missing trait instance methods for bitflag types (fixes ~30 bitflags errors)
+        - [ ] Leaf 5.1: Synthesize `iter()`, `iter_names()`, `complement()`, `set()` methods for bitflag newtype structs (detected via `const _: () = { impl ... }` blocks)
+        - [ ] Leaf 5.2: Add regression tests for bitflag trait method synthesis
+      - [ ] Leaf 6: Fix `core::fmt` and unresolved path prefixes (fixes ~4 bitflags errors)
+        - [ ] Leaf 6.1: Map remaining `core::fmt::*` paths to `rusty::fmt::*` in expanded output emission
+        - [ ] Leaf 6.2: Add regression tests for core::fmt path resolution
+      - [ ] Leaf 7: Fix method-as-function-pointer emission (fixes ~5 bitflags errors)
+        - [ ] Leaf 7.1: Detect `Type::method` used as callable argument (not a static call) and wrap in lambda: `[](auto& x) { return x.method(); }`
+        - [ ] Leaf 7.2: Add regression tests for member function references as arguments
+      - [ ] Leaf 8: Fix `case_()` function signature mismatches (fixes ~10 bitflags errors)
+        - [ ] Leaf 8.1: Detect test helper function call argument type mismatches (e.g., `case_(int, TestFlags(uint8_t))` vs `case_(int, int, TestFlags(Bits))`) and emit correct overload or cast
+        - [ ] Leaf 8.2: Add regression tests for test helper call patterns
+      - [ ] Leaf 9: Fix trait associated type resolution for `Flag<B>` (fixes ~9 bitflags errors)
+        - [ ] Leaf 9.1: Resolve `traits::Flag<B>::value_field` incomplete type by emitting complete trait-associated type definitions or inlining the associated type
+        - [ ] Leaf 9.2: Add regression tests for trait associated type usage in template contexts
+      - [ ] Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
+        - [ ] Leaf 10.1: Map `string_view::as_bytes()` → appropriate C++ equivalent (e.g., `reinterpret_cast<const uint8_t*>(sv.data())` with size)
+        - [ ] Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
+        - [ ] Leaf 10.3: Fix `Vec` used without template arguments in emitted code
+        - [ ] Leaf 10.4: Add regression tests for string API and iterator translations
+      - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
+        - [ ] Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
+        - [ ] Leaf 11.2: For types used only by pointer/reference in the cycle, emit forward declaration; for types used by value, extract to separate definition block
+        - [ ] Leaf 11.3: Add regression tests for circular type dependencies
+      - [ ] Leaf 12: Fix test namespace / function name collision (architecture gap #7)
+        - [ ] Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_test` suffix to test sub-module namespaces
+        - [ ] Leaf 12.2: Update all cross-references to use renamed test namespaces
+        - [ ] Leaf 12.3: Add regression tests for namespace/function collision patterns
+      - [ ] Leaf 13: Re-run parity matrix after all fixes and verify 7/7 crates pass
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
