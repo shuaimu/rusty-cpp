@@ -3579,6 +3579,8 @@ The following Rust→C++ translation gaps remain and require fundamental transpi
 
 6. **`format_args!` with complex patterns** — `format_args!` with Rust-specific format specs (`:?`, `:#x`), non-formattable types (`char32_t` in some contexts), or variable references is limited to `std::string{}` fallback. Simple cases with `{}` or `{0}` with literal args work via `std::format()`.
 
+7. **Test namespace / function template name collision** — When expanded test code creates sub-modules with the same name as function templates in a sibling module (e.g., `mod parser { fn from_str<B>(...) }` alongside `mod parser { mod from_str { fn valid() } }`), the C++ `namespace from_str` shadows the function template `from_str<B>`. In C++, namespaces hide functions of the same name — no standard mechanism can override this. Attempted fixes: path qualification (fails because `parser::from_str` is ambiguous), namespace renaming (breaks all cross-references), using-declarations (can't disambiguate). Fix requires: comprehensive test-module path rewrite that prefixes test sub-modules with `_test` suffix and updates all references.
+
 ### 11.10 Do Not Expand This Doc as a Chronological Diary
 
 Rejected pattern:
