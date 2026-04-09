@@ -17830,6 +17830,28 @@ impl CodeGen {
         if self.is_unit_struct_path(path) {
             return format!("{}{{}}", self.emit_path_to_string(path));
         }
+        // Bitflags `Bits::EMPTY` / `Bits::ALL` patterns:
+        // `Type::Bits::EMPTY` → `0` and `Type::Bits::ALL` → `static_cast<decltype(Type::_0)>(~0)`
+        if path.segments.len() >= 2 {
+            let last = path.segments.last().unwrap().ident.to_string();
+            let second_last = path.segments[path.segments.len() - 2].ident.to_string();
+            if second_last == "Bits" {
+                if last == "EMPTY" {
+                    return "0".to_string();
+                } else if last == "ALL" {
+                    // Get the type prefix for the cast
+                    if path.segments.len() >= 3 {
+                        let type_seg = &path.segments[path.segments.len() - 3];
+                        let type_name = type_seg.ident.to_string();
+                        return format!(
+                            "static_cast<{}::Bits>(~0)",
+                            type_name
+                        );
+                    }
+                    return "static_cast<unsigned>(~0)".to_string();
+                }
+            }
+        }
         // Data enum unit variant path: `ErrorKind::Empty` → `ErrorKind_Empty{}`
         // Only applies to unit variants (no fields) — data variants like
         // `Either::Left` used as constructor references are NOT rewritten.
