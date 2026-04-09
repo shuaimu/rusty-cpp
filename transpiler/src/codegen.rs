@@ -11883,7 +11883,18 @@ impl CodeGen {
             return format!("rusty::iter_mut({})", receiver);
         }
         if mc.method == "collect" && mc.args.is_empty() {
-            let receiver = self.emit_expr_to_string(&mc.receiver);
+            // When receiver is `.into_iter()`, replace with `rusty::iter()`
+            // since C++ containers don't have `.into_iter()`.
+            let receiver = if let syn::Expr::MethodCall(inner_mc) = &*mc.receiver {
+                if inner_mc.method == "into_iter" && inner_mc.args.is_empty() {
+                    let inner = self.emit_expr_to_string(&inner_mc.receiver);
+                    format!("rusty::iter({})", inner)
+                } else {
+                    self.emit_expr_to_string(&mc.receiver)
+                }
+            } else {
+                self.emit_expr_to_string(&mc.receiver)
+            };
             // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
             if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
                 let collect_type = self.map_type(turbofish_ty);
