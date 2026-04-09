@@ -3735,6 +3735,13 @@ impl CodeGen {
                             n, n
                         ));
                     }
+                    // from_iter: collect iterator elements via bitwise OR
+                    if !merged_methods.contains("from_iter") {
+                        self.writeln(&format!(
+                            "template<typename Iter> static {} from_iter(Iter&& iter) {{ {} result{{}}; for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) result._0 |= item._0; return result; }}",
+                            n, n
+                        ));
+                    }
                 }
             }
         }
@@ -11852,6 +11859,13 @@ impl CodeGen {
         }
         if mc.method == "collect" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
+            // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
+            if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
+                let collect_type = self.map_type(turbofish_ty);
+                if collect_type != "auto" && !collect_type.contains("/* TODO") {
+                    return format!("{}::from_iter({})", collect_type, receiver);
+                }
+            }
             if let Some(expected) = expected_ty {
                 let resolved_expected = self.resolve_expected_type_with_iter_hint(expected, &mc.receiver);
                 let expected_cpp = self.map_type(&resolved_expected);
