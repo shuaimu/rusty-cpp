@@ -35,6 +35,7 @@
 #include "rusty/panic.hpp"
 #include "rusty/cell.hpp"
 #include "rusty/refcell.hpp"
+#include "rusty/fmt.hpp"
 #include "rusty/string.hpp"
 #include "rusty/fn.hpp"
 #include "rusty/function.hpp"

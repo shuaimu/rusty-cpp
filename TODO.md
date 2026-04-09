@@ -2594,8 +2594,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 1.3: Add regression test for namespace/function collision rename pattern
         - [x] *done* Leaf 1.4: Fix path resolution for function calls inside renamed scopes — emit absolute `::parser::from_str<T>(...)` paths when calling functions from a parent module whose name is shadowed by a same-named namespace in the current scope. Handles both turbofish and non-turbofish calls. Bitflags errors: 447 → 363 (84 fewer).
       - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
-        - [x] *done* Leaf 2.0: Strip `&` from `&mut path` expressions — in C++, references bind automatically, no address-of needed. Fixes `&mut x` emitting `&x` (pointer) instead of `x` (reference). Changes `write_str` errors from "pointer type" to "const has no member named" (next step: add fmt::Write to rusty::String and fix const qualifier).
-        - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring
+        - [x] *done* Leaf 2.0: Strip `&` from `&mut path` expressions — in C++, references bind automatically, no address-of needed. Fixes `&mut x` emitting `&x` (pointer) instead of `x` (reference).
+        - [x] *done* Leaf 2.0.1: Add `rusty::fmt::Error`, `rusty::fmt::Result` in new `include/rusty/fmt.hpp` header; add `write_str()`/`write_char()` methods to `rusty::String`; emit `auto&` (not `const auto&`) for `impl Write` parameters. Bitflags errors: 363 → 338 (25 fewer). All 30 `write_str` pointer/const errors eliminated.
+        - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring (root cause: `Vec::new_()` without template arg → CTAD failure → cascading void deduction)
         - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
       - [ ] Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
         - [ ] Leaf 3.1: Detect forward references to `auto`-typed variables within the same scope and either reorder declarations or emit explicit types

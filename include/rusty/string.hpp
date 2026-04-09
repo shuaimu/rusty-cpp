@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 #include <cctype>
+#include "rusty/fmt.hpp"
 
 // @safe
 namespace rusty {
@@ -204,6 +205,16 @@ public:
         ensure_null_terminated();
     }
     
+    // fmt::Write trait — write string/char into this String.
+    fmt::Result write_str(std::string_view s) {
+        push_str(s.data());
+        return fmt::Result::Ok({});
+    }
+    fmt::Result write_char(char32_t ch) {
+        push(ch);
+        return fmt::Result::Ok({});
+    }
+
     // Pop character from end
     char pop() {
         if (len_ == 0) {

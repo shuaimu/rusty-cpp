@@ -18894,7 +18894,21 @@ impl CodeGen {
                 // `SafeFn<uint64_t(auto)>`.  When inside a generic argument
                 // context, fall through to the facade/concept path instead.
                 if self.module_name.is_some() && self.type_arg_nesting.get() == 0 {
-                    return "const auto&".to_string();
+                    // Check if any bound is a mutable trait (e.g., fmt::Write,
+                    // io::Write) — these need `auto&` not `const auto&`.
+                    let has_mutable_trait = it.bounds.iter().any(|b| {
+                        if let syn::TypeParamBound::Trait(tb) = b {
+                            let last = tb.path.segments.last().map(|s| s.ident.to_string());
+                            matches!(last.as_deref(), Some("Write"))
+                        } else {
+                            false
+                        }
+                    });
+                    return if has_mutable_trait {
+                        "auto&".to_string()
+                    } else {
+                        "const auto&".to_string()
+                    };
                 }
                 // Collect all trait names
                 let trait_paths: Vec<&syn::Path> = it
@@ -20547,8 +20561,7 @@ auto partial_cmp(const A& a, const B& b) {\n\
     }\n\
 }\n\
 namespace fmt {\n\
-struct Error {};\n\
-using Result = rusty::Result<std::tuple<>, Error>;\n\
+// Error and Result are defined in rusty/fmt.hpp\n\
 struct Arguments {};\n\
 enum class Alignment { Left, Right, Center };\n\
 struct DebugList {\n\
@@ -29396,7 +29409,9 @@ mod tests {
             "#,
             "test_crate",
         );
-        assert!(out.contains("const auto& writer"), "impl Trait arg should use const auto&, got: {}", out);
+        // impl Write is a mutable trait — should emit `auto&` not `const auto&`
+        assert!(out.contains("auto& writer"), "impl Write arg should use auto&, got: {}", out);
+        assert!(!out.contains("const auto& writer"), "impl Write should not be const, got: {}", out);
         assert!(!out.contains("void*"), "impl Trait should not use void*, got: {}", out);
     }
 
@@ -29742,15 +29757,16 @@ mod tests {
 
     #[test]
     fn test_leaf4154333333362_runtime_fallback_formatter_exposes_error_type() {
+        // Error and Result are now defined in rusty/fmt.hpp, not in runtime helpers.
+        // The runtime helpers just reference them via the `fmt` namespace.
         let helpers = runtime_path_fallback_helpers_text();
-        assert!(helpers.contains("struct Error {};"));
+        assert!(helpers.contains("namespace fmt {"));
     }
 
     #[test]
     fn test_leaf415441_runtime_fallback_formatter_supports_padding_surface() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("enum class Alignment { Left, Right, Center };"));
-        assert!(helpers.contains("using Result = rusty::Result<std::tuple<>, Error>;"));
         assert!(helpers.contains("rusty::Option<size_t> width() const"));
         assert!(helpers.contains("rusty::Option<Alignment> align() const"));
         assert!(helpers.contains("char fill() const { return ' '; }"));
@@ -33847,6 +33863,28 @@ mod tests {
         assert!(
             !out.contains("core::fmt"),
             "core:: prefix should not remain in output\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_impl_write_emits_non_const_auto_ref() {
+        // impl fmt::Write should emit `auto&` not `const auto&` because
+        // Write trait methods mutate the receiver.
+        let out = transpile_str_module(
+            r#"
+            fn write_to(writer: impl std::fmt::Write, s: &str) {
+                writer.write_str(s);
+            }
+            "#,
+            "test_crate",
+        );
+        assert!(
+            out.contains("auto& writer"),
+            "impl Write should emit auto& (mutable)\nGot: {out}"
+        );
+        assert!(
+            !out.contains("const auto& writer"),
+            "impl Write should NOT be const\nGot: {out}"
         );
     }
 }
