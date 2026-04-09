@@ -294,6 +294,9 @@ pub struct CodeGen {
     declared_item_names: HashSet<String>,
     /// Maps function names declared inside inline modules to qualified paths.
     module_qualified_functions: HashMap<String, String>,
+    /// Tracks inline module names that collide with function names in the same scope.
+    /// Maps original module name to renamed C++ namespace name (e.g., "from_str" → "from_str_tests").
+    module_namespace_renames: HashMap<String, String>,
     /// Per-type method signature keys already emitted in the current type body.
     /// This catches collisions that only appear after Rust-path → C++ mapping.
     emitted_method_conflict_keys: Vec<HashSet<String>>,
@@ -396,6 +399,7 @@ impl CodeGen {
             in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
             module_qualified_functions: HashMap::new(),
+            module_namespace_renames: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
             return_value_scopes: Vec::new(),
@@ -611,6 +615,10 @@ impl CodeGen {
                 deferred_items.push(item);
             }
         }
+
+        // Pre-scan: detect module names that collide with function names
+        // in the same scope, and register renames to avoid C++ namespace shadowing.
+        self.detect_namespace_function_collisions(&file.items, &[]);
 
         if self.emit_item_forward_decls(&file.items, 0) {
             self.newline();
@@ -1048,6 +1056,75 @@ impl CodeGen {
         })
     }
 
+    /// Collect all function names (including templates) from all scopes.
+    fn collect_all_function_names(items: &[syn::Item], out: &mut HashSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) if !Self::has_cfg_test(&f.attrs) => {
+                    out.insert(f.sig.ident.to_string());
+                }
+                syn::Item::Mod(m) if !Self::has_cfg_test(&m.attrs) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        Self::collect_all_function_names(nested_items, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Pre-scan items to detect inline module names that collide with function
+    /// names anywhere in the file. Registers renames in `module_namespace_renames`.
+    fn detect_namespace_function_collisions(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        // On first call, collect all function names from all scopes
+        let all_fn_names = if module_path.is_empty() {
+            let mut names = HashSet::new();
+            Self::collect_all_function_names(items, &mut names);
+            names
+        } else {
+            HashSet::new() // Will be passed through recursion
+        };
+        self.detect_namespace_function_collisions_inner(items, module_path, &all_fn_names);
+    }
+
+    fn detect_namespace_function_collisions_inner(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+        all_fn_names: &HashSet<String>,
+    ) {
+        for item in items {
+            if let syn::Item::Mod(m) = item {
+                if Self::has_cfg_test(&m.attrs) {
+                    continue;
+                }
+                let mod_name = m.ident.to_string();
+                if all_fn_names.contains(&mod_name) {
+                    let qualified = if module_path.is_empty() {
+                        mod_name.clone()
+                    } else {
+                        format!("{}::{}", module_path.join("::"), mod_name)
+                    };
+                    let renamed = format!("{}_tests", escape_cpp_keyword(&mod_name));
+                    self.module_namespace_renames
+                        .insert(qualified, renamed);
+                }
+                // Recurse into inline module content
+                if let Some((_, nested_items)) = &m.content {
+                    let mut child_path = module_path.to_vec();
+                    child_path.push(mod_name);
+                    self.detect_namespace_function_collisions_inner(
+                        nested_items, &child_path, all_fn_names,
+                    );
+                }
+            }
+        }
+    }
+
     fn collect_scope_module_dependencies(
         &self,
         items: &[syn::Item],
@@ -1189,7 +1266,18 @@ impl CodeGen {
             if !Self::has_forward_decl_items(nested_items) {
                 continue;
             }
-            let mod_cpp_name = escape_cpp_keyword(&mod_name);
+            // Look up potential rename from pre-scan collision detection
+            let scope_prefix = self.module_stack.join("::");
+            let qualified_mod = if scope_prefix.is_empty() {
+                mod_name.clone()
+            } else {
+                format!("{}::{}", scope_prefix, mod_name)
+            };
+            let mod_cpp_name = if let Some(renamed) = self.module_namespace_renames.get(&qualified_mod) {
+                renamed.clone()
+            } else {
+                escape_cpp_keyword(&mod_name)
+            };
             self.writeln(&format!("namespace {} {{", mod_cpp_name));
             self.indent += 1;
             // Record UNIQUE function names for qualified path resolution.
@@ -2865,7 +2953,7 @@ impl CodeGen {
                 continue;
             };
 
-            let call_name = Self::escape_cpp_qualified_name(&call_target);
+            let call_name = self.escape_and_rename_qualified_name(&call_target);
             let wrapper_name = format!("rusty_test_{}", Self::marker_wrapper_suffix(&marker));
             let should_panic = self
                 .expanded_test_marker_should_panic
@@ -2931,6 +3019,28 @@ impl CodeGen {
             .map(escape_cpp_keyword)
             .collect::<Vec<_>>()
             .join("::")
+    }
+
+    /// Like escape_cpp_qualified_name but also applies module namespace renames.
+    fn escape_and_rename_qualified_name(&self, path: &str) -> String {
+        let segments: Vec<&str> = path.split("::").collect();
+        let mut result_segments = Vec::new();
+        // Build progressive qualified paths to check for renames
+        let mut prefix_parts: Vec<String> = Vec::new();
+        for seg in &segments {
+            let qualified = if prefix_parts.is_empty() {
+                seg.to_string()
+            } else {
+                format!("{}::{}", prefix_parts.join("::"), seg)
+            };
+            if let Some(renamed) = self.module_namespace_renames.get(&qualified) {
+                result_segments.push(renamed.clone());
+            } else {
+                result_segments.push(escape_cpp_keyword(seg));
+            }
+            prefix_parts.push(seg.to_string());
+        }
+        result_segments.join("::")
     }
 
     fn has_rustc_test_marker_attr(attrs: &[syn::Attribute]) -> bool {
@@ -4912,7 +5022,19 @@ impl CodeGen {
         }
 
         let mod_name = &m.ident;
-        let mod_cpp_name = escape_cpp_keyword(&mod_name.to_string());
+        let mod_name_str = mod_name.to_string();
+        // Check if this module was renamed due to function name collision
+        let scope_prefix = self.module_stack.join("::");
+        let qualified_mod = if scope_prefix.is_empty() {
+            mod_name_str.clone()
+        } else {
+            format!("{}::{}", scope_prefix, mod_name_str)
+        };
+        let mod_cpp_name = if let Some(renamed) = self.module_namespace_renames.get(&qualified_mod) {
+            renamed.clone()
+        } else {
+            escape_cpp_keyword(&mod_name_str)
+        };
         let is_pub = matches!(m.vis, syn::Visibility::Public(_));
         let has_inline_content = m.content.is_some();
 
@@ -33547,5 +33669,44 @@ mod tests {
         // is_empty should also not be duplicated
         let is_empty_count = out.matches("is_empty()").count();
         assert!(is_empty_count >= 1, "is_empty() should appear at least once\nGot: {out}");
+    }
+
+    #[test]
+    fn test_namespace_function_collision_rename() {
+        // When a module name collides with a function name, the namespace
+        // should be renamed to avoid C++ name lookup shadowing.
+        let out = transpile_str(
+            r#"
+            mod parser {
+                pub fn from_str(input: &str) -> i32 { 0 }
+                pub fn to_writer(flags: i32) -> String { String::new() }
+            }
+            mod tests {
+                mod parser {
+                    mod from_str {
+                        fn valid() {}
+                        fn invalid() {}
+                    }
+                    mod to_writer {
+                        fn cases() {}
+                    }
+                }
+            }
+            "#,
+        );
+        // The inner test sub-modules should be renamed to avoid collision
+        assert!(
+            out.contains("namespace from_str_tests"),
+            "from_str module should be renamed to from_str_tests\nGot: {out}"
+        );
+        assert!(
+            out.contains("namespace to_writer_tests"),
+            "to_writer module should be renamed to to_writer_tests\nGot: {out}"
+        );
+        // The outer function should still use its original name
+        assert!(
+            out.contains("from_str("),
+            "outer from_str function should keep its name\nGot: {out}"
+        );
     }
 }

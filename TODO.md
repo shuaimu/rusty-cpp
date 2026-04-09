@@ -2588,10 +2588,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.4: Fix `format_args!` transpilation for simple cases with literal args. `format_args!("Hello {0}", 123)` now produces `std::format("Hello {}", 123)` when args are numeric/string literals. Strips Rust positional indices (`{0}`→`{}`). Added `std::formatter<char32_t>` specialization for Rust char formatting.
                             - [x] *done* Leaf 4.15.4.3.3.3.3.3.27.46.5: Fix `format_args!` with no-placeholder literal strings (e.g., `format_args!("\u{1}\u{2}\u{3}")`). When format_args has no placeholders and no args, parse the format string as a Rust string literal via `syn::LitStr` and emit as proper C++ string with `escape_cpp_string_literal_content`. Result: arrayvec **51/51 tests pass (100%)**. Full matrix: **5/6 crates pass** (either ✅, tap ✅, cfg-if ✅, take_mut ✅, arrayvec ✅, semver ❌ Stage D).
     - [ ] Phase 21: Semver and bitflags parity — fix remaining Stage D compilation errors (59 semver, 396 bitflags)
-      - [ ] Leaf 1: Fix turbofish syntax lowering in complex expression positions (fixes ~99 bitflags errors)
-        - [ ] Leaf 1.1: Detect residual `::<Type>` turbofish patterns in emitted C++ expressions and lower to valid C++ template syntax (e.g., `func::<T>(args)` → `func<T>(args)`)
-        - [ ] Leaf 1.2: Handle turbofish on method calls in chained expressions (e.g., `.collect::<Vec<_>>()`) where the `::` before `<` is invalid C++
-        - [ ] Leaf 1.3: Add regression tests for turbofish in function calls, method calls, and nested generic positions
+      - [x] *done* Leaf 1: Fix namespace/function collision — rename test sub-module namespaces that shadow function templates (architecture gap #7 partial fix)
+        - [x] *done* Leaf 1.1: Pre-scan all items to detect inline module names that collide with function names anywhere in the file; rename colliding namespaces by appending `_tests` suffix
+        - [x] *done* Leaf 1.2: Apply renames consistently in forward declarations, full namespace body emission, and test wrapper call paths via `escape_and_rename_qualified_name()`
+        - [x] *done* Leaf 1.3: Add regression test for namespace/function collision rename pattern
+        - [ ] Leaf 1.4: Fix remaining path resolution for function calls inside renamed scopes — `from_str<T>(s)` inside `tests::parser` can't find `::parser::from_str<B>()` by unqualified lookup; needs either `using namespace ::parser;` injection or absolute path qualification
       - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
         - [ ] Leaf 2.1: Detect `let (a, b) = expr` where expr returns void or incomplete type and emit explicit typed bindings or skip destructuring
         - [ ] Leaf 2.2: Add regression tests for structured bindings from functions returning tuples vs void
@@ -2626,9 +2627,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [ ] Leaf 11.2: For types used only by pointer/reference in the cycle, emit forward declaration; for types used by value, extract to separate definition block
         - [ ] Leaf 11.3: Add regression tests for circular type dependencies
       - [ ] Leaf 12: Fix test namespace / function name collision (architecture gap #7)
-        - [ ] Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_test` suffix to test sub-module namespaces
-        - [ ] Leaf 12.2: Update all cross-references to use renamed test namespaces
-        - [ ] Leaf 12.3: Add regression tests for namespace/function collision patterns
+        - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
+        - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)
+        - [x] *done* Leaf 12.3: Add regression tests for namespace/function collision patterns (done in Leaf 1.3)
+        - [ ] Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (see Leaf 1.4)
       - [ ] Leaf 13: Re-run parity matrix after all fixes and verify 7/7 crates pass
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
