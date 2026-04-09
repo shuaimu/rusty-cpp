@@ -3991,7 +3991,7 @@ impl CodeGen {
                     // iter: iterate over individual set flags using FLAGS constant
                     if !merged_methods.contains("iter") {
                         self.writeln(&format!(
-                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push_back(FLAGS[i].value()); }} return result; }}",
+                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push(FLAGS[i].value()); }} return result; }}",
                             n = n
                         ));
                     }
@@ -3999,7 +3999,7 @@ impl CodeGen {
                     // Returns a wrapper struct supporting both range-for and remaining().
                     if !merged_methods.contains("iter_names") {
                         self.writeln(&format!(
-                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) {{ v.push_back(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); rem.remove(FLAGS[i].value()); }} }} return IterNames{{std::move(v), rem}}; }}",
+                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) {{ v.push(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); rem.remove(FLAGS[i].value()); }} }} return IterNames{{std::move(v), rem}}; }}",
                             n = n
                         ));
                     }
