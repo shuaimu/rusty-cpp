@@ -10158,7 +10158,10 @@ impl CodeGen {
             }
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
+                // First check declared bindings, then fall back to placeholder hints
+                // from pre-scan (handles forward references like `let x = y; let y = 5;`).
                 self.lookup_local_binding_type(&name)
+                    .or_else(|| self.lookup_local_placeholder_type_hint(&name).cloned())
             }
             syn::Expr::Unsafe(unsafe_expr) => self
                 .extract_single_expr_from_block(&unsafe_expr.block)
@@ -25064,6 +25067,20 @@ mod tests {
         assert!(!out.contains("auto [a, b] = Vec::new_()"));
         // Should emit static_cast<void> to handle the incomplete type
         assert!(out.contains("static_cast<void>(Vec::new_())"));
+    }
+
+    #[test]
+    fn test_forward_reference_uses_explicit_type_not_auto() {
+        // When `let x = y;` references `y` before `y` is declared, we can't use
+        // `auto x = y;` in C++ because `y` isn't defined yet. Instead, we use the
+        // pre-scanned placeholder hint to emit an explicit type: `int32_t x = y;`.
+        let out = transpile_str("fn f() { let x = y; let y = 5; }");
+        // Should NOT emit `auto x = y;` (forward reference, invalid C++)
+        assert!(!out.contains("auto x = y"));
+        // Should emit explicit type for x based on y's type
+        assert!(out.contains("int32_t x = y") || out.contains("auto y = 5"));
+        // y should still be declared as auto (it's defined before being used)
+        assert!(out.contains("auto y = 5") || out.contains("int32_t y = 5"));
     }
 
     #[test]

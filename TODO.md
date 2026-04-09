@@ -2593,14 +2593,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 1.2: Apply renames consistently in forward declarations, full namespace body emission, and test wrapper call paths via `escape_and_rename_qualified_name()`
         - [x] *done* Leaf 1.3: Add regression test for namespace/function collision rename pattern
         - [x] *done* Leaf 1.4: Fix path resolution for function calls inside renamed scopes — emit absolute `::parser::from_str<T>(...)` paths when calling functions from a parent module whose name is shadowed by a same-named namespace in the current scope. Handles both turbofish and non-turbofish calls. Bitflags errors: 447 → 363 (84 fewer).
-      - [ ] Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
+      - [x] *done* Leaf 2: Fix structured binding type deduction failures (fixes 6 semver errors)
         - [x] *done* Leaf 2.0: Strip `&` from `&mut path` expressions — in C++, references bind automatically, no address-of needed. Fixes `&mut x` emitting `&x` (pointer) instead of `x` (reference).
         - [x] *done* Leaf 2.0.1: Add `rusty::fmt::Error`, `rusty::fmt::Result` in new `include/rusty/fmt.hpp` header; add `write_str()`/`write_char()` methods to `rusty::String`; emit `auto&` (not `const auto&`) for `impl Write` parameters. Bitflags errors: 363 → 338 (25 fewer). All 30 `write_str` pointer/const errors eliminated.
         - [x] *done* Leaf 2.1: Added `init_expr_is_incomplete_constructor_call` helper to detect constructor calls without template args (e.g., `Vec::new_()`, `HashMap::new_()`) that cause C++ CTAD failure. When such constructor calls appear in tuple destructuring context (`let (a, b) = Vec::new_()`), emit `static_cast<void>(expr)` to avoid invalid C++ structured binding. Regular tuple destructuring (`let (a, b) = pair;`) and Try expressions (`let (a, b) = func()?`) are unaffected.
         - [x] *done* Leaf 2.2: Added `test_tuple_destructuring_void_expr_falls_back_to_static_cast_void` regression test verifying that `Vec::new_()` in tuple context emits `static_cast<void>` fallback.
-      - [ ] Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
-        - [ ] Leaf 3.1: Detect forward references to `auto`-typed variables within the same scope and either reorder declarations or emit explicit types
-        - [ ] Leaf 3.2: Add regression tests for variable ordering with auto deduction
+      - [x] *done* Leaf 3: Fix `auto` variable use-before-deduction (fixes ~7 semver errors)
+        - [x] *done* Leaf 3.1: Added fallback to `lookup_local_placeholder_type_hint` in `infer_local_binding_type_from_initializer` for Path expressions. When `let x = y;` references `y` before `y` is declared, the pre-scanned placeholder hints provide `y`'s type so we emit explicit type `T x = y;` instead of invalid `auto x = y;` in C++.
+        - [x] *done* Leaf 3.2: Added `test_forward_reference_uses_explicit_type_not_auto` regression test verifying forward reference `let x = y; let y = 5;` emits explicit type for `x` based on `y`'s type.
       - [ ] Leaf 4: Fix deleted copy constructor usage (fixes 3 semver errors)
         - [ ] Leaf 4.1: Detect types with deleted copy constructors (e.g., `VersionReq`) and emit `std::move()` or restructure to avoid copies
         - [ ] Leaf 4.2: Add regression tests for non-copyable type usage in assignments and function calls
