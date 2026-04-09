@@ -3996,9 +3996,10 @@ impl CodeGen {
                         ));
                     }
                     // iter_names: iterate over (name, flag) pairs for set flags
+                    // Returns a wrapper struct supporting both range-for and remaining().
                     if !merged_methods.contains("iter_names") {
                         self.writeln(&format!(
-                            "rusty::Vec<std::tuple<std::string_view, {n}>> iter_names() const {{ rusty::Vec<std::tuple<std::string_view, {n}>> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push_back(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); }} return result; }}",
+                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) {{ v.push_back(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); rem.remove(FLAGS[i].value()); }} }} return IterNames{{std::move(v), rem}}; }}",
                             n = n
                         ));
                     }
@@ -19155,11 +19156,27 @@ impl CodeGen {
         }
     }
 
+    /// Check if a closure parameter pattern requires destructuring in the body.
+    /// C++ doesn't support structured bindings as lambda parameters.
+    fn closure_param_needs_body_destructure(pat: &syn::Pat) -> bool {
+        matches!(pat, syn::Pat::Tuple(_) | syn::Pat::TupleStruct(_) | syn::Pat::Struct(_))
+    }
+
     fn emit_closure_param_with_prelude(
         &self,
         pat: &syn::Pat,
         index: usize,
     ) -> (String, Option<String>) {
+        // Tuple/struct destructuring can't be used in C++ lambda parameters.
+        // Emit a temp parameter and destructure in the body.
+        if Self::closure_param_needs_body_destructure(pat) {
+            let temp_name = format!("_destruct_param{}", index);
+            let binding = self.emit_pat_to_string(pat);
+            return (
+                format!("auto&& {}", temp_name),
+                Some(format!("auto&& {} = {};", binding, temp_name)),
+            );
+        }
         let syn::Pat::Reference(pr) = pat else {
             return (self.emit_closure_param(pat), None);
         };
@@ -33936,6 +33953,30 @@ mod tests {
         assert!(
             out.contains("inline const") && out.contains("MyFlags::FLAGS"),
             "FLAGS should have a deferred definition after class body\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_closure_tuple_destructuring_uses_body_binding() {
+        // C++ doesn't allow structured bindings as lambda parameters.
+        // |(a, b)| a + b → [&](auto&& _destruct_param0) { auto&& [a, b] = _destruct_param0; return a + b; }
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let pairs = vec![(1, 2)];
+                let result: Vec<i32> = pairs.iter().map(|(a, b)| a + b).collect();
+            }
+            "#,
+        );
+        // Should NOT have structured bindings in lambda parameters
+        assert!(
+            !out.contains("(auto ["),
+            "tuple destructuring should NOT be in lambda parameter position\nGot: {out}"
+        );
+        // Should have a body-level binding
+        assert!(
+            out.contains("_destruct_param") || out.contains("[a, b]"),
+            "tuple destructuring should use body-level structured binding\nGot: {out}"
         );
     }
 }
