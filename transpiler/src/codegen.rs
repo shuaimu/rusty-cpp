@@ -14771,7 +14771,7 @@ impl CodeGen {
                 let is_current_struct = self.current_struct.as_deref() == Some(&type_name);
                 let is_constructor = matches!(method_name.as_str(),
                     "new" | "new_" | "empty" | "all" | "from_bits" | "from_bits_retain"
-                    | "from_bits_truncate" | "from_name" | "default_" | "from_iter"
+                    | "from_bits_truncate" | "from_name" | "from_str" | "default_" | "from_iter"
                 );
                 if is_current_struct && !is_constructor {
                     let arg = &call.args[0];
