@@ -2503,7 +2503,43 @@ impl CodeGen {
                 return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
             }
         }
+        // Member method reference: `Type::method` used as a function argument.
+        // In Rust, this creates a function item `fn(&Type) -> RetType`.
+        // In C++, member functions can't be passed as function pointers,
+        // so emit a lambda wrapper: `[](const auto& _f) { return _f.method(); }`
+        if let syn::Expr::Path(path_expr) = arg {
+            if let Some(lambda) = self.try_emit_method_reference_lambda(&path_expr.path) {
+                return lambda;
+            }
+        }
         self.emit_expr_to_string_with_expected_and_move_if_needed(arg, expected_ty)
+    }
+
+    /// If `path` is `Type::method` where `Type` is a known local type and
+    /// `method` is a lowercase instance method name, emit as lambda wrapper.
+    fn try_emit_method_reference_lambda(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let method_seg = path.segments.last()?;
+        let type_seg = &path.segments[path.segments.len() - 2];
+        let method_name = method_seg.ident.to_string();
+        let type_name = type_seg.ident.to_string();
+        // Heuristic: method names start with lowercase
+        if !method_name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+            return None;
+        }
+        // Check if Type is a known declared type
+        if !self.local_declared_types.contains(&type_name)
+            && !self.is_local_type_name_in_scope(&type_name)
+        {
+            return None;
+        }
+        let escaped = escape_cpp_keyword(&method_name);
+        Some(format!(
+            "[](const auto& _f) {{ return _f.{}(); }}",
+            escaped
+        ))
     }
 
     fn resolve_trait_scoped_key_for_impl(
