@@ -1056,54 +1056,100 @@ impl CodeGen {
         })
     }
 
-    /// Collect all function names (including templates) from all scopes.
-    fn collect_all_function_names(items: &[syn::Item], out: &mut HashSet<String>) {
-        for item in items {
-            match item {
-                syn::Item::Fn(f) if !Self::has_cfg_test(&f.attrs) => {
-                    out.insert(f.sig.ident.to_string());
-                }
-                syn::Item::Mod(m) if !Self::has_cfg_test(&m.attrs) => {
-                    if let Some((_, nested_items)) = &m.content {
-                        Self::collect_all_function_names(nested_items, out);
+    /// Collect function names at a specific scope level (non-recursive).
+    fn collect_scope_function_names(items: &[syn::Item]) -> HashSet<String> {
+        items
+            .iter()
+            .filter_map(|item| {
+                if let syn::Item::Fn(f) = item {
+                    if !Self::has_cfg_test(&f.attrs) {
+                        return Some(f.sig.ident.to_string());
                     }
                 }
-                _ => {}
-            }
-        }
+                None
+            })
+            .collect()
     }
 
     /// Pre-scan items to detect inline module names that collide with function
-    /// names anywhere in the file. Registers renames in `module_namespace_renames`.
+    /// names in the same scope or ancestor scopes (which can cause C++ name
+    /// lookup shadowing). Registers renames in `module_namespace_renames`.
     fn detect_namespace_function_collisions(
         &mut self,
         items: &[syn::Item],
         module_path: &[String],
     ) {
-        // On first call, collect all function names from all scopes
-        let all_fn_names = if module_path.is_empty() {
-            let mut names = HashSet::new();
-            Self::collect_all_function_names(items, &mut names);
-            names
-        } else {
-            HashSet::new() // Will be passed through recursion
-        };
-        self.detect_namespace_function_collisions_inner(items, module_path, &all_fn_names);
+        // Collect per-module function names map for ancestor lookup
+        let mut module_fn_map: HashMap<String, HashSet<String>> = HashMap::new();
+        Self::build_module_function_map(items, &[], &mut module_fn_map);
+        self.detect_namespace_function_collisions_inner(items, module_path, &module_fn_map);
+    }
+
+    /// Build a map from module path → set of function names at that scope.
+    fn build_module_function_map(
+        items: &[syn::Item],
+        module_path: &[String],
+        out: &mut HashMap<String, HashSet<String>>,
+    ) {
+        let scope_key = module_path.join("::");
+        let fn_names = Self::collect_scope_function_names(items);
+        out.insert(scope_key, fn_names);
+
+        for item in items {
+            if let syn::Item::Mod(m) = item {
+                if Self::has_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, nested_items)) = &m.content {
+                    let mut child_path = module_path.to_vec();
+                    child_path.push(m.ident.to_string());
+                    Self::build_module_function_map(nested_items, &child_path, out);
+                }
+            }
+        }
     }
 
     fn detect_namespace_function_collisions_inner(
         &mut self,
         items: &[syn::Item],
         module_path: &[String],
-        all_fn_names: &HashSet<String>,
+        module_fn_map: &HashMap<String, HashSet<String>>,
     ) {
+        // Collect function names visible at this scope: same scope + all ancestors
+        let mut visible_fn_names = HashSet::new();
+        // Check all ancestor scopes (including root "")
+        for depth in 0..=module_path.len() {
+            let ancestor_key = module_path[..depth].join("::");
+            if let Some(fns) = module_fn_map.get(&ancestor_key) {
+                visible_fn_names.extend(fns.iter().cloned());
+            }
+        }
+        // Also check sibling modules at the same parent level that share a name
+        // with the current scope (the actual shadowing case: tests::parser vs parser)
+        if let Some(last) = module_path.last() {
+            // Look for function names in any module named `last` at any scope
+            for (key, fns) in module_fn_map {
+                let key_parts: Vec<&str> = if key.is_empty() {
+                    vec![]
+                } else {
+                    key.split("::").collect()
+                };
+                if key_parts.last() == Some(&last.as_str())
+                    && !(key_parts.len() == module_path.len()
+                        && key_parts.iter().zip(module_path.iter()).all(|(a, b)| *a == b.as_str()))
+                {
+                    visible_fn_names.extend(fns.iter().cloned());
+                }
+            }
+        }
+
         for item in items {
             if let syn::Item::Mod(m) = item {
                 if Self::has_cfg_test(&m.attrs) {
                     continue;
                 }
                 let mod_name = m.ident.to_string();
-                if all_fn_names.contains(&mod_name) {
+                if visible_fn_names.contains(&mod_name) {
                     let qualified = if module_path.is_empty() {
                         mod_name.clone()
                     } else {
@@ -1118,7 +1164,7 @@ impl CodeGen {
                     let mut child_path = module_path.to_vec();
                     child_path.push(mod_name);
                     self.detect_namespace_function_collisions_inner(
-                        nested_items, &child_path, all_fn_names,
+                        nested_items, &child_path, module_fn_map,
                     );
                 }
             }
@@ -17879,6 +17925,18 @@ impl CodeGen {
             }
         }
 
+        // Map remaining `core::` and `alloc::` prefixed paths to `rusty::`
+        // This catches paths like `core::fmt::Formatter::write_str` that weren't
+        // handled by more specific pattern matchers above.
+        if segments.len() >= 2 && matches!(segments[0].as_str(), "core" | "alloc") {
+            let mut resolved = vec!["rusty".to_string()];
+            resolved.extend(segments[1..].iter().cloned());
+            for seg in &mut resolved {
+                *seg = escape_cpp_keyword(seg);
+            }
+            return resolved.join("::");
+        }
+
         // Escape C++ keywords across all path segments.
         if segments.len() > 1 {
             let mut escaped = segments.clone();
@@ -33761,6 +33819,31 @@ mod tests {
         assert!(
             out.contains("::parser::to_writer(") || out.contains("::parser::to_writer<"),
             "to_writer call inside tests::parser should use absolute path\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_core_alloc_path_maps_to_rusty() {
+        // core:: paths in expressions should map to rusty::
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x = core::fmt::write();
+                let y = core::num::parse_int();
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::fmt::write()"),
+            "core::fmt::write() should map to rusty::fmt::write()\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::num::parse_int()"),
+            "core::num::parse_int should map to rusty::num::parse_int\nGot: {out}"
+        );
+        assert!(
+            !out.contains("core::fmt"),
+            "core:: prefix should not remain in output\nGot: {out}"
         );
     }
 }

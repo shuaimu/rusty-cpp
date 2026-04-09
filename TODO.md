@@ -2605,9 +2605,9 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Leaf 5: Emit missing trait instance methods for bitflag types (fixes ~85 bitflags errors)
         - [x] *done* Leaf 5.1: Synthesize `empty()`, `all()`, `from_bits_retain()`, `is_all()`, `insert()`, `remove()`, `toggle()`, `set()`, `intersection()`, `union_()`, `difference()`, `symmetric_difference()`, `iter()`, `iter_names()`, `extend()` methods for bitflag newtype structs
         - [x] *done* Leaf 5.2: Add regression tests for bitflag trait method synthesis (2 tests: all methods emitted, dedup when already present)
-      - [ ] Leaf 6: Fix `core::fmt` and unresolved path prefixes (fixes ~4 bitflags errors)
-        - [ ] Leaf 6.1: Map remaining `core::fmt::*` paths to `rusty::fmt::*` in expanded output emission
-        - [ ] Leaf 6.2: Add regression tests for core::fmt path resolution
+      - [x] *done* Leaf 6: Fix `core::fmt` and unresolved path prefixes
+        - [x] *done* Leaf 6.1: Map remaining `core::*` and `alloc::*` paths to `rusty::*` in `emit_path_to_string` fallback. Moves mapping before generic multi-segment handler so it fires for paths like `core::fmt::Formatter::write_str`. Also fixes over-aggressive namespace rename by making collision detection scope-aware (only renames when function and module share a visible scope).
+        - [x] *done* Leaf 6.2: Add regression test for core/alloc path mapping to rusty
       - [ ] Leaf 7: Fix method-as-function-pointer emission (fixes ~5 bitflags errors)
         - [ ] Leaf 7.1: Detect `Type::method` used as callable argument (not a static call) and wrap in lambda: `[](auto& x) { return x.method(); }`
         - [ ] Leaf 7.2: Add regression tests for member function references as arguments
