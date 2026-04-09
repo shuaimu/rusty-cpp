@@ -17883,7 +17883,11 @@ impl CodeGen {
                 if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
                     if !qualified.is_empty() {
                         let module_prefix = qualified.split("::").next().unwrap_or("");
-                        let inside_module = self.module_stack.iter().any(|m| m == module_prefix);
+                        // Only skip qualification if the INNERMOST module scope
+                        // is the target module. Being in a nested sub-module
+                        // (e.g., `parser::from_str`) still needs qualification
+                        // because `namespace from_str` shadows `parser::from_str`.
+                        let inside_module = self.module_stack.last().is_some_and(|m| m == module_prefix);
                         if !inside_module {
                             let mut emitted = qualified.clone();
                             if let Some(template_args) = self.emit_expr_path_template_args(path) {
