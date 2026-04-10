@@ -3927,7 +3927,22 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_stop_after_transpile -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): validation stays in shared parity/transpile flows with fixture-agnostic assertions; no generated-output patching, no bridge wrappers, and no global text rewrites were introduced.
-155. Current active next leaf is `22.8.2` (extend parity harness dry-run coverage for `cpp::` interop), now that `22.8.1` fixture + transpile-stage parity coverage is complete.
+155. `Leaf 22.8.2` is complete.
+   - plan/scope check: parity dry-run reporting + regression updates stayed well below the <1000 LOC target and required no additional decomposition.
+   - updated shared parity harness dry-run behavior in `transpiler/src/main.rs`:
+     - Stage C dry-run now reports deterministic transpile actions per discovered target (instead of depending on expanded-source population).
+     - added explicit `cpp` index-shape reporting in dry-run Stage C lines:
+       - configured index path list (`cpp index: <path...>`),
+       - missing-index invocation shape (`cpp index: <none>`).
+   - added focused dry-run regressions for the `cpp_module_interop` fixture in `transpiler/tests/parity_test_verification.rs`:
+     - `test_cpp_module_interop_dry_run_transpile_reports_indexed_stage_shapes`
+     - `test_cpp_module_interop_dry_run_transpile_reports_missing_index_shape`
+   - regression assertions cover deterministic Stage B/Stage C dry-run reporting, interop-target discovery, configured-vs-missing index invocation shape, and `--stop-after transpile` boundary (no Stage D execution).
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_dry_run_transpile -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): changes remain in shared parity harness flow with fixture-agnostic assertions; no crate-specific behavior forks, no generated-output patching, and no bridge-wrapper shortcuts were introduced.
+156. Current active next leaf is `22.8.3` (compile-stage CI coverage for generated `cpp::` interop units), now that `22.8.2` dry-run parity coverage is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

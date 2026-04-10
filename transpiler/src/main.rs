@@ -1377,6 +1377,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
     // ── Stage C: Transpile ──────────────────────────────
     println!("Stage C: Transpiling to C++...");
+    let cpp_index_label = if args.cpp_module_index.is_empty() {
+        "<none>".to_string()
+    } else {
+        args.cpp_module_index
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    };
     let type_map = if let Some(ref tm_path) = args.type_map {
         types::UserTypeMap::load(tm_path)?
     } else {
@@ -1401,10 +1410,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         extension_method_hints.extend(transpile::collect_extension_method_hints(source));
     }
     if args.dry_run {
-        for (target, _) in &expanded_sources {
+        for target in &targets {
             println!(
-                "  [dry-run] transpile {} as module '{}'",
-                target.name, target.module_name
+                "  [dry-run] transpile {} as module '{}' (cpp index: {})",
+                target.name, target.module_name, cpp_index_label
             );
         }
     } else {

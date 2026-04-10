@@ -3020,9 +3020,21 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_stop_after_transpile -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): coverage uses shared parity/transpile flows and fixture-agnostic assertions; no crate-specific generated-output patching, no bridge wrappers, and no global text substitutions were introduced.
-        - [ ] Leaf 22.8.2: Extend parity harness dry-run coverage for `cpp::` interop
-          - Extend parity harness dry-run checks to assert `cpp::` interop fixtures are discovered and staged with deterministic Stage B/Stage C dry-run reporting.
-          - Add dry-run guardrail checks covering both configured-index and missing-index invocation shapes (without running build/run stages).
+        - [x] *done* Leaf 22.8.2: Extend parity harness dry-run coverage for `cpp::` interop
+          - Plan/scope check: parity dry-run reporting + regression updates stayed well below the <1000 LOC target and required no additional decomposition.
+          - Updated parity harness Stage C dry-run behavior in `transpiler/src/main.rs`:
+            - Stage C dry-run now reports deterministic per-target transpile actions from discovered targets (instead of relying on populated expanded-source entries).
+            - added explicit dry-run index-shape label in transpile reporting:
+              - configured index paths (`cpp index: <path1>, <path2>, ...`)
+              - missing index shape (`cpp index: <none>`).
+          - Added dedicated dry-run guardrail regressions for the `cpp_module_interop` fixture in `transpiler/tests/parity_test_verification.rs`:
+            - `test_cpp_module_interop_dry_run_transpile_reports_indexed_stage_shapes`
+            - `test_cpp_module_interop_dry_run_transpile_reports_missing_index_shape`
+          - Coverage asserts deterministic Stage B/Stage C dry-run reporting, target discovery, configured-vs-missing index invocation shape, and `--stop-after transpile` boundary (no Stage D execution).
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_dry_run_transpile -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): changes stay in shared parity harness behavior and fixture-agnostic assertions; no crate-specific scripts, no generated-output patching, and no bridge-wrapper shortcuts were introduced.
         - [ ] Leaf 22.8.3: Add compile-stage CI coverage for generated `cpp::` interop units
           - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.
           - Ensure failure diagnostics and artifact retention for this compile-only interop check align with existing parity CI patterns.
