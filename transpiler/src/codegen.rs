@@ -10035,6 +10035,15 @@ impl CodeGen {
                             return Some(parse_quote!(rusty::mem::ManuallyDrop<#inner_ty>));
                         }
                     }
+                    // rusty::as_bytes returns std::span<const uint8_t> for string_view input
+                    if matches!(
+                        joined.as_str(),
+                        "rusty::as_bytes" | "as_bytes"
+                    ) && call.args.len() == 1
+                    {
+                        // Return &[u8] so map_type converts it to std::span<const uint8_t>
+                        return syn::parse_str::<syn::Type>("&[u8]").ok();
+                    }
                     if matches!(
                         joined.as_str(),
                         "Some" | "Option::Some" | "core::option::Option::Some"
@@ -10270,6 +10279,12 @@ impl CodeGen {
                 return Some(parse_quote!(*mut #pointee_ty));
             }
             return Some(parse_quote!(*const #pointee_ty));
+        }
+
+        // str::as_bytes() on &str / &str arguments returns std::span<const uint8_t>
+        if method == "as_bytes" && mc.args.is_empty() {
+            // Return &[u8] so map_type converts it to std::span<const uint8_t>
+            return syn::parse_str::<syn::Type>("&[u8]").ok();
         }
 
         if matches!(method.as_str(), "add" | "offset" | "sub") && mc.args.len() == 1 {
@@ -12578,9 +12593,67 @@ impl CodeGen {
             };
             return format!("rusty::is_ascii_digit({})", receiver);
         }
-        // Note: `.as_bytes()`, `.first()`, `.get()` on slices are NOT rewritten
-        // generically — `.as_bytes()` would require full Rust slice API on the
-        // returned span, and `.get()`/`.first()` are too broad for universal rewrite.
+        // Rust slice methods `.first()` and `.get(n)` on std::span.
+        // In Rust, &[T]::first() -> Option<&T> and &[T]::get(n) -> Option<&T>.
+        // In C++, std::span has no such methods, so we emit equivalent expressions.
+        // First, check if receiver is a method call to as_bytes (emitted as rusty::as_bytes)
+        if let syn::Expr::MethodCall(as_bytes_mc) = mc.receiver.as_ref() {
+            if as_bytes_mc.method == "as_bytes" && as_bytes_mc.args.is_empty() {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                let opt_type = "rusty::Option<const uint8_t&>";
+                if method_name == "first" && args.is_empty() {
+                    return format!(
+                        "(!{}.empty() ? {}({}[0]) : {}(rusty::None))",
+                        receiver, opt_type, receiver, opt_type
+                    );
+                }
+                if method_name == "get" && args.len() == 1 {
+                    let idx = &args[0];
+                    return format!(
+                        "(({} < {}.size()) ? {}({}[{}]) : {}(rusty::None))",
+                        idx, receiver, opt_type, receiver, idx, opt_type
+                    );
+                }
+            }
+        }
+        // Infer receiver type to detect span types from local bindings.
+        let receiver_ty = self.infer_simple_expr_type(&mc.receiver);
+        if let Some((is_const, elem_cpp)) = receiver_ty.as_ref().and_then(|ty| self.span_element_type(ty)) {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            // Construct the Option type: Option<T&> or Option<const T&>
+            let opt_type = if is_const {
+                format!("rusty::Option<const {}&>", elem_cpp)
+            } else {
+                format!("rusty::Option<{}&>", elem_cpp)
+            };
+            // .first() with no args: bounds check + element access
+            if method_name == "first" && args.is_empty() {
+                return format!(
+                    "(!{}.empty() ? {}({}[0]) : {}(rusty::None))",
+                    receiver, opt_type, receiver, opt_type
+                );
+            }
+            // .get(n) with one arg: bounds check + element access
+            if method_name == "get" && args.len() == 1 {
+                let idx = &args[0];
+                return format!(
+                    "(({} < {}.size()) ? {}({}[{}]) : {}(rusty::None))",
+                    idx, receiver, opt_type, receiver, idx, opt_type
+                );
+            }
+        }
+        // Note: `.as_bytes()` on slices is NOT rewritten generically —
+        // it would require full Rust slice API on the returned span.
         // Rust `is_empty()` → dispatch to `.is_empty()` or `.empty()` depending on type
         if method_name == "is_empty" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -13652,6 +13725,46 @@ impl CodeGen {
                 | "std::span<unsignedchar>"
                 | "span<unsignedchar>"
         )
+    }
+
+    /// If the type is std::span<T> or std::span<const T>, returns Some((is_const, element_type)).
+    /// is_const indicates whether the span's element type is const.
+    fn span_element_type(&self, ty: &syn::Type) -> Option<(bool, String)> {
+        // Try expected_array_element_type first
+        if let Some(elem_ty) = self.expected_array_element_type(Some(ty)) {
+            let elem_cpp = self.map_type(elem_ty);
+            // Check if it's a u8/uint8_t slice
+            if Self::is_u8_syn_type(elem_ty) {
+                return Some((true, elem_cpp));
+            }
+        }
+        // Check normalized C++ span type strings
+        let compact = normalize_token_text(ty.to_token_stream().to_string())
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>();
+        // Parse std::span<T> or std::span<const T>
+        // Pattern: "std::span<constT>" or "std::span<T>" etc.
+        if let Some(span_content) = compact.strip_prefix("std::span<").and_then(|s| s.strip_suffix('>')) {
+            let is_const = span_content.starts_with("const");
+            let elem_str = if is_const {
+                span_content.strip_prefix("const")?
+            } else {
+                span_content
+            };
+            // Normalize element type (e.g., "uint8_t" -> "uint8_t", "unsignedchar" -> "unsigned char")
+            let elem_cpp = if elem_str == "unsignedchar" {
+                "unsigned char".to_string()
+            } else if elem_str == "constunsignedchar" {
+                "const unsigned char".to_string()
+            } else {
+                elem_str.replace("const", "const ")
+                    .trim()
+                    .to_string()
+            };
+            return Some((is_const, elem_cpp));
+        }
+        None
     }
 
     fn is_u8_syn_type(ty: &syn::Type) -> bool {
