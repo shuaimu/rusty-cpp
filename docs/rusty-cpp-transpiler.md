@@ -3533,8 +3533,23 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): change stays shared and AST-shape-gated, avoids crate-specific rewrites, and does not rely on post-generation text patching.
-130. Current active next leaf is `10.5.2`.
-   - focus: push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering so shadowed names resolve to newly bound payload names.
+130. `Leaf 10.5.2` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - added temporary try-style binding-scope emission helpers for arm-body expression emission (`emit_expr_with_try_style_binding_scope`) and return-arm emission (`emit_return_expr_with_variant_ctx_and_try_style_binding_scope`).
+     - applied these helpers in both try-style match lowerings:
+       - `emit_try_style_runtime_match_expr`
+       - `emit_try_style_either_match_expr`
+     - updated try-style either payload binding collection to use mapping-aware bindings (`collect_pattern_binding_stmts_with_cpp_name_map`) so emitted payload declarations and arm-body name resolution remain aligned under shadowing.
+   - focused regressions:
+     - `test_leaf1052_try_style_either_shadowed_payload_bindings_scope_arm_bodies`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1052 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fix stays shared and AST-scope-gated, avoids crate-specific rewrites, and avoids post-generation text patching.
+131. Current active next leaf is `10.5.3`.
+   - focus: add regressions for nested-shadow try-style patterns (`let rhs = match rhs.next() { Some(rhs) => ... }`) before the next semver parity reprobe leaf.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

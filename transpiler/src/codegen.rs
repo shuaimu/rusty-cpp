@@ -17925,6 +17925,50 @@ impl CodeGen {
         })
     }
 
+    fn emit_expr_with_try_style_binding_scope(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+        binding_map: &HashMap<String, String>,
+    ) -> String {
+        if binding_map.is_empty() {
+            return self.emit_expr_to_string_with_expected(expr, expected_ty);
+        }
+        let mut inner = self.new_inner_for_block();
+        inner.local_cpp_bindings.push(binding_map.clone());
+        let mut binding_types = HashMap::new();
+        let mut binding_consts = HashMap::new();
+        for rust_name in binding_map.keys() {
+            binding_types.insert(rust_name.clone(), None);
+            binding_consts.insert(rust_name.clone(), false);
+        }
+        inner.local_bindings.push(binding_types);
+        inner.local_const_bindings.push(binding_consts);
+        inner.emit_expr_to_string_with_expected(expr, expected_ty)
+    }
+
+    fn emit_return_expr_with_variant_ctx_and_try_style_binding_scope(
+        &self,
+        ret: &syn::ExprReturn,
+        variant_ctx: &VariantTypeContext,
+        binding_map: &HashMap<String, String>,
+    ) -> String {
+        if binding_map.is_empty() {
+            return self.emit_return_expr_with_variant_ctx(ret, variant_ctx);
+        }
+        let mut inner = self.new_inner_for_block();
+        inner.local_cpp_bindings.push(binding_map.clone());
+        let mut binding_types = HashMap::new();
+        let mut binding_consts = HashMap::new();
+        for rust_name in binding_map.keys() {
+            binding_types.insert(rust_name.clone(), None);
+            binding_consts.insert(rust_name.clone(), false);
+        }
+        inner.local_bindings.push(binding_types);
+        inner.local_const_bindings.push(binding_consts);
+        inner.emit_return_expr_with_variant_ctx(ret, variant_ctx)
+    }
+
     fn runtime_try_pattern_details(
         &self,
         pat: &syn::Pat,
@@ -18021,9 +18065,9 @@ impl CodeGen {
         let success_arm = success_arm?;
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
 
-        let (success_cond, success_bindings, _success_binding_map, success_unwrap_method) =
+        let (success_cond, success_bindings, success_binding_map, success_unwrap_method) =
             self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")?;
-        let (return_cond, return_bindings, _return_binding_map, _) =
+        let (return_cond, return_bindings, return_binding_map, _) =
             self.runtime_try_pattern_details(&return_arm.pat, variant_ctx.as_ref(), "_mv")?;
 
         let mut value_ty = expected_ty.map(|ty| self.map_type(ty));
@@ -18043,7 +18087,11 @@ impl CodeGen {
         let value_ty = value_ty?;
 
         let success_body = {
-            let emitted = self.emit_expr_to_string_with_expected(&success_arm.body, expected_ty);
+            let emitted = self.emit_expr_with_try_style_binding_scope(
+                &success_arm.body,
+                expected_ty,
+                &success_binding_map,
+            );
             self.maybe_wrap_variant_constructor_with_expected_enum(
                 &success_arm.body,
                 emitted,
@@ -18058,7 +18106,11 @@ impl CodeGen {
                     Some(expr) => format!(
                         "{} {}",
                         keyword,
-                        self.emit_expr_to_string_with_expected(expr, self.current_return_type_hint())
+                        self.emit_expr_with_try_style_binding_scope(
+                            expr,
+                            self.current_return_type_hint(),
+                            &return_binding_map,
+                        )
                     ),
                     None => keyword.to_string(),
                 }
@@ -18184,14 +18236,6 @@ impl CodeGen {
                 variant_ctx.template_args[1].clone()
             }
         });
-        let success_body = self.emit_expr_to_string_with_expected(&success_arm.body, expected_ty);
-        let return_body = match self.extract_value_expr(&return_arm.body) {
-            Some(syn::Expr::Return(ret)) => {
-                self.emit_return_expr_with_variant_ctx(ret, &variant_ctx)
-            }
-            _ => return None,
-        };
-
         let success_ts = match &success_arm.pat {
             syn::Pat::TupleStruct(ts) => ts,
             _ => return None,
@@ -18201,13 +18245,40 @@ impl CodeGen {
             _ => return None,
         };
         let mut success_bindings = Vec::new();
-        if !self.collect_pattern_binding_stmts(&success_ts.elems[0], "_mv", &mut success_bindings) {
+        let mut success_binding_map = HashMap::new();
+        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+            &success_ts.elems[0],
+            "_mv",
+            &mut success_bindings,
+            &mut success_binding_map,
+        ) {
             return None;
         }
         let mut return_bindings = Vec::new();
-        if !self.collect_pattern_binding_stmts(&return_ts.elems[0], "_mv", &mut return_bindings) {
+        let mut return_binding_map = HashMap::new();
+        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+            &return_ts.elems[0],
+            "_mv",
+            &mut return_bindings,
+            &mut return_binding_map,
+        ) {
             return None;
         }
+        let success_body = self.emit_expr_with_try_style_binding_scope(
+            &success_arm.body,
+            expected_ty,
+            &success_binding_map,
+        );
+        let return_body = match self.extract_value_expr(&return_arm.body) {
+            Some(syn::Expr::Return(ret)) => {
+                self.emit_return_expr_with_variant_ctx_and_try_style_binding_scope(
+                    ret,
+                    &variant_ctx,
+                    &return_binding_map,
+                )
+            }
+            _ => return None,
+        };
         let success_bindings_str = if success_bindings.is_empty() {
             String::new()
         } else {
@@ -27361,6 +27432,31 @@ mod tests {
         assert!(!out.contains("std::visit(overloaded {"));
         assert!(out.contains("_m.is_right()"));
         assert!(out.contains("return Left<rusty::String, std::string_view>("));
+    }
+
+    #[test]
+    fn test_leaf1052_try_style_either_shadowed_payload_bindings_scope_arm_bodies() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> { Left(L), Right(R) }
+            fn f(rhs: Either<String, &'static str>) -> Either<String, &'static str> {
+                let rhs = rhs;
+                Right(match Left("foo bar") {
+                    Left(rhs) => return Left(rhs),
+                    Right(rhs) => rhs,
+                })
+            }
+        "#,
+        );
+        assert!(out.contains("_m.is_right()"));
+        assert!(out.contains("auto&& rhs_shadow1 = _mv; _match_value = rhs_shadow1;"));
+        assert!(out.contains(
+            "auto&& rhs_shadow1 = _mv; return Left<rusty::String, std::string_view>(rusty::String::from(std::move(rhs_shadow1)));"
+        ));
+        assert!(!out.contains("auto&& rhs = _mv; _match_value = rhs_shadow1;"));
+        assert!(!out.contains(
+            "auto&& rhs = _mv; return Left<rusty::String, std::string_view>(rusty::String::from(std::move(rhs_shadow1)));"
+        ));
     }
 
     #[test]

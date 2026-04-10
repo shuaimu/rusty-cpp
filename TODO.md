@@ -2668,8 +2668,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 10.5.2: Push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering
-          - Ensure shadowed names in arm bodies resolve to newly bound payload names, not outer locals.
+        - [x] *done* Leaf 10.5.2: Push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering
+          - Added try-style binding-scope emission helpers in `transpiler/src/codegen.rs` and applied them to both `emit_try_style_runtime_match_expr` and `emit_try_style_either_match_expr` so success/return arm bodies are emitted with temporary Rust-name→C++-name binding overlays.
+          - Updated try-style either payload binding collection to use mapping-aware binding statements (`collect_pattern_binding_stmts_with_cpp_name_map`) so emitted payload declarations and arm-body name resolution stay consistent under shadowing.
+          - Added focused regression `test_leaf1052_try_style_either_shadowed_payload_bindings_scope_arm_bodies`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf1052 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 10.5.3: Add regressions for `let rhs = match rhs.next() { Some(rhs) => ... }` nested-shadow patterns
         - [ ] Leaf 10.5.4: Re-run semver parity and confirm try-style shadowing family is removed from Stage D head set
       - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
