@@ -3701,8 +3701,24 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): this leaf is metadata/diagnostic-only, deterministic, and avoids blanket or crate-specific rewrite behavior.
-143. Current active next leaf is `11.2.6`.
-   - focus: implement opt-in declaration rewrite for rewrite-eligible direct by-value feedback edges while keeping ineligible edges diagnostic-only.
+143. `Leaf 11.2.6` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared opt-in declaration rewrite in `transpiler/src/codegen.rs`:
+     - added deterministic rewrite-plan capture from selected by-value feedback edges, filtered to rewrite-eligible (`DirectFieldType`) edges only.
+     - rewrote selected declaration sites to `rusty::Box<...>` for named/tuple struct fields and data-enum variant struct fields under prototype opt-in mode.
+     - preserved non-direct/ineligible edges as diagnostics-only and intentionally left constructor/initializer propagation for `Leaf 11.2.7`.
+     - updated prototype diagnostic banner wording from `diagnostic-only prototype` to `prototype mode` to reflect declaration rewrite activation.
+   - focused regressions:
+     - `test_leaf1126_default_mode_does_not_rewrite_cycle_field_declaration`
+     - `test_leaf1126_opt_in_mode_rewrites_selected_direct_cycle_field_declaration`
+     - `test_leaf1126_opt_in_mode_only_rewrites_direct_edge_declarations`
+     - `test_leaf1126_opt_in_mode_rewrites_direct_enum_variant_field_declaration`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): rewrite is opt-in, deterministic, AST-aware, and shape-gated; no crate-specific or post-generation text patching was introduced.
+144. Current active next leaf is `11.2.7`.
+   - focus: propagate rewritten-edge type updates across constructors and field-initialization emission so declaration rewrites become type-consistent end-to-end.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

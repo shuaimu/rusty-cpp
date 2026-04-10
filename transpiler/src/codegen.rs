@@ -360,6 +360,8 @@ pub struct CodeGen {
     by_value_cycle_breaking_prototype_diagnostics: Vec<String>,
     /// De-duplication keys for prototype cycle-breaking diagnostics.
     by_value_cycle_breaking_prototype_keys: HashSet<String>,
+    /// Opt-in declaration rewrite plan for by-value cycle-breaking prototype.
+    by_value_cycle_breaking_rewrite_fields: HashSet<ByValueCycleRewriteFieldKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,6 +383,12 @@ struct ByValueCycleFeedbackEdge {
 enum ByValueCycleEdgeRewriteEligibility {
     DirectFieldType,
     NonDirectFieldType,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ByValueCycleRewriteFieldKey {
+    owner_type: String,
+    field_name: String,
 }
 
 impl ByValueCycleFeedbackEdge {
@@ -493,6 +501,7 @@ impl CodeGen {
             enable_by_value_cycle_breaking_prototype: false,
             by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
             by_value_cycle_breaking_prototype_keys: HashSet::new(),
+            by_value_cycle_breaking_rewrite_fields: HashSet::new(),
         }
     }
 
@@ -619,6 +628,7 @@ impl CodeGen {
         self.unsupported_by_value_cycle_keys.clear();
         self.by_value_cycle_breaking_prototype_diagnostics.clear();
         self.by_value_cycle_breaking_prototype_keys.clear();
+        self.by_value_cycle_breaking_rewrite_fields.clear();
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -665,6 +675,7 @@ impl CodeGen {
             self.record_unsupported_by_value_cycle_diagnostic(&diagnostic);
             if self.enable_by_value_cycle_breaking_prototype {
                 self.record_by_value_cycle_breaking_prototype_diagnostic(&diagnostic);
+                self.collect_by_value_cycle_breaking_rewrite_plan(&diagnostic);
             }
         }
 
@@ -1060,7 +1071,7 @@ impl CodeGen {
                 }
             };
             self.by_value_cycle_breaking_prototype_diagnostics.push(format!(
-                "by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope {}: [{}]; selected feedback edges: [{}]; cycle path: {}; rewrite-eligible edges: [{}]; rewrite-ineligible edges: [{}]",
+                "by-value cycle-breaking flag enabled (prototype mode) in scope {}: [{}]; selected feedback edges: [{}]; cycle path: {}; rewrite-eligible edges: [{}]; rewrite-ineligible edges: [{}]",
                 scope,
                 sorted_names.join(", "),
                 selected_edges,
@@ -1068,6 +1079,61 @@ impl CodeGen {
                 rewrite_eligible_edges,
                 rewrite_ineligible_edges
             ));
+        }
+    }
+
+    fn collect_by_value_cycle_breaking_rewrite_plan(
+        &mut self,
+        diagnostic: &ByValueCycleDiagnostic,
+    ) {
+        for edge in &diagnostic.feedback_edges {
+            if !matches!(
+                edge.rewrite_eligibility,
+                ByValueCycleEdgeRewriteEligibility::DirectFieldType
+            ) {
+                continue;
+            }
+            self.by_value_cycle_breaking_rewrite_fields
+                .insert(ByValueCycleRewriteFieldKey {
+                    owner_type: edge.owner_type.clone(),
+                    field_name: edge.field_name.clone(),
+                });
+        }
+    }
+
+    fn format_by_value_field_name(variant_name: Option<&str>, base_name: &str) -> String {
+        if let Some(variant) = variant_name {
+            format!("{}::{}", variant, base_name)
+        } else {
+            base_name.to_string()
+        }
+    }
+
+    fn should_rewrite_by_value_cycle_field_declaration(
+        &self,
+        owner_type: &str,
+        field_name: &str,
+    ) -> bool {
+        self.enable_by_value_cycle_breaking_prototype
+            && self
+                .by_value_cycle_breaking_rewrite_fields
+                .contains(&ByValueCycleRewriteFieldKey {
+                    owner_type: owner_type.to_string(),
+                    field_name: field_name.to_string(),
+                })
+    }
+
+    fn map_field_type_with_by_value_cycle_breaking_rewrite(
+        &self,
+        owner_type: &str,
+        field_name: &str,
+        ty: &syn::Type,
+    ) -> String {
+        let mapped = self.map_type(ty);
+        if self.should_rewrite_by_value_cycle_field_declaration(owner_type, field_name) {
+            format!("rusty::Box<{}>", mapped)
+        } else {
+            mapped
         }
     }
 
@@ -1535,9 +1601,9 @@ impl CodeGen {
                 .map(|ident| ident.to_string())
                 .unwrap_or_else(|| format!("#{}", field_idx));
             let field_name = if let Some(variant) = variant_name {
-                format!("{}::{}", variant, base_name)
+                Self::format_by_value_field_name(Some(variant), base_name.as_str())
             } else {
-                base_name
+                Self::format_by_value_field_name(None, base_name.as_str())
             };
             let mut sorted_targets: Vec<String> = targets.into_iter().collect();
             sorted_targets.sort();
@@ -4797,7 +4863,10 @@ impl CodeGen {
                     // Emit field doc comments
                     self.emit_doc_comments(&field.attrs);
                     let field_name = field.ident.as_ref().unwrap().to_string();
-                    let field_type = self.map_type(&field.ty);
+                    let field_key = Self::format_by_value_field_name(None, &field_name);
+                    let field_type = self.map_field_type_with_by_value_cycle_breaking_rewrite(
+                        &name_str, &field_key, &field.ty,
+                    );
                     let mut emitted_field_name = escape_cpp_keyword(&field_name);
                     if reserved_member_names.contains(&emitted_field_name) {
                         emitted_field_name = format!("{}_field", emitted_field_name);
@@ -4824,7 +4893,10 @@ impl CodeGen {
             }
             syn::Fields::Unnamed(fields) => {
                 for (i, field) in fields.unnamed.iter().enumerate() {
-                    let field_type = self.map_type(&field.ty);
+                    let field_key = Self::format_by_value_field_name(None, &format!("#{}", i));
+                    let field_type = self.map_field_type_with_by_value_cycle_breaking_rewrite(
+                        &name_str, &field_key, &field.ty,
+                    );
                     self.writeln(&format!("{} _{};", field_type, i));
                 }
             }
@@ -5365,6 +5437,7 @@ impl CodeGen {
         } else {
             String::new()
         };
+        let enum_owner_name = name.to_string();
 
         if has_data {
             // Check if any variant references the enum type itself (recursive)
@@ -5395,9 +5468,18 @@ impl CodeGen {
                         }
                         self.writeln(&format!("struct {}_{} {{", name, vname));
                         self.indent += 1;
+                        let variant_name = vname.to_string();
                         for field in &fields.named {
                             let fname = field.ident.as_ref().unwrap();
-                            let ftype = self.map_type(&field.ty);
+                            let field_key = Self::format_by_value_field_name(
+                                Some(variant_name.as_str()),
+                                &fname.to_string(),
+                            );
+                            let ftype = self.map_field_type_with_by_value_cycle_breaking_rewrite(
+                                &enum_owner_name,
+                                &field_key,
+                                &field.ty,
+                            );
                             self.writeln(&format!("{} {};", ftype, fname));
                         }
                         self.indent -= 1;
@@ -5409,8 +5491,17 @@ impl CodeGen {
                         }
                         self.writeln(&format!("struct {}_{} {{", name, vname));
                         self.indent += 1;
+                        let variant_name = vname.to_string();
                         for (i, field) in fields.unnamed.iter().enumerate() {
-                            let ftype = self.map_type(&field.ty);
+                            let field_key = Self::format_by_value_field_name(
+                                Some(variant_name.as_str()),
+                                &format!("#{}", i),
+                            );
+                            let ftype = self.map_field_type_with_by_value_cycle_breaking_rewrite(
+                                &enum_owner_name,
+                                &field_key,
+                                &field.ty,
+                            );
                             self.writeln(&format!("{} _{};", ftype, i));
                         }
                         self.indent -= 1;
@@ -36710,7 +36801,7 @@ mod tests {
         );
         assert!(
             out.contains(
-                "// PROTOTYPE: by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope <crate>: [A, B, C]; selected feedback edges: [A.b -> B]; cycle path: A -> B -> C -> A"
+                "// PROTOTYPE: by-value cycle-breaking flag enabled (prototype mode) in scope <crate>: [A, B, C]; selected feedback edges: [A.b -> B]; cycle path: A -> B -> C -> A"
             ),
             "Expected deterministic prototype feedback-edge diagnostic for opt-in mode\nGot: {out}"
         );
@@ -36763,6 +36854,103 @@ mod tests {
                 "rewrite-ineligible edges: [A.bs -> B (non-direct field type shape)]"
             ),
             "Expected nested container edge to be marked rewrite-ineligible\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1126_default_mode_does_not_rewrite_cycle_field_declaration() {
+        let out = transpile_str(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("B b;"),
+            "Expected by-value declaration to stay unchanged in default mode\nGot: {out}"
+        );
+        assert!(
+            !out.contains("rusty::Box<B> b;"),
+            "Default mode must not rewrite by-value cycle fields\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1126_opt_in_mode_rewrites_selected_direct_cycle_field_declaration() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Box<B> b;"),
+            "Expected selected direct feedback edge declaration to rewrite to rusty::Box\nGot: {out}"
+        );
+        assert!(
+            out.contains("A a;"),
+            "Expected non-selected opposite edge declaration to remain by-value in this leaf\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1126_opt_in_mode_only_rewrites_direct_edge_declarations() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+                bs: Vec<B>,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Box<B> b;"),
+            "Expected direct selected feedback edge declaration rewrite\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::Vec<B> bs;"),
+            "Expected non-direct selected edge declaration to remain unchanged for this leaf\nGot: {out}"
+        );
+        assert!(
+            !out.contains("rusty::Box<rusty::Vec<B>> bs;"),
+            "Non-direct selected edge must remain diagnostic-only in this leaf\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1126_opt_in_mode_rewrites_direct_enum_variant_field_declaration() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            enum A {
+                Hold { b: B },
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("struct A_Hold {"),
+            "Expected variant struct declaration in output\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::Box<B> b;"),
+            "Expected direct enum variant field declaration rewrite to rusty::Box\nGot: {out}"
         );
     }
 

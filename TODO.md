@@ -2760,8 +2760,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
               - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf only adds deterministic AST-aware eligibility metadata/diagnostics and does not perform blanket or crate-specific rewriting.
-            - [ ] Leaf 11.2.6: Implement opt-in declaration rewrite for rewrite-eligible feedback edges (direct by-value field types only)
-              - Scope: rewrite selected declaration sites to indirection form in a shared AST-aware way, leave all non-direct/ineligible edges diagnostic-only.
+            - [x] *done* Leaf 11.2.6: Implement opt-in declaration rewrite for rewrite-eligible feedback edges (direct by-value field types only)
+              - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+              - Implemented shared opt-in declaration rewrite in `transpiler/src/codegen.rs`:
+                - added deterministic rewrite-plan capture from selected feedback edges, filtered to `DirectFieldType` eligibility only.
+                - rewrote selected field declaration sites to `rusty::Box<...>` for named/tuple struct fields and data-enum variant struct fields under opt-in prototype mode.
+                - left non-direct/ineligible edges diagnostic-only and left constructor/initializer propagation to `Leaf 11.2.7`.
+                - updated prototype banner wording from `diagnostic-only prototype` to `prototype mode` to reflect declaration rewrite activation.
+              - Added focused regressions:
+                - `test_leaf1126_default_mode_does_not_rewrite_cycle_field_declaration`
+                - `test_leaf1126_opt_in_mode_rewrites_selected_direct_cycle_field_declaration`
+                - `test_leaf1126_opt_in_mode_only_rewrites_direct_edge_declarations`
+                - `test_leaf1126_opt_in_mode_rewrites_direct_enum_variant_field_declaration`
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
+              - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): rewrite remains opt-in, deterministic, AST-aware, and field-shape-gated with no crate-specific or post-generation text patching.
             - [ ] Leaf 11.2.7: Propagate rewritten-edge type updates across constructors and field-initialization emission
               - Scope: keep rewritten edges type-consistent in constructor signatures/bodies and struct-literal/initializer emission without global text patching.
             - [ ] Leaf 11.2.8: Add parity-facing validation for opt-in cycle-breaking lowering and reassess Leaf 11.2 closure
