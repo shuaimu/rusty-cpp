@@ -10329,6 +10329,23 @@ impl CodeGen {
             }
         }
 
+        // iter()/iter_mut()/into_iter() on Field receiver - lookup field type directly
+        if matches!(method.as_str(), "iter" | "iter_mut" | "into_iter") && mc.args.is_empty() {
+            if let syn::Expr::Field(field_expr) = mc.receiver.as_ref() {
+                let member_str = match &field_expr.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(_) => return None,
+                };
+                if let Some(field_ty) =
+                    self.lookup_field_type_for_expr_base(&field_expr.base, &member_str)
+                {
+                    if let Some(item_ty) = self.extract_iter_item_type_from_type(&field_ty) {
+                        return Some(item_ty);
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -10650,6 +10667,13 @@ impl CodeGen {
                 .extract_single_expr_from_block(&unsafe_expr.block)
                 .and_then(|inner| self.infer_simple_expr_type(inner)),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
+            syn::Expr::Field(field) => {
+                let member = match &field.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(_) => return None,
+                };
+                self.lookup_field_type_for_expr_base(&field.base, &member)
+            }
             _ => None,
         }
     }
@@ -11374,6 +11398,21 @@ impl CodeGen {
             syn::Expr::Paren(p) => self.lookup_field_type_for_expr_base(&p.expr, field_name),
             syn::Expr::Group(g) => self.lookup_field_type_for_expr_base(&g.expr, field_name),
             syn::Expr::Reference(r) => self.lookup_field_type_for_expr_base(&r.expr, field_name),
+            syn::Expr::Field(field_expr) => {
+                // For chained field access like `self.comparators.iter()` where the base
+                // is itself a field (`self.comparators`), first resolve the base field,
+                // then look up the target field within that type.
+                let base_field_name = match &field_expr.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(_) => return None,
+                };
+                if let Some(base_field_ty) =
+                    self.lookup_field_type_for_expr_base(&field_expr.base, &base_field_name)
+                {
+                    return self.lookup_field_type_from_type(&base_field_ty, field_name);
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -14233,6 +14272,13 @@ impl CodeGen {
                         }
                     }
                 }
+                if method == "iter" || method == "iter_mut" || method == "into_iter" {
+                    if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                        if let Some(item_ty) = self.extract_iter_item_type_from_type(&receiver_ty) {
+                            return Some(item_ty);
+                        }
+                    }
+                }
                 self.infer_iter_item_type_from_expr(&mc.receiver)
             }
             syn::Expr::Call(call) => {
@@ -14268,6 +14314,17 @@ impl CodeGen {
             syn::Expr::Index(idx) => self
                 .infer_simple_expr_type(&idx.expr)
                 .and_then(|ty| self.extract_iter_item_type_from_type(&ty)),
+            syn::Expr::Field(field) => {
+                // For field expressions like `this->comparators`, first try to get the
+                // field's type directly and extract the iterator item type from it.
+                if let Some(field_ty) = self.infer_simple_expr_type(expr) {
+                    if let Some(item_ty) = self.extract_iter_item_type_from_type(&field_ty) {
+                        return Some(item_ty);
+                    }
+                }
+                // Fallback: try to get the iterator item type from the base expression
+                self.infer_iter_item_type_from_expr(&field.base)
+            }
             _ => self
                 .infer_simple_expr_type(expr)
                 .and_then(|ty| self.extract_iter_item_type_from_type(&ty)),
@@ -31912,6 +31969,41 @@ mod tests {
         assert!(out.contains("rusty::enumerate(rusty::iter_mut(v))"));
         assert!(out.contains("rusty::iter(v)"));
         assert!(!out.contains("rusty::enumerate(rusty::iter(v))"));
+    }
+
+    #[test]
+    fn test_self_field_iter_enumerate_lowers_to_rusty_iter() {
+        // Regression test: self.field.iter().enumerate() should emit
+        // rusty::enumerate(rusty::iter(this->field))
+        let out = transpile_str(
+            r#"
+            struct Container {
+                items: Vec<i32>,
+            }
+            impl Container {
+                fn iterate(&self) {
+                    for (i, item) in self.items.iter().enumerate() {
+                        println!("{}: {}", i, item);
+                    }
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("rusty::enumerate(rusty::iter(this->items))"),
+            "self.field.iter().enumerate() should emit rusty::enumerate(rusty::iter(this->field))\nGot: {}",
+            out
+        );
+        assert!(
+            !out.contains("this->items.iter()"),
+            "should not contain .iter() method call\nGot: {}",
+            out
+        );
+        assert!(
+            !out.contains("this->items.enumerate()"),
+            "should not contain .enumerate() method call\nGot: {}",
+            out
+        );
     }
 
     #[test]
