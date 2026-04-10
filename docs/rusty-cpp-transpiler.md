@@ -1489,11 +1489,12 @@ For this profile, the design is **no-bridge by default**: do not generate typed 
 #### Rust Surface (Proposed)
 
 ```rust
-use cpp::my::api as my_api;
+use cpp::std as cpp_std;
 
 unsafe {
-    my_api::normalize(&mut v);
-    let h: u64 = my_api::hash_value(&s);
+    let hi: i32 = 20;
+    let lo: i32 = 10;
+    let m: i32 = cpp_std::max(lo, hi);
 }
 ```
 
@@ -1503,6 +1504,7 @@ Rules:
 2. `use cpp::a::b` is treated as importing C++ module path `a.b`.
 3. No Rust-side `extern "C++"` declaration blocks or `#[cpp(...)]` attributes for this path.
 4. Name remapping is handled on the C++ side (module-exported aliases/shims), not by Rust attributes.
+5. Alias imported C++ modules when helpful (for example `use cpp::std as cpp_std`) to keep Rust and C++ module intent explicit.
 
 #### Module and Symbol Resolution
 
@@ -1539,10 +1541,11 @@ For Rust-owned runtime types (`rusty::String`, `rusty::Vec<T>`, `rusty::HashMap<
 #### Generated C++ Shape
 
 ```cpp
-import my.api;
+import std;
 
-my::api::normalize(v);
-auto h = my::api::hash_value(s);
+int hi = 20;
+int lo = 10;
+auto m = std::max(lo, hi);
 ```
 
 Transpiled Rust call sites lower directly to target C++ module symbols, preserving existing Rust lowering and ownership rules.
