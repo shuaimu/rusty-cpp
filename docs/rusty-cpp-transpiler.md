@@ -3659,8 +3659,22 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): fix is scoped to recognized callable-bound extension-method call sites; no blanket reference rewrite across all call expressions.
-139. Current active next leaf is `13.3`.
-   - focus: add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params).
+139. `Leaf 13.3` is complete.
+   - plan/scope check: implemented as focused regression coverage in `transpiler/src/codegen.rs` and stayed well below the <1000 LOC target.
+   - added tap-family regression coverage for dereferencing callback bodies:
+     - `test_leaf133_tap_call_shape_keeps_deref_closure_param`
+     - `test_leaf133_tap_err_call_shape_keeps_deref_closure_param`
+     - `test_leaf133_tap_some_call_shape_keeps_deref_closure_param`
+   - assertions verify:
+     - extension-method calls are rewritten to `rusty::tap(...)` / `rusty::tap_err(...)` / `rusty::tap_some(...)` (no lingering `.tap*(` call forms),
+     - closure bodies keep dereference behavior (`*v`, `*error`, `*value`),
+     - callback invocations in extension free-function bodies keep borrow-shaped args (`f(&self_)`, `f(&val)`).
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf133 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): this leaf is regression-only and validates shape-gated behavior; no new blanket rewrite path was introduced.
+140. Current active next leaf is `13.4`.
+   - focus: re-run tap parity matrix and record Stage D delta.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

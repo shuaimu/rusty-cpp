@@ -25564,6 +25564,79 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf133_tap_call_shape_keeps_deref_closure_param() {
+        let out = transpile_str(
+            r#"
+            trait TapOps: Sized { fn tap<R, F>(self, f: F) -> Self where F: FnOnce(&mut Self) -> R; }
+            impl<T> TapOps for T {
+                fn tap<R, F>(mut self, f: F) -> Self
+                where
+                    F: FnOnce(&mut Self) -> R,
+                {
+                    let _ = f(&mut self);
+                    self
+                }
+            }
+            fn f(mut foo: i32) {
+                let _ = 10.tap(|v| foo += *v);
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<void>(f(&self_));"));
+        assert!(out.contains("rusty::tap("));
+        assert!(out.contains("foo += *v"));
+        assert!(!out.contains("10.tap("));
+    }
+
+    #[test]
+    fn test_leaf133_tap_err_call_shape_keeps_deref_closure_param() {
+        let out = transpile_str(
+            r#"
+            trait TapResultOps<T, E> { fn tap_err<R, F: FnOnce(&mut E) -> R>(self, f: F) -> Self; }
+            impl<T, E> TapResultOps<T, E> for Result<T, E> {
+                fn tap_err<R, F: FnOnce(&mut E) -> R>(mut self, f: F) -> Self {
+                    if let Err(mut val) = self.as_mut() {
+                        let _ = f(&mut val);
+                    }
+                    self
+                }
+            }
+            fn g(result: Result<i32, i32>, mut foo: i32) {
+                let _ = result.tap_err(|error| foo += *error);
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<void>(f(&val));"));
+        assert!(out.contains("rusty::tap_err("));
+        assert!(out.contains("foo += *error"));
+        assert!(!out.contains("result.tap_err("));
+    }
+
+    #[test]
+    fn test_leaf133_tap_some_call_shape_keeps_deref_closure_param() {
+        let out = transpile_str(
+            r#"
+            trait TapOptionOps<T> { fn tap_some<R, F: FnOnce(&mut T) -> R>(self, f: F) -> Self; }
+            impl<T> TapOptionOps<T> for Option<T> {
+                fn tap_some<R, F: FnOnce(&mut T) -> R>(mut self, f: F) -> Self {
+                    if let Some(mut val) = self.as_mut() {
+                        let _ = f(&mut val);
+                    }
+                    self
+                }
+            }
+            fn h(opt: Option<i32>, mut foo: i32) {
+                let _ = opt.tap_some(|value| foo += *value);
+            }
+            "#,
+        );
+        assert!(out.contains("static_cast<void>(f(&val));"));
+        assert!(out.contains("rusty::tap_some("));
+        assert!(out.contains("foo += *value"));
+        assert!(!out.contains("opt.tap_some("));
+    }
+
+    #[test]
     fn test_leaf131_collects_callable_bound_metadata_for_extension_method_where_clause() {
         let file: syn::File = syn::parse_str(
             r#"

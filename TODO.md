@@ -2781,7 +2781,18 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `cargo test -p rusty-cpp-transpiler leaf13 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 13.3: Add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params)
+        - [x] *done* Leaf 13.3: Add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params)
+          - Plan/scope check: implemented as focused transpiler regressions in `transpiler/src/codegen.rs`; change stayed well under the <1000 LOC target.
+          - Added focused `Leaf 13.3` regressions covering tap-family call shapes with dereferencing callback bodies:
+            - `test_leaf133_tap_call_shape_keeps_deref_closure_param`
+            - `test_leaf133_tap_err_call_shape_keeps_deref_closure_param`
+            - `test_leaf133_tap_some_call_shape_keeps_deref_closure_param`
+          - Regression assertions cover both:
+            - extension call-site rewrite shape (`rusty::tap(...)`, `rusty::tap_err(...)`, `rusty::tap_some(...)`, no lingering `.tap*(` receiver-method call)
+            - closure bodies that dereference callback params (`foo += *v`, `foo += *error`, `foo += *value`) plus preserved borrow-shaped callback invocation in extension free functions (`f(&self_)`, `f(&val)`)
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf133 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 13.4: Re-run tap parity matrix and record Stage D delta
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
