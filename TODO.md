@@ -2957,10 +2957,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): enforcement is AST-aware and scope-gated, with no generated-text patching, no bridge-wrapper workarounds, and no crate-specific shortcuts.
-      - [ ] Leaf 22.6: Add deterministic diagnostics for unresolved/ambiguous `cpp::` symbols
-        - Error when module path is missing from symbol index.
-        - Error when symbol is absent or call cannot be matched to indexed callable family.
-        - Include module path, symbol name, and configured index source in diagnostics.
+      - [x] *done* Leaf 22.6: Add deterministic diagnostics for unresolved/ambiguous `cpp::` symbols
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented deterministic transpile-stage `cpp::` symbol resolution diagnostics in `transpiler/src/transpile.rs`:
+          - added `CppForeignCallResolutionVisitor` and fail-fast integration in `transpile_full_with_options` before unsafe-boundary checks.
+          - visitor tracks lexically scoped `use cpp::...` bindings and validates `binding::symbol(...)` call sites against the configured module-symbol index.
+          - emits deterministic diagnostics for:
+            - missing module path in index,
+            - missing symbol in resolved module entry,
+            - indexed callable family mismatch (call arity does not match indexed signatures).
+          - diagnostics now include module path, symbol name, call context, and configured index source path(s).
+        - Extended transpile options/CLI plumbing so diagnostics can report configured index sources:
+          - added `TranspileOptions::cpp_module_symbol_index_sources`.
+          - wired both top-level CLI and parity flows in `transpiler/src/main.rs`.
+        - Added focused regressions:
+          - `transpile::tests::test_cpp_module_call_errors_when_module_path_missing_from_index`
+          - `transpile::tests::test_cpp_module_call_errors_when_symbol_missing_from_index_module`
+          - `transpile::tests::test_cpp_module_call_errors_when_signature_family_does_not_match_call_shape`
+          - updated `test_cpp_module_foreign_call_requires_unsafe_context` / `test_cpp_module_foreign_call_in_unsafe_context_is_allowed` index fixtures so they continue exercising safety enforcement after resolution checks run first.
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): implementation is AST-aware and deterministic with shared transpile-stage validation; no bridge wrappers, no global text substitution, and no crate-specific shortcuts were introduced.
       - [ ] Leaf 22.7: Define and enforce MVP support limits for `cpp::` imports
         - Start with free/static function calls and module constants.
         - Emit explicit TODO diagnostics for unsupported surfaces (member-function import syntax, template-only exports without resolvable call shape, macros).

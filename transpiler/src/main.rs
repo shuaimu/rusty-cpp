@@ -1392,6 +1392,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
+        cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
     };
 
     let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
@@ -1869,6 +1870,7 @@ fn main() {
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
+        cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
     };
 
     // Handle --crate: transpile entire crate

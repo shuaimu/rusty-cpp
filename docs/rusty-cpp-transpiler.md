@@ -3854,7 +3854,26 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): enforcement is AST-aware and scope-gated with deterministic diagnostics; no bridge wrappers, no global generated-text substitutions, and no crate-specific shortcuts were introduced.
-151. Current active next leaf is `22.6` (deterministic diagnostics for unresolved/ambiguous `cpp::` symbols), now that `22.5` safety-boundary enforcement is complete.
+151. `Leaf 22.6` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented deterministic transpile-stage resolution diagnostics for `cpp::` imported calls in `transpiler/src/transpile.rs`:
+     - added `CppForeignCallResolutionVisitor` and integrated it into `transpile_full_with_options` as a fail-fast validation pass before unsafe-boundary checking.
+     - visitor tracks lexical `use cpp::...` bindings and validates `binding::symbol(...)` call sites against the configured C++ module symbol index.
+     - emits deterministic diagnostics for unresolved module paths, unresolved symbols within resolved modules, and callable-family mismatch when call arity cannot be matched to indexed signatures.
+     - diagnostics include module path, symbol name, call/context metadata, and configured index source path(s).
+   - propagated index-source diagnostics context through options wiring:
+     - added `TranspileOptions::cpp_module_symbol_index_sources`.
+     - updated both top-level CLI and parity transpile-option construction in `transpiler/src/main.rs`.
+   - focused regressions:
+     - `transpile::tests::test_cpp_module_call_errors_when_module_path_missing_from_index`
+     - `transpile::tests::test_cpp_module_call_errors_when_symbol_missing_from_index_module`
+     - `transpile::tests::test_cpp_module_call_errors_when_signature_family_does_not_match_call_shape`
+     - updated `transpile::tests::test_cpp_module_foreign_call_requires_unsafe_context` and `transpile::tests::test_cpp_module_foreign_call_in_unsafe_context_is_allowed` index fixtures so safety checks remain the tested behavior after resolution validation is introduced.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): implementation is AST-aware and deterministic in shared transpile validation; no bridge wrappers, no blanket/global text rewrites, and no crate-specific shortcuts were introduced.
+152. Current active next leaf is `22.7` (define and enforce MVP support limits for `cpp::` imports), now that `22.6` deterministic resolution diagnostics are complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

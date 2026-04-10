@@ -59,6 +59,9 @@ pub struct TranspileOptions {
     pub by_value_cycle_breaking_prototype: bool,
     /// Optional C++ module symbol index for `use cpp::...` interop resolution.
     pub cpp_module_symbol_index: Option<CppModuleSymbolIndex>,
+    /// Source paths used to load the configured C++ module symbol index.
+    /// Used in diagnostics so unresolved-symbol errors point to the configured index input.
+    pub cpp_module_symbol_index_sources: Vec<PathBuf>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -295,7 +298,8 @@ pub fn transpile_full_with_options(
     options: &TranspileOptions,
 ) -> Result<String, String> {
     let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
-    if file_contains_cpp_module_imports(&file) {
+    let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
+    if has_cpp_module_imports {
         match options.cpp_module_symbol_index.as_ref() {
             Some(index) if !index.modules.is_empty() => {}
             Some(_) => {
@@ -309,6 +313,21 @@ pub fn transpile_full_with_options(
                     "Found `use cpp::...` import, but no C++ module symbol index is configured. Pass --cpp-module-index <path>"
                         .to_string(),
                 )
+            }
+        }
+    }
+    if has_cpp_module_imports {
+        if let Some(index) = options.cpp_module_symbol_index.as_ref() {
+            let resolution_diagnostics = collect_cpp_foreign_call_resolution_diagnostics(
+                &file,
+                index,
+                &options.cpp_module_symbol_index_sources,
+            );
+            if !resolution_diagnostics.is_empty() {
+                return Err(format!(
+                    "Unresolved or invalid `cpp::` symbol usage detected:\n- {}",
+                    resolution_diagnostics.join("\n- ")
+                ));
             }
         }
     }
@@ -515,6 +534,278 @@ impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
         self.check_cpp_call_requires_unsafe(call);
         visit::visit_expr_call(self, call);
     }
+}
+
+fn collect_cpp_foreign_call_resolution_diagnostics(
+    file: &syn::File,
+    index: &CppModuleSymbolIndex,
+    index_sources: &[PathBuf],
+) -> Vec<String> {
+    let mut visitor = CppForeignCallResolutionVisitor::new(index, index_sources);
+    visitor.visit_file(file);
+    visitor.into_diagnostics()
+}
+
+struct CppForeignCallResolutionVisitor<'a> {
+    cpp_binding_scopes: Vec<HashMap<String, String>>,
+    diagnostics: Vec<String>,
+    diagnostic_keys: HashSet<String>,
+    context_stack: Vec<String>,
+    index: &'a CppModuleSymbolIndex,
+    index_source_label: String,
+}
+
+impl<'a> CppForeignCallResolutionVisitor<'a> {
+    fn new(index: &'a CppModuleSymbolIndex, index_sources: &[PathBuf]) -> Self {
+        Self {
+            cpp_binding_scopes: Vec::new(),
+            diagnostics: Vec::new(),
+            diagnostic_keys: HashSet::new(),
+            context_stack: Vec::new(),
+            index,
+            index_source_label: format_cpp_module_index_sources(index_sources),
+        }
+    }
+
+    fn push_cpp_binding_scope(&mut self, bindings: HashMap<String, String>) {
+        self.cpp_binding_scopes.push(bindings);
+    }
+
+    fn pop_cpp_binding_scope(&mut self) {
+        self.cpp_binding_scopes.pop();
+    }
+
+    fn lookup_cpp_binding(&self, binding: &str) -> Option<&str> {
+        for scope in self.cpp_binding_scopes.iter().rev() {
+            if let Some(module_path) = scope.get(binding) {
+                return Some(module_path);
+            }
+        }
+        None
+    }
+
+    fn current_context_label(&self) -> String {
+        if self.context_stack.is_empty() {
+            "<module>".to_string()
+        } else {
+            self.context_stack.join("::")
+        }
+    }
+
+    fn record_diagnostic(
+        &mut self,
+        call: &syn::ExprCall,
+        module_path: &str,
+        symbol_name: &str,
+        detail: &str,
+    ) {
+        let call_site = call.to_token_stream().to_string();
+        let context = self.current_context_label();
+        let key = format!(
+            "{}|{}|{}|{}",
+            context, module_path, symbol_name, detail
+        );
+        if self.diagnostic_keys.insert(key) {
+            self.diagnostics.push(format!(
+                "{} (module `{}`, symbol `{}`, index source `{}`, call `{}`, context `{}`)",
+                detail,
+                module_path,
+                symbol_name,
+                self.index_source_label,
+                call_site,
+                context
+            ));
+        }
+    }
+
+    fn resolve_cpp_symbol_for_call(
+        &self,
+        path_expr: &syn::ExprPath,
+    ) -> Option<(String, String)> {
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let first_segment = path_expr.path.segments.first()?;
+        let binding_name = first_segment.ident.to_string();
+        let module_path = self.lookup_cpp_binding(&binding_name)?.to_string();
+        let symbol_name = path_expr
+            .path
+            .segments
+            .iter()
+            .skip(1)
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<String>>()
+            .join("::");
+        if symbol_name.is_empty() {
+            return None;
+        }
+        Some((module_path, symbol_name))
+    }
+
+    fn validate_cpp_call_symbol(&mut self, call: &syn::ExprCall) {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return;
+        };
+        let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_call(path_expr) else {
+            return;
+        };
+
+        let Some(module) = self.index.modules.get(&module_path) else {
+            self.record_diagnostic(
+                call,
+                &module_path,
+                &symbol_name,
+                "module path is not present in configured C++ module symbol index",
+            );
+            return;
+        };
+
+        let symbol = module
+            .symbols
+            .get(&symbol_name)
+            .or_else(|| symbol_name.rsplit("::").next().and_then(|tail| module.symbols.get(tail)));
+        let Some(symbol) = symbol else {
+            self.record_diagnostic(
+                call,
+                &module_path,
+                &symbol_name,
+                "symbol is not present in configured C++ module symbol index module entry",
+            );
+            return;
+        };
+
+        let call_arity = call.args.len();
+        if symbol.callable_signatures.is_empty() {
+            self.record_diagnostic(
+                call,
+                &module_path,
+                &symbol_name,
+                "call cannot be matched to indexed callable family (no callable signatures indexed)",
+            );
+            return;
+        }
+
+        let mut has_arity_match = false;
+        for signature in &symbol.callable_signatures {
+            if parse_callable_signature_arity(signature).is_some_and(|arity| arity == call_arity) {
+                has_arity_match = true;
+                break;
+            }
+        }
+        if !has_arity_match {
+            self.record_diagnostic(
+                call,
+                &module_path,
+                &symbol_name,
+                &format!(
+                    "call cannot be matched to indexed callable family (arity {} does not match signatures [{}])",
+                    call_arity,
+                    symbol.callable_signatures.join(", ")
+                ),
+            );
+        }
+    }
+
+    fn into_diagnostics(mut self) -> Vec<String> {
+        self.diagnostics.sort();
+        self.diagnostics.dedup();
+        self.diagnostics
+    }
+}
+
+impl<'ast> Visit<'ast> for CppForeignCallResolutionVisitor<'_> {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_items(&file.items));
+        for item in &file.items {
+            self.visit_item(item);
+        }
+        self.pop_cpp_binding_scope();
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        let Some((_, items)) = &module.content else {
+            return;
+        };
+        self.context_stack.push(module.ident.to_string());
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_items(items));
+        for item in items {
+            self.visit_item(item);
+        }
+        self.pop_cpp_binding_scope();
+        self.context_stack.pop();
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.context_stack.push(function.sig.ident.to_string());
+        visit::visit_block(self, &function.block);
+        self.context_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
+        self.context_stack.push(method.sig.ident.to_string());
+        visit::visit_block(self, &method.block);
+        self.context_stack.pop();
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_stmts(&block.stmts));
+        for stmt in &block.stmts {
+            self.visit_stmt(stmt);
+        }
+        self.pop_cpp_binding_scope();
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.validate_cpp_call_symbol(call);
+        visit::visit_expr_call(self, call);
+    }
+}
+
+fn format_cpp_module_index_sources(index_sources: &[PathBuf]) -> String {
+    if index_sources.is_empty() {
+        "<unknown>".to_string()
+    } else {
+        index_sources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
+}
+
+fn parse_callable_signature_arity(signature: &str) -> Option<usize> {
+    let start = signature.find('(')?;
+    let end = signature.rfind(')')?;
+    if end < start {
+        return None;
+    }
+    let args = signature[start + 1..end].trim();
+    if args.is_empty() {
+        return Some(0);
+    }
+
+    let mut arity = 1usize;
+    let mut paren_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    for ch in args.chars() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && angle_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                arity += 1;
+            }
+            _ => {}
+        }
+    }
+    Some(arity)
 }
 
 fn collect_cpp_bindings_from_items(items: &[syn::Item]) -> HashMap<String, String> {
@@ -759,6 +1050,7 @@ fn qualify_relative_path(raw: &str, module_path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -998,11 +1290,19 @@ callable_signatures = ["int(int,int)"]
     #[test]
     fn test_cpp_module_foreign_call_requires_unsafe_context() {
         let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "max".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec!["int(int,int)".to_string()],
+            },
+        );
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
                 namespace: Some("std".to_string()),
-                symbols: BTreeMap::new(),
+                symbols,
             },
         );
         let options = TranspileOptions {
@@ -1033,11 +1333,19 @@ fn max2(lo: i32, hi: i32) -> i32 {
     #[test]
     fn test_cpp_module_foreign_call_in_unsafe_context_is_allowed() {
         let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "max".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec!["int(int,int)".to_string()],
+            },
+        );
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
                 namespace: Some("std".to_string()),
-                symbols: BTreeMap::new(),
+                symbols,
             },
         );
         let options = TranspileOptions {
@@ -1062,5 +1370,132 @@ fn max2(lo: i32, hi: i32) -> i32 {
 
         assert!(output.contains("// @unsafe"));
         assert!(output.contains("std::max("));
+    }
+
+    #[test]
+    fn test_cpp_module_call_errors_when_module_path_missing_from_index() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::alpha::beta;
+fn f(v: i32) -> i32 {
+    unsafe { beta::transform(v) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("missing cpp module path should fail");
+
+        assert!(err.contains("module path is not present"));
+        assert!(err.contains("module `alpha::beta`"));
+        assert!(err.contains("symbol `transform`"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_call_errors_when_symbol_missing_from_index_module() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "max".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec!["int(int,int)".to_string()],
+            },
+        );
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f() -> i32 {
+    unsafe { cpp_std::min(1, 2) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("missing indexed symbol should fail");
+
+        assert!(err.contains("symbol is not present"));
+        assert!(err.contains("module `std`"));
+        assert!(err.contains("symbol `min`"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_call_errors_when_signature_family_does_not_match_call_shape() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "max".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec!["int(int,int)".to_string()],
+            },
+        );
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f() -> i32 {
+    unsafe { cpp_std::max(1) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("call arity mismatch should fail");
+
+        assert!(err.contains("call cannot be matched to indexed callable family"));
+        assert!(err.contains("arity 1"));
+        assert!(err.contains("int(int,int)"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
     }
 }
