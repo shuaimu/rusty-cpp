@@ -2626,8 +2626,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
         - [x] *done* Leaf 10.1: Added `rusty::as_bytes(std::string_view)` helper function and transpiler handling for `str::as_bytes()` method calls. The helper returns `std::span<const uint8_t>` representing the raw bytes. Fixed by adding handling in `emit_method_call_expr_to_string` and a helper function in `include/rusty/string.hpp`.
         - [ ] Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
-          - **BLOCKED**: The variable shadowing bug fix (see below) is a prerequisite for this task.
-          - The root cause is in `runtime_try_pattern_details` which generates pattern bindings using Rust identifiers directly without allocating unique C++ names.
+          - [x] *done* Leaf 10.2.1: Fix for-loop iterable self-shadowing in emission (`for x in iter` where `x` also names the iterable local)
+            - Implemented a shape-gated fix in `transpiler/src/codegen.rs`: when the iterable root path name collides with loop-pattern binding names, emit a stable iterable temp before binding loop vars (`auto&& _for_iter = rusty::for_in(...); for (auto&& x : _for_iter) { ... }`).
+            - Added internal synthetic-temp reservation for loop lowering so generated temp names do not collide with existing local/parameter C++ names in scope.
+          - [x] *done* Leaf 10.2.2: Add focused regression for loop-variable shadowing over iterable locals (`for item in item`)
+            - Added targeted regressions in `transpiler/src/codegen.rs`: `test_leaf1021_for_loop_iterable_self_shadowing_uses_stable_iter_temp` and `test_leaf1021_for_loop_borrowed_iterable_self_shadowing_uses_stable_iter_temp`.
+          - [ ] Leaf 10.2.3: Re-run semver parity after 10.2.1/10.2.2 and capture next deterministic head
         - [x] *done* Leaf 10.3: Fix `Vec` used without template arguments in emitted code
           - Fixed `Vec::from_iter` → `rusty::Vec::from_iter` by adding special handling in `emit_expr_path_to_string` and `map_type` to rewrite unqualified `Vec` to `rusty::Vec`
           - Added regression tests `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish`
@@ -2635,25 +2639,38 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 10.4: Add regression tests for string API and iterator translations
           - Added `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish` for iterator translations
           - Existing tests cover string API: `test_str_as_bytes_method`, `test_leaf4154448_to_string_emits_rusty_to_string`, etc.
-      - [ ] Leaf 10.5: Fix variable shadowing in try-style match patterns (BLOCKED - deep architectural change)
-        - **Issue**: In `runtime_try_pattern_details` for `Pat::Ident`, pattern bindings use Rust identifier directly (e.g., `rhs`) instead of allocating unique C++ names. When the Rust code has `let rhs = match rhs.next() { Some(rhs) => rhs }`, the inner `rhs` shadows the outer, and the generated C++ has `const auto rhs_shadow1 = rhs_shadow1.next()` causing "use before deduction" error.
-        - **Root cause**: `collect_pattern_binding_stmts` calls `allocate_local_cpp_name` which requires `&mut self`, cascading to 35+ functions needing signature changes.
-        - **Fix approach**: Modify `collect_pattern_binding_stmts` to take `&mut self`, allocate unique names, and register in `local_cpp_bindings`. This cascades to: `tuple_struct_binding_stmts`, `runtime_try_pattern_details`, `emit_try_style_runtime_match_expr`, `emit_try_style_either_match_expr`, `emit_match_expr_to_string`, `emit_expr_to_string_with_expected`, and many callers.
-        - **Status**: Initial attempt failed due to deep borrow checker cascades. Needs significant refactoring to complete.
+      - [ ] Leaf 10.5: Fix variable shadowing in try-style match patterns
+        - [ ] Leaf 10.5.1: Refactor try-style pattern binding collection to return both emitted binding statements and Rust-name→C++-name mapping
+          - Use mapping in `runtime_try_pattern_details` for `Pat::Ident` / tuple / struct payload bindings instead of emitting raw Rust names.
+        - [ ] Leaf 10.5.2: Push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering
+          - Ensure shadowed names in arm bodies resolve to newly bound payload names, not outer locals.
+        - [ ] Leaf 10.5.3: Add regressions for `let rhs = match rhs.next() { Some(rhs) => ... }` nested-shadow patterns
+        - [ ] Leaf 10.5.4: Re-run semver parity and confirm try-style shadowing family is removed from Stage D head set
       - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
             - When Kahn's algorithm fails to sort all nodes, identifies cyclic nodes and moves them to end of emission order
             - Forward declarations for all types are already emitted before definitions
             - Added regression tests: `test_circular_type_ordering_cyclic_types_last`, `test_circular_type_ordering_with_reference`
-          - [ ] Leaf 11.2: BLOCKED - Not actionable in current form. Forward declarations are already emitted for all types before definitions (via `emit_item_forward_decls`). Leaf 11.1 already moves cyclic types to end of emission order. For true value-type circular dependencies (A contains B by value, B contains A by value), C++ requires using pointers - there's no solution within the current single-file .cppm architecture without semantic changes to the generated code.
+          - [ ] Leaf 11.2: Handle true by-value circular dependencies with an explicit strategy (architecture)
+            - [ ] Leaf 11.2.1: Detect SCCs with by-value cycle edges and emit deterministic unsupported diagnostics (short-term unblock)
+            - [ ] Leaf 11.2.2: Add regression fixture asserting diagnostics include cycle path/type names
+            - [ ] Leaf 11.2.3: Write design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion)
+            - [ ] Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [x] *done* Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
         - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)
         - [x] *done* Leaf 12.3: Add regression tests for namespace/function collision patterns (done in Leaf 1.3)
         - [x] *done* Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (done in Leaf 1.4)
-      - [ ] Leaf 13: BLOCKED - tap crate has pre-existing bug in extension trait method lowering. Root cause: Rust's `tap` impl passes `&mut self` to `FnOnce(&mut Self)` closure, but C++ lowering passes `self_` by value (`f(self_)` instead of `f(&mut self_)`). This is a deep architectural issue requiring significant refactoring of how trait bounds (`FnOnce(&mut Self)`) are handled when lowering extension trait method bodies. Would require understanding trait bounds on closure parameters at emission time.
+      - [ ] Leaf 13: Fix extension-trait callable argument pass-style for tap family (`FnOnce(&mut Self)` and peers)
+        - Current deterministic tap Stage D head: `invalid type argument of unary '*' (have 'int')` from generated `rusty::tap(10, [&](auto&& v) { return foo += *v; })`.
+        - [ ] Leaf 13.1: Collect callable-bound metadata for extension-trait method parameters during pre-scan
+          - Track `Fn`/`FnMut`/`FnOnce` argument pass intent and reference mutability shape for callable parameters.
+        - [ ] Leaf 13.2: Apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`)
+          - For `FnOnce(&mut Self)`-style bounds, pass borrow-shaped arguments instead of by-value fallback.
+        - [ ] Leaf 13.3: Add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params)
+        - [ ] Leaf 13.4: Re-run tap parity matrix and record Stage D delta
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
@@ -2667,3 +2684,36 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added dedicated `parity-matrix` CI job in `.github/workflows/ci.yml` (runs after `build-and-test`) that executes `tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`
           - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
           - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads
+    - [ ] Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
+      - [ ] Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
+        - Add a reserved-root detection path for `cpp::` in import lowering.
+        - Preserve aliasing (`use cpp::std as cpp_std`) in symbol resolution tables.
+        - Add focused parser/codegen regressions for plain + aliased `cpp::` imports.
+      - [ ] Leaf 22.2: Add a C++ module symbol index input and loader for transpiler resolution
+        - Define a stable sidecar format (JSON/TOML) mapping module path → exported symbols/callable signatures.
+        - Add CLI flag(s) to pass index path(s) in single-file and crate-mode runs.
+        - Fail fast when `cpp::` imports are present but no symbol index is configured.
+      - [ ] Leaf 22.3: Resolve `cpp::` module paths and emit C++20 module imports
+        - `use cpp::a::b` resolves to C++ module `a.b` and emits `import a.b;` once per unit.
+        - Keep deterministic ordering and de-dup behavior for repeated imports across files.
+        - Add regressions verifying mixed Rust-module imports and C++ module imports coexist.
+      - [ ] Leaf 22.4: Lower `cpp::` call paths to direct native C++ calls (no generated bridge wrappers)
+        - For `cpp_alias::f(...)`, emit direct qualified C++ call path and rely on C++ overload resolution.
+        - Reuse canonical Rust→C++ type lowering for arguments/returns; do not add interop-only adapters.
+        - Add regressions for `use cpp::std as cpp_std; cpp_std::max(lo, hi)` lowering to `std::max(...)`.
+      - [ ] Leaf 22.5: Enforce safety boundary for foreign C++ calls imported through `cpp::`
+        - Require `unsafe` context for direct calls to `cpp::` imported symbols.
+        - Add diagnostics that point to call sites when safe-context calls target foreign C++ symbols.
+        - Add regressions for both accepted (`unsafe`) and rejected (safe context) call shapes.
+      - [ ] Leaf 22.6: Add deterministic diagnostics for unresolved/ambiguous `cpp::` symbols
+        - Error when module path is missing from symbol index.
+        - Error when symbol is absent or call cannot be matched to indexed callable family.
+        - Include module path, symbol name, and configured index source in diagnostics.
+      - [ ] Leaf 22.7: Define and enforce MVP support limits for `cpp::` imports
+        - Start with free/static function calls and module constants.
+        - Emit explicit TODO diagnostics for unsupported surfaces (member-function import syntax, template-only exports without resolvable call shape, macros).
+        - Document unsupported surfaces in docs/rusty-cpp-transpiler.md §3.13 once enforced in code.
+      - [ ] Leaf 22.8: Integration coverage for `cpp::` interop path
+        - Add transpiler integration fixtures that include a tiny C++ module (`import std;` and one custom module fixture) consumed via Rust `use cpp::...`.
+        - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.
+        - Extend parity harness dry-run checks to assert `cpp::` imports produce module-import emission and expected diagnostics when index is missing.

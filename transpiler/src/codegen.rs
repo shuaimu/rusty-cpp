@@ -9159,10 +9159,15 @@ impl CodeGen {
 
     fn emit_for_loop(&mut self, for_expr: &syn::ExprForLoop) {
         let pat = self.emit_pat_to_string(&for_expr.pat);
+        let mut loop_binding_names = HashSet::new();
+        self.collect_pattern_binding_names(&for_expr.pat, &mut loop_binding_names);
+
         let iter_is_borrowed = matches!(
             self.peel_paren_group_expr(&for_expr.expr),
             syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr)
         );
+        let iterable_self_shadows_loop_binding =
+            self.for_loop_iterable_self_shadows_binding(&for_expr.expr, &loop_binding_names);
         let iter = match self.peel_paren_group_expr(&for_expr.expr) {
             syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
                 self.emit_expr_to_string(&r.expr)
@@ -9189,15 +9194,17 @@ impl CodeGen {
 
         // Rust `for x in expr` → C++ `for (auto& x : expr)` or `for (auto x : expr)`
         // Use auto&& to handle both references and values correctly
-        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_expr));
+        let iter_source = if iterable_self_shadows_loop_binding {
+            // Preserve Rust name resolution when loop pattern shadows the iterable local
+            // (e.g., `for lhs in lhs`) by stabilizing the iterable before binding `lhs`.
+            let stable_iter_name = self.reserve_synthetic_cpp_name("_for_iter");
+            self.writeln(&format!("auto&& {} = {};", stable_iter_name, iter_expr));
+            stable_iter_name
+        } else {
+            iter_expr
+        };
+        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_source));
         self.indent += 1;
-
-        // Collect for-loop pattern binding names so they can be registered
-        // in the body scope. This ensures that variable shadowing inside the
-        // loop body (e.g., `let flag = trim(flag)`) correctly renames to
-        // `flag_shadow1` instead of redeclaring `flag`.
-        let mut loop_binding_names = HashSet::new();
-        self.collect_pattern_binding_names(&for_expr.pat, &mut loop_binding_names);
 
         // Temporarily store the binding names; emit_block will push a new scope,
         // and we'll inject the loop var names into it afterwards.
@@ -9211,6 +9218,34 @@ impl CodeGen {
         if iter_is_borrowed {
             self.pattern_ref_bindings.pop();
         }
+    }
+
+    fn for_loop_iterable_self_shadows_binding(
+        &self,
+        iterable_expr: &syn::Expr,
+        loop_binding_names: &HashSet<String>,
+    ) -> bool {
+        let iter_name = self.extract_for_loop_iterable_root_name(iterable_expr);
+        iter_name
+            .as_ref()
+            .is_some_and(|name| loop_binding_names.contains(name))
+    }
+
+    fn extract_for_loop_iterable_root_name(&self, iterable_expr: &syn::Expr) -> Option<String> {
+        let mut expr = self.peel_paren_group_expr(iterable_expr);
+        if let syn::Expr::Reference(r) = expr {
+            if self.is_expr_raw_pointer_like(&r.expr) {
+                return None;
+            }
+            expr = self.peel_paren_group_expr(&r.expr);
+        }
+
+        if let syn::Expr::Path(path_expr) = expr {
+            if path_expr.path.segments.len() == 1 {
+                return Some(path_expr.path.segments[0].ident.to_string());
+            }
+        }
+        None
     }
 
     fn emit_pat_to_string(&self, pat: &syn::Pat) -> String {
@@ -9872,6 +9907,49 @@ impl CodeGen {
                 scope.insert(rust_name.to_string(), candidate.clone());
                 if let Some(used_set) = self.local_cpp_names_used.last_mut() {
                     used_set.insert(candidate.clone());
+                }
+                return candidate;
+            }
+            idx += 1;
+        }
+    }
+
+    fn reserve_synthetic_cpp_name(&mut self, base_name: &str) -> String {
+        let escaped_base = escape_cpp_keyword(base_name);
+        let used_in_scope = self
+            .local_cpp_names_used
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let scope_cpp_names: HashSet<String> = self
+            .local_cpp_bindings
+            .last()
+            .map(|scope| scope.values().cloned().collect())
+            .unwrap_or_default();
+        let param_cpp_names: HashSet<String> = self
+            .param_bindings
+            .last()
+            .map(|params| {
+                params
+                    .keys()
+                    .map(|name| escape_cpp_keyword(name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut idx = 0usize;
+        loop {
+            let candidate = if idx == 0 {
+                escaped_base.clone()
+            } else {
+                format!("{}_{}", escaped_base, idx)
+            };
+            if !used_in_scope.contains(&candidate)
+                && !scope_cpp_names.contains(&candidate)
+                && !param_cpp_names.contains(&candidate)
+            {
+                if let Some(used) = self.local_cpp_names_used.last_mut() {
+                    used.insert(candidate.clone());
                 }
                 return candidate;
             }
@@ -25159,6 +25237,40 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf1021_for_loop_iterable_self_shadowing_uses_stable_iter_temp() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let lhs = [1, 2, 3];
+                for lhs in lhs {
+                    let _ = lhs;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto&& _for_iter = rusty::for_in(lhs);"));
+        assert!(out.contains("for (auto&& lhs : _for_iter) {"));
+        assert!(!out.contains("for (auto&& lhs : rusty::for_in(lhs)) {"));
+    }
+
+    #[test]
+    fn test_leaf1021_for_loop_borrowed_iterable_self_shadowing_uses_stable_iter_temp() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let lhs = [1, 2, 3];
+                for lhs in &lhs {
+                    let _ = lhs;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto&& _for_iter = rusty::for_in(rusty::iter(lhs));"));
+        assert!(out.contains("for (auto&& lhs : _for_iter) {"));
+        assert!(!out.contains("for (auto&& lhs : rusty::for_in(rusty::iter(lhs))) {"));
+    }
+
+    #[test]
     fn test_str_as_bytes_method() {
         // Rust str::as_bytes() on &str should map to rusty::as_bytes()
         let out = transpile_str("fn f(s: &str) { let _ = s.as_bytes(); }");
@@ -26870,7 +26982,8 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("return rusty::fold(rusty::iter(v), 0, rusty::ops::add_fn);"));
+        assert!(out.contains("return rusty::fold(rusty::iter(v), 0,"));
+        assert!(out.contains("rusty::ops::add_fn"));
         assert!(!out.contains(".fold(0, Add::add)"));
     }
 

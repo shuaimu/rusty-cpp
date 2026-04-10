@@ -3474,8 +3474,21 @@ Active work items:
      - adjacent follow-ons in the same family: `is_null` on raw pointer and `rotate_right`/`wrapping_sub` intrinsic-method emission at `runner.cpp:708/748/760`.
    - canonical artifacts: `/tmp/rusty-parity-4-15-4-4-9-semver-20260407-2/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared + AST/context-gated and introduced no crate-specific rewrites/scripts.
-125. Current active next leaf is the `4.15.4.4` priority-pivot continuation.
-   - focus: collapse the new deterministic `semver` Stage D `identifier::new_unchecked` control-flow/lambda-return head before resuming deferred `arrayvec` `4.15.4.3...27.46.1`.
+125. `Leaf 10.2.1` is complete.
+   - plan/scope check: the fix stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs` (no crate-specific scripts):
+     - added shape-gated for-loop iterable self-shadow detection: when loop-pattern binding names overlap the iterable root path name (for example `for lhs in lhs`), codegen now stabilizes iterable evaluation before introducing loop bindings.
+     - added scoped synthetic temp reservation for loop lowering (`_for_iter`/suffix fallback) so generated temp names do not collide with existing local/parameter C++ names.
+     - lowered self-shadowing loops to a two-step shape (`auto&& _for_iter = rusty::for_in(...); for (auto&& lhs : _for_iter) { ... }`) while keeping non-shadowing loop lowering unchanged.
+   - added focused regressions in `transpiler/src/codegen.rs`:
+     - `test_leaf1021_for_loop_iterable_self_shadowing_uses_stable_iter_temp`
+     - `test_leaf1021_for_loop_borrowed_iterable_self_shadowing_uses_stable_iter_temp`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1021 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): change is shape-gated and local to for-loop lowering; no blanket for-loop rewrite and no crate-specific patching was introduced.
+126. Current active next leaf is `10.2.3`.
+   - focus: re-run semver parity after `10.2.1/10.2.2` and capture the next deterministic Stage D head.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
