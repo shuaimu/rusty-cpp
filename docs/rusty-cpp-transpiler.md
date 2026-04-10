@@ -3815,7 +3815,20 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf remained loader/configuration-only; no bridge-wrapper generation, no call-lowering shortcuts, and no global path text substitution were introduced.
-148. Current active next leaf is `22.3` (resolve `cpp::` module paths to emitted C++ `import` lines), now that `22.1/22.2` classification and index-loading prerequisites are complete.
+148. `Leaf 22.3` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented deterministic C++ module import emission in `transpiler/src/codegen.rs`:
+     - `emit_file` now initializes prologue text via `emit_cpp_module_import_prologue()` so `use cpp::...` imports lower into emitted C++20 `import ...;` lines.
+     - added `emit_cpp_module_import_prologue()` to map collected `cpp_module_import_paths` into C++ module names, sort, de-duplicate, and emit one import per module.
+     - added `cpp_module_path_to_import_name(...)` helper to convert canonical `a::b` paths to C++ module import names (`a.b`).
+   - focused regressions:
+     - `test_leaf223_cpp_module_imports_emit_deduped_sorted_cxx_imports`
+     - `test_leaf223_cpp_and_rust_imports_coexist`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf223 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf is import-emission scoped, deterministic, AST-driven, and introduces no bridge wrappers or generated-text patching.
+149. Current active next leaf is `22.4` (lower `cpp::` call paths to direct native C++ calls), now that `22.3` module-import emission is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

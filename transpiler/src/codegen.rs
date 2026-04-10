@@ -780,7 +780,7 @@ impl CodeGen {
 
         self.emit_expanded_test_wrappers();
 
-        let mut prologue_text = String::new();
+        let mut prologue_text = self.emit_cpp_module_import_prologue();
         if !self.unsupported_by_value_cycle_diagnostics.is_empty() {
             let mut diagnostics = self.unsupported_by_value_cycle_diagnostics.clone();
             diagnostics.sort();
@@ -818,6 +818,30 @@ impl CodeGen {
         if !prologue_text.is_empty() {
             self.output.insert_str(helper_insert_pos, &prologue_text);
         }
+    }
+
+    fn emit_cpp_module_import_prologue(&self) -> String {
+        let mut import_paths: Vec<String> = self
+            .cpp_module_import_paths
+            .iter()
+            .map(|path| cpp_module_path_to_import_name(path))
+            .filter(|path| !path.is_empty())
+            .collect();
+        import_paths.sort();
+        import_paths.dedup();
+
+        if import_paths.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::new();
+        for import_path in import_paths {
+            out.push_str("import ");
+            out.push_str(&import_path);
+            out.push_str(";\n");
+        }
+        out.push('\n');
+        out
     }
 
     fn order_items_for_emission<'a>(&self, items: &'a [syn::Item]) -> Vec<&'a syn::Item> {
@@ -23291,6 +23315,14 @@ fn classify_cpp_module_use_import(path: &str) -> Option<CppModuleUseImport> {
     })
 }
 
+fn cpp_module_path_to_import_name(path: &str) -> String {
+    path.split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn classify_use_import(path: &str) -> UseImportAction {
     let normalized = normalize_use_import_path(path);
     if let Some((alias, target_path)) = split_use_import_alias(normalized) {
@@ -30499,6 +30531,47 @@ mod tests {
             Some("std")
         );
         assert_eq!(cg.cpp_module_import_paths, vec!["std".to_string()]);
+    }
+
+    #[test]
+    fn test_leaf223_cpp_module_imports_emit_deduped_sorted_cxx_imports() {
+        let out = transpile_str_module(
+            r#"
+            use cpp::zeta;
+            use cpp::alpha::beta;
+            use cpp::zeta as cpp_zeta;
+            pub fn f() {}
+        "#,
+            "my_crate",
+        );
+
+        assert_eq!(out.matches("import alpha.beta;").count(), 1);
+        assert_eq!(out.matches("import zeta;").count(), 1);
+        assert!(!out.contains("import alpha::beta;"));
+
+        let alpha_pos = out
+            .find("import alpha.beta;")
+            .expect("alpha import should be emitted");
+        let zeta_pos = out.find("import zeta;").expect("zeta import should be emitted");
+        assert!(
+            alpha_pos < zeta_pos,
+            "imports should be deterministic and sorted: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf223_cpp_and_rust_imports_coexist() {
+        let out = transpile_str_module(
+            r#"
+            use cpp::std;
+            use std::collections::HashMap;
+            pub fn f() {}
+        "#,
+            "my_crate",
+        );
+
+        assert!(out.contains("import std;"));
+        assert!(out.contains("using rusty::HashMap;"));
     }
 
     #[test]

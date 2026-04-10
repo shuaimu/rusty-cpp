@@ -2918,10 +2918,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): this leaf remains loader/configuration-only (no bridge wrappers, no call-lowering shortcuts, no global path text substitution).
-      - [ ] Leaf 22.3: Resolve `cpp::` module paths and emit C++20 module imports
-        - `use cpp::a::b` resolves to C++ module `a.b` and emits `import a.b;` once per unit.
-        - Keep deterministic ordering and de-dup behavior for repeated imports across files.
-        - Add regressions verifying mixed Rust-module imports and C++ module imports coexist.
+      - [x] *done* Leaf 22.3: Resolve `cpp::` module paths and emit C++20 module imports
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented deterministic C++ module-import prologue emission in `transpiler/src/codegen.rs`:
+          - `emit_file` now seeds generated prologue text with `emit_cpp_module_import_prologue()` so resolved `cpp::` imports are emitted as real C++20 `import ...;` statements.
+          - added `emit_cpp_module_import_prologue()` that maps classified `cpp::` module paths to C++ module names, sorts them, and de-duplicates them before emission.
+          - added `cpp_module_path_to_import_name(...)` helper to convert canonical Rust-style `a::b` module paths into C++ module import names (`a.b`).
+        - Added focused regressions:
+          - `test_leaf223_cpp_module_imports_emit_deduped_sorted_cxx_imports`
+          - `test_leaf223_cpp_and_rust_imports_coexist`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler leaf223 -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): this leaf stays import-emission scoped, keeps deterministic AST-derived lowering, and does not introduce bridge wrappers or global generated-text substitutions.
       - [ ] Leaf 22.4: Lower `cpp::` call paths to direct native C++ calls (no generated bridge wrappers)
         - For `cpp_alias::f(...)`, emit direct qualified C++ call path and rely on C++ overload resolution.
         - Reuse canonical Rust→C++ type lowering for arguments/returns; do not add interop-only adapters.
