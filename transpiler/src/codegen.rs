@@ -20215,6 +20215,12 @@ impl CodeGen {
                 return mapped;
             }
         }
+        if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
+            if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                rewritten.push_str(&template_args);
+            }
+            return rewritten;
+        }
         // Special case: unqualified `Vec` in paths should map to rusty::Vec
         // This handles `Vec::from_iter`, but NOT constructor methods like new/new_/from/try_from
         // which are handled specially in emit_call_expr_to_string.
@@ -20381,6 +20387,34 @@ impl CodeGen {
             emitted.push_str(&template_args);
         }
         emitted
+    }
+
+    fn rewrite_cpp_import_bound_expr_path(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let first_segment = path.segments.first()?.ident.to_string();
+        let module_path = self.cpp_module_import_bindings.get(&first_segment)?;
+
+        let mut resolved_segments: Vec<String> = module_path
+            .split("::")
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(escape_cpp_keyword)
+            .collect();
+        if resolved_segments.is_empty() {
+            return None;
+        }
+
+        for segment in path.segments.iter().skip(1) {
+            resolved_segments.push(escape_cpp_keyword(&segment.ident.to_string()));
+        }
+
+        let mut rewritten = resolved_segments.join("::");
+        if path.leading_colon.is_some() {
+            rewritten = format!("::{}", rewritten);
+        }
+        Some(rewritten)
     }
 
     fn emit_expr_path_template_args(&self, path: &syn::Path) -> Option<String> {
@@ -30572,6 +30606,47 @@ mod tests {
 
         assert!(out.contains("import std;"));
         assert!(out.contains("using rusty::HashMap;"));
+    }
+
+    #[test]
+    fn test_leaf224_cpp_alias_call_lowers_to_direct_cpp_call_path() {
+        let out = transpile_str_module(
+            r#"
+            use cpp::std as cpp_std;
+            pub fn max2(lo: i32, hi: i32) -> i32 {
+                cpp_std::max(lo, hi)
+            }
+        "#,
+            "my_crate",
+        );
+
+        assert!(out.contains("std::max("), "expected direct std::max call: {out}");
+        assert!(
+            !out.contains("cpp_std::max("),
+            "cpp alias should be resolved in call emission: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf224_cpp_nested_module_binding_lowers_to_qualified_cpp_call_path() {
+        let out = transpile_str_module(
+            r#"
+            use cpp::alpha::beta;
+            pub fn f(v: i32) -> i32 {
+                beta::transform(v)
+            }
+        "#,
+            "my_crate",
+        );
+
+        assert!(
+            out.contains("alpha::beta::transform("),
+            "expected qualified C++ module path call: {out}"
+        );
+        assert!(
+            !out.contains("return beta::transform("),
+            "unqualified binding call should be rewritten to qualified path: {out}"
+        );
     }
 
     #[test]

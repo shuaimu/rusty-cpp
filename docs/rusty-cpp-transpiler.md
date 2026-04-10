@@ -3828,7 +3828,20 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf223 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf is import-emission scoped, deterministic, AST-driven, and introduces no bridge wrappers or generated-text patching.
-149. Current active next leaf is `22.4` (lower `cpp::` call paths to direct native C++ calls), now that `22.3` module-import emission is complete.
+149. `Leaf 22.4` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented direct `cpp::` call-path lowering in `transpiler/src/codegen.rs`:
+     - added `rewrite_cpp_import_bound_expr_path(...)` to rewrite expression paths rooted at `cpp::` import bindings to direct qualified C++ paths.
+     - integrated that rewrite into `emit_expr_path_to_string(...)`, so aliased imported call paths (for example `cpp_std::max(...)`) lower to native calls (`std::max(...)`) without bridge wrappers.
+     - preserved existing canonical call argument/return lowering by reusing the existing call emission pipeline (`emit_call_expr_to_string`) rather than adding interop-only adapters.
+   - focused regressions:
+     - `test_leaf224_cpp_alias_call_lowers_to_direct_cpp_call_path`
+     - `test_leaf224_cpp_nested_module_binding_lowers_to_qualified_cpp_call_path`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf224 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): lowering is AST-aware and scope-gated to classified `cpp` bindings; no bridge-wrapper generation, no blanket/global text substitutions, and no crate-specific shortcuts were introduced.
+150. Current active next leaf is `22.5` (enforce safety boundary for foreign C++ calls imported through `cpp::`), now that `22.4` direct-call lowering is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

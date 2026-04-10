@@ -2931,10 +2931,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler leaf223 -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): this leaf stays import-emission scoped, keeps deterministic AST-derived lowering, and does not introduce bridge wrappers or global generated-text substitutions.
-      - [ ] Leaf 22.4: Lower `cpp::` call paths to direct native C++ calls (no generated bridge wrappers)
-        - For `cpp_alias::f(...)`, emit direct qualified C++ call path and rely on C++ overload resolution.
-        - Reuse canonical Rust→C++ type lowering for arguments/returns; do not add interop-only adapters.
-        - Add regressions for `use cpp::std as cpp_std; cpp_std::max(lo, hi)` lowering to `std::max(...)`.
+      - [x] *done* Leaf 22.4: Lower `cpp::` call paths to direct native C++ calls (no generated bridge wrappers)
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented direct call-path lowering for `cpp::` import bindings in `transpiler/src/codegen.rs`:
+          - added expression-path rewrite helper (`rewrite_cpp_import_bound_expr_path`) that resolves leading path segments bound by `use cpp::...` imports to their underlying C++ module-qualified paths.
+          - integrated helper into `emit_expr_path_to_string` so function-call paths like `cpp_alias::f(...)` now lower to direct native C++ calls such as `std::max(...)`.
+          - reused existing argument/return lowering and call emission (`emit_call_expr_to_string`) without adding interop-only wrappers/adapters.
+        - Added focused regressions:
+          - `test_leaf224_cpp_alias_call_lowers_to_direct_cpp_call_path`
+          - `test_leaf224_cpp_nested_module_binding_lowers_to_qualified_cpp_call_path`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler leaf224 -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): lowering remains AST-aware and scope-gated to `cpp` bindings; no bridge wrapper generation, no crate-specific shortcuts, and no global generated-text patching were introduced.
       - [ ] Leaf 22.5: Enforce safety boundary for foreign C++ calls imported through `cpp::`
         - Require `unsafe` context for direct calls to `cpp::` imported symbols.
         - Add diagnostics that point to call sites when safe-context calls target foreign C++ symbols.
