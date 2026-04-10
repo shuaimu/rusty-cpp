@@ -66,3 +66,27 @@ jobs:
             ${{ runner.temp }}/rusty-parity-matrix/bitflags/**
           if-no-files-found: warn
           retention-days: 14
+
+  cpp-module-interop-compile:
+    runs-on: self-hosted
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run cpp module interop compile check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./tests/transpile_tests/run_cpp_module_interop_compile.sh \
+            --work-dir "${RUNNER_TEMP}/rusty-cpp-module-interop"
+
+      - name: Upload cpp module interop artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-module-interop-artifacts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/rusty-cpp-module-interop/**
+          if-no-files-found: warn
+          retention-days: 14

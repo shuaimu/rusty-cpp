@@ -2877,7 +2877,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added dedicated `parity-matrix` CI job in `.github/workflows/ci.yml` (runs after `build-and-test`) that executes `tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`
           - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
           - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads
-    - [ ] Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
+    - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
         - Implemented shared `cpp::` reserved-root import classification in `transpiler/src/codegen.rs`:
@@ -3001,7 +3001,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): implementation is AST-aware and shape-gated per call/value/macro surface, with no bridge wrappers, no global text substitution, and no crate-specific shortcuts.
-      - [ ] Leaf 22.8: Integration coverage for `cpp::` interop path
+      - [x] *done* Leaf 22.8: Integration coverage for `cpp::` interop path
         - [x] *done* Leaf 22.8.1: Add a dedicated `cpp::` interop fixture crate and transpile-stage parity coverage
           - Plan/scope check: fixture + parity verification updates stayed well below the <1000 LOC target and required no additional decomposition.
           - Added committed integration fixture crate at `tests/transpile_tests/cpp_module_interop/`:
@@ -3035,6 +3035,23 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_dry_run_transpile -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): changes stay in shared parity harness behavior and fixture-agnostic assertions; no crate-specific scripts, no generated-output patching, and no bridge-wrapper shortcuts were introduced.
-        - [ ] Leaf 22.8.3: Add compile-stage CI coverage for generated `cpp::` interop units
-          - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.
-          - Ensure failure diagnostics and artifact retention for this compile-only interop check align with existing parity CI patterns.
+        - [x] *done* Leaf 22.8.3: Add compile-stage CI coverage for generated `cpp::` interop units
+          - Plan/scope check: compile-harness script + CI workflow wiring + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+          - Added dedicated compile-stage interop harness script `tests/transpile_tests/run_cpp_module_interop_compile.sh`:
+            - runs parity Stage C (`--stop-after transpile`) for the committed `cpp_module_interop` fixture with required `--cpp-module-index`.
+            - compiles fixture custom module (`custom.math.cppm`) plus transpiled output module (`cpp_module_interop.cppm`) when a local compiler supports `import std;`.
+            - performs deterministic compiler probing (`g++` then `clang++`) and exits with explicit `SKIP` status when `import std` modules are unavailable instead of producing flaky failures.
+            - prints canonical failure diagnostics (`transpile.log`, `build.log`, transpiled module path, custom module path) matching parity CI troubleshooting style.
+          - Added CI coverage in `.github/workflows/ci.yml`:
+            - new `cpp-module-interop-compile` job (after `build-and-test`) runs `./tests/transpile_tests/run_cpp_module_interop_compile.sh --work-dir "${RUNNER_TEMP}/rusty-cpp-module-interop"`.
+            - failure-only artifact upload via `actions/upload-artifact@v4` for `${{ runner.temp }}/rusty-cpp-module-interop/**`.
+          - Added focused regressions in `transpiler/tests/parity_matrix_harness.rs`:
+            - `test_cpp_module_interop_compile_script_dry_run_reports_expected_commands`
+            - `test_ci_workflow_defines_cpp_module_interop_compile_job`
+            - `test_ci_workflow_uploads_cpp_module_interop_artifacts_on_failure`
+          - Verification:
+            - `bash tests/transpile_tests/run_cpp_module_interop_compile.sh --dry-run`
+            - `bash tests/transpile_tests/run_cpp_module_interop_compile.sh --work-dir "$(mktemp -d)"` (deterministic `SKIP` on hosts without `import std` support)
+            - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): coverage stays in shared parity/CI orchestration and fixture-agnostic workflow tests; no crate-specific generated-output patching, no bridge-wrapper shortcuts, and no global text substitutions were introduced.

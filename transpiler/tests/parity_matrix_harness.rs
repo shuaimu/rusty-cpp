@@ -12,6 +12,10 @@ fn matrix_script() -> PathBuf {
     repo_root().join("tests/transpile_tests/run_parity_matrix.sh")
 }
 
+fn cpp_module_interop_compile_script() -> PathBuf {
+    repo_root().join("tests/transpile_tests/run_cpp_module_interop_compile.sh")
+}
+
 fn ci_workflow_file() -> PathBuf {
     repo_root().join(".github/workflows/ci.yml")
 }
@@ -55,6 +59,40 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
     }
     assert!(stdout.contains("parity-test"));
     assert!(stdout.contains("--stop-after run"));
+}
+
+#[test]
+fn test_cpp_module_interop_compile_script_dry_run_reports_expected_commands() {
+    let script = cpp_module_interop_compile_script();
+    assert!(
+        script.exists(),
+        "missing cpp-module interop compile script: {}",
+        script.display()
+    );
+
+    let work_root = tempfile::tempdir().unwrap();
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--dry-run")
+        .arg("--work-dir")
+        .arg(work_root.path())
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to run cpp-module interop compile script");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("parity-test"), "stdout:\n{}", stdout);
+    assert!(stdout.contains("--stop-after transpile"), "stdout:\n{}", stdout);
+    assert!(stdout.contains("--cpp-module-index"), "stdout:\n{}", stdout);
+    assert!(stdout.contains("custom.math.cppm"), "stdout:\n{}", stdout);
+    assert!(stdout.contains("cpp_module_interop.cppm"), "stdout:\n{}", stdout);
 }
 
 #[test]
@@ -173,6 +211,14 @@ fn test_ci_workflow_defines_parity_matrix_job() {
 }
 
 #[test]
+fn test_ci_workflow_defines_cpp_module_interop_compile_job() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("cpp-module-interop-compile:"));
+    assert!(workflow.contains("./tests/transpile_tests/run_cpp_module_interop_compile.sh"));
+    assert!(workflow.contains("--work-dir \"${RUNNER_TEMP}/rusty-cpp-module-interop\""));
+}
+
+#[test]
 fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
     assert!(workflow.contains("Upload parity matrix artifacts on failure"));
@@ -191,4 +237,13 @@ fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
             crate_name
         );
     }
+}
+
+#[test]
+fn test_ci_workflow_uploads_cpp_module_interop_artifacts_on_failure() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("Upload cpp module interop artifacts on failure"));
+    assert!(workflow.contains("if: failure()"));
+    assert!(workflow.contains("actions/upload-artifact@v4"));
+    assert!(workflow.contains("${{ runner.temp }}/rusty-cpp-module-interop/**"));
 }

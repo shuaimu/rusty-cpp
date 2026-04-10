@@ -3942,7 +3942,28 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_dry_run_transpile -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): changes remain in shared parity harness flow with fixture-agnostic assertions; no crate-specific behavior forks, no generated-output patching, and no bridge-wrapper shortcuts were introduced.
-156. Current active next leaf is `22.8.3` (compile-stage CI coverage for generated `cpp::` interop units), now that `22.8.2` dry-run parity coverage is complete.
+156. `Leaf 22.8.3` is complete.
+   - plan/scope check: compile-harness script + CI wiring + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - added compile-stage interop harness script: `tests/transpile_tests/run_cpp_module_interop_compile.sh`.
+     - drives parity Stage C (`--stop-after transpile`) for the committed `cpp_module_interop` fixture with required symbol index.
+     - probes compiler support for `import std;` (tries `g++` then `clang++`) and deterministically returns `SKIP` when unsupported, preventing flaky false failures on hosts without module-ready standard library support.
+     - when supported, compiles both fixture custom module (`custom.math.cppm`) and generated transpiled module (`cpp_module_interop.cppm`) and records deterministic diagnostics (`transpile.log`, `build.log`, module paths) on failure.
+   - added CI coverage in `.github/workflows/ci.yml`:
+     - new `cpp-module-interop-compile` job (after `build-and-test`) runs:
+       - `./tests/transpile_tests/run_cpp_module_interop_compile.sh --work-dir "${RUNNER_TEMP}/rusty-cpp-module-interop"`
+     - failure-only artifact upload captures `${{ runner.temp }}/rusty-cpp-module-interop/**`.
+   - added focused regressions in `transpiler/tests/parity_matrix_harness.rs`:
+     - `test_cpp_module_interop_compile_script_dry_run_reports_expected_commands`
+     - `test_ci_workflow_defines_cpp_module_interop_compile_job`
+     - `test_ci_workflow_uploads_cpp_module_interop_artifacts_on_failure`
+   - verification:
+     - `bash tests/transpile_tests/run_cpp_module_interop_compile.sh --dry-run`
+     - `bash tests/transpile_tests/run_cpp_module_interop_compile.sh --work-dir "$(mktemp -d)"`
+     - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): interop compile coverage remains shared harness/CI orchestration and fixture-agnostic workflow assertions; no bridge-wrapper path, no crate-specific generated-text patching, and no global text substitutions were introduced.
+157. `Leaf 22.8` and `Phase 22` are now complete (`22.8.1`-`22.8.3` all done): transpile-stage + dry-run + compile-stage coverage exists for the `cpp::` interop MVP path.
+158. Current active next leaf is `4.15.4.3.3.3` (re-run full seven-crate parity matrix and capture the deterministic next head in the long-running parity stabilization chain).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3972,6 +3993,17 @@ Useful options:
 - `--work-root <dir>`
 - `--keep-work-dirs`
 - `--dry-run`
+
+Cpp-module interop compile-stage check:
+
+```bash
+tests/transpile_tests/run_cpp_module_interop_compile.sh --work-dir /tmp/rusty-cpp-module-interop
+```
+
+Expected support-gating behavior:
+
+- returns `PASS` when compiler+stdlib support `import std;` and both module units compile
+- returns deterministic `SKIP` (exit 0) when host toolchain lacks `import std` module support
 
 Failure diagnostics contract:
 
