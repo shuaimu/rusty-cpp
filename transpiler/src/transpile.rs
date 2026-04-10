@@ -1,9 +1,11 @@
 use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
+use quote::ToTokens;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::visit::{self, Visit};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CppModuleSymbolIndex {
@@ -310,6 +312,13 @@ pub fn transpile_full_with_options(
             }
         }
     }
+    let cpp_call_unsafe_violations = collect_cpp_foreign_call_unsafe_violations(&file);
+    if !cpp_call_unsafe_violations.is_empty() {
+        return Err(format!(
+            "Foreign C++ calls imported through `cpp::` require `unsafe` context:\n- {}",
+            cpp_call_unsafe_violations.join("\n- ")
+        ));
+    }
 
     let mut codegen = if extension_method_hints.is_empty() {
         CodeGen::with_type_map(type_map.clone())
@@ -353,6 +362,254 @@ fn use_tree_contains_cpp_module_root(tree: &syn::UseTree, at_root: bool) -> bool
             .any(|item| use_tree_contains_cpp_module_root(item, at_root)),
         syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => false,
     }
+}
+
+fn collect_cpp_foreign_call_unsafe_violations(file: &syn::File) -> Vec<String> {
+    let mut visitor = CppForeignCallSafetyVisitor::default();
+    visitor.visit_file(file);
+    visitor.into_diagnostics()
+}
+
+#[derive(Default)]
+struct CppForeignCallSafetyVisitor {
+    cpp_binding_scopes: Vec<HashMap<String, String>>,
+    unsafe_context_depth: usize,
+    diagnostics: Vec<String>,
+    diagnostic_keys: HashSet<String>,
+    context_stack: Vec<String>,
+}
+
+impl CppForeignCallSafetyVisitor {
+    fn push_cpp_binding_scope(&mut self, bindings: HashMap<String, String>) {
+        self.cpp_binding_scopes.push(bindings);
+    }
+
+    fn pop_cpp_binding_scope(&mut self) {
+        self.cpp_binding_scopes.pop();
+    }
+
+    fn lookup_cpp_binding(&self, binding: &str) -> Option<&str> {
+        for scope in self.cpp_binding_scopes.iter().rev() {
+            if let Some(module_path) = scope.get(binding) {
+                return Some(module_path);
+            }
+        }
+        None
+    }
+
+    fn current_context_label(&self) -> String {
+        if self.context_stack.is_empty() {
+            "<module>".to_string()
+        } else {
+            self.context_stack.join("::")
+        }
+    }
+
+    fn record_safe_context_cpp_call_violation(
+        &mut self,
+        call: &syn::ExprCall,
+        binding_name: &str,
+        module_path: &str,
+    ) {
+        let call_site = call.to_token_stream().to_string();
+        let context = self.current_context_label();
+        let key = format!("{}|{}", context, call_site);
+        if self.diagnostic_keys.insert(key) {
+            self.diagnostics.push(format!(
+                "safe-context foreign C++ call requires `unsafe`: `{}` (binding `{}` -> `{}`) in `{}`",
+                call_site, binding_name, module_path, context
+            ));
+        }
+    }
+
+    fn check_cpp_call_requires_unsafe(&mut self, call: &syn::ExprCall) {
+        if self.unsafe_context_depth > 0 {
+            return;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return;
+        }
+        let Some(first_segment) = path_expr.path.segments.first() else {
+            return;
+        };
+        let binding_name = first_segment.ident.to_string();
+        let Some(module_path) = self.lookup_cpp_binding(&binding_name).map(ToOwned::to_owned) else {
+            return;
+        };
+        self.record_safe_context_cpp_call_violation(call, &binding_name, &module_path);
+    }
+
+    fn into_diagnostics(mut self) -> Vec<String> {
+        self.diagnostics.sort();
+        self.diagnostics.dedup();
+        self.diagnostics
+    }
+}
+
+impl<'ast> Visit<'ast> for CppForeignCallSafetyVisitor {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_items(&file.items));
+        for item in &file.items {
+            self.visit_item(item);
+        }
+        self.pop_cpp_binding_scope();
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        let Some((_, items)) = &module.content else {
+            return;
+        };
+        self.context_stack.push(module.ident.to_string());
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_items(items));
+        for item in items {
+            self.visit_item(item);
+        }
+        self.pop_cpp_binding_scope();
+        self.context_stack.pop();
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.context_stack.push(function.sig.ident.to_string());
+        let was_unsafe = function.sig.unsafety.is_some();
+        if was_unsafe {
+            self.unsafe_context_depth += 1;
+        }
+        visit::visit_block(self, &function.block);
+        if was_unsafe {
+            self.unsafe_context_depth -= 1;
+        }
+        self.context_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
+        self.context_stack.push(method.sig.ident.to_string());
+        let was_unsafe = method.sig.unsafety.is_some();
+        if was_unsafe {
+            self.unsafe_context_depth += 1;
+        }
+        visit::visit_block(self, &method.block);
+        if was_unsafe {
+            self.unsafe_context_depth -= 1;
+        }
+        self.context_stack.pop();
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.push_cpp_binding_scope(collect_cpp_bindings_from_stmts(&block.stmts));
+        for stmt in &block.stmts {
+            self.visit_stmt(stmt);
+        }
+        self.pop_cpp_binding_scope();
+    }
+
+    fn visit_expr_unsafe(&mut self, unsafe_expr: &'ast syn::ExprUnsafe) {
+        self.unsafe_context_depth += 1;
+        visit::visit_expr_unsafe(self, unsafe_expr);
+        self.unsafe_context_depth -= 1;
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.check_cpp_call_requires_unsafe(call);
+        visit::visit_expr_call(self, call);
+    }
+}
+
+fn collect_cpp_bindings_from_items(items: &[syn::Item]) -> HashMap<String, String> {
+    let mut bindings = HashMap::new();
+    for item in items {
+        if let syn::Item::Use(use_item) = item {
+            collect_cpp_bindings_from_use_tree(&use_item.tree, true, false, "", &mut bindings);
+        }
+    }
+    bindings
+}
+
+fn collect_cpp_bindings_from_stmts(stmts: &[syn::Stmt]) -> HashMap<String, String> {
+    let mut bindings = HashMap::new();
+    for stmt in stmts {
+        if let syn::Stmt::Item(syn::Item::Use(use_item)) = stmt {
+            collect_cpp_bindings_from_use_tree(&use_item.tree, true, false, "", &mut bindings);
+        }
+    }
+    bindings
+}
+
+fn collect_cpp_bindings_from_use_tree(
+    tree: &syn::UseTree,
+    at_root: bool,
+    in_cpp_root: bool,
+    prefix: &str,
+    out: &mut HashMap<String, String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            if in_cpp_root {
+                let new_prefix = join_cpp_module_prefix(prefix, &path.ident.to_string());
+                collect_cpp_bindings_from_use_tree(&path.tree, false, true, &new_prefix, out);
+            } else if at_root && path.ident == "cpp" {
+                collect_cpp_bindings_from_use_tree(&path.tree, false, true, "", out);
+            } else {
+                collect_cpp_bindings_from_use_tree(&path.tree, false, false, prefix, out);
+            }
+        }
+        syn::UseTree::Name(name) => {
+            if !in_cpp_root {
+                return;
+            }
+            if name.ident == "self" {
+                if let Some(binding) = cpp_module_tail_segment(prefix) {
+                    record_cpp_binding(out, binding.to_string(), prefix.to_string());
+                }
+                return;
+            }
+            let ident = name.ident.to_string();
+            let module_path = join_cpp_module_prefix(prefix, &ident);
+            record_cpp_binding(out, ident, module_path);
+        }
+        syn::UseTree::Rename(rename) => {
+            if !in_cpp_root {
+                return;
+            }
+            let target = if rename.ident == "self" {
+                prefix.to_string()
+            } else {
+                join_cpp_module_prefix(prefix, &rename.ident.to_string())
+            };
+            if target.is_empty() {
+                return;
+            }
+            record_cpp_binding(out, rename.rename.to_string(), target);
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_cpp_bindings_from_use_tree(item, at_root, in_cpp_root, prefix, out);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn join_cpp_module_prefix(prefix: &str, segment: &str) -> String {
+    if prefix.is_empty() {
+        segment.to_string()
+    } else {
+        format!("{}::{}", prefix, segment)
+    }
+}
+
+fn cpp_module_tail_segment(path: &str) -> Option<&str> {
+    path.rsplit("::").find(|segment| !segment.is_empty())
+}
+
+fn record_cpp_binding(out: &mut HashMap<String, String>, binding: String, module_path: String) {
+    if binding.is_empty() || module_path.is_empty() {
+        return;
+    }
+    let canonical = canonical_cpp_module_path(&module_path);
+    out.entry(binding).or_insert(canonical);
 }
 
 /// Collect extension-method names from a Rust source unit.
@@ -736,5 +993,74 @@ callable_signatures = ["int(int,int)"]
         )
         .expect("cpp import with index should transpile");
         assert!(output.contains("// C++ module import (reserved cpp::): std as cpp_std"));
+    }
+
+    #[test]
+    fn test_cpp_module_foreign_call_requires_unsafe_context() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn max2(lo: i32, hi: i32) -> i32 {
+    cpp_std::max(lo, hi)
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("safe-context foreign C++ call should fail");
+
+        assert!(err.contains("require `unsafe` context"));
+        assert!(err.contains("cpp_std"));
+        assert!(err.contains("max2"));
+    }
+
+    #[test]
+    fn test_cpp_module_foreign_call_in_unsafe_context_is_allowed() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn max2(lo: i32, hi: i32) -> i32 {
+    unsafe { cpp_std::max(lo, hi) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("unsafe-context foreign C++ call should transpile");
+
+        assert!(output.contains("// @unsafe"));
+        assert!(output.contains("std::max("));
     }
 }

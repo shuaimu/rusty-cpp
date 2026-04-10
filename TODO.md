@@ -2944,10 +2944,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler leaf224 -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): lowering remains AST-aware and scope-gated to `cpp` bindings; no bridge wrapper generation, no crate-specific shortcuts, and no global generated-text patching were introduced.
-      - [ ] Leaf 22.5: Enforce safety boundary for foreign C++ calls imported through `cpp::`
-        - Require `unsafe` context for direct calls to `cpp::` imported symbols.
-        - Add diagnostics that point to call sites when safe-context calls target foreign C++ symbols.
-        - Add regressions for both accepted (`unsafe`) and rejected (safe context) call shapes.
+      - [x] *done* Leaf 22.5: Enforce safety boundary for foreign C++ calls imported through `cpp::`
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented transpile-stage safety enforcement in `transpiler/src/transpile.rs`:
+          - added a dedicated AST visitor (`CppForeignCallSafetyVisitor`) that tracks `use cpp::...` bindings by lexical scope and detects foreign call expressions (`binding::symbol(...)`).
+          - added unsafe-context tracking (`unsafe fn` and `unsafe { ... }`) during traversal so only safe-context foreign calls are rejected.
+          - added deterministic call-site diagnostics with binding/module resolution context, and fail-fast erroring in `transpile_full_with_options` when violations are present.
+        - Added focused regressions:
+          - `transpile::tests::test_cpp_module_foreign_call_requires_unsafe_context`
+          - `transpile::tests::test_cpp_module_foreign_call_in_unsafe_context_is_allowed`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): enforcement is AST-aware and scope-gated, with no generated-text patching, no bridge-wrapper workarounds, and no crate-specific shortcuts.
       - [ ] Leaf 22.6: Add deterministic diagnostics for unresolved/ambiguous `cpp::` symbols
         - Error when module path is missing from symbol index.
         - Error when symbol is absent or call cannot be matched to indexed callable family.

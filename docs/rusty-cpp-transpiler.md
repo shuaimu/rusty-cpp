@@ -3841,7 +3841,20 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf224 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): lowering is AST-aware and scope-gated to classified `cpp` bindings; no bridge-wrapper generation, no blanket/global text substitutions, and no crate-specific shortcuts were introduced.
-150. Current active next leaf is `22.5` (enforce safety boundary for foreign C++ calls imported through `cpp::`), now that `22.4` direct-call lowering is complete.
+150. `Leaf 22.5` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented safety-boundary enforcement for `cpp::` imported foreign calls in `transpiler/src/transpile.rs`:
+     - added an AST visitor (`CppForeignCallSafetyVisitor`) that tracks `use cpp::...` bindings across module/block scopes and identifies foreign call expressions through those bindings.
+     - visitor tracks unsafe context (`unsafe fn` and `unsafe { ... }`) and emits deterministic diagnostics when foreign calls occur in safe context.
+     - `transpile_full_with_options` now fails fast with aggregated call-site diagnostics when safe-context foreign C++ calls are detected.
+   - focused regressions:
+     - `transpile::tests::test_cpp_module_foreign_call_requires_unsafe_context`
+     - `transpile::tests::test_cpp_module_foreign_call_in_unsafe_context_is_allowed`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): enforcement is AST-aware and scope-gated with deterministic diagnostics; no bridge wrappers, no global generated-text substitutions, and no crate-specific shortcuts were introduced.
+151. Current active next leaf is `22.6` (deterministic diagnostics for unresolved/ambiguous `cpp::` symbols), now that `22.5` safety-boundary enforcement is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
