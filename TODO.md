@@ -2715,7 +2715,12 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                 - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-11-2-1-1775849924 --keep-work-dirs`
               - Semver repro note:
                 - deterministic Stage D head remains `runner.cpp:1064` (`std::basic_string_view<char>` missing `.bytes()`); current semver expanded set did not trigger a by-value SCC diagnostic with this detector.
-            - [ ] Leaf 11.2.2: Add regression fixture asserting diagnostics include cycle path/type names
+            - [x] *done* Leaf 11.2.2: Add regression fixture asserting diagnostics include cycle path/type names
+              - Extended by-value SCC diagnostic payload in `transpiler/src/codegen.rs` to include deterministic cycle-path strings (for example `A -> B -> C -> A`) in addition to sorted type-name sets.
+              - Added focused regression fixture `test_leaf1122_by_value_cycle_diagnostic_includes_cycle_path_and_type_names` and updated `leaf1121` cycle diagnostics coverage to validate path-aware output shape remains deterministic.
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
             - [ ] Leaf 11.2.3: Write design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion)
             - [ ] Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies

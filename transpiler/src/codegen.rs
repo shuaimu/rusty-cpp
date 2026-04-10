@@ -330,6 +330,12 @@ pub struct CodeGen {
     unsupported_by_value_cycle_keys: HashSet<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ByValueCycleDiagnostic {
+    type_names: Vec<String>,
+    cycle_path: Vec<String>,
+}
+
 impl CodeGen {
     pub fn new() -> Self {
         Self {
@@ -576,8 +582,8 @@ impl CodeGen {
         let mut all_type_items = Vec::new();
         Self::collect_struct_enum_items_recursive(&file.items, &mut all_type_items);
         let cycle_components = Self::detect_by_value_cycle_components(&all_type_items);
-        for type_names in cycle_components {
-            self.record_unsupported_by_value_cycle_diagnostic(&type_names);
+        for diagnostic in cycle_components {
+            self.record_unsupported_by_value_cycle_diagnostic(&diagnostic);
         }
 
         // Pass 2: emit all items
@@ -854,16 +860,24 @@ impl CodeGen {
         }
     }
 
-    fn record_unsupported_by_value_cycle_diagnostic(&mut self, type_names: &[String]) {
-        if type_names.is_empty() {
+    fn record_unsupported_by_value_cycle_diagnostic(
+        &mut self,
+        diagnostic: &ByValueCycleDiagnostic,
+    ) {
+        if diagnostic.type_names.is_empty() {
             return;
         }
-        let mut sorted_names = type_names.to_vec();
+        let mut sorted_names = diagnostic.type_names.clone();
         sorted_names.sort();
         sorted_names.dedup();
         if sorted_names.is_empty() {
             return;
         }
+        let cycle_path = if diagnostic.cycle_path.is_empty() {
+            sorted_names.join(" -> ")
+        } else {
+            diagnostic.cycle_path.join(" -> ")
+        };
         let scope = if self.module_stack.is_empty() {
             "<crate>".to_string()
         } else {
@@ -872,9 +886,10 @@ impl CodeGen {
         let key = format!("{}|{}", scope, sorted_names.join(","));
         if self.unsupported_by_value_cycle_keys.insert(key) {
             self.unsupported_by_value_cycle_diagnostics.push(format!(
-                "unsupported by-value circular type dependency in scope {}: [{}]",
+                "unsupported by-value circular type dependency in scope {}: [{}]; cycle path: {}",
                 scope,
-                sorted_names.join(", ")
+                sorted_names.join(", "),
+                cycle_path
             ));
         }
     }
@@ -1084,7 +1099,7 @@ impl CodeGen {
 
     /// Detect strongly connected components in the by-value type dependency graph.
     /// A component is reported when it is a true cycle (size > 1 or self-loop).
-    fn detect_by_value_cycle_components(items: &[&syn::Item]) -> Vec<Vec<String>> {
+    fn detect_by_value_cycle_components(items: &[&syn::Item]) -> Vec<ByValueCycleDiagnostic> {
         let mut type_name_counts: HashMap<String, usize> = HashMap::new();
         for item in items {
             let Some(name) = (match item {
@@ -1217,7 +1232,23 @@ impl CodeGen {
             components.push(component);
         }
 
-        let mut cycle_components: Vec<Vec<String>> = Vec::new();
+        let pos_to_name: Vec<String> = struct_indices
+            .iter()
+            .map(|&idx| {
+                items
+                    .get(idx)
+                    .and_then(|item| match item {
+                        syn::Item::Struct(s) => Some(s.ident.to_string()),
+                        syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                            Some(e.ident.to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("_unknown_{}", idx))
+            })
+            .collect();
+
+        let mut cycle_components: Vec<ByValueCycleDiagnostic> = Vec::new();
         for component in components {
             let has_cycle = if component.len() > 1 {
                 true
@@ -1244,13 +1275,154 @@ impl CodeGen {
             names.sort();
             names.dedup();
             if !names.is_empty() {
-                cycle_components.push(names);
+                let cycle_path = Self::find_deterministic_cycle_path_for_component(
+                    &component,
+                    &edges,
+                    &pos_to_name,
+                );
+                cycle_components.push(ByValueCycleDiagnostic {
+                    type_names: names,
+                    cycle_path,
+                });
             }
         }
 
-        cycle_components.sort();
-        cycle_components.dedup();
+        cycle_components.sort_by(|a, b| {
+            a.type_names
+                .cmp(&b.type_names)
+                .then_with(|| a.cycle_path.cmp(&b.cycle_path))
+        });
+        cycle_components.dedup_by(|a, b| a.type_names == b.type_names && a.cycle_path == b.cycle_path);
         cycle_components
+    }
+
+    fn find_deterministic_cycle_path_for_component(
+        component: &[usize],
+        edges: &[Vec<usize>],
+        pos_to_name: &[String],
+    ) -> Vec<String> {
+        if component.is_empty() {
+            return Vec::new();
+        }
+        if component.len() == 1 {
+            let node = component[0];
+            if edges.get(node).is_some_and(|nexts| nexts.contains(&node)) {
+                let name = pos_to_name
+                    .get(node)
+                    .cloned()
+                    .unwrap_or_else(|| format!("_node_{}", node));
+                return vec![name.clone(), name];
+            }
+            return vec![pos_to_name
+                .get(node)
+                .cloned()
+                .unwrap_or_else(|| format!("_node_{}", node))];
+        }
+
+        let component_set: HashSet<usize> = component.iter().copied().collect();
+        let mut starts = component.to_vec();
+        starts.sort_by(|a, b| {
+            pos_to_name
+                .get(*a)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .cmp(pos_to_name.get(*b).map(|s| s.as_str()).unwrap_or(""))
+                .then_with(|| a.cmp(b))
+        });
+
+        for start in starts {
+            let mut path = vec![start];
+            let mut in_path = HashSet::from([start]);
+            if let Some(found) = Self::dfs_cycle_path_within_component(
+                start,
+                start,
+                edges,
+                &component_set,
+                pos_to_name,
+                &mut path,
+                &mut in_path,
+            ) {
+                return found
+                    .into_iter()
+                    .map(|pos| {
+                        pos_to_name
+                            .get(pos)
+                            .cloned()
+                            .unwrap_or_else(|| format!("_node_{}", pos))
+                    })
+                    .collect();
+            }
+        }
+
+        // Fallback should be unreachable for true SCC cycles; keep deterministic anyway.
+        let mut names: Vec<String> = component
+            .iter()
+            .map(|&pos| {
+                pos_to_name
+                    .get(pos)
+                    .cloned()
+                    .unwrap_or_else(|| format!("_node_{}", pos))
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        if let Some(first) = names.first().cloned() {
+            names.push(first);
+        }
+        names
+    }
+
+    fn dfs_cycle_path_within_component(
+        start: usize,
+        current: usize,
+        edges: &[Vec<usize>],
+        component_set: &HashSet<usize>,
+        pos_to_name: &[String],
+        path: &mut Vec<usize>,
+        in_path: &mut HashSet<usize>,
+    ) -> Option<Vec<usize>> {
+        let mut nexts: Vec<usize> = edges
+            .get(current)
+            .into_iter()
+            .flat_map(|v| v.iter().copied())
+            .filter(|next| component_set.contains(next))
+            .collect();
+        nexts.sort_by(|a, b| {
+            pos_to_name
+                .get(*a)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .cmp(pos_to_name.get(*b).map(|s| s.as_str()).unwrap_or(""))
+                .then_with(|| a.cmp(b))
+        });
+        nexts.dedup();
+
+        for next in nexts {
+            if next == start && path.len() >= 2 {
+                let mut cycle = path.clone();
+                cycle.push(start);
+                return Some(cycle);
+            }
+            if in_path.contains(&next) {
+                continue;
+            }
+            path.push(next);
+            in_path.insert(next);
+            if let Some(found) = Self::dfs_cycle_path_within_component(
+                start,
+                next,
+                edges,
+                component_set,
+                pos_to_name,
+                path,
+                in_path,
+            ) {
+                return Some(found);
+            }
+            in_path.remove(&next);
+            path.pop();
+        }
+        None
     }
 
     /// Extract type-name segments from struct/enum fields that match any name
@@ -35643,6 +35815,31 @@ mod tests {
         assert!(
             !out.contains("unsupported by-value circular type dependency"),
             "Indirection cycles must not be flagged as by-value cycles\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1122_by_value_cycle_diagnostic_includes_cycle_path_and_type_names() {
+        let out = transpile_str(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                c: C,
+            }
+
+            struct C {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "// UNSUPPORTED: unsupported by-value circular type dependency in scope <crate>: [A, B, C]; cycle path: A -> B -> C -> A"
+            ),
+            "Expected cycle diagnostic with explicit path and type names\nGot: {out}"
         );
     }
 

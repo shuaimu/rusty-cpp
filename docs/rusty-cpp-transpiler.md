@@ -3590,8 +3590,20 @@ Active work items:
      - this repro did not trigger by-value SCC diagnostics in current expanded semver outputs.
    - canonical artifacts: `/tmp/rusty-parity-matrix-11-2-1-1775849924/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix is shared and AST-shape-gated, avoids crate-specific scripts/rewrites, and keeps deterministic-first parity evidence.
-134. Current active next leaf is `11.2.2`.
-   - focus: add regression fixture coverage asserting unsupported diagnostics include cycle path/type names.
+134. `Leaf 11.2.2` is complete.
+   - plan/scope check: implementation + focused regression fixture stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler hardening in `transpiler/src/codegen.rs`:
+     - by-value SCC diagnostics now include a deterministic cycle path string in addition to sorted type names.
+     - cycle paths are selected deterministically via name-ordered traversal inside the SCC (for example `A -> B -> C -> A`).
+   - focused regressions:
+     - `test_leaf1122_by_value_cycle_diagnostic_includes_cycle_path_and_type_names`
+     - existing `leaf1121` cycle diagnostics tests remain green with path-aware output.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): kept the fix shared and deterministic in AST-aware dependency analysis; no crate-specific rewrites/scripts were introduced.
+135. Current active next leaf is `11.2.3`.
+   - focus: add design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion) for true by-value SCCs.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3716,6 +3728,7 @@ Required approach:
 - for struct-literal field lowering in consuming `self` scopes, do not bypass move insertion by using non-move field emission helpers; field payload emission must preserve receiver-aware move semantics
 - for nested local-shadow initializer lowering (for example `let rhs = match rhs.next() { ... }`), do not hide outer same-name bindings before initializer emission or reuse outer same-name C++ shadow identifiers in inner scopes; preserve prior binding visibility and allocate distinct shadow identifiers to avoid self-reference/use-before-deduction
 - for circular type-ordering fallback, do not silently reorder true by-value SCCs and proceed without explicit unsupported diagnostics; emit deterministic cycle diagnostics so unsupported architecture gaps are visible at generation time
+- for by-value SCC diagnostics, do not emit only unordered type sets; include deterministic cycle paths so failure fixtures can assert concrete cycle structure and avoid ambiguous diagnostics
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
