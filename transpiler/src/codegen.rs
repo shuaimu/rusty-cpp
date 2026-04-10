@@ -10653,7 +10653,6 @@ impl CodeGen {
                 match path_str.as_str() {
                     "Some" | "Option::Some" => {
                         // if let Some(v) = opt → if (opt.<is_some/has_value>()) { auto v = opt.<unwrap/value>(); ... }
-                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
                         let scrutinee_var = "_iflet_scrutinee";
                         let use_scrutinee_storage =
                             self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
@@ -10676,7 +10675,7 @@ impl CodeGen {
                             self.format_option_like_pattern_condition(scrutinee_expr, cond_scrutinee, true);
                         self.emit_if_let_body(
                             &cond,
-                            &binding,
+                            ts.elems.first(),
                             body_scrutinee,
                             option_unwrap_method,
                             then_branch,
@@ -10688,7 +10687,6 @@ impl CodeGen {
                     }
                     "Ok" | "Result::Ok" => {
                         // if let Ok(v) = result → if (result.is_ok()) { auto v = result.unwrap(); ... }
-                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
                         let scrutinee_var = "_iflet_scrutinee";
                         let use_scrutinee_storage =
                             self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
@@ -10710,7 +10708,7 @@ impl CodeGen {
                         let cond = format!("{}.is_ok()", cond_scrutinee);
                         self.emit_if_let_body(
                             &cond,
-                            &binding,
+                            ts.elems.first(),
                             body_scrutinee,
                             "unwrap",
                             then_branch,
@@ -10722,7 +10720,6 @@ impl CodeGen {
                     }
                     "Err" | "Result::Err" => {
                         // if let Err(e) = result → if (result.is_err()) { auto e = result.unwrap_err(); ... }
-                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
                         let scrutinee_var = "_iflet_scrutinee";
                         let use_scrutinee_storage =
                             self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
@@ -10744,7 +10741,7 @@ impl CodeGen {
                         let cond = format!("{}.is_err()", cond_scrutinee);
                         self.emit_if_let_body(
                             &cond,
-                            &binding,
+                            ts.elems.first(),
                             body_scrutinee,
                             "unwrap_err",
                             then_branch,
@@ -10895,7 +10892,7 @@ impl CodeGen {
     fn emit_if_let_body(
         &mut self,
         cond: &str,
-        bindings: &[String],
+        binding_pat: Option<&syn::Pat>,
         scrutinee: &str,
         unwrap_method: &str,
         then_branch: &syn::Block,
@@ -10916,29 +10913,88 @@ impl CodeGen {
         }
         self.indent += 1;
 
-        // Emit bindings
-        if bindings.len() == 1 && bindings[0] != "_" {
-            if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
-                self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
-                self.writeln(&format!(
-                    "auto {} = rusty::detail::option_take_value(_iflet_take);",
-                    bindings[0]
-                ));
-            } else {
-                let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee, unwrap_method);
-                // `if let ... = <option_or_result>.as_mut()` binds `&mut T` / `&mut E`.
-                // Those are represented as pointer-like unwrap values in C++ runtime types;
-                // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
-                // call arguments (avoid producing pointer-to-pointer by accident).
-                if scrutinee_is_as_mut {
-                    self.writeln(&format!("auto& {} = *{};", bindings[0], unwrap_expr));
+        // Emit bindings with local Rust-name → C++-name scope mapping.
+        let mut binding_map = HashMap::new();
+        if let Some(pat) = binding_pat {
+            let simple_ident = match pat {
+                syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none() => {
+                    Some(pi.ident.to_string())
+                }
+                _ => None,
+            };
+
+            if let Some(rust_name) = simple_ident {
+                let cpp_name = self
+                    .lookup_local_binding_cpp_name(&rust_name)
+                    .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                binding_map.insert(rust_name, cpp_name.clone());
+                if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                    self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
+                    self.writeln(&format!(
+                        "auto {} = rusty::detail::option_take_value(_iflet_take);",
+                        cpp_name
+                    ));
                 } else {
-                    self.writeln(&format!("auto {} = {};", bindings[0], unwrap_expr));
+                    let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee, unwrap_method);
+                    // `if let ... = <option_or_result>.as_mut()` binds `&mut T` / `&mut E`.
+                    // Those are represented as pointer-like unwrap values in C++ runtime types;
+                    // bind through `auto&` to preserve one-layer borrow shape in downstream `&mut`
+                    // call arguments (avoid producing pointer-to-pointer by accident).
+                    if scrutinee_is_as_mut {
+                        self.writeln(&format!("auto& {} = *{};", cpp_name, unwrap_expr));
+                    } else {
+                        self.writeln(&format!("auto {} = {};", cpp_name, unwrap_expr));
+                    }
+                }
+            } else {
+                let payload_var = "_iflet_payload";
+                if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                    self.writeln(&format!("auto&& _iflet_take = {};", scrutinee));
+                    self.writeln(&format!(
+                        "auto&& {} = rusty::detail::option_take_value(_iflet_take);",
+                        payload_var
+                    ));
+                } else {
+                    let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee, unwrap_method);
+                    if scrutinee_is_as_mut {
+                        self.writeln(&format!("auto&& {} = *{};", payload_var, unwrap_expr));
+                    } else {
+                        self.writeln(&format!("auto&& {} = {};", payload_var, unwrap_expr));
+                    }
+                }
+                let mut binding_stmts = Vec::new();
+                if self.collect_pattern_binding_stmts_with_cpp_name_map(
+                    pat,
+                    payload_var,
+                    &mut binding_stmts,
+                    &mut binding_map,
+                ) {
+                    for stmt in binding_stmts {
+                        self.writeln(&stmt);
+                    }
+                } else {
+                    binding_map.clear();
                 }
             }
         }
 
-        self.emit_block(then_branch);
+        if binding_map.is_empty() {
+            self.emit_block(then_branch);
+        } else {
+            self.local_cpp_bindings.push(binding_map.clone());
+            let mut local_types = HashMap::new();
+            let mut local_consts = HashMap::new();
+            for rust_name in binding_map.keys() {
+                local_types.insert(rust_name.clone(), None);
+                local_consts.insert(rust_name.clone(), false);
+            }
+            self.local_bindings.push(local_types);
+            self.local_const_bindings.push(local_consts);
+            self.emit_block(then_branch);
+            self.local_const_bindings.pop();
+            self.local_bindings.pop();
+            self.local_cpp_bindings.pop();
+        }
         self.indent -= 1;
         self.emit_if_let_else(else_branch);
     }
@@ -15593,6 +15649,9 @@ impl CodeGen {
                 }
                 if self.expected_type_is_string_view(expected_ty) {
                     return self.emit_from_conversion_to_target(expr, "std::string_view");
+                }
+                if self.is_associated_const_value_path(&path.path) {
+                    return format!("rusty::clone({})", self.emit_expr_path_to_string(&path.path));
                 }
                 self.emit_expr_path_to_string(&path.path)
             }
@@ -22281,6 +22340,14 @@ impl CodeGen {
     }
 
     fn emit_expr_maybe_move(&self, expr: &syn::Expr) -> String {
+        if let syn::Expr::Path(path) = expr {
+            if self.is_associated_const_value_path(&path.path) {
+                // Rust associated const values are re-materialized at each use-site.
+                // In C++, `Type::CONST` is an lvalue (often `const`), so `std::move`
+                // does not avoid copy-ctor requirements. Clone preserves value semantics.
+                return format!("rusty::clone({})", self.emit_expr_to_string(expr));
+            }
+        }
         if self.should_insert_move(expr) {
             let inner = self.emit_expr_to_string(expr);
             format!("std::move({})", inner)
@@ -22302,21 +22369,31 @@ impl CodeGen {
         }
     }
 
+    fn is_associated_const_value_path(&self, path: &syn::Path) -> bool {
+        if path.segments.len() < 2 {
+            return false;
+        }
+        let Some(first_seg) = path.segments.first() else {
+            return false;
+        };
+        let Some(last_seg) = path.segments.last() else {
+            return false;
+        };
+        let owner = first_seg.ident.to_string();
+        let member = last_seg.ident.to_string();
+        owner.chars().next().is_some_and(|c| c.is_uppercase())
+            && !member.is_empty()
+            && member.chars().all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+
     /// Determine whether an expression represents a local variable that should
     /// be wrapped in std::move() when used by value.
     fn should_insert_move(&self, expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Path(path) => {
-                // Multi-segment paths like `VersionReq::STAR` or `SomeEnum::Variant`
-                // These are const/static values passed by value to Ok/Err constructors.
-                // Always insert move for safety: for Copy types it's a no-op, for non-Copy
-                // types (containing Vec/String) it prevents "deleted copy constructor" errors.
+                // Multi-segment associated const values are handled separately via
+                // `rusty::clone(...)` in `emit_expr_maybe_move(...)`.
                 if path.path.segments.len() > 1 {
-                    let first_seg = path.path.segments[0].ident.to_string();
-                    // Only handle Type::CONST pattern (first segment uppercase)
-                    if first_seg.chars().next().is_some_and(|c| c.is_uppercase()) {
-                        return true;
-                    }
                     return false;
                 }
 
@@ -28418,14 +28495,22 @@ mod tests {
     }
 
     #[test]
-    fn test_ok_variant_with_struct_const_uses_move() {
-        // Struct const values like VersionReq::STAR passed to Ok() must use std::move
-        // because the struct's copy constructor is deleted (contains Vec).
-        // This prevents "use of deleted function" compilation errors.
+    fn test_ok_variant_with_struct_const_uses_clone_not_move() {
+        // Struct const values like VersionReq::STAR are associated const lvalues in C++.
+        // `std::move(const T)` still binds to copy; use `rusty::clone(...)` instead.
         let out = transpile_str("struct VersionReq { comparators: Vec<i32> } impl VersionReq { pub const STAR: Self = VersionReq { comparators: Vec::new() }; } fn from_str(s: &str) -> Result<VersionReq, ()> { Ok(VersionReq::STAR) }");
-        // VersionReq::STAR should be wrapped in std::move when passed to Ok
-        assert!(out.contains("std::move(VersionReq::STAR)"),
-            "Expected std::move(VersionReq::STAR) but got:\n{}", out);
+        assert!(
+            out.contains("rusty::clone(VersionReq::STAR)"),
+            "Expected rusty::clone(VersionReq::STAR) but got:\n{}",
+            out
+        );
+        assert!(!out.contains("std::move(VersionReq::STAR)"));
+    }
+
+    #[test]
+    fn test_returning_struct_const_uses_clone_not_move() {
+        let out = transpile_str("struct VersionReq { comparators: Vec<i32> } impl VersionReq { pub const STAR: Self = VersionReq { comparators: Vec::new() }; fn default_() -> VersionReq { VersionReq::STAR } }");
+        assert!(out.contains("return rusty::clone(VersionReq::STAR);"));
     }
 
     #[test]
@@ -31174,6 +31259,18 @@ mod tests {
     fn test_if_let_none() {
         let out = transpile_str("fn f(opt: Option<i32>) { if let None = opt { nothing(); } }");
         assert!(out.contains("if (opt.is_none()) {"));
+    }
+
+    #[test]
+    fn test_if_let_some_tuple_payload_binds_nested_tuple_names() {
+        let out = transpile_str(
+            "fn f(opt: Option<(char, &str)>) { if let Some((ch, text)) = opt { use_ch(ch); use_text(text); } }",
+        );
+        assert!(out.contains("auto&& _iflet_payload = opt.unwrap();"));
+        assert!(out.contains("auto&& ch = std::get<0>(_iflet_payload);"));
+        assert!(out.contains("auto&& text = std::get<1>(_iflet_payload);"));
+        assert!(out.contains("use_ch(std::move(ch));"));
+        assert!(out.contains("use_text(std::move(text));"));
     }
 
     // ── Operator trait tests ────────────────────────────────────

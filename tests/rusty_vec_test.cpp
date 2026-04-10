@@ -269,6 +269,28 @@ void test_vec_size() {
     printf("PASS\n");
 }
 
+// Test unsafe-style set_len surface (used by transpiled Rust unsafe code)
+void test_vec_set_len() {
+    printf("test_vec_set_len: ");
+    {
+        auto vec = Vec<int>::with_capacity(4);
+        vec.push(10);
+        vec.push(20);
+        vec.push(30);
+
+        vec.set_len(1);
+        assert(vec.len() == 1);
+        assert(vec[0] == 10);
+
+        // Previous elements remain materialized; caller controls safety invariants.
+        vec.set_len(3);
+        assert(vec.len() == 3);
+        assert(vec[1] == 20);
+        assert(vec[2] == 30);
+    }
+    printf("PASS\n");
+}
+
 int main() {
     printf("=== Testing rusty::Vec<T> ===\n");
     
@@ -284,6 +306,7 @@ int main() {
     test_vec_destructor();
     test_vec_of();
     test_vec_size();
+    test_vec_set_len();
     
     printf("\nAll Vec tests passed!\n");
     return 0;

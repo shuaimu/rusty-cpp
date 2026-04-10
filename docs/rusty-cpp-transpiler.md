@@ -4054,7 +4054,33 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1278` (`VersionReq::STAR` deleted-copy path), with immediate adjacent fallout at `runner.cpp:1280` (`ch` unresolved) and `runner.cpp:1290` (`Vec::set_len` missing runtime surface).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-8b-1775863750/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in core transpiler/runtime surfaces, with no crate-specific scripts and no generated-text patching.
-162. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.8` (`runner.cpp:1278` deleted-copy/`VersionReq::STAR` + adjacent `set_len`/shadow fallout).
+162. `Leaf 10.5.9` is complete.
+   - plan/scope check: shared transpiler/runtime updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - hardened if-let tuple payload binding for `Some((...))` / `Ok((...))` / `Err((...))` by using pattern-driven binding statement emission (`collect_pattern_binding_stmts_with_cpp_name_map`) and scoped Rust-name → C++-name overlays in then-arm body emission.
+     - changed associated-const by-value lowering from invalid const-move shapes to `rusty::clone(Type::CONST)` in value-path contexts; retained no blanket multi-segment move insertion.
+   - implemented shared runtime support in `include/rusty/vec.hpp`:
+     - added unsafe-style `Vec::set_len(size_t)` surface (`assert(new_len <= capacity_)`) for transpiled `unsafe { vec.set_len(len) }` flows.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_ok_variant_with_struct_const_uses_clone_not_move`
+       - `test_returning_struct_const_uses_clone_not_move`
+       - `test_if_let_some_tuple_payload_binds_nested_tuple_names`
+     - `tests/rusty_vec_test.cpp`:
+       - `test_vec_set_len`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_ok_variant_with_struct_const_uses_clone_not_move -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_returning_struct_const_uses_clone_not_move -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_if_let_some_tuple_payload_binds_nested_tuple_names -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `ctest --test-dir build-tests --output-on-failure -R rusty_vec_test`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-9b-1775864919 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1278` / `1280` / `1290` (`VersionReq::STAR` deleted-copy, missing `ch` tuple payload binding, and missing `Vec::set_len`) is collapsed.
+     - new first deterministic head starts at `runner.cpp:1656` (`std::visit` applied to `rusty::Option<rusty::cmp::Ordering>` in `Version::operator<=>`), with adjacent dependent lambda-return fallout at `runner.cpp:1858`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-9b-1775864919/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/runtime-surface-gated, with no crate-specific scripts and no generated-text patching.
+163. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.9` (`runner.cpp:1656` `std::visit` on runtime `Option<Ordering>` + adjacent `runner.cpp:1858` lambda return-shape fallout).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

@@ -2794,6 +2794,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-8b-1775863750/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-surface-gated, with no crate-specific scripts and no post-generation text patching.
+        - [x] *done* Leaf 10.5.9: Collapse the post-10.5.8 deterministic semver Stage D associated-const/if-let tuple payload/`Vec::set_len` frontier generically (starting with `runner.cpp:1278` `VersionReq::STAR` deleted-copy family, plus adjacent `runner.cpp:1280` missing `ch` binding and `runner.cpp:1290` missing `Vec::set_len` surface), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler/runtime updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - Added shape-gated if-let tuple-payload binding emission for `Some((...))`/`Ok((...))`/`Err((...))`, using pattern-driven binding statement generation (`collect_pattern_binding_stmts_with_cpp_name_map`) and scoped Rust-name→C++-name overlays when emitting arm bodies.
+            - Added associated-const by-value lowering to `rusty::clone(Type::CONST)` for value-path contexts, and removed prior multi-segment path `std::move(...)` fallback that produced invalid const-move/copy-deleted behavior.
+          - Implemented shared runtime surface in `include/rusty/vec.hpp`:
+            - Added unsafe-style `Vec::set_len(size_t)` API (`assert(new_len <= capacity_)`) to match Rust `unsafe { vec.set_len(len) }` lowering requirements.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_ok_variant_with_struct_const_uses_clone_not_move`
+              - `test_returning_struct_const_uses_clone_not_move`
+              - `test_if_let_some_tuple_payload_binds_nested_tuple_names`
+            - `tests/rusty_vec_test.cpp`:
+              - `test_vec_set_len`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_ok_variant_with_struct_const_uses_clone_not_move -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_returning_struct_const_uses_clone_not_move -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_if_let_some_tuple_payload_binds_nested_tuple_names -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `ctest --test-dir build-tests --output-on-failure -R rusty_vec_test`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-9b-1775864919 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - Previous first hard-error family at `runner.cpp:1278`/`1280`/`1290` (`VersionReq::STAR` deleted-copy, missing tuple payload binding `ch`, missing `Vec::set_len`) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1656` (`std::visit` applied to `rusty::Option<rusty::cmp::Ordering>` in `Version::operator<=>`), with adjacent downstream lambda return-shape fallout at `runner.cpp:1858`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-9b-1775864919/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.3): fixes stayed AST-shape-gated and runtime-surface-gated, without crate-specific rewrites/scripts or generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

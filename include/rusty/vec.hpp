@@ -186,6 +186,13 @@ public:
     // Get size
     size_t len() const { return size_; }
     size_t size() const { return size_; }
+
+    // Unsafe-style length override (Rust Vec::set_len semantics).
+    // Caller is responsible for initialization/drop invariants.
+    void set_len(size_t new_len) {
+        assert(new_len <= capacity_);
+        size_ = new_len;
+    }
     
     // Check if empty
     bool is_empty() const { return size_ == 0; }
