@@ -3751,7 +3751,23 @@ Active work items:
      - `Leaf 11.2` is complete for the planned architecture/prototype scope (`11.2.1`-`11.2.8`).
      - remaining semver parity blockers are currently outside the by-value cycle-breaking family and continue under separate deterministic Stage D families.
    - guardrail check against wrong-approach checklist (§11): validation remained deterministic, artifact-backed, and opt-in-only; no crate-specific rewrite shortcuts were introduced.
-146. Current active next leaf is outside `11.2`: continue semver/bitflags parity families at the current deterministic Stage D frontier (`semver` first head `runner.cpp:1064` `string_view.bytes()` family).
+146. `Leaf 22.1` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented shared `cpp::` reserved-root import classification in `transpiler/src/codegen.rs`:
+     - added reserved-root detection in `emit_use` so `cpp` is not treated as an external crate import root.
+     - added `CppModuleUseImport` + `classify_cpp_module_use_import(...)` so flattened `use` paths are classified as foreign C++ module imports when they target `cpp::...`.
+     - added dedicated `CodeGen` symbol-resolution tracking for classified `cpp::` imports:
+       - `cpp_module_import_bindings` (`binding_name -> module_path`),
+       - `cpp_module_import_paths` (ordered unique module paths).
+     - updated `emit_use` to emit deterministic foreign-module marker comments for `cpp::` imports instead of normal C++ `using` lowering.
+   - focused regressions:
+     - `test_leaf221_use_cpp_import_is_classified_as_foreign_module_import`
+     - `test_leaf221_use_cpp_alias_import_records_alias_binding`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf221 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf stayed parser/classification-scoped, introduced no bridge wrappers, and avoided global text substitution of unresolved paths.
+147. Current active next leaf is `22.2` (C++ module symbol index input/loader), with `22.1` now providing deterministic `cpp::` import classification and alias/module tracking groundwork.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

@@ -2878,10 +2878,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
           - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads
     - [ ] Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
-      - [ ] Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
-        - Add a reserved-root detection path for `cpp::` in import lowering.
-        - Preserve aliasing (`use cpp::std as cpp_std`) in symbol resolution tables.
-        - Add focused parser/codegen regressions for plain + aliased `cpp::` imports.
+      - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented shared `cpp::` reserved-root import classification in `transpiler/src/codegen.rs`:
+          - added reserved-root handling in `emit_use` so `cpp` is no longer treated as an external Rust crate import root.
+          - added `classify_cpp_module_use_import(...)` and `CppModuleUseImport` classification to parse plain and aliased `cpp::` imports from flattened `use` trees.
+          - added dedicated symbol-resolution tracking tables for `cpp::` imports:
+            - `cpp_module_import_bindings` (`binding -> module_path`),
+            - `cpp_module_import_paths` (ordered unique imported module paths).
+          - `emit_use` now classifies `cpp::` imports as foreign-module imports and emits deterministic marker comments instead of normal `using` lowering.
+        - Added focused regressions:
+          - `test_leaf221_use_cpp_import_is_classified_as_foreign_module_import`
+          - `test_leaf221_use_cpp_alias_import_records_alias_binding`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler leaf221 -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): kept `cpp::` handling parser/classification-only for this leaf, avoided bridge-wrapper generation and global path text substitution shortcuts, and preserved deterministic import handling.
       - [ ] Leaf 22.2: Add a C++ module symbol index input and loader for transpiler resolution
         - Define a stable sidecar format (JSON/TOML) mapping module path → exported symbols/callable signatures.
         - Add CLI flag(s) to pass index path(s) in single-file and crate-mode runs.

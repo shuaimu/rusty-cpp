@@ -311,6 +311,13 @@ pub struct CodeGen {
     /// Alias names introduced by `use ... as Alias`.
     /// Used to avoid alias-order-sensitive non-void forward declarations.
     import_alias_names: HashSet<String>,
+    /// Rust-visible bindings introduced by `use cpp::...` imports.
+    /// Maps binding name (alias or tail segment) → imported C++ module path without `cpp::`.
+    cpp_module_import_bindings: HashMap<String, String>,
+    /// Ordered imported C++ module paths (without `cpp::`) from `use cpp::...` imports.
+    cpp_module_import_paths: Vec<String>,
+    /// De-duplication keys for recorded C++ module import paths.
+    cpp_module_import_path_keys: HashSet<String>,
     /// True while emitting function forward declaration signatures.
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
@@ -483,6 +490,9 @@ impl CodeGen {
             macro_rules_names: HashSet::new(),
             option_type_aliases: HashSet::new(),
             import_alias_names: HashSet::new(),
+            cpp_module_import_bindings: HashMap::new(),
+            cpp_module_import_paths: Vec::new(),
+            cpp_module_import_path_keys: HashSet::new(),
             in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
             module_qualified_functions: HashMap::new(),
@@ -576,6 +586,9 @@ impl CodeGen {
         self.macro_rules_names.clear();
         self.option_type_aliases.clear();
         self.import_alias_names.clear();
+        self.cpp_module_import_bindings.clear();
+        self.cpp_module_import_paths.clear();
+        self.cpp_module_import_path_keys.clear();
         self.in_forward_decl_signature = false;
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
@@ -6555,7 +6568,7 @@ impl CodeGen {
         let root_ident = self.get_use_root(&u.tree);
         let is_external = !matches!(
             root_ident.as_str(),
-            "crate" | "self" | "super" | "std" | "core" | "alloc"
+            "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp"
         ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase())
             && !self.declared_item_names.contains(&root_ident);
 
@@ -6575,6 +6588,21 @@ impl CodeGen {
             ""
         };
         for path in &paths {
+            if let Some(cpp_import) = classify_cpp_module_use_import(path) {
+                self.record_cpp_module_use_import(&cpp_import);
+                if cpp_import.explicit_alias {
+                    self.writeln(&format!(
+                        "// C++ module import (reserved cpp::): {} as {}",
+                        cpp_import.module_path, cpp_import.binding_name
+                    ));
+                } else {
+                    self.writeln(&format!(
+                        "// C++ module import (reserved cpp::): {}",
+                        cpp_import.module_path
+                    ));
+                }
+                continue;
+            }
             let resolved_path = self.resolve_unqualified_local_import_path(path);
             self.record_option_alias_import(&resolved_path);
             if is_pub
@@ -6640,6 +6668,20 @@ impl CodeGen {
         };
         if target == "std::option::Option" {
             self.option_type_aliases.insert(alias.to_string());
+        }
+    }
+
+    fn record_cpp_module_use_import(&mut self, import: &CppModuleUseImport) {
+        self.cpp_module_import_bindings.insert(
+            import.binding_name.clone(),
+            import.module_path.clone(),
+        );
+        if self
+            .cpp_module_import_path_keys
+            .insert(import.module_path.clone())
+        {
+            self.cpp_module_import_paths
+                .push(import.module_path.clone());
         }
     }
 
@@ -23205,10 +23247,48 @@ fn qualify_impl_type_name(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CppModuleUseImport {
+    module_path: String,
+    binding_name: String,
+    explicit_alias: bool,
+}
+
 enum UseImportAction {
     RustOnly,
     Using(String),
     Raw(String),
+}
+
+fn classify_cpp_module_use_import(path: &str) -> Option<CppModuleUseImport> {
+    let normalized = normalize_use_import_path(path);
+
+    if let Some((alias, target_path)) = split_use_import_alias(normalized) {
+        let module_path = target_path.strip_prefix("cpp::")?;
+        if module_path.is_empty() {
+            return None;
+        }
+        return Some(CppModuleUseImport {
+            module_path: module_path.to_string(),
+            binding_name: alias.to_string(),
+            explicit_alias: true,
+        });
+    }
+
+    let module_path = normalized.strip_prefix("cpp::")?;
+    if module_path.is_empty() {
+        return None;
+    }
+    let binding_name = module_path
+        .rsplit("::")
+        .next()
+        .filter(|name| !name.is_empty())?;
+
+    Some(CppModuleUseImport {
+        module_path: module_path.to_string(),
+        binding_name: binding_name.to_string(),
+        explicit_alias: false,
+    })
 }
 
 fn classify_use_import(path: &str) -> UseImportAction {
@@ -30378,6 +30458,47 @@ mod tests {
     fn test_use_std_no_external_comment() {
         let out = transpile_str("use std::io::Read;");
         assert!(!out.contains("// TODO: external crate"));
+    }
+
+    #[test]
+    fn test_leaf221_use_cpp_import_is_classified_as_foreign_module_import() {
+        let file: syn::File = syn::parse_file("use cpp::std;").expect("parse file");
+        let mut cg = CodeGen::new();
+        cg.emit_file(&file, None);
+
+        assert!(
+            cg.output
+                .contains("// C++ module import (reserved cpp::): std")
+        );
+        assert!(!cg.output.contains("// TODO: external crate 'cpp'"));
+        assert!(!cg.output.contains("\nusing cpp::std;"));
+        assert_eq!(
+            cg.cpp_module_import_bindings.get("std").map(String::as_str),
+            Some("std")
+        );
+        assert_eq!(cg.cpp_module_import_paths, vec!["std".to_string()]);
+    }
+
+    #[test]
+    fn test_leaf221_use_cpp_alias_import_records_alias_binding() {
+        let file: syn::File =
+            syn::parse_file("use cpp::std as cpp_std;").expect("parse file");
+        let mut cg = CodeGen::new();
+        cg.emit_file(&file, None);
+
+        assert!(
+            cg.output
+                .contains("// C++ module import (reserved cpp::): std as cpp_std")
+        );
+        assert!(!cg.output.contains("// TODO: external crate 'cpp'"));
+        assert!(!cg.output.contains("\nusing cpp_std = cpp::std;"));
+        assert_eq!(
+            cg.cpp_module_import_bindings
+                .get("cpp_std")
+                .map(String::as_str),
+            Some("std")
+        );
+        assert_eq!(cg.cpp_module_import_paths, vec!["std".to_string()]);
     }
 
     #[test]
