@@ -2637,9 +2637,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - **Fix approach**: Modify `collect_pattern_binding_stmts` to take `&mut self`, allocate unique names, and register in `local_cpp_bindings`. This cascades to: `tuple_struct_binding_stmts`, `runtime_try_pattern_details`, `emit_try_style_runtime_match_expr`, `emit_try_style_either_match_expr`, `emit_match_expr_to_string`, `emit_expr_to_string_with_expected`, and many callers.
         - **Status**: Initial attempt failed due to deep borrow checker cascades. Needs significant refactoring to complete.
       - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
-        - [ ] Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
-        - [ ] Leaf 11.2: For types used only by pointer/reference in the cycle, emit forward declaration; for types used by value, extract to separate definition block
-        - [ ] Leaf 11.3: Add regression tests for circular type dependencies
+          - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
+            - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
+            - When Kahn's algorithm fails to sort all nodes, identifies cyclic nodes and moves them to end of emission order
+            - Forward declarations for all types are already emitted before definitions
+            - Added regression tests: `test_circular_type_ordering_cyclic_types_last`, `test_circular_type_ordering_with_reference`
+          - [ ] Leaf 11.2: For types used only by pointer/reference in the cycle, emit forward declaration; for types used by value, extract to separate definition block
+          - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [ ] Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
         - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)

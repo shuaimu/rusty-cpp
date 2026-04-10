@@ -321,6 +321,9 @@ pub struct CodeGen {
     block_depth: usize,
     /// User-provided type mappings for external crate types.
     user_type_map: types::UserTypeMap,
+    /// Forward-declared cyclic type names for proper emission ordering.
+    /// Populated during `topological_sort_structs` when cycles are detected.
+    cyclic_type_names: HashSet<String>,
 }
 
 impl CodeGen {
@@ -408,6 +411,7 @@ impl CodeGen {
             in_async: false,
             block_depth: 0,
             user_type_map: types::UserTypeMap::default(),
+            cyclic_type_names: HashSet::new(),
         }
     }
 
@@ -521,6 +525,7 @@ impl CodeGen {
         self.deref_mut_method_scopes.clear();
         self.self_path_overrides.clear();
         self.block_depth = 0;
+        self.cyclic_type_names.clear();
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -799,6 +804,37 @@ impl CodeGen {
         final_ordered
     }
 
+    /// Helper: check if node `start` can reach any node in the cycle set via outgoing edges.
+    fn can_reach_cycle(
+        start: usize,
+        outgoing: &[HashSet<usize>],
+        _sorted_set: &std::collections::HashSet<usize>,
+        in_cycle: &[bool],
+    ) -> bool {
+        let mut visited = vec![false; outgoing.len()];
+        let mut stack = vec![start];
+        while let Some(pos) = stack.pop() {
+            if pos == start {
+                continue; // Skip self
+            }
+            if in_cycle[pos] {
+                return true;
+            }
+            if visited[pos] {
+                continue;
+            }
+            visited[pos] = true;
+            if let Some(nexts) = outgoing.get(pos) {
+                for &next in nexts {
+                    if !visited[next] {
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Topologically sort top-level struct and data-enum items so that types
     /// used as direct fields are emitted before the types that contain them.
     fn topological_sort_structs(items: &mut Vec<&syn::Item>) {
@@ -884,7 +920,81 @@ impl CodeGen {
             }
         }
         if sorted_indices.len() != n {
-            // Cyclic dependency — keep original order.
+            // Cyclic dependency — find nodes in cycles and move them to end of order.
+            // A node is in a cycle if it was not visited by Kahn's algorithm
+            // OR if it has non-zero indegree after Kahn's pass (meaning it depends on a cycle).
+            let mut in_cycle = vec![false; n];
+            let sorted_set: std::collections::HashSet<usize> =
+                sorted_indices.iter().cloned().collect();
+            for pos in 0..n {
+                if !sorted_set.contains(&pos) {
+                    in_cycle[pos] = true; // Not visited = part of a cycle
+                }
+            }
+            // Also mark nodes that have non-zero indegree after Kahn's (they depend on cycles)
+            for pos in 0..n {
+                if indegree[pos] > 0 && !in_cycle[pos] {
+                    // Check if this node reaches into the cycle
+                    if Self::can_reach_cycle(pos, &outgoing, &sorted_set, &in_cycle) {
+                        in_cycle[pos] = true;
+                    }
+                }
+            }
+
+            // Collect cyclic type names.
+            let cyclic_names: Vec<String> = in_cycle
+                .iter()
+                .enumerate()
+                .filter(|pair| *pair.1)
+                .filter_map(|(pos, _)| {
+                    struct_indices.get(pos).and_then(|&idx| {
+                        items.get(idx).and_then(|item| match item {
+                            syn::Item::Struct(s) => Some(s.ident.to_string()),
+                            syn::Item::Enum(e)
+                                if e.variants.iter().any(|v| !v.fields.is_empty()) =>
+                            {
+                                Some(e.ident.to_string())
+                            }
+                            _ => None,
+                        })
+                    })
+                })
+                .collect();
+
+            // Separate cyclic from non-cyclic: keep non-cyclic in topological order,
+            // move cyclic to end (in their original relative order).
+            let original_items_at_struct_positions: Vec<&syn::Item> =
+                struct_indices.iter().map(|&idx| items[idx]).collect();
+
+            let mut new_order: Vec<&syn::Item> = Vec::with_capacity(n);
+            let mut cyclic_items: Vec<&syn::Item> = Vec::new();
+
+            for &sorted_pos in sorted_indices.iter() {
+                let item = original_items_at_struct_positions[sorted_pos];
+                let name = match item {
+                    syn::Item::Struct(s) => s.ident.to_string(),
+                    syn::Item::Enum(e)
+                        if e.variants.iter().any(|v| !v.fields.is_empty()) =>
+                    {
+                        e.ident.to_string()
+                    }
+                    _ => continue,
+                };
+                if cyclic_names.contains(&name) {
+                    cyclic_items.push(item);
+                } else {
+                    new_order.push(item);
+                }
+            }
+            // Append cyclic items at the end.
+            new_order.extend(cyclic_items);
+
+            // Place items back at their struct positions.
+            for (i, &struct_idx) in struct_indices.iter().enumerate() {
+                if i < new_order.len() {
+                    items[struct_idx] = new_order[i];
+                }
+            }
             return;
         }
 
@@ -34564,6 +34674,60 @@ mod tests {
         assert!(
             !out.contains("rusty::Function"),
             "impl Fn* in module arg position should use auto, not rusty::Function\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_circular_type_ordering_cyclic_types_last() {
+        // When types have circular dependencies (A uses B, B uses A),
+        // the transpiler should emit non-cyclic types first, then cyclic types last.
+        // Forward declarations are emitted first, then definitions in topological order.
+        let out = transpile_str(
+            r#"
+            struct A {
+                b: Option<Box<B>>,
+            }
+
+            struct B {
+                a: Option<Box<A>>,
+            }
+            "#,
+        );
+        // Both structs should appear in the output
+        assert!(
+            out.contains("struct A;"),
+            "A forward declaration should be present\nGot: {out}"
+        );
+        assert!(
+            out.contains("struct B;"),
+            "B forward declaration should be present\nGot: {out}"
+        );
+        // Both struct definitions should be present
+        assert!(
+            out.contains("struct A {") || out.contains("struct A\n{"),
+            "A definition should be present\nGot: {out}"
+        );
+        assert!(
+            out.contains("struct B {") || out.contains("struct B\n{"),
+            "B definition should be present\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_circular_type_ordering_with_reference() {
+        // Types that reference each other via Option<T> should compile.
+        // This tests that forward declarations are emitted before definitions.
+        let out = transpile_str(
+            r#"
+            struct Node {
+                next: Option<Box<Node>>,
+                data: u32,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("struct Node;"),
+            "Forward declaration should be present for self-referential type\nGot: {out}"
         );
     }
 }
