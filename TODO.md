@@ -2700,7 +2700,21 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Forward declarations for all types are already emitted before definitions
             - Added regression tests: `test_circular_type_ordering_cyclic_types_last`, `test_circular_type_ordering_with_reference`
           - [ ] Leaf 11.2: Handle true by-value circular dependencies with an explicit strategy (architecture)
-            - [ ] Leaf 11.2.1: Detect SCCs with by-value cycle edges and emit deterministic unsupported diagnostics (short-term unblock)
+            - [x] *done* Leaf 11.2.1: Detect SCCs with by-value cycle edges and emit deterministic unsupported diagnostics (short-term unblock)
+              - Implemented by-value SCC detection in `transpiler/src/codegen.rs`:
+                - recursively collect all struct/data-enum items across the module tree
+                - build by-value dependency graph (references/raw pointers and indirection wrappers such as `Box`/`Rc`/`Arc`/`Pin` are excluded from cycle edges)
+                - run SCC detection and emit deterministic unsupported diagnostics in generated output preamble (`// UNSUPPORTED: unsupported by-value circular type dependency in scope <crate>: [...]`)
+              - Added focused regressions:
+                - `test_leaf1121_by_value_cycle_emits_unsupported_diagnostic`
+                - `test_leaf1121_cross_module_by_value_cycle_emits_diagnostic`
+                - `test_leaf1121_indirection_cycle_does_not_emit_by_value_cycle_diagnostic`
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf1121 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
+                - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-11-2-1-1775849924 --keep-work-dirs`
+              - Semver repro note:
+                - deterministic Stage D head remains `runner.cpp:1064` (`std::basic_string_view<char>` missing `.bytes()`); current semver expanded set did not trigger a by-value SCC diagnostic with this detector.
             - [ ] Leaf 11.2.2: Add regression fixture asserting diagnostics include cycle path/type names
             - [ ] Leaf 11.2.3: Write design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion)
             - [ ] Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)

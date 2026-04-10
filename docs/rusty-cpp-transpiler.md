@@ -3570,8 +3570,28 @@ Active work items:
      - new first deterministic head starts at `runner.cpp:1064`: `std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-4-1775849157/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts before opening the next implementation leaf; no crate-specific rewrite scripts were introduced.
-133. Current active next leaf is `11.2.1`.
-   - focus: add deterministic SCC diagnostics for true by-value circular type cycles in semver (`Leaf 11.2` architecture chain).
+133. `Leaf 11.2.1` is complete.
+   - plan/scope check: implementation + focused regressions + parity repro stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler detection in `transpiler/src/codegen.rs`:
+     - recursively collects struct/data-enum items across the full module tree for by-value cycle analysis.
+     - detects SCCs in the by-value dependency graph while excluding indirection edges (`Box`/`Rc`/`Arc`/`Weak`/`NonNull`/`Pin`) and reference/raw-pointer edges from cycle triggering.
+     - emits deterministic unsupported diagnostics in generated output preamble:
+       - `// UNSUPPORTED: unsupported by-value circular type dependency in scope <crate>: [...]`
+   - focused regressions:
+     - `test_leaf1121_by_value_cycle_emits_unsupported_diagnostic`
+     - `test_leaf1121_cross_module_by_value_cycle_emits_diagnostic`
+     - `test_leaf1121_indirection_cycle_does_not_emit_by_value_cycle_diagnostic`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1121 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-11-2-1-1775849924 --keep-work-dirs`
+   - semver repro note:
+     - current deterministic Stage D head remains `runner.cpp:1064` (`std::basic_string_view<char>` missing `.bytes()`).
+     - this repro did not trigger by-value SCC diagnostics in current expanded semver outputs.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-11-2-1-1775849924/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix is shared and AST-shape-gated, avoids crate-specific scripts/rewrites, and keeps deterministic-first parity evidence.
+134. Current active next leaf is `11.2.2`.
+   - focus: add regression fixture coverage asserting unsupported diagnostics include cycle path/type names.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3695,6 +3715,7 @@ Required approach:
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout
 - for struct-literal field lowering in consuming `self` scopes, do not bypass move insertion by using non-move field emission helpers; field payload emission must preserve receiver-aware move semantics
 - for nested local-shadow initializer lowering (for example `let rhs = match rhs.next() { ... }`), do not hide outer same-name bindings before initializer emission or reuse outer same-name C++ shadow identifiers in inner scopes; preserve prior binding visibility and allocate distinct shadow identifiers to avoid self-reference/use-before-deduction
+- for circular type-ordering fallback, do not silently reorder true by-value SCCs and proceed without explicit unsupported diagnostics; emit deterministic cycle diagnostics so unsupported architecture gaps are visible at generation time
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
