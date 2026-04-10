@@ -1478,46 +1478,56 @@ Canonical constraint:
 - recover omitted owner args through expected-type/scope inference,
 - do not apply blanket global rewrites that force template args where they are not required.
 
-### 3.13 Transparent C++ Calls with Rust Objects (`extern "C++"`) ⚠️
+### 3.13 Transparent C++ Module Imports as Rust Modules (`use cpp::...`) ⚠️
 
-Because the transpiler target is C++, Rust code should be able to call selected C++ APIs directly when Rust types lower to compatible C++ runtime types.
+Because the transpiler target is module-based C++, C++ modules should be imported in Rust grammar as if they were Rust modules.
 
-This is **not** C ABI FFI (`extern "C"`). This is a source-level C++ interop layer resolved at C++ compile time.
+This is **not** C ABI FFI (`extern "C"`). This is direct source-level C++ module interop resolved by the C++ compiler.
 
-For the module-only target profile, this design adopts a **no-bridge model**: do not generate typed wrapper layers; emit direct C++ calls and let the C++ compiler resolve overloads/conversions.
+For this profile, the design is **no-bridge by default**: do not generate typed wrapper layers; emit direct C++ calls and let the C++ compiler resolve overloads/conversions.
 
-#### Rust Surface (Proposed, Module-Oriented)
+#### Rust Surface (Proposed)
 
 ```rust
-#[cpp(include = "<my_api.hpp>", ns = "my::api")]
-unsafe extern "C++" {
-    fn normalize(v: &mut Vec<f32>);
+use cpp::my::api as my_api;
 
-    #[cpp_name = "hash_value"] // optional explicit symbol name
-    fn hash_string(s: &String) -> u64;
+unsafe {
+    my_api::normalize(&mut v);
+    let h: u64 = my_api::hash_value(&s);
 }
 ```
 
-MVP rules:
+Rules:
 
-1. `unsafe extern "C++"` is required at declaration sites.
-2. Calls are emitted as direct qualified C++ calls to declared symbols (no generated bridge wrappers).
-3. Free/static C++ functions are in scope for MVP; member/template-heavy surfaces require explicit C++ shim functions.
+1. `cpp::` is a reserved import root for foreign C++ modules.
+2. `use cpp::a::b` is treated as importing C++ module path `a.b`.
+3. No Rust-side `extern "C++"` declaration blocks or `#[cpp(...)]` attributes for this path.
+4. Name remapping is handled on the C++ side (module-exported aliases/shims), not by Rust attributes.
+
+#### Module and Symbol Resolution
+
+The transpiler resolves `use cpp::...` imports through a C++ module symbol index produced from module interface units.
+
+The index must provide enough metadata to validate symbol existence and emit calls:
+
+- module path to C++ namespace mapping,
+- exported function names/callable sets,
+- callable type shapes needed by emission diagnostics.
+
+If a `cpp::` import or referenced symbol cannot be resolved, transpilation fails with an explicit import/symbol error.
 
 #### Direct-Call Lowering Rule
 
-For each declared Rust interop item:
+For each resolved C++ module call:
 
-1. lower Rust parameter/return types to canonical emitted C++ types (same lowering table used by normal Rust emission),
-2. map Rust item path to target C++ symbol (using namespace/name overrides from `#[cpp(...)]` attributes),
-3. emit call sites as direct C++ calls to that symbol,
-4. let C++ compiler perform overload resolution/implicit conversion checks and report diagnostics.
-
-This keeps one source of truth for type mapping while avoiding extra wrapper codegen.
+1. emit C++ module imports for referenced `cpp::` modules,
+2. lower Rust values to canonical emitted C++ types (same lowering table used by normal Rust emission),
+3. emit direct qualified C++ calls (no generated bridge wrappers),
+4. let C++ compiler perform overload resolution/implicit conversion checks and produce final call diagnostics.
 
 #### Borrow/Move Semantics at the Boundary
 
-| Rust signature shape | Emitted C++ argument shape | Boundary behavior |
+| Rust signature shape at call site | Emitted C++ argument shape | Boundary behavior |
 |---|---|---|
 | `T` | `T` | caller passes moved value when Rust semantics require move |
 | `&T` | `const T&` | shared borrow |
@@ -1526,41 +1536,35 @@ This keeps one source of truth for type mapping while avoiding extra wrapper cod
 
 For Rust-owned runtime types (`rusty::String`, `rusty::Vec<T>`, `rusty::HashMap<K,V>`, etc.), direct interop is allowed only when the C++ side consumes the same lowered type family.
 
-#### Overload and Name Resolution
-
-C++ overload sets are resolved directly by the C++ compiler at transpiled call sites.
-
-If resolution is ambiguous or picks an undesired overload, constrain from Rust with stronger types/casts or provide an explicit C++ shim symbol.
-
 #### Generated C++ Shape
 
 ```cpp
-#include <my_api.hpp>
+import my.api;
 
-// Transpiled from Rust call sites (no wrapper layer)
 my::api::normalize(v);
 auto h = my::api::hash_value(s);
 ```
 
-Transpiled Rust call sites lower directly to target C++ symbols, preserving existing Rust lowering and ownership rules.
+Transpiled Rust call sites lower directly to target C++ module symbols, preserving existing Rust lowering and ownership rules.
 
 #### Safety Contract
 
-- `extern "C++"` declarations remain `unsafe`: C++ callees may violate Rust aliasing/lifetime expectations by storing references, mutating through hidden aliases, etc.
-- Rust-side safe wrappers are allowed, but only when the crate author can prove callee behavior is compatible with Rust invariants.
+- C++ imported calls are foreign/unsafe by default: callees may violate Rust aliasing/lifetime expectations.
+- Calls require `unsafe` context (or explicit Rust-side safe wrapper APIs that document invariants).
 - No automatic lifetime extension is introduced by the transpiler.
 
 #### Accepted Tradeoff (No-Bridge Mode)
 
 - overload choice and implicit conversion behavior are delegated to C++ compiler rules,
-- diagnostics surface at direct call sites instead of synthesized wrapper functions,
-- behavior can shift when target C++ declarations or visible overload sets change.
+- diagnostics surface primarily at direct call sites in C++ compile stage,
+- behavior can shift when target C++ module exports or visible overload sets change.
 
 #### Rejected Patterns
 
 - no automatic C ABI thunk generation for this surface (that is a separate `extern "C"` path),
 - no global text substitution of unresolved `foo::bar` paths into C++ calls,
-- no generated bridge wrappers in module-only no-bridge profile.
+- no generated bridge wrappers in module-only no-bridge profile,
+- no Rust-side attribute-driven symbol remapping for `cpp::` imports.
 
 ---
 
@@ -1793,7 +1797,7 @@ Section 10 remains status/frontier tracking only.
 | Derive macros | Code generation | Medium | Per-derive mapping |
 | Unsafe blocks | Raw code | Easy | Just emit the code |
 | FFI (`extern "C"`) | `extern "C"` | Easy | Direct mapping |
-| C++ interop (`extern "C++"`) | Direct native C++ calls (no bridge wrappers) | Medium | See §3.13 |
+| C++ module interop (`use cpp::...`) | Direct native C++ module calls (no bridge wrappers) | Medium | See §3.13 |
 
 ---
 
