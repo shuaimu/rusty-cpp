@@ -2693,13 +2693,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - New deterministic Stage D head starts at `runner.cpp:1064`: `std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)` shape.
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-4-1775849157/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-      - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
+      - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
             - When Kahn's algorithm fails to sort all nodes, identifies cyclic nodes and moves them to end of emission order
             - Forward declarations for all types are already emitted before definitions
             - Added regression tests: `test_circular_type_ordering_cyclic_types_last`, `test_circular_type_ordering_with_reference`
-          - [ ] Leaf 11.2: Handle true by-value circular dependencies with an explicit strategy (architecture)
+          - [x] *done* Leaf 11.2: Handle true by-value circular dependencies with an explicit strategy (architecture)
             - [x] *done* Leaf 11.2.1: Detect SCCs with by-value cycle edges and emit deterministic unsupported diagnostics (short-term unblock)
               - Implemented by-value SCC detection in `transpiler/src/codegen.rs`:
                 - recursively collect all struct/data-enum items across the module tree
@@ -2792,8 +2792,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
               - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes remain opt-in, deterministic, AST-aware, and field-shape-gated; no crate-specific rewrites or post-generation text patching were introduced.
-            - [ ] Leaf 11.2.8: Add parity-facing validation for opt-in cycle-breaking lowering and reassess Leaf 11.2 closure
-              - Scope: run semver plus seven-crate matrix probes with canonical artifacts, verify deterministic diagnostics/rewrite behavior, and document closure criteria.
+            - [x] *done* Leaf 11.2.8: Add parity-facing validation for opt-in cycle-breaking lowering and reassess Leaf 11.2 closure
+              - Plan/scope check: this leaf was parity-validation/documentation only, stayed well below the <1000 LOC target, and required no additional decomposition.
+              - Re-ran semver parity in prototype opt-in mode:
+                - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/semver/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-11-2-8-semver-optin-20260410 --keep-work-dir --by-value-cycle-breaking-prototype`
+                - deterministic Stage D head remains `runner.cpp:1064` (`std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)`).
+              - Re-ran default seven-crate matrix:
+                - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-11-2-8-default-matrix-20260410 --keep-work-dirs`
+                - summary: `total=6 pass=5 fail=1`; first failing crate remains `semver` with the same `runner.cpp:1064` head.
+              - Re-ran opt-in seven-crate matrix probe (same crate order with `--by-value-cycle-breaking-prototype`):
+                - summary: `total=6 pass=5 fail=1`; first failing crate remains `semver` with the same `runner.cpp:1064` head.
+              - Deterministic behavior validation:
+                - semver opt-in outputs do not yet emit by-value SCC diagnostics/rewrite markers in this expanded set (no `// PROTOTYPE`/`// UNSUPPORTED` cycle comments and no `rusty::Box::make(...)` cycle-lowering markers in `semver.cppm`).
+              - Canonical artifacts:
+                - semver opt-in single-crate parity: `/tmp/rusty-parity-11-2-8-semver-optin-20260410/{baseline.txt,build.log,run.log,runner.cpp,targets/...}`
+                - default matrix first-failure crate: `/tmp/rusty-parity-11-2-8-default-matrix-20260410/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+                - opt-in matrix first-failure crate: `/tmp/rusty-parity-11-2-8-optin-matrix-20260410/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - Closure reassessment:
+                - `Leaf 11.2` is closed as complete for the planned architecture/prototype scope (`11.2.1`-`11.2.8`), with remaining semver parity failures tracked under separate non-cycle families.
+              - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): validation stayed deterministic and artifact-backed, with opt-in-only behavior preserved and no crate-specific rewrite shortcuts.
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [x] *done* Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)

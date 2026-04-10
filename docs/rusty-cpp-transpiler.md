@@ -3733,8 +3733,25 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): changes remain opt-in, deterministic, AST-aware, and field-shape-gated; no crate-specific rewrites or post-generation text patching were introduced.
-145. Current active next leaf is `11.2.8`.
-   - focus: run parity-facing validation for opt-in cycle-breaking lowering and reassess `Leaf 11.2` closure criteria.
+145. `Leaf 11.2.8` is complete.
+   - plan/scope check: this leaf was parity-validation/documentation only, stayed well below the <1000 LOC target, and required no additional decomposition.
+   - verification runs:
+     - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/semver/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-11-2-8-semver-optin-20260410 --keep-work-dir --by-value-cycle-breaking-prototype`
+     - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-11-2-8-default-matrix-20260410 --keep-work-dirs`
+     - explicit opt-in matrix probe over `either,tap,cfg-if,take_mut,arrayvec,semver,bitflags` with `--by-value-cycle-breaking-prototype` and per-crate work dirs under `/tmp/rusty-parity-11-2-8-optin-matrix-20260410`.
+   - deterministic parity results:
+     - semver opt-in single-crate parity still fails first at `runner.cpp:1064` (`std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)`).
+     - default matrix and opt-in matrix both stop at the same first failing crate/head (`semver`, `runner.cpp:1064`) with identical summary counts (`total=6 pass=5 fail=1`).
+     - semver opt-in generated outputs still show no by-value SCC cycle diagnostics/rewrite markers in this expanded set (no `// PROTOTYPE`/`// UNSUPPORTED` cycle lines and no `rusty::Box::make(...)` cycle-lowering markers in `semver.cppm`).
+   - canonical artifacts:
+     - semver opt-in single-crate parity: `/tmp/rusty-parity-11-2-8-semver-optin-20260410/{baseline.txt,build.log,run.log,runner.cpp,targets/...}`
+     - default matrix first-failure crate: `/tmp/rusty-parity-11-2-8-default-matrix-20260410/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - opt-in matrix first-failure crate: `/tmp/rusty-parity-11-2-8-optin-matrix-20260410/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - closure reassessment:
+     - `Leaf 11.2` is complete for the planned architecture/prototype scope (`11.2.1`-`11.2.8`).
+     - remaining semver parity blockers are currently outside the by-value cycle-breaking family and continue under separate deterministic Stage D families.
+   - guardrail check against wrong-approach checklist (§11): validation remained deterministic, artifact-backed, and opt-in-only; no crate-specific rewrite shortcuts were introduced.
+146. Current active next leaf is outside `11.2`: continue semver/bitflags parity families at the current deterministic Stage D frontier (`semver` first head `runner.cpp:1064` `string_view.bytes()` family).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
