@@ -7343,6 +7343,92 @@ impl CodeGen {
         }
     }
 
+    fn collect_pattern_binding_stmts_with_cpp_name_map(
+        &self,
+        pat: &syn::Pat,
+        source_expr: &str,
+        out: &mut Vec<String>,
+        rust_to_cpp: &mut HashMap<String, String>,
+    ) -> bool {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.ident != "_" {
+                    let rust_name = pi.ident.to_string();
+                    let cpp_name = rust_to_cpp
+                        .entry(rust_name.clone())
+                        .or_insert_with(|| {
+                            self.lookup_local_binding_cpp_name(&rust_name)
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name))
+                        })
+                        .clone();
+                    let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
+                        "auto&"
+                    } else if pi.by_ref.is_some() {
+                        "const auto&"
+                    } else {
+                        // By-value pattern bindings should preserve reference payloads
+                        // (e.g., `R = T&`) without forcing `const`.
+                        "auto&&"
+                    };
+                    out.push(format!("{} {} = {};", binding_prefix, cpp_name, source_expr));
+                }
+                true
+            }
+            syn::Pat::Wild(_) => true,
+            syn::Pat::Tuple(tuple_pat) => {
+                for (i, elem) in tuple_pat.elems.iter().enumerate() {
+                    let elem_expr = format!("std::get<{}>({})", i, source_expr);
+                    if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                        elem,
+                        &elem_expr,
+                        out,
+                        rust_to_cpp,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            syn::Pat::Struct(struct_pat) => {
+                for field_pat in &struct_pat.fields {
+                    let field_name = match &field_pat.member {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(index) => format!("_{}", index.index),
+                    };
+                    let field_expr = format!("{}.{}", source_expr, field_name);
+                    if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                        &field_pat.pat,
+                        &field_expr,
+                        out,
+                        rust_to_cpp,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            syn::Pat::Type(pt) => self.collect_pattern_binding_stmts_with_cpp_name_map(
+                &pt.pat,
+                source_expr,
+                out,
+                rust_to_cpp,
+            ),
+            syn::Pat::Reference(r) => self.collect_pattern_binding_stmts_with_cpp_name_map(
+                &r.pat,
+                source_expr,
+                out,
+                rust_to_cpp,
+            ),
+            syn::Pat::Paren(p) => self.collect_pattern_binding_stmts_with_cpp_name_map(
+                &p.pat,
+                source_expr,
+                out,
+                rust_to_cpp,
+            ),
+            _ => false,
+        }
+    }
+
     fn pattern_requires_mut_ref_binding(&self, pat: &syn::Pat) -> bool {
         match pat {
             syn::Pat::Ident(pi) => pi.by_ref.is_some() && pi.mutability.is_some(),
@@ -17844,7 +17930,7 @@ impl CodeGen {
         pat: &syn::Pat,
         variant_ctx: Option<&VariantTypeContext>,
         matched_var: &str,
-    ) -> Option<(String, Vec<String>, Option<&'static str>)> {
+    ) -> Option<(String, Vec<String>, HashMap<String, String>, Option<&'static str>)> {
         match pat {
             syn::Pat::TupleStruct(ts) => {
                 let (cond_method, unwrap_method) =
@@ -17852,26 +17938,50 @@ impl CodeGen {
                 if ts.elems.len() != 1 {
                     return None;
                 }
+                let mut binding_map = HashMap::new();
                 let mut stmts = vec![format!("auto {} = _m.{}();", matched_var, unwrap_method)];
-                if !self.collect_pattern_binding_stmts(&ts.elems[0], matched_var, &mut stmts) {
+                if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                    &ts.elems[0],
+                    matched_var,
+                    &mut stmts,
+                    &mut binding_map,
+                ) {
                     return None;
                 }
                 Some((
                     format!("_m.{}()", cond_method),
                     stmts,
+                    binding_map,
                     Some(unwrap_method),
                 ))
             }
             syn::Pat::Path(pp) => {
                 let cond_method = self.runtime_path_match_condition_method(&pp.path, variant_ctx)?;
-                Some((format!("_m.{}()", cond_method), Vec::new(), None))
+                Some((
+                    format!("_m.{}()", cond_method),
+                    Vec::new(),
+                    HashMap::new(),
+                    None,
+                ))
             }
-            syn::Pat::Wild(_) => Some(("true".to_string(), Vec::new(), None)),
-            syn::Pat::Ident(pi) => Some((
-                "true".to_string(),
-                vec![format!("const auto& {} = _m;", pi.ident)],
-                None,
-            )),
+            syn::Pat::Wild(_) => Some(("true".to_string(), Vec::new(), HashMap::new(), None)),
+            syn::Pat::Ident(pi) => {
+                if pi.ident == "_" {
+                    return Some(("true".to_string(), Vec::new(), HashMap::new(), None));
+                }
+                let rust_name = pi.ident.to_string();
+                let cpp_name = self
+                    .lookup_local_binding_cpp_name(&rust_name)
+                    .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                let mut binding_map = HashMap::new();
+                binding_map.insert(rust_name, cpp_name.clone());
+                Some((
+                    "true".to_string(),
+                    vec![format!("const auto& {} = _m;", cpp_name)],
+                    binding_map,
+                    None,
+                ))
+            }
             _ => None,
         }
     }
@@ -17911,9 +18021,9 @@ impl CodeGen {
         let success_arm = success_arm?;
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
 
-        let (success_cond, success_bindings, success_unwrap_method) =
+        let (success_cond, success_bindings, _success_binding_map, success_unwrap_method) =
             self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")?;
-        let (return_cond, return_bindings, _) =
+        let (return_cond, return_bindings, _return_binding_map, _) =
             self.runtime_try_pattern_details(&return_arm.pat, variant_ctx.as_ref(), "_mv")?;
 
         let mut value_ty = expected_ty.map(|ty| self.map_type(ty));
@@ -26921,6 +27031,75 @@ mod tests {
         assert!(out.contains("if (_m.is_some())"));
         assert!(out.contains("return rusty::Option<char32_t>(rusty::None);"));
         assert!(!out.contains("return return"));
+    }
+
+    #[test]
+    fn test_leaf1051_try_style_runtime_ident_binding_uses_shadowed_cpp_name() {
+        let out = transpile_str(
+            r#"
+            fn f(rhs: Option<i32>, v: Vec<i32>) -> i32 {
+                let rhs = rhs;
+                for x in v {
+                    let rhs = match rhs {
+                        Some(rhs) => rhs,
+                        None => return 0,
+                    };
+                    return rhs;
+                }
+                0
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& rhs_shadow1 = _mv;"));
+        assert!(out.contains("_match_value = rhs_shadow1;"));
+        assert!(!out.contains("auto&& rhs = _mv; _match_value = rhs_shadow1;"));
+    }
+
+    #[test]
+    fn test_leaf1051_try_style_runtime_tuple_binding_uses_shadowed_cpp_names() {
+        let out = transpile_str(
+            r#"
+            fn f(pair: Option<(i32, i32)>, v: Vec<i32>, lhs: i32, rhs: i32) -> i32 {
+                let lhs = lhs;
+                let rhs = rhs;
+                for x in v {
+                    let lhs = match pair {
+                        Some((lhs, rhs)) => lhs + rhs,
+                        None => return 0,
+                    };
+                    return lhs;
+                }
+                0
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& lhs_shadow1 = std::get<0>(_mv);"));
+        assert!(out.contains("auto&& rhs_shadow1 = std::get<1>(_mv);"));
+        assert!(out.contains("_match_value = lhs_shadow1 + rhs_shadow1;"));
+    }
+
+    #[test]
+    fn test_leaf1051_try_style_runtime_struct_binding_uses_shadowed_cpp_names() {
+        let out = transpile_str(
+            r#"
+            struct Pair { left: i32, right: i32 }
+            fn g(opt: Option<Pair>, v: Vec<i32>, left: i32, right: i32) -> i32 {
+                let left = left;
+                let right = right;
+                for x in v {
+                    let left = match opt {
+                        Some(Pair { left, right }) => left + right,
+                        None => return 0,
+                    };
+                    return left;
+                }
+                0
+            }
+        "#,
+        );
+        assert!(out.contains("auto&& left_shadow1 = _mv.left;"));
+        assert!(out.contains("auto&& right_shadow1 = _mv.right;"));
+        assert!(out.contains("_match_value = left_shadow1 + right_shadow1;"));
     }
 
     #[test]

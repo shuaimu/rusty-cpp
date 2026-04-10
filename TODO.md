@@ -2625,7 +2625,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 9.2: Add regression test for indirect self-referential const deferral
       - [x] *done* Leaf 10: Fix Rust-specific string/iterator APIs in semver (fixes ~8 semver errors)
         - [x] *done* Leaf 10.1: Added `rusty::as_bytes(std::string_view)` helper function and transpiler handling for `str::as_bytes()` method calls. The helper returns `std::span<const uint8_t>` representing the raw bytes. Fixed by adding handling in `emit_method_call_expr_to_string` and a helper function in `include/rusty/string.hpp`.
-        - [ ] Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
+        - [x] *done* Leaf 10.2: Map missing `begin`/`end` scope declarations for range iteration patterns
           - [x] *done* Leaf 10.2.1: Fix for-loop iterable self-shadowing in emission (`for x in iter` where `x` also names the iterable local)
             - Implemented a shape-gated fix in `transpiler/src/codegen.rs`: when the iterable root path name collides with loop-pattern binding names, emit a stable iterable temp before binding loop vars (`auto&& _for_iter = rusty::for_in(...); for (auto&& x : _for_iter) { ... }`).
             - Added internal synthetic-temp reservation for loop lowering so generated temp names do not collide with existing local/parameter C++ names in scope.
@@ -2658,8 +2658,16 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Added `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish` for iterator translations
           - Existing tests cover string API: `test_str_as_bytes_method`, `test_leaf4154448_to_string_emits_rusty_to_string`, etc.
       - [ ] Leaf 10.5: Fix variable shadowing in try-style match patterns
-        - [ ] Leaf 10.5.1: Refactor try-style pattern binding collection to return both emitted binding statements and Rust-name→C++-name mapping
-          - Use mapping in `runtime_try_pattern_details` for `Pat::Ident` / tuple / struct payload bindings instead of emitting raw Rust names.
+        - [x] *done* Leaf 10.5.1: Refactor try-style pattern binding collection to return both emitted binding statements and Rust-name→C++-name mapping
+          - Added mapping-aware pattern binding collector in `transpiler/src/codegen.rs` for try-style lowering (`collect_pattern_binding_stmts_with_cpp_name_map`), keeping existing shared matcher binding behavior unchanged.
+          - `runtime_try_pattern_details` now returns `(condition, binding_stmts, rust_to_cpp_map, unwrap_method)` and emits mapped C++ binding names for `Pat::Ident` / tuple / struct payload bindings instead of raw Rust names.
+          - Added focused regressions:
+            - `test_leaf1051_try_style_runtime_ident_binding_uses_shadowed_cpp_name`
+            - `test_leaf1051_try_style_runtime_tuple_binding_uses_shadowed_cpp_names`
+            - `test_leaf1051_try_style_runtime_struct_binding_uses_shadowed_cpp_names`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 10.5.2: Push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering
           - Ensure shadowed names in arm bodies resolve to newly bound payload names, not outer locals.
         - [ ] Leaf 10.5.3: Add regressions for `let rhs = match rhs.next() { Some(rhs) => ... }` nested-shadow patterns

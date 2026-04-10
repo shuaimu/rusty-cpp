@@ -3519,8 +3519,22 @@ Active work items:
      - new first deterministic head starts at `runner.cpp:1061` in `Prerelease::cmp`: nested try-style match binding self-reference (`rhs_shadow1` use-before-deduction).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-2-4-1775846704/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): kept deterministic-first workflow with canonical artifacts and no crate-specific patching.
-129. Current active next leaf is `10.5.1`.
-   - focus: refactor try-style pattern binding collection to return emitted bindings plus Rust-name→C++-name mapping, then apply that mapping in runtime try-style match lowering.
+129. `Leaf 10.5.1` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - added mapping-aware try-style pattern binding collection (`collect_pattern_binding_stmts_with_cpp_name_map`) that returns emitted binding statements plus Rust-name→C++-name mapping.
+     - `runtime_try_pattern_details` now returns `(condition, binding_stmts, rust_to_cpp_map, unwrap_method)` and uses mapped C++ names for `Pat::Ident` / tuple / struct payload bindings.
+     - this aligns try-style binding declarations with name resolution used by emitted arm bodies in shadowing scenarios.
+   - focused regressions:
+     - `test_leaf1051_try_style_runtime_ident_binding_uses_shadowed_cpp_name`
+     - `test_leaf1051_try_style_runtime_tuple_binding_uses_shadowed_cpp_names`
+     - `test_leaf1051_try_style_runtime_struct_binding_uses_shadowed_cpp_names`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): change stays shared and AST-shape-gated, avoids crate-specific rewrites, and does not rely on post-generation text patching.
+130. Current active next leaf is `10.5.2`.
+   - focus: push temporary local binding scope when emitting success/return arm bodies in try-style runtime/either match lowering so shadowed names resolve to newly bound payload names.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
