@@ -2657,7 +2657,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 10.4: Add regression tests for string API and iterator translations
           - Added `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish` for iterator translations
           - Existing tests cover string API: `test_str_as_bytes_method`, `test_leaf4154448_to_string_emits_rusty_to_string`, etc.
-      - [ ] Leaf 10.5: Fix variable shadowing in try-style match patterns
+      - [x] *done* Leaf 10.5: Fix variable shadowing in try-style match patterns
         - [x] *done* Leaf 10.5.1: Refactor try-style pattern binding collection to return both emitted binding statements and Rust-name→C++-name mapping
           - Added mapping-aware pattern binding collector in `transpiler/src/codegen.rs` for try-style lowering (`collect_pattern_binding_stmts_with_cpp_name_map`), keeping existing shared matcher binding behavior unchanged.
           - `runtime_try_pattern_details` now returns `(condition, binding_stmts, rust_to_cpp_map, unwrap_method)` and emits mapped C++ binding names for `Pat::Ident` / tuple / struct payload bindings instead of raw Rust names.
@@ -2686,7 +2686,13 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf105 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 10.5.4: Re-run semver parity and confirm try-style shadowing family is removed from Stage D head set
+        - [x] *done* Leaf 10.5.4: Re-run semver parity and confirm try-style shadowing family is removed from Stage D head set
+          - Re-ran semver parity:
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-4-1775849157 --keep-work-dirs`
+          - Confirmed prior deterministic try-style nested-shadow Stage D head (`rhs_shadow1` self-reference/use-before-deduction in `Prerelease::cmp`) is removed from the first failure set.
+          - New deterministic Stage D head starts at `runner.cpp:1064`: `std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)` shape.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-4-1775849157/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
       - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

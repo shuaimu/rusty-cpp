@@ -3561,8 +3561,17 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf105 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): fix stays shared and scope/shape-gated in AST-aware lowering, with no crate-specific rewrites or post-generation text patching.
-132. Current active next leaf is `10.5.4`.
-   - focus: re-run semver parity and confirm try-style shadowing failures are removed from the deterministic Stage D head set.
+132. `Leaf 10.5.4` is complete.
+   - plan/scope check: parity repro + deterministic-head analysis + docs updates stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - verification run:
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-4-1775849157 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - prior first head family in `Prerelease::cmp` (`rhs_shadow1` self-reference/use-before-deduction from nested try-style shadowing) is removed.
+     - new first deterministic head starts at `runner.cpp:1064`: `std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-4-1775849157/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic first-head discipline and recorded canonical artifacts before opening the next implementation leaf; no crate-specific rewrite scripts were introduced.
+133. Current active next leaf is `11.2.1`.
+   - focus: add deterministic SCC diagnostics for true by-value circular type cycles in semver (`Leaf 11.2` architecture chain).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
