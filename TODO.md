@@ -2756,8 +2756,18 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (done in Leaf 1.4)
       - [ ] Leaf 13: Fix extension-trait callable argument pass-style for tap family (`FnOnce(&mut Self)` and peers)
         - Current deterministic tap Stage D head: `invalid type argument of unary '*' (have 'int')` from generated `rusty::tap(10, [&](auto&& v) { return foo += *v; })`.
-        - [ ] Leaf 13.1: Collect callable-bound metadata for extension-trait method parameters during pre-scan
-          - Track `Fn`/`FnMut`/`FnOnce` argument pass intent and reference mutability shape for callable parameters.
+        - [x] *done* Leaf 13.1: Collect callable-bound metadata for extension-trait method parameters during pre-scan
+          - Plan/scope check: implemented as a focused pre-scan metadata addition in `transpiler/src/codegen.rs`; change stayed well under the <1000 LOC target.
+          - Added callable-bound metadata capture on extension methods during pre-scan:
+            - introduced callable metadata model for callable trait kind (`Fn`/`FnMut`/`FnOnce`) and callable argument pass intent (`Value`, `SharedRef`, `MutRef`, `Pointer`)
+            - extension method collection now records per-parameter callable-bound metadata from generic bounds and where-clause predicates (for example `F: FnOnce(&mut Self) -> R`)
+            - preserved deterministic conflict handling: incompatible duplicate callable bounds for the same type parameter are dropped rather than guessed
+          - Added focused regressions:
+            - `test_leaf131_collects_callable_bound_metadata_for_extension_method_where_clause`
+            - `test_leaf131_collects_callable_bound_metadata_for_fn_families_and_ref_shapes`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf131 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 13.2: Apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`)
           - For `FnOnce(&mut Self)`-style bounds, pass borrow-shaped arguments instead of by-value fallback.
         - [ ] Leaf 13.3: Add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params)

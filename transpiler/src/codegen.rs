@@ -26,6 +26,7 @@ struct VariantTypeContext {
 struct ExtensionImplMethod {
     self_ty: syn::Type,
     method: syn::ImplItemFn,
+    callable_param_metadata: HashMap<String, CallableParamBoundMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,27 @@ enum ArgPassStyle {
     Pointer,
     Value,
     Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallableTraitKind {
+    Fn,
+    FnMut,
+    FnOnce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallableArgPassIntent {
+    Value,
+    SharedRef,
+    MutRef,
+    Pointer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallableParamBoundMetadata {
+    trait_kind: CallableTraitKind,
+    arg_pass_intents: Vec<CallableArgPassIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3654,11 +3676,17 @@ impl CodeGen {
                         };
                         let mut merged = method.clone();
                         merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                        let callable_param_metadata =
+                            Self::collect_callable_param_bound_metadata_from_generics(
+                                &merged.sig.generics,
+                                &merged.sig.inputs,
+                            );
                         self.extension_method_names
                             .insert(merged.sig.ident.to_string());
                         entry.push(ExtensionImplMethod {
                             self_ty: (*impl_block.self_ty).clone(),
                             method: merged,
+                            callable_param_metadata,
                         });
                     }
                 }
@@ -3671,6 +3699,153 @@ impl CodeGen {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn collect_callable_param_bound_metadata_from_generics(
+        generics: &syn::Generics,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    ) -> HashMap<String, CallableParamBoundMetadata> {
+        let mut callable_param_type_names: HashMap<String, String> = HashMap::new();
+        for arg in inputs.iter().skip(1) {
+            let syn::FnArg::Typed(pt) = arg else {
+                continue;
+            };
+            let syn::Pat::Ident(pi) = pt.pat.as_ref() else {
+                continue;
+            };
+            let syn::Type::Path(tp) = pt.ty.as_ref() else {
+                continue;
+            };
+            if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                continue;
+            }
+            let type_name = tp.path.segments[0].ident.to_string();
+            if type_name.is_empty() {
+                continue;
+            }
+            callable_param_type_names.insert(pi.ident.to_string(), type_name);
+        }
+        if callable_param_type_names.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut type_bound_meta: HashMap<String, CallableParamBoundMetadata> = HashMap::new();
+        let mut conflicted_type_params: HashSet<String> = HashSet::new();
+
+        for param in &generics.params {
+            let syn::GenericParam::Type(tp) = param else {
+                continue;
+            };
+            let type_name = tp.ident.to_string();
+            for bound in &tp.bounds {
+                if let Some(meta) = Self::callable_bound_metadata_from_type_param_bound(bound) {
+                    Self::record_callable_type_param_metadata(
+                        &mut type_bound_meta,
+                        &mut conflicted_type_params,
+                        type_name.clone(),
+                        meta,
+                    );
+                }
+            }
+        }
+
+        if let Some(where_clause) = &generics.where_clause {
+            for predicate in &where_clause.predicates {
+                let syn::WherePredicate::Type(type_pred) = predicate else {
+                    continue;
+                };
+                let syn::Type::Path(tp) = &type_pred.bounded_ty else {
+                    continue;
+                };
+                if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                    continue;
+                }
+                let type_name = tp.path.segments[0].ident.to_string();
+                for bound in &type_pred.bounds {
+                    if let Some(meta) = Self::callable_bound_metadata_from_type_param_bound(bound) {
+                        Self::record_callable_type_param_metadata(
+                            &mut type_bound_meta,
+                            &mut conflicted_type_params,
+                            type_name.clone(),
+                            meta,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut out: HashMap<String, CallableParamBoundMetadata> = HashMap::new();
+        for (param_name, type_name) in callable_param_type_names {
+            if conflicted_type_params.contains(&type_name) {
+                continue;
+            }
+            if let Some(meta) = type_bound_meta.get(&type_name) {
+                out.insert(param_name, meta.clone());
+            }
+        }
+        out
+    }
+
+    fn record_callable_type_param_metadata(
+        dst: &mut HashMap<String, CallableParamBoundMetadata>,
+        conflicted: &mut HashSet<String>,
+        type_name: String,
+        incoming: CallableParamBoundMetadata,
+    ) {
+        if conflicted.contains(&type_name) {
+            return;
+        }
+        if let Some(existing) = dst.get(&type_name) {
+            if existing != &incoming {
+                dst.remove(&type_name);
+                conflicted.insert(type_name);
+            }
+            return;
+        }
+        dst.insert(type_name, incoming);
+    }
+
+    fn callable_bound_metadata_from_type_param_bound(
+        bound: &syn::TypeParamBound,
+    ) -> Option<CallableParamBoundMetadata> {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return None;
+        };
+        let last = trait_bound.path.segments.last()?;
+        let trait_kind = match last.ident.to_string().as_str() {
+            "Fn" => CallableTraitKind::Fn,
+            "FnMut" => CallableTraitKind::FnMut,
+            "FnOnce" => CallableTraitKind::FnOnce,
+            _ => return None,
+        };
+        let syn::PathArguments::Parenthesized(parenthesized) = &last.arguments else {
+            return None;
+        };
+        let arg_pass_intents = parenthesized
+            .inputs
+            .iter()
+            .map(Self::callable_arg_pass_intent_for_type)
+            .collect();
+        Some(CallableParamBoundMetadata {
+            trait_kind,
+            arg_pass_intents,
+        })
+    }
+
+    fn callable_arg_pass_intent_for_type(ty: &syn::Type) -> CallableArgPassIntent {
+        match ty {
+            syn::Type::Reference(r) => {
+                if r.mutability.is_some() {
+                    CallableArgPassIntent::MutRef
+                } else {
+                    CallableArgPassIntent::SharedRef
+                }
+            }
+            syn::Type::Ptr(_) => CallableArgPassIntent::Pointer,
+            syn::Type::Paren(p) => Self::callable_arg_pass_intent_for_type(&p.elem),
+            syn::Type::Group(g) => Self::callable_arg_pass_intent_for_type(&g.elem),
+            _ => CallableArgPassIntent::Value,
         }
     }
 
@@ -5858,6 +6033,7 @@ impl CodeGen {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
         let escaped_method_name = escape_cpp_keyword(&method_name);
+        let _callable_param_metadata = &method_spec.callable_param_metadata;
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             self.writeln(&format!(
@@ -25296,6 +25472,134 @@ mod tests {
         // `&mut self` should emit just `self_` (not `&self_`) because
         // C++ references bind automatically — no address-of needed.
         assert!(out.contains("static_cast<void>(f(self_));"));
+    }
+
+    #[test]
+    fn test_leaf131_collects_callable_bound_metadata_for_extension_method_where_clause() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            trait TapOps: Sized {
+                fn tap<R, F>(self, f: F) -> Self
+                where
+                    F: FnOnce(&mut Self) -> R;
+            }
+            impl<T> TapOps for T {
+                fn tap<R, F>(self, f: F) -> Self
+                where
+                    F: FnOnce(&mut Self) -> R,
+                {
+                    self
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let mut cg = CodeGen::new();
+        cg.collect_local_declared_types(&file.items, &[]);
+        cg.collect_extension_trait_impl_methods(&file.items, &[]);
+
+        let methods = cg
+            .extension_trait_impl_methods
+            .get("TapOps")
+            .expect("TapOps extension methods should be collected");
+        let tap_method = methods
+            .iter()
+            .find(|m| m.method.sig.ident == "tap")
+            .expect("tap extension method should be present");
+        let callable_meta = tap_method
+            .callable_param_metadata
+            .get("f")
+            .expect("callable metadata for param f should be collected");
+        assert_eq!(callable_meta.trait_kind, CallableTraitKind::FnOnce);
+        assert_eq!(
+            callable_meta.arg_pass_intents,
+            vec![CallableArgPassIntent::MutRef]
+        );
+    }
+
+    #[test]
+    fn test_leaf131_collects_callable_bound_metadata_for_fn_families_and_ref_shapes() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            trait Ops: Sized {
+                fn tap_shared<R, F>(self, f: F) -> Self
+                where
+                    F: Fn(&Self) -> R;
+                fn tap_mut<R, F>(self, f: F) -> Self
+                where
+                    F: FnMut(&mut Self) -> R;
+                fn tap_once<R, F>(self, f: F) -> Self
+                where
+                    F: FnOnce(Self) -> R;
+            }
+            impl<T> Ops for T {
+                fn tap_shared<R, F>(self, f: F) -> Self
+                where
+                    F: Fn(&Self) -> R,
+                {
+                    self
+                }
+                fn tap_mut<R, F>(self, f: F) -> Self
+                where
+                    F: FnMut(&mut Self) -> R,
+                {
+                    self
+                }
+                fn tap_once<R, F>(self, f: F) -> Self
+                where
+                    F: FnOnce(Self) -> R,
+                {
+                    self
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let mut cg = CodeGen::new();
+        cg.collect_local_declared_types(&file.items, &[]);
+        cg.collect_extension_trait_impl_methods(&file.items, &[]);
+
+        let methods = cg
+            .extension_trait_impl_methods
+            .get("Ops")
+            .expect("Ops extension methods should be collected");
+        let mut by_name: HashMap<String, &ExtensionImplMethod> = HashMap::new();
+        for method in methods {
+            by_name.insert(method.method.sig.ident.to_string(), method);
+        }
+
+        let shared = by_name
+            .get("tap_shared")
+            .expect("tap_shared extension method should be present")
+            .callable_param_metadata
+            .get("f")
+            .expect("tap_shared metadata should include param f");
+        assert_eq!(shared.trait_kind, CallableTraitKind::Fn);
+        assert_eq!(
+            shared.arg_pass_intents,
+            vec![CallableArgPassIntent::SharedRef]
+        );
+
+        let mutable = by_name
+            .get("tap_mut")
+            .expect("tap_mut extension method should be present")
+            .callable_param_metadata
+            .get("f")
+            .expect("tap_mut metadata should include param f");
+        assert_eq!(mutable.trait_kind, CallableTraitKind::FnMut);
+        assert_eq!(
+            mutable.arg_pass_intents,
+            vec![CallableArgPassIntent::MutRef]
+        );
+
+        let once = by_name
+            .get("tap_once")
+            .expect("tap_once extension method should be present")
+            .callable_param_metadata
+            .get("f")
+            .expect("tap_once metadata should include param f");
+        assert_eq!(once.trait_kind, CallableTraitKind::FnOnce);
+        assert_eq!(once.arg_pass_intents, vec![CallableArgPassIntent::Value]);
     }
 
     #[test]

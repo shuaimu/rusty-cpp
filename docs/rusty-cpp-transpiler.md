@@ -3632,8 +3632,21 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler transpile_options_toggle -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): kept default behavior diagnostic-only and made edge selection deterministic under explicit opt-in only.
-137. Current active next leaf is `13.1`.
-   - focus: collect callable-bound metadata for extension-trait method parameters (`Fn`/`FnMut`/`FnOnce`) before call-site emission fixes.
+137. `Leaf 13.1` is complete.
+   - plan/scope check: implemented as a focused metadata-only pre-scan enhancement and stayed well below the <1000 LOC target.
+   - implemented callable-bound metadata capture for extension methods in `transpiler/src/codegen.rs`:
+     - added callable metadata model tracking callable trait kind (`Fn`/`FnMut`/`FnOnce`) and argument pass intent (`Value`, `SharedRef`, `MutRef`, `Pointer`).
+     - extension-trait method pre-scan now records per-parameter callable-bound metadata from generic/type bounds and where clauses (for example `F: FnOnce(&mut Self) -> R`).
+     - conflicting duplicate callable bounds for the same type parameter are dropped deterministically (no guessed merge).
+   - focused regressions:
+     - `test_leaf131_collects_callable_bound_metadata_for_extension_method_where_clause`
+     - `test_leaf131_collects_callable_bound_metadata_for_fn_families_and_ref_shapes`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf131 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): this leaf only adds AST-aware metadata collection and does not apply blanket call-site rewrites.
+138. Current active next leaf is `13.2`.
+   - focus: apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`), especially for `FnOnce(&mut Self)`-style bounds.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
