@@ -3487,8 +3487,17 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf1021 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): change is shape-gated and local to for-loop lowering; no blanket for-loop rewrite and no crate-specific patching was introduced.
-126. Current active next leaf is `10.2.3`.
-   - focus: re-run semver parity after `10.2.1/10.2.2` and capture the next deterministic Stage D head.
+126. `Leaf 10.2.3` is complete.
+   - plan/scope check: parity reprobe + documentation updates stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - verification run:
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-2-3-1775846232 --keep-work-dirs`
+   - deterministic semver Stage D head after `10.2.1/10.2.2`:
+     - first compile blocker starts at `runner.cpp:1060` (`Prerelease::cmp`): generated `auto&& _for_iter = rusty::for_in(lhs); for (auto&& lhs : _for_iter)` fails with `begin/end` not declared in range-for.
+     - immediate adjacent fallout in the same block starts at `runner.cpp:1061` (`rhs_shadow1` use-before-deduction from nested match shadowing).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-2-3-1775846232/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): this leaf remained deterministic-first and evidence-capture only; no crate-specific rewrite or blanket lowering was introduced.
+127. Current active next leaf is `10.2.4`.
+   - focus: fix self-shadowing loop stabilization so it preserves C++ range-for compatibility without broad loop rewrites.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
