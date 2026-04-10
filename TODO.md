@@ -2754,7 +2754,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)
         - [x] *done* Leaf 12.3: Add regression tests for namespace/function collision patterns (done in Leaf 1.3)
         - [x] *done* Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (done in Leaf 1.4)
-      - [ ] Leaf 13: Fix extension-trait callable argument pass-style for tap family (`FnOnce(&mut Self)` and peers)
+      - [x] *done* Leaf 13: Fix extension-trait callable argument pass-style for tap family (`FnOnce(&mut Self)` and peers)
         - Current deterministic tap Stage D head: `invalid type argument of unary '*' (have 'int')` from generated `rusty::tap(10, [&](auto&& v) { return foo += *v; })`.
         - [x] *done* Leaf 13.1: Collect callable-bound metadata for extension-trait method parameters during pre-scan
           - Plan/scope check: implemented as a focused pre-scan metadata addition in `transpiler/src/codegen.rs`; change stayed well under the <1000 LOC target.
@@ -2793,7 +2793,14 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf133 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 13.4: Re-run tap parity matrix and record Stage D delta
+        - [x] *done* Leaf 13.4: Re-run tap parity matrix and record Stage D delta
+          - Re-ran tap parity matrix:
+            - `tests/transpile_tests/run_parity_matrix.sh --crate tap --work-root /tmp/rusty-parity-matrix-13-4-1775853247 --keep-work-dirs`
+          - Delta against prior deterministic tap Stage D head:
+            - prior Stage D head (`invalid type argument of unary '*' (have 'int')` from `rusty::tap(10, [&](auto&& v) { return foo += *v; })`) is removed
+            - Stage D now passes for tap (`Build: PASS`), and Stage E run also passes (`2 passed, 0 failed`)
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-13-4-1775853247/tap/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs

@@ -3673,8 +3673,18 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf133 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): this leaf is regression-only and validates shape-gated behavior; no new blanket rewrite path was introduced.
-140. Current active next leaf is `13.4`.
-   - focus: re-run tap parity matrix and record Stage D delta.
+140. `Leaf 13.4` is complete.
+   - plan/scope check: executed as parity evidence capture only (no transpiler code-path changes), staying well below the <1000 LOC target.
+   - re-ran tap parity matrix:
+     - `tests/transpile_tests/run_parity_matrix.sh --crate tap --work-root /tmp/rusty-parity-matrix-13-4-1775853247 --keep-work-dirs`
+   - deterministic Stage D delta:
+     - prior deterministic tap Stage D head (`invalid type argument of unary '*' (have 'int')` from generated `rusty::tap(10, [&](auto&& v) { return foo += *v; })`) is no longer present.
+     - current tap parity pipeline passes Stage D and Stage E (`Build: PASS`, run: `2 passed, 0 failed`).
+   - canonical artifacts:
+     - `/tmp/rusty-parity-matrix-13-4-1775853247/tap/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): maintained deterministic-first evidence workflow and recorded artifact-backed frontier movement before opening a new implementation leaf.
+141. Current active next leaf is `11.2`.
+   - focus: handle remaining by-value circular dependency architecture completion by decomposing/finishing unresolved follow-up work under Phase 21.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
