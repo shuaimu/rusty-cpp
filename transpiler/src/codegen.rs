@@ -374,6 +374,31 @@ struct ByValueCycleFeedbackEdge {
     owner_type: String,
     field_name: String,
     target_type: String,
+    rewrite_eligibility: ByValueCycleEdgeRewriteEligibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ByValueCycleEdgeRewriteEligibility {
+    DirectFieldType,
+    NonDirectFieldType,
+}
+
+impl ByValueCycleFeedbackEdge {
+    fn short_label(&self) -> String {
+        format!(
+            "{}.{} -> {}",
+            self.owner_type, self.field_name, self.target_type
+        )
+    }
+
+    fn ineligibility_reason(&self) -> Option<&'static str> {
+        match self.rewrite_eligibility {
+            ByValueCycleEdgeRewriteEligibility::DirectFieldType => None,
+            ByValueCycleEdgeRewriteEligibility::NonDirectFieldType => {
+                Some("non-direct field type shape")
+            }
+        }
+    }
 }
 
 impl CodeGen {
@@ -993,21 +1018,55 @@ impl CodeGen {
                 diagnostic
                     .feedback_edges
                     .iter()
-                    .map(|edge| {
-                        format!(
-                            "{}.{} -> {}",
-                            edge.owner_type, edge.field_name, edge.target_type
-                        )
-                    })
+                    .map(ByValueCycleFeedbackEdge::short_label)
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            let rewrite_eligible_edges = {
+                let mut edges: Vec<String> = diagnostic
+                    .feedback_edges
+                    .iter()
+                    .filter(|edge| {
+                        matches!(
+                            edge.rewrite_eligibility,
+                            ByValueCycleEdgeRewriteEligibility::DirectFieldType
+                        )
+                    })
+                    .map(ByValueCycleFeedbackEdge::short_label)
+                    .collect();
+                edges.sort();
+                edges.dedup();
+                if edges.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    edges.join(", ")
+                }
+            };
+            let rewrite_ineligible_edges = {
+                let mut edges: Vec<String> = diagnostic
+                    .feedback_edges
+                    .iter()
+                    .filter_map(|edge| {
+                        edge.ineligibility_reason()
+                            .map(|reason| format!("{} ({})", edge.short_label(), reason))
+                    })
+                    .collect();
+                edges.sort();
+                edges.dedup();
+                if edges.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    edges.join(", ")
+                }
+            };
             self.by_value_cycle_breaking_prototype_diagnostics.push(format!(
-                "by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope {}: [{}]; selected feedback edges: [{}]; cycle path: {}",
+                "by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope {}: [{}]; selected feedback edges: [{}]; cycle path: {}; rewrite-eligible edges: [{}]; rewrite-ineligible edges: [{}]",
                 scope,
                 sorted_names.join(", "),
                 selected_edges,
-                cycle_path
+                cycle_path,
+                rewrite_eligible_edges,
+                rewrite_ineligible_edges
             ));
         }
     }
@@ -1484,16 +1543,36 @@ impl CodeGen {
             sorted_targets.sort();
             sorted_targets.dedup();
             for target_type in sorted_targets {
+                let rewrite_eligibility =
+                    if Self::field_type_is_direct_by_value_target(&field.ty, &target_type) {
+                        ByValueCycleEdgeRewriteEligibility::DirectFieldType
+                    } else {
+                        ByValueCycleEdgeRewriteEligibility::NonDirectFieldType
+                    };
                 result.push(ByValueCycleFeedbackEdge {
                     owner_type: owner_type.to_string(),
                     field_name: field_name.clone(),
                     target_type,
+                    rewrite_eligibility,
                 });
             }
         }
         result.sort();
         result.dedup();
         result
+    }
+
+    fn field_type_is_direct_by_value_target(ty: &syn::Type, target_type: &str) -> bool {
+        match ty {
+            syn::Type::Path(tp) => tp
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == target_type),
+            syn::Type::Paren(p) => Self::field_type_is_direct_by_value_target(&p.elem, target_type),
+            syn::Type::Group(g) => Self::field_type_is_direct_by_value_target(&g.elem, target_type),
+            _ => false,
+        }
     }
 
     fn select_deterministic_feedback_edges_for_component(
@@ -36654,6 +36733,36 @@ mod tests {
         assert!(
             out.contains("selected feedback edges: [A.b1 -> B, A.b2 -> B]"),
             "Expected deterministic multi-edge feedback selection when one edge is insufficient to break SCC\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1125_opt_in_mode_reports_feedback_edge_rewrite_eligibility() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+                bs: Vec<B>,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("selected feedback edges: [A.b -> B, A.bs -> B]"),
+            "Expected deterministic selected-edge list for mixed direct/non-direct fields\nGot: {out}"
+        );
+        assert!(
+            out.contains("rewrite-eligible edges: [A.b -> B]"),
+            "Expected direct edge to be rewrite-eligible\nGot: {out}"
+        );
+        assert!(
+            out.contains(
+                "rewrite-ineligible edges: [A.bs -> B (non-direct field type shape)]"
+            ),
+            "Expected nested container edge to be marked rewrite-ineligible\nGot: {out}"
         );
     }
 

@@ -3683,8 +3683,26 @@ Active work items:
    - canonical artifacts:
      - `/tmp/rusty-parity-matrix-13-4-1775853247/tap/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
    - guardrail check against wrong-approach checklist (§11): maintained deterministic-first evidence workflow and recorded artifact-backed frontier movement before opening a new implementation leaf.
-141. Current active next leaf is `11.2`.
-   - focus: handle remaining by-value circular dependency architecture completion by decomposing/finishing unresolved follow-up work under Phase 21.
+141. `Leaf 11.2` was decomposed into follow-up subleaves (`11.2.5` to `11.2.8`) so remaining architecture work stays in <1000 LOC slices.
+   - decomposition rationale:
+     - `11.2.5`: diagnostics-only eligibility classification for deterministic rewrite planning.
+     - `11.2.6`: declaration-site rewrite for directly rewritable feedback edges only.
+     - `11.2.7`: constructor/initializer propagation for rewritten edges.
+     - `11.2.8`: parity-facing validation and closure reassessment for `Leaf 11.2`.
+142. `Leaf 11.2.5` is complete.
+   - plan/scope check: implementation + focused regression stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared prototype diagnostics hardening in `transpiler/src/codegen.rs`:
+     - added feedback-edge rewrite eligibility classification (`DirectFieldType` / `NonDirectFieldType`) while collecting by-value graph field edges.
+     - direct top-level field-type edges are marked rewrite-eligible; nested/container-shaped edges are marked rewrite-ineligible for this phase.
+     - opt-in prototype diagnostics now include deterministic eligible/ineligible edge sets (with ineligibility reason text) in addition to selected feedback edges.
+   - focused regressions:
+     - `test_leaf1125_opt_in_mode_reports_feedback_edge_rewrite_eligibility`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): this leaf is metadata/diagnostic-only, deterministic, and avoids blanket or crate-specific rewrite behavior.
+143. Current active next leaf is `11.2.6`.
+   - focus: implement opt-in declaration rewrite for rewrite-eligible direct by-value feedback edges while keeping ineligible edges diagnostic-only.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

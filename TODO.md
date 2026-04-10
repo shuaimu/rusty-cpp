@@ -2748,6 +2748,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler transpile_options_toggle -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
+            - [x] *done* Leaf 11.2.5: Classify prototype feedback edges by rewrite eligibility and emit deterministic eligible/ineligible diagnostics
+              - Plan/scope check: implementation + focused regression stayed well below the <1000 LOC threshold and required no additional decomposition.
+              - Implemented shared by-value cycle prototype hardening in `transpiler/src/codegen.rs`:
+                - added feedback-edge rewrite eligibility classification (`DirectFieldType` vs `NonDirectFieldType`) while collecting by-value graph field edges.
+                - classified direct top-level field-type edges as rewrite-eligible and nested/container-shaped edges as rewrite-ineligible for the current prototype phase.
+                - extended opt-in prototype diagnostics to emit deterministic selected edges plus explicit eligible/ineligible edge sets (with reason text for ineligible edges).
+              - Added focused regression:
+                - `test_leaf1125_opt_in_mode_reports_feedback_edge_rewrite_eligibility`
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
+              - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf only adds deterministic AST-aware eligibility metadata/diagnostics and does not perform blanket or crate-specific rewriting.
+            - [ ] Leaf 11.2.6: Implement opt-in declaration rewrite for rewrite-eligible feedback edges (direct by-value field types only)
+              - Scope: rewrite selected declaration sites to indirection form in a shared AST-aware way, leave all non-direct/ineligible edges diagnostic-only.
+            - [ ] Leaf 11.2.7: Propagate rewritten-edge type updates across constructors and field-initialization emission
+              - Scope: keep rewritten edges type-consistent in constructor signatures/bodies and struct-literal/initializer emission without global text patching.
+            - [ ] Leaf 11.2.8: Add parity-facing validation for opt-in cycle-breaking lowering and reassess Leaf 11.2 closure
+              - Scope: run semver plus seven-crate matrix probes with canonical artifacts, verify deterministic diagnostics/rewrite behavior, and document closure criteria.
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [x] *done* Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
