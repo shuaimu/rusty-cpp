@@ -3717,8 +3717,24 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): rewrite is opt-in, deterministic, AST-aware, and shape-gated; no crate-specific or post-generation text patching was introduced.
-144. Current active next leaf is `11.2.7`.
-   - focus: propagate rewritten-edge type updates across constructors and field-initialization emission so declaration rewrites become type-consistent end-to-end.
+144. `Leaf 11.2.7` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared constructor/initializer propagation in `transpiler/src/codegen.rs`:
+     - added a deterministic field-initializer wrapper path keyed by rewrite-plan metadata so rewritten edges initialize with `rusty::Box::make(...)`.
+     - updated drop-generated struct constructors to initialize rewritten by-value fields with `rusty::Box::make(std::move(...))` while preserving unchanged behavior for non-rewritten fields.
+     - updated data-enum variant constructor helper bodies (named and tuple variants) so rewritten field payloads are wrapped with `rusty::Box::make(...)`.
+     - updated struct-literal emission in both designated and positional-constructor paths to wrap rewritten field initializers with `rusty::Box::make(...)`.
+   - focused regressions:
+     - `test_leaf1127_opt_in_mode_drop_constructor_initializes_rewritten_field_with_box_make`
+     - `test_leaf1127_opt_in_mode_struct_literal_designated_field_initialization_wraps_with_box_make`
+     - `test_leaf1127_opt_in_mode_struct_literal_positional_constructor_initialization_wraps_with_box_make`
+     - `test_leaf1127_opt_in_mode_enum_variant_constructor_helper_wraps_rewritten_field_with_box_make`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): changes remain opt-in, deterministic, AST-aware, and field-shape-gated; no crate-specific rewrites or post-generation text patching were introduced.
+145. Current active next leaf is `11.2.8`.
+   - focus: run parity-facing validation for opt-in cycle-breaking lowering and reassess `Leaf 11.2` closure criteria.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

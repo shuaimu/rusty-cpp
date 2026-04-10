@@ -2776,8 +2776,22 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
               - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): rewrite remains opt-in, deterministic, AST-aware, and field-shape-gated with no crate-specific or post-generation text patching.
-            - [ ] Leaf 11.2.7: Propagate rewritten-edge type updates across constructors and field-initialization emission
-              - Scope: keep rewritten edges type-consistent in constructor signatures/bodies and struct-literal/initializer emission without global text patching.
+            - [x] *done* Leaf 11.2.7: Propagate rewritten-edge type updates across constructors and field-initialization emission
+              - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+              - Implemented shared constructor/initializer propagation in `transpiler/src/codegen.rs`:
+                - added a deterministic field-initializer wrapper path for rewritten edges (`rusty::Box::make(...)`) keyed by owner+field rewrite plan metadata from `11.2.6`.
+                - updated drop-generated struct constructors so rewritten by-value fields initialize via `rusty::Box::make(std::move(...))` while preserving non-rewritten field behavior.
+                - updated data-enum variant constructor helper bodies to wrap rewritten field payload initialization (named and tuple variants) with `rusty::Box::make(...)`.
+                - updated struct-literal field emission (designated and positional constructor paths) to wrap rewritten field initializers with `rusty::Box::make(...)`.
+              - Added focused regressions:
+                - `test_leaf1127_opt_in_mode_drop_constructor_initializes_rewritten_field_with_box_make`
+                - `test_leaf1127_opt_in_mode_struct_literal_designated_field_initialization_wraps_with_box_make`
+                - `test_leaf1127_opt_in_mode_struct_literal_positional_constructor_initialization_wraps_with_box_make`
+                - `test_leaf1127_opt_in_mode_enum_variant_constructor_helper_wraps_rewritten_field_with_box_make`
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
+              - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes remain opt-in, deterministic, AST-aware, and field-shape-gated; no crate-specific rewrites or post-generation text patching were introduced.
             - [ ] Leaf 11.2.8: Add parity-facing validation for opt-in cycle-breaking lowering and reassess Leaf 11.2 closure
               - Scope: run semver plus seven-crate matrix probes with canonical artifacts, verify deterministic diagnostics/rewrite behavior, and document closure criteria.
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies

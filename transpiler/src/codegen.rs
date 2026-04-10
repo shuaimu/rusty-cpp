@@ -1137,6 +1137,19 @@ impl CodeGen {
         }
     }
 
+    fn wrap_by_value_cycle_rewrite_field_initializer(
+        &self,
+        owner_type: &str,
+        field_name: &str,
+        value_expr: String,
+    ) -> String {
+        if self.should_rewrite_by_value_cycle_field_declaration(owner_type, field_name) {
+            format!("rusty::Box::make({})", value_expr)
+        } else {
+            value_expr
+        }
+    }
+
     /// Helper: check if node `start` can reach any node in the cycle set via outgoing edges.
     fn can_reach_cycle(
         start: usize,
@@ -4947,10 +4960,18 @@ impl CodeGen {
                                 .cloned()
                                 .unwrap_or_else(|| escape_cpp_keyword(&rust_field_name));
                             let param_name = format!("{}_init", rust_field_name);
+                            let rewrite_field_key =
+                                Self::format_by_value_field_name(None, &rust_field_name);
                             let init = if matches!(&field.ty, syn::Type::Reference(_)) {
                                 format!("{}({})", member_name, param_name)
                             } else {
-                                format!("{}(std::move({}))", member_name, param_name)
+                                let moved = format!("std::move({})", param_name);
+                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    &name_str,
+                                    &rewrite_field_key,
+                                    moved,
+                                );
+                                format!("{}({})", member_name, wrapped)
                             };
                             Some(init)
                         })
@@ -5022,10 +5043,18 @@ impl CodeGen {
                         .enumerate()
                         .map(|(i, field)| {
                             let param_name = format!("_{}_init", i);
+                            let rewrite_field_key =
+                                Self::format_by_value_field_name(None, &format!("#{}", i));
                             if matches!(&field.ty, syn::Type::Reference(_)) {
                                 format!("_{}({})", i, param_name)
                             } else {
-                                format!("_{}(std::move({}))", i, param_name)
+                                let moved = format!("std::move({})", param_name);
+                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    &name_str,
+                                    &rewrite_field_key,
+                                    moved,
+                                );
+                                format!("_{}({})", i, wrapped)
                             }
                         })
                         .collect();
@@ -5639,6 +5668,7 @@ impl CodeGen {
 
                 match &variant.fields {
                     syn::Fields::Unnamed(fields) => {
+                        let variant_name = vname.to_string();
                         let params: Vec<String> = fields
                             .unnamed
                             .iter()
@@ -5655,7 +5685,16 @@ impl CodeGen {
                             .map(|(i, f)| {
                                 let ty = self.map_type(&f.ty);
                                 let param = format!("_{}", i);
-                                format!("std::forward<{}>({})", ty, param)
+                                let forwarded = format!("std::forward<{}>({})", ty, param);
+                                let rewrite_field_key = Self::format_by_value_field_name(
+                                    Some(variant_name.as_str()),
+                                    &format!("#{}", i),
+                                );
+                                self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    &enum_owner_name,
+                                    &rewrite_field_key,
+                                    forwarded,
+                                )
                             })
                             .collect();
                         if has_generics {
@@ -5671,6 +5710,7 @@ impl CodeGen {
                         ));
                     }
                     syn::Fields::Named(fields) => {
+                        let variant_name = vname.to_string();
                         let params: Vec<String> = fields
                             .named
                             .iter()
@@ -5686,7 +5726,18 @@ impl CodeGen {
                             .map(|f| {
                                 let fname = f.ident.as_ref().unwrap();
                                 let ftype = self.map_type(&f.ty);
-                                format!(".{} = std::forward<{}>({})", fname, ftype, fname)
+                                let forwarded =
+                                    format!("std::forward<{}>({})", ftype, fname);
+                                let rewrite_field_key = Self::format_by_value_field_name(
+                                    Some(variant_name.as_str()),
+                                    &fname.to_string(),
+                                );
+                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    &enum_owner_name,
+                                    &rewrite_field_key,
+                                    forwarded,
+                                );
+                                format!(".{} = {}", fname, wrapped)
                             })
                             .collect();
                         if has_generics {
@@ -14933,9 +14984,16 @@ impl CodeGen {
                                     .expect("field presence checked above");
                                 let field_ty =
                                     self.lookup_struct_literal_field_type(struct_expr, field_name);
-                                self.emit_expr_to_string_with_expected_and_move_if_needed(
+                                let value = self.emit_expr_to_string_with_expected_and_move_if_needed(
                                     expr,
                                     field_ty.as_ref(),
+                                );
+                                let rewrite_field_key =
+                                    Self::format_by_value_field_name(None, field_name);
+                                self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    struct_name,
+                                    &rewrite_field_key,
+                                    value,
                                 )
                             })
                             .collect();
@@ -14981,6 +15039,21 @@ impl CodeGen {
                     self.lookup_struct_literal_field_type(struct_expr, &rust_member_name);
                 let val = self
                     .emit_expr_to_string_with_expected_and_move_if_needed(&f.expr, field_ty.as_ref());
+                let rewrite_field_member = match &f.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(idx) => format!("#{}", idx.index),
+                };
+                let rewrite_field_key =
+                    Self::format_by_value_field_name(None, &rewrite_field_member);
+                let val = if let Some(struct_name) = resolved_struct_name.as_ref() {
+                    self.wrap_by_value_cycle_rewrite_field_initializer(
+                        struct_name,
+                        &rewrite_field_key,
+                        val,
+                    )
+                } else {
+                    val
+                };
                 format!(".{} = {}", emitted_member_name, val)
             })
             .collect();
@@ -36951,6 +37024,98 @@ mod tests {
         assert!(
             out.contains("rusty::Box<B> b;"),
             "Expected direct enum variant field declaration rewrite to rusty::Box\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1127_opt_in_mode_drop_constructor_initializes_rewritten_field_with_box_make() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            impl Drop for A {
+                fn drop(&mut self) {}
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("A(B b_init) : b(rusty::Box::make(std::move(b_init))) {}"),
+            "Expected drop-generated constructor to wrap rewritten field initialization with rusty::Box::make\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1127_opt_in_mode_struct_literal_designated_field_initialization_wraps_with_box_make() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                a: A,
+            }
+
+            fn mk(b: B) -> A {
+                A { b: b }
+            }
+            "#,
+        );
+        assert!(
+            out.contains(".b = rusty::Box::make(std::move(b))"),
+            "Expected struct-literal field initialization to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1127_opt_in_mode_struct_literal_positional_constructor_initialization_wraps_with_box_make() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            impl Drop for A {
+                fn drop(&mut self) {}
+            }
+
+            struct B {
+                a: A,
+            }
+
+            fn mk(b: B) -> A {
+                A { b: b }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return A(rusty::Box::make(std::move(b)));"),
+            "Expected positional constructor path to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1127_opt_in_mode_enum_variant_constructor_helper_wraps_rewritten_field_with_box_make() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            enum A {
+                Hold { b: B },
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains(".b = rusty::Box::make(std::forward<B>(b))"),
+            "Expected enum variant constructor helper to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
         );
     }
 
