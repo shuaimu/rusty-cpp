@@ -25452,6 +25452,13 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_from_iter_with_turbofish() {
+        // Vec::from_iter::<i32>(iter) should be rewritten to rusty::Vec<int32_t>::from_iter
+        let out = transpile_str("fn f(iter: impl IntoIterator<Item=i32>) { let v = Vec::<i32>::from_iter(iter); }");
+        assert!(out.contains("rusty::Vec<int32_t>::from_iter"));
+    }
+
+    #[test]
     fn test_condvar_type() {
         let out = transpile_str("fn f(cv: Condvar) {}");
         assert!(out.contains("rusty::Condvar cv"));

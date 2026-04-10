@@ -2626,9 +2626,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - The root cause is in `runtime_try_pattern_details` which generates pattern bindings using Rust identifiers directly without allocating unique C++ names.
         - [x] *done* Leaf 10.3: Fix `Vec` used without template arguments in emitted code
           - Fixed `Vec::from_iter` → `rusty::Vec::from_iter` by adding special handling in `emit_expr_path_to_string` and `map_type` to rewrite unqualified `Vec` to `rusty::Vec`
-          - Added regression test `test_vec_from_iter_mapping`
+          - Added regression tests `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish`
           - Note: `Vec::new_()` without template args is a separate issue related to variable type annotation not propagating to call expressions
-        - [ ] Leaf 10.4: Add regression tests for string API and iterator translations
+        - [x] *done* Leaf 10.4: Add regression tests for string API and iterator translations
+          - Added `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish` for iterator translations
+          - Existing tests cover string API: `test_str_as_bytes_method`, `test_leaf4154448_to_string_emits_rusty_to_string`, etc.
       - [ ] Leaf 10.5: Fix variable shadowing in try-style match patterns (BLOCKED - deep architectural change)
         - **Issue**: In `runtime_try_pattern_details` for `Pat::Ident`, pattern bindings use Rust identifier directly (e.g., `rhs`) instead of allocating unique C++ names. When the Rust code has `let rhs = match rhs.next() { Some(rhs) => rhs }`, the inner `rhs` shadows the outer, and the generated C++ has `const auto rhs_shadow1 = rhs_shadow1.next()` causing "use before deduction" error.
         - **Root cause**: `collect_pattern_binding_stmts` calls `allocate_local_cpp_name` which requires `&mut self`, cascading to 35+ functions needing signature changes.
