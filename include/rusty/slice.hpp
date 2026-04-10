@@ -558,6 +558,16 @@ decltype(auto) take(Range&& range, size_t remaining) {
     }
 }
 
+template<typename Range, typename Pred>
+bool all(Range&& range, Pred&& pred) {
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        if (!std::invoke(pred, std::forward<decltype(item)>(item))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 template<typename Range, typename Acc, typename Func>
 auto fold(Range&& range, Acc init, Func&& func) {
     auto acc = std::move(init);

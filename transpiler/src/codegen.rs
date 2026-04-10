@@ -11909,6 +11909,20 @@ impl CodeGen {
             // Return &[u8] so map_type converts it to std::span<const uint8_t>
             return syn::parse_str::<syn::Type>("&[u8]").ok();
         }
+        // str::bytes() exposes an iterator over u8 values.
+        if method == "bytes" && mc.args.is_empty() {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                if !self.is_known_string_like_type(&receiver_ty) {
+                    return None;
+                }
+            }
+            return syn::parse_str::<syn::Type>("&[u8]").ok();
+        }
+
+        if method == "all" && mc.args.len() == 1 && self.is_iterator_like_receiver_expr(&mc.receiver)
+        {
+            return Some(parse_quote!(bool));
+        }
 
         if matches!(method.as_str(), "add" | "offset" | "sub") && mc.args.len() == 1 {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
@@ -13938,6 +13952,12 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::as_bytes({})", receiver);
         }
+        // Rust `str::bytes()` iterator source on string-like receivers should
+        // lower to the same byte-span helper surface as `as_bytes()`.
+        if mc.method == "bytes" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::as_bytes({})", receiver);
+        }
         // Rust `value.to_string()` (Display trait) → `rusty::to_string(value)`.
         // C++ user-defined types don't have a `.to_string()` member; dispatch
         // through a SFINAE helper that tries `.to_string()`, then `std::to_string()`.
@@ -14098,6 +14118,9 @@ impl CodeGen {
         }
         if let Some(fold_call) = self.try_emit_iter_fold_call(mc) {
             return fold_call;
+        }
+        if let Some(all_call) = self.try_emit_iter_all_call(mc) {
+            return all_call;
         }
 
         let method_name = mc.method.to_string();
@@ -16053,6 +16076,14 @@ impl CodeGen {
                             return Some(item_ty);
                         }
                     }
+                }
+                if (method == "bytes" || method == "as_bytes") && mc.args.is_empty() {
+                    if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                        if !self.is_known_string_like_type(&receiver_ty) {
+                            return self.infer_iter_item_type_from_expr(&mc.receiver);
+                        }
+                    }
+                    return Some(parse_quote!(u8));
                 }
                 self.infer_iter_item_type_from_expr(&mc.receiver)
             }
@@ -19047,6 +19078,18 @@ impl CodeGen {
         let init = self.emit_expr_maybe_move(mc.args.first()?);
         let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
         Some(format!("rusty::fold({}, {}, {})", receiver, init, reducer))
+    }
+
+    fn try_emit_iter_all_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "all" || mc.args.len() != 1 {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let predicate = self.emit_expr_maybe_move(mc.args.first()?);
+        Some(format!("rusty::all({}, {})", receiver, predicate))
     }
 
     fn try_emit_error_description_dispatch_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -27143,6 +27186,37 @@ mod tests {
         assert!(
             out.contains("rusty::as_bytes("),
             "str::as_bytes() should emit rusty::as_bytes(), got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf2114_str_bytes_all_lowers_to_runtime_iter_helper() {
+        let out = transpile_str(
+            r#"
+            fn all_digits(s: &str) -> bool {
+                s.bytes().all(|b| b.is_ascii_digit())
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::all("),
+            "bytes().all(...) should lower to rusty::all(...), got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::as_bytes("),
+            "bytes() receiver should lower via rusty::as_bytes(...), got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::is_ascii_digit("),
+            "u8::is_ascii_digit should lower to runtime helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".bytes().all("),
+            "raw .bytes().all(...) member chain should not remain, got:\n{}",
             out
         );
     }

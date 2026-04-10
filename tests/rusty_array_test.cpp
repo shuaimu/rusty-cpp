@@ -436,6 +436,21 @@ void test_for_in_map_fold_rusty_option_next_shape() {
     printf("PASS\n");
 }
 
+void test_all_iterator_helper_shape() {
+    printf("test_all_iterator_helper_shape: ");
+    {
+        auto digits = rusty::as_bytes(std::string_view("0123456789"));
+        assert(rusty::all(digits, [](uint8_t b) { return rusty::is_ascii_digit(b); }));
+        auto mixed = rusty::as_bytes(std::string_view("123x"));
+        assert(!rusty::all(mixed, [](uint8_t b) { return rusty::is_ascii_digit(b); }));
+    }
+    {
+        assert(rusty::all(OptionalCounterIter{}, [](int value) { return value < 4; }));
+        assert(!rusty::all(OptionalCounterIter{}, [](int value) { return value < 2; }));
+    }
+    printf("PASS\n");
+}
+
 void test_take_iterator_adapter_shape() {
     printf("test_take_iterator_adapter_shape: ");
     {
@@ -596,6 +611,7 @@ int main() {
     test_filter_map_span_shape();
     test_for_in_map_fold_optional_next_shape();
     test_for_in_map_fold_rusty_option_next_shape();
+    test_all_iterator_helper_shape();
     test_take_iterator_adapter_shape();
     test_rev_enumerate_iterator_adapter_shape();
     test_iter_mut_enumerate_preserves_mutability_shape();

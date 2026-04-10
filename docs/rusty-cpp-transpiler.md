@@ -3963,7 +3963,28 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): interop compile coverage remains shared harness/CI orchestration and fixture-agnostic workflow assertions; no bridge-wrapper path, no crate-specific generated-text patching, and no global text substitutions were introduced.
 157. `Leaf 22.8` and `Phase 22` are now complete (`22.8.1`-`22.8.3` all done): transpile-stage + dry-run + compile-stage coverage exists for the `cpp::` interop MVP path.
-158. Current active next leaf is `4.15.4.3.3.3` (re-run full seven-crate parity matrix and capture the deterministic next head in the long-running parity stabilization chain).
+158. `Leaf 10.5.5` is complete.
+   - plan/scope check: shared transpiler/runtime updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes:
+     - `transpiler/src/codegen.rs`:
+       - lowered string-like `.bytes()` to `rusty::as_bytes(...)`,
+       - lowered iterator-like `.all(...)` to `rusty::all(...)`,
+       - updated local method/item inference so `bytes`/`as_bytes` feed iterator item type `u8` and `.all(...)` infers `bool`.
+     - `include/rusty/slice.hpp`: added `rusty::all(range, pred)` helper over `for_in(...)`.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`: `test_leaf2114_str_bytes_all_lowers_to_runtime_iter_helper`
+     - `tests/rusty_array_test.cpp`: `test_all_iterator_helper_shape`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-21-14-1b-1775860634 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1064` (`std::string_view` missing `.bytes()` / `.all(...)` chain) is collapsed.
+     - new first deterministic head remains at `runner.cpp:1064` but is now a `std::visit` argument-shape mismatch (`bool, bool`) in the same `Prerelease::cmp` branch family.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-21-14-1b-1775860634/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and shape-gated in AST-aware lowering/runtime surfaces; no crate-specific rewrites/scripts and no blanket callsite rewrites were introduced.
+159. Current active next leaf is `10.5.6` (collapse the post-10.5.5 deterministic semver `std::visit` bool-branch dispatch head and re-probe parity).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

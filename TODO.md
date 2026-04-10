@@ -2693,6 +2693,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - New deterministic Stage D head starts at `runner.cpp:1064`: `std::basic_string_view<char>` has no `.bytes()` in `lhs.bytes().all(...)` / `rhs_shadow2.bytes().all(...)` shape.
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-4-1775849157/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+        - [x] *done* Leaf 10.5.5: Collapse semver Stage D `.bytes().all(...)` iterator/member-shape head generically (no crate-specific scripts), add fixture-agnostic regressions, then re-run semver parity
+          - Plan/scope check: shared transpiler/runtime changes + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler/runtime fixes:
+            - `transpiler/src/codegen.rs`:
+              - lowered string-like `.bytes()` to `rusty::as_bytes(...)`,
+              - added iterator-like `.all(...)` lowering to `rusty::all(...)`,
+              - updated local method/type inference so `bytes`/`as_bytes` feed iterator item type `u8` and `.all(...)` infers `bool`.
+            - `include/rusty/slice.hpp`: added shared `rusty::all(range, pred)` helper over `for_in(...)` iteration.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`: `test_leaf2114_str_bytes_all_lowers_to_runtime_iter_helper`.
+            - `tests/rusty_array_test.cpp`: `test_all_iterator_helper_shape`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-21-14-1b-1775860634 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior `.bytes()`/`.all(...)` missing-member family at `runner.cpp:1064` is removed from first hard errors.
+            - new deterministic Stage D head starts at `runner.cpp:1064` with `std::visit` argument-shape mismatch (`bool, bool` branch form) in the same `Prerelease::cmp` frontier.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-21-14-1b-1775860634/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in core lowering/runtime surfaces; no crate-specific rewrites/scripts or blanket callsite rewrites were introduced.
+        - [ ] Leaf 10.5.6: Collapse the post-10.5.5 deterministic semver Stage D `std::visit` bool-branch dispatch head generically (starting with `runner.cpp:1064` `std::visit` argument-shape mismatch on `bool, bool`), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
