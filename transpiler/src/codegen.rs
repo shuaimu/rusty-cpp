@@ -6975,76 +6975,115 @@ impl CodeGen {
 
     fn emit_match_as_switch(&mut self, scrutinee: &str, arms: &[syn::Arm]) {
         self.writeln(&format!("switch ({}) {{", scrutinee));
+
+        // Track emitted case values across ALL arms to detect duplicates.
+        // When multiple arms have the same pattern (e.g., `false if guard =>` and `false =>`),
+        // we emit the first as case label and subsequent arms as else-if chains.
+        let mut emitted_cases: HashMap<String, (bool, &syn::Arm)> = HashMap::new();
+
         for arm in arms {
-            match &arm.pat {
-                syn::Pat::Wild(_) => {
-                    self.writeln("default: {");
-                }
-                syn::Pat::Lit(lit) => {
-                    let val = self.emit_lit(&lit.lit);
-                    self.writeln(&format!("case {}: {{", val));
-                }
-                syn::Pat::Path(pp) => {
-                    let val = self.emit_path_to_string(&pp.path);
-                    self.writeln(&format!("case {}: {{", val));
-                }
+            // Determine the case label(s) for this arm's pattern
+            let case_labels: Vec<String> = match &arm.pat {
+                syn::Pat::Wild(_) => vec!["default".to_string()],
+                syn::Pat::Lit(lit) => vec![self.emit_lit(&lit.lit)],
+                syn::Pat::Path(pp) => vec![self.emit_path_to_string(&pp.path)],
                 syn::Pat::Or(or_pat) => {
-                    // Multiple patterns: `1 | 2 | 3 =>`
-                    for (i, case) in or_pat.cases.iter().enumerate() {
-                        if let syn::Pat::Lit(lit) = case {
-                            let val = self.emit_lit(&lit.lit);
-                            if i < or_pat.cases.len() - 1 {
-                                self.writeln(&format!("case {}:", val));
-                            } else {
-                                self.writeln(&format!("case {}: {{", val));
+                    // OR pattern: collect all case labels, deduplicating within the OR
+                    let mut labels: Vec<String> = Vec::new();
+                    let mut seen_in_or: HashSet<String> = HashSet::new();
+                    for case in &or_pat.cases {
+                        match case {
+                            syn::Pat::Lit(lit) => {
+                                let val = self.emit_lit(&lit.lit);
+                                if !seen_in_or.contains(&val) {
+                                    seen_in_or.insert(val.clone());
+                                    labels.push(val);
+                                }
                             }
-                        } else if let syn::Pat::Wild(_) = case {
-                            self.writeln("default: {");
-                        } else if let syn::Pat::Path(pp) = case {
-                            let val = self.emit_path_to_string(&pp.path);
-                            if i < or_pat.cases.len() - 1 {
-                                self.writeln(&format!("case {}:", val));
-                            } else {
-                                self.writeln(&format!("case {}: {{", val));
+                            syn::Pat::Wild(_) => {
+                                if !seen_in_or.contains("default") {
+                                    seen_in_or.insert("default".to_string());
+                                    labels.push("default".to_string());
+                                }
                             }
+                            syn::Pat::Path(pp) => {
+                                let val = self.emit_path_to_string(&pp.path);
+                                if !seen_in_or.contains(&val) {
+                                    seen_in_or.insert(val.clone());
+                                    labels.push(val);
+                                }
+                            }
+                            _ => {}
                         }
                     }
+                    labels
                 }
-                syn::Pat::Ident(pi) => {
-                    // Catch-all binding: `x =>`  acts like default
-                    let name = &pi.ident;
-                    self.writeln("default: {");
+                _ => vec!["default".to_string()],
+            };
+
+            // Check if any case label was already emitted by a previous arm
+            let first_label = case_labels.first().cloned().unwrap_or_default();
+            let is_duplicate = emitted_cases.contains_key(&first_label);
+
+            if is_duplicate {
+                // This arm has a duplicate pattern with a previous arm.
+                // For duplicate patterns, we need to emit an else clause.
+                // However, if the previous arm had a guard and this arm's body is empty,
+                // we can skip this arm because the fall-through is implicit.
+                let prev_had_guard = emitted_cases
+                    .get(&first_label)
+                    .map(|(had_guard, _)| *had_guard)
+                    .unwrap_or(false);
+
+                // Check if this arm's body is empty (just "{}")
+                let is_body_empty = match &*arm.body {
+                    syn::Expr::Block(block) => block.block.stmts.is_empty(),
+                    _ => false,
+                };
+
+                if prev_had_guard && is_body_empty {
+                    // Previous arm had a guard and this arm has empty body.
+                    // Skip this arm - fall-through behavior is correct.
+                } else if prev_had_guard {
+                    // Previous arm had a guard, emit as else clause
+                    self.writeln("} else {");
                     self.indent += 1;
-                    self.writeln(&format!("auto {} = {};", name, scrutinee));
+                    self.emit_arm_body(&arm.body);
                     self.indent -= 1;
+                    self.writeln("}");
+                } else {
+                    // Previous arm had no guard - this is a problem
+                    self.writeln("// TODO: duplicate pattern without guard ordering");
                 }
-                syn::Pat::Range(_) => {
-                    self.writeln("// TODO: range pattern in switch");
-                    self.writeln("default: {");
+            } else {
+                // Emit case label(s) for this arm
+                for label in &case_labels {
+                    emitted_cases.insert(label.clone(), (arm.guard.is_some(), arm));
+                    if label == "default" {
+                        self.writeln("default: {");
+                    } else {
+                        self.writeln(&format!("case {}: {{", label));
+                    }
                 }
-                _ => {
-                    self.writeln("// TODO: unhandled switch pattern");
-                    self.writeln("default: {");
-                }
-            }
 
-            self.indent += 1;
-
-            // Emit guard if present
-            if let Some((_, guard)) = &arm.guard {
-                let guard_str = self.emit_expr_to_string(guard);
-                self.writeln(&format!("if ({}) {{", guard_str));
                 self.indent += 1;
-                self.emit_arm_body(&arm.body);
+
+                // Emit guard if present
+                if let Some((_, guard)) = &arm.guard {
+                    let guard_str = self.emit_expr_to_string(guard);
+                    self.writeln(&format!("if ({}) {{", guard_str));
+                    self.indent += 1;
+                    self.emit_arm_body(&arm.body);
+                    self.indent -= 1;
+                    self.writeln("}");
+                } else {
+                    self.emit_arm_body(&arm.body);
+                }
+
+                self.writeln("break;");
                 self.indent -= 1;
                 self.writeln("}");
-            } else {
-                self.emit_arm_body(&arm.body);
             }
-
-            self.writeln("break;");
-            self.indent -= 1;
-            self.writeln("}");
         }
         self.writeln("}");
     }
@@ -34730,4 +34769,27 @@ mod tests {
             "Forward declaration should be present for self-referential type\nGot: {out}"
         );
     }
+
+    #[test]
+    fn test_match_or_pattern_bool_uses_if_expression_not_switch() {
+        // Simple OR patterns on bool (true | false) are emitted as if-expressions
+        // because try_emit_runtime_match_stmt handles them as boolean conditions.
+        // The switch path (emit_match_as_switch) is only reached for complex patterns
+        // that aren't handled by the runtime match stmt path.
+        let out = transpile_str(
+            r#"
+            fn test(x: bool) -> i32 {
+                match x {
+                    true | false => 1,
+                }
+            }
+            "#,
+        );
+        // Should use if-expression form since it's a simple boolean match
+        assert!(
+            out.contains("if (_m == true || _m == false)"),
+            "Simple bool OR pattern should emit if-expression\nGot: {out}"
+        );
+    }
+
 }

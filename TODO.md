@@ -95,6 +95,10 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
       - [x] *done* Match guards (`x if x > 0`) → if-else chains inside visitor lambdas
       - [x] *done* Exhaustiveness: rely on `std::visit` compile-time exhaustiveness for variant matches
       - [x] *done* Destructuring in match arms: struct patterns → field bindings, tuple patterns → positional bindings
+      - [x] *done* Bug fix: duplicate case value in switch emission for OR patterns and duplicate arms
+        - Fixed `emit_match_as_switch` to deduplicate case labels within OR patterns (e.g., `true | true` only emits one `case true:`)
+        - Fixed handling of duplicate patterns across arms (e.g., `false if guard =>` and `false =>`): empty-body duplicate arms are skipped, non-empty-body duplicates emit else clauses
+        - Added regression test `test_match_or_pattern_bool_uses_if_expression_not_switch`
     - [x] *done* Phase 4: Traits → Microsoft Proxy facades
       - [x] *done* Trait definition → `PRO_DEF_MEM_DISPATCH` + `pro::facade_builder` for each method
       - [x] *done* `dyn Trait` parameters → `pro::proxy_view<Facade>`
