@@ -18285,6 +18285,53 @@ impl CodeGen {
                 return mapped;
             }
         }
+        // Special case: unqualified `Vec` in paths should map to rusty::Vec
+        // This handles `Vec::from_iter`, but NOT constructor methods like new/new_/from/try_from
+        // which are handled specially in emit_call_expr_to_string.
+        if path.segments.len() >= 2 {
+            let first = path.segments[0].ident.to_string();
+            if first == "Vec" {
+                let method = path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                // Skip constructor methods - they are handled specially elsewhere
+                let is_constructor = matches!(
+                    method.as_str(),
+                    "new" | "new_" | "from" | "try_from" | "default" | "with_capacity"
+                );
+                if is_constructor {
+                    // Let the constructor handling in emit_call_expr_to_string take care of it
+                    return self.emit_path_to_string(path);
+                }
+                // Reconstruct the path with rusty::Vec as the owner
+                let middle: String = path.segments
+                    .iter()
+                    .take(path.segments.len() - 1)
+                    .skip(1)
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let middle = if middle.is_empty() {
+                    String::new()
+                } else {
+                    middle + "::"
+                };
+                // Check if there are template arguments on Vec
+                if let syn::PathArguments::AngleBracketed(args) = &path.segments[0].arguments {
+                    let generic_args: Vec<String> = args
+                        .args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                            syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !generic_args.is_empty() {
+                        return format!("rusty::Vec<{}>::{}{}", generic_args.join(", "), middle, method);
+                    }
+                }
+                return format!("rusty::Vec::{}{}", middle, method);
+            }
+        }
         if self.is_unit_struct_path(path) {
             return format!("{}{{}}", self.emit_path_to_string(path));
         }
@@ -18855,6 +18902,29 @@ impl CodeGen {
                                 }
                             }
                         }
+                    }
+                }
+
+                // Special case: Vec → rusty::Vec
+                // This handles both Vec and Vec<T> by rewriting the base type.
+                if let Some(last_seg) = tp.path.segments.last() {
+                    let seg_name = last_seg.ident.to_string();
+                    if seg_name == "Vec" {
+                        // Rewrite Vec to rusty::Vec, preserving any generic arguments
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            let generic_args: Vec<String> = args
+                                .args
+                                .iter()
+                                .filter_map(|arg| match arg {
+                                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                                    syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                                    _ => None,
+                                })
+                                .collect();
+                            return format!("rusty::Vec<{}>", generic_args.join(", "));
+                        }
+                        // Vec without generic args
+                        return "rusty::Vec".to_string();
                     }
                 }
 
@@ -25372,6 +25442,13 @@ mod tests {
     fn test_vec_new_mapping() {
         let out = transpile_str("fn f() { let v = Vec::new(); }");
         assert!(out.contains("rusty::Vec::new_()"));
+    }
+
+    #[test]
+    fn test_vec_from_iter_mapping() {
+        // Vec::from_iter should be rewritten to rusty::Vec::from_iter
+        let out = transpile_str("fn f(iter: impl IntoIterator<Item=i32>) { let v = Vec::from_iter(iter); }");
+        assert!(out.contains("rusty::Vec::from_iter"));
     }
 
     #[test]
