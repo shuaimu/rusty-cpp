@@ -9787,10 +9787,14 @@ impl CodeGen {
             }
         }
 
-        out.push_str(&format!(
-            "return {}; }}()",
-            self.match_expr_unreachable_fallback_with_expected(expected_ty)
-        ));
+        if expected_ty.is_some() {
+            out.push_str(&format!(
+                "return {}; }}()",
+                self.match_expr_unreachable_fallback_with_expected(expected_ty)
+            ));
+        } else {
+            out.push_str("rusty::intrinsics::unreachable(); }()");
+        }
         out
     }
 
@@ -14095,6 +14099,9 @@ impl CodeGen {
         }
         if let Some(into_call) = self.try_emit_into_method_call(mc, expected_ty) {
             return into_call;
+        }
+        if let Some(then_with_call) = self.try_emit_ordering_then_with_call(mc) {
+            return then_with_call;
         }
         if mc.method == "assume_init" && mc.args.is_empty() {
             if let Some(expected) = expected_ty {
@@ -19264,6 +19271,50 @@ impl CodeGen {
         Some(format!("rusty::all({}, {})", receiver, predicate))
     }
 
+    fn is_ordering_like_type(&self, ty: &syn::Type) -> bool {
+        let mapped = self.map_type(ty);
+        mapped == "Ordering"
+            || mapped == "rusty::cmp::Ordering"
+            || mapped.ends_with("::Ordering")
+    }
+
+    fn is_ordering_then_with_receiver_shape(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::MethodCall(inner) => {
+                (inner.method == "cmp" && inner.args.len() == 1)
+                    || (inner.method == "then_with" && inner.args.len() == 1)
+            }
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(&call.func) else {
+                    return false;
+                };
+                path_expr
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "cmp" || seg.ident == "then_with")
+            }
+            _ => false,
+        }
+    }
+
+    fn try_emit_ordering_then_with_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "then_with" || mc.args.len() != 1 {
+            return None;
+        }
+        let receiver_is_ordering = self
+            .infer_simple_expr_type(&mc.receiver)
+            .as_ref()
+            .is_some_and(|ty| self.is_ordering_like_type(ty))
+            || self.is_ordering_then_with_receiver_shape(&mc.receiver);
+        if !receiver_is_ordering {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let callback = self.emit_expr_maybe_move(mc.args.first()?);
+        Some(format!("rusty::cmp::then_with({}, {})", receiver, callback))
+    }
+
     fn try_emit_error_description_dispatch_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         if mc.method != "description" || !mc.args.is_empty() {
             return None;
@@ -22969,6 +23020,13 @@ Ordering cmp(const A& a, const B& b) {\n\
         if (b < a) return Ordering::Greater;\n\
         return Ordering::Equal;\n\
     }\n\
+}\n\
+template<typename F>\n\
+Ordering then_with(Ordering ord, F&& f) {\n\
+    if (ord == Ordering::Equal) {\n\
+        return std::forward<F>(f)();\n\
+    }\n\
+    return ord;\n\
 }\n\
 }\n\
 // Clone: dispatches to .clone() if available, otherwise copy-constructs.\n\
@@ -27429,6 +27487,80 @@ mod tests {
         assert!(
             !out.contains("std::visit(overloaded {"),
             "tuple bool match should not lower via std::visit, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return rusty::intrinsics::unreachable();"),
+            "tuple value-match fallback should not emit return-unreachable in non-void lambda, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1057_ordering_then_with_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            use core::cmp::Ordering;
+            fn f(a: usize, b: usize) -> Ordering {
+                a.cmp(&b).then_with(|| Ordering::Equal)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::cmp::then_with("),
+            "Ordering::then_with should lower to runtime helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".then_with("),
+            "member .then_with(...) should not remain in emitted C++, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1057_ordering_then_with_lowers_for_cmp_call_receiver_shape() {
+        let out = transpile_str(
+            r#"
+            use core::cmp::Ordering;
+            fn f(lhs: &str, rhs: &str) -> Ordering {
+                let string_cmp = || lhs.cmp(rhs);
+                core::cmp::Ord::cmp(lhs.len(), rhs.len()).then_with(string_cmp)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::cmp::then_with("),
+            "Ordering::then_with on cmp-call receiver should lower to runtime helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".then_with("),
+            "member .then_with(...) should not remain in emitted C++, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1057_ordering_then_with_chain_lowers_to_runtime_helper_calls() {
+        let out = transpile_str(
+            r#"
+            use core::cmp::Ordering;
+            fn f(a: usize, b: usize, c: usize) -> Ordering {
+                a.cmp(&b)
+                    .then_with(|| b.cmp(&c))
+                    .then_with(|| Ordering::Equal)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::cmp::then_with("),
+            "chained Ordering::then_with should lower to runtime helper calls, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".then_with("),
+            "member .then_with(...) should not remain in emitted C++, got:\n{}",
             out
         );
     }

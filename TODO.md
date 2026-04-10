@@ -2734,7 +2734,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-6b-1775863888/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated, avoided blanket method-call rewrites, and introduced no crate-specific scripts or generated-text patching.
-        - [ ] Leaf 10.5.7: Collapse the post-10.5.6 deterministic semver Stage D `Prerelease::cmp` ordering/lambda-return family generically (starting with `runner.cpp:1064` `cmp(...).then_with(...)` on non-chainable `Ordering` and adjacent `Ordering` vs `void` lambda-return mismatch), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.7: Collapse the post-10.5.6 deterministic semver Stage D `Prerelease::cmp` ordering/lambda-return family generically (starting with `runner.cpp:1064` `cmp(...).then_with(...)` on non-chainable `Ordering` and adjacent `Ordering` vs `void` lambda-return mismatch), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler/runtime-fallback updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - added shape-gated `Ordering::then_with` lowering (`try_emit_ordering_then_with_call`) that emits `rusty::cmp::then_with(receiver, callback)` for:
+              - inferred Ordering-typed receivers,
+              - `cmp(...)` receiver families (method and call/UFCS forms),
+              - chained `then_with(...).then_with(...)` receiver families.
+            - hardened tuple value-match fallback (non-expected-type path) to emit terminal `rusty::intrinsics::unreachable();` statement form (no invalid `return void` shape in non-void lambdas).
+          - Implemented shared runtime-fallback helper surface in `transpiler/src/codegen.rs` fallback text:
+            - added `rusty::cmp::then_with(Ordering, F&&)` helper in `runtime_path_fallback_helpers_text()`.
+          - Added focused fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf1057_ordering_then_with_lowers_to_runtime_helper`
+            - `test_leaf1057_ordering_then_with_lowers_for_cmp_call_receiver_shape`
+            - `test_leaf1057_ordering_then_with_chain_lowers_to_runtime_helper_calls`
+            - updated `test_leaf1056_tuple_bool_match_uses_value_conditions_not_visit` to assert non-void fallback does not emit `return rusty::intrinsics::unreachable();`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf1057 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf1056 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-7c-1775862052 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior first hard-error family at `runner.cpp:1064` (`cmp(...).then_with(...)` non-chainable `Ordering` and adjacent lambda return-shape mismatch) is removed.
+            - new deterministic Stage D head starts at `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:514` (`rusty::enumerate` deduction recursion on `rusty::iter(this->comparators)`), with immediate semver fallout led by `runner.cpp:1267` (`rusty::Vec` omitted template args) and adjacent dependent errors.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-7c-1775862052/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated, avoided crate-specific rewrites/scripts and avoided blanket callsite text patching.
+        - [ ] Leaf 10.5.8: Collapse the post-10.5.7 deterministic semver Stage D iterator/enumerate-template frontier generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:514` `rusty::enumerate` deduction recursion and adjacent `runner.cpp:1267` omitted-template `rusty::Vec` usage), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
