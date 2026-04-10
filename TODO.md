@@ -2676,7 +2676,16 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `cargo test -p rusty-cpp-transpiler leaf1052 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 10.5.3: Add regressions for `let rhs = match rhs.next() { Some(rhs) => ... }` nested-shadow patterns
+        - [x] *done* Leaf 10.5.3: Add regressions for `let rhs = match rhs.next() { Some(rhs) => ... }` nested-shadow patterns
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf1053_try_style_runtime_next_shadow_same_scope_uses_outer_iterator_binding`
+            - `test_leaf1053_try_style_runtime_next_shadow_loop_scope_avoids_self_reference_head`
+          - Fixed shared shadow-name/codegen handling in `transpiler/src/codegen.rs` so try-style nested-shadow initializers resolve to outer bindings instead of self-referential locals:
+            - preserve previous same-scope Rust-name→C++-name mapping while temporarily hiding in-progress shadow locals during initializer emission
+            - avoid allocating nested-scope shadow C++ names that collide with same-Rust-name bindings from outer local scopes
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf105 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 10.5.4: Re-run semver parity and confirm try-style shadowing family is removed from Stage D head set
       - [ ] Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle

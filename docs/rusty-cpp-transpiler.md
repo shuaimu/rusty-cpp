@@ -3548,8 +3548,21 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): fix stays shared and AST-scope-gated, avoids crate-specific rewrites, and avoids post-generation text patching.
-131. Current active next leaf is `10.5.3`.
-   - focus: add regressions for nested-shadow try-style patterns (`let rhs = match rhs.next() { Some(rhs) => ... }`) before the next semver parity reprobe leaf.
+131. `Leaf 10.5.3` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - hardened local shadow initializer emission in `emit_local` (`Pat::Ident`) so previous same-scope Rust-name→C++-name mappings are preserved while temporarily hiding in-progress shadow locals.
+     - hardened shadow-name allocation in `allocate_local_cpp_name` so nested-scope candidates do not reuse the same C++ shadow name as outer same-Rust-name bindings.
+     - this removes nested `let rhs = match rhs.next() { ... }` self-reference/use-before-deduction shapes in generated C++ try-style lowering.
+   - focused regressions:
+     - `test_leaf1053_try_style_runtime_next_shadow_same_scope_uses_outer_iterator_binding`
+     - `test_leaf1053_try_style_runtime_next_shadow_loop_scope_avoids_self_reference_head`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf105 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fix stays shared and scope/shape-gated in AST-aware lowering, with no crate-specific rewrites or post-generation text patching.
+132. Current active next leaf is `10.5.4`.
+   - focus: re-run semver parity and confirm try-style shadowing failures are removed from the deterministic Stage D head set.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3672,6 +3685,7 @@ Required approach:
 - for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout
 - for struct-literal field lowering in consuming `self` scopes, do not bypass move insertion by using non-move field emission helpers; field payload emission must preserve receiver-aware move semantics
+- for nested local-shadow initializer lowering (for example `let rhs = match rhs.next() { ... }`), do not hide outer same-name bindings before initializer emission or reuse outer same-name C++ shadow identifiers in inner scopes; preserve prior binding visibility and allocate distinct shadow identifiers to avoid self-reference/use-before-deduction
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

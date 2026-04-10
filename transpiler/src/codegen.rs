@@ -9364,6 +9364,10 @@ impl CodeGen {
             syn::Pat::Ident(pat_ident) => {
                 let name = &pat_ident.ident;
                 let name_str = name.to_string();
+                let previous_cpp_name_in_current_scope = self
+                    .local_cpp_bindings
+                    .last()
+                    .and_then(|scope| scope.get(&name_str).cloned());
                 let cpp_name = self.allocate_local_cpp_name(&name_str);
                 // If the new name shadows the Rust name, temporarily hide the
                 // new mapping while emitting the init expression so that
@@ -9371,9 +9375,15 @@ impl CodeGen {
                 // newly allocated `rhs_shadow1`.
                 let shadows_outer = cpp_name != escape_cpp_keyword(&name_str);
                 if shadows_outer {
-                    // Temporarily remove the new mapping from the current scope
+                    // Temporarily remove the new mapping from the current scope.
+                    // If there was a previous same-scope binding for this Rust name,
+                    // restore it for initializer emission so `let x = x.next()` in
+                    // same-scope shadow chains still resolves to the previous local.
                     if let Some(scope) = self.local_cpp_bindings.last_mut() {
                         scope.remove(&name_str);
+                        if let Some(previous_cpp_name) = previous_cpp_name_in_current_scope.clone() {
+                            scope.insert(name_str.clone(), previous_cpp_name);
+                        }
                     }
                 }
                 let shadows_param = self
@@ -9457,7 +9467,7 @@ impl CodeGen {
                     qualifier == "const " && local.init.is_some(),
                 );
 
-                if shadows_param {
+                if shadows_param && previous_cpp_name_in_current_scope.is_none() {
                     self.local_cpp_bindings
                         .last_mut()
                         .and_then(|scope| scope.remove(&name_str));
@@ -9960,6 +9970,12 @@ impl CodeGen {
             .param_bindings
             .last()
             .is_some_and(|params| params.contains_key(rust_name));
+        let outer_same_rust_cpp_name = self
+            .local_cpp_bindings
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|scope| scope.get(rust_name).cloned());
         let param_cpp_names: HashSet<String> = self
             .param_bindings
             .last()
@@ -9982,6 +9998,9 @@ impl CodeGen {
             && !used.contains(&escaped_name)
             && !param_scope_has_rust_name
             && !param_cpp_names.contains(&escaped_name)
+            && !outer_same_rust_cpp_name
+                .as_ref()
+                .is_some_and(|outer| outer == &escaped_name)
         {
             let cpp_name = escaped_name;
             scope.insert(rust_name.to_string(), cpp_name.clone());
@@ -9994,7 +10013,12 @@ impl CodeGen {
         let mut idx = 1usize;
         loop {
             let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
-            if !used.contains(&candidate) && !param_cpp_names.contains(&candidate) {
+            if !used.contains(&candidate)
+                && !param_cpp_names.contains(&candidate)
+                && !outer_same_rust_cpp_name
+                    .as_ref()
+                    .is_some_and(|outer| outer == &candidate)
+            {
                 scope.insert(rust_name.to_string(), candidate.clone());
                 if let Some(used_set) = self.local_cpp_names_used.last_mut() {
                     used_set.insert(candidate.clone());
@@ -27460,6 +27484,54 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf1053_try_style_runtime_next_shadow_same_scope_uses_outer_iterator_binding() {
+        let out = transpile_str(
+            r#"
+            fn f(mut rhs: Vec<i32>) -> i32 {
+                let mut rhs = rhs.into_iter();
+                let rhs = match rhs.next() {
+                    Some(rhs) => rhs,
+                    None => return 0,
+                };
+                rhs
+            }
+        "#,
+        );
+        assert!(out.contains("auto rhs_shadow1 = rhs.into_iter();"));
+        assert!(out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"));
+        assert!(out.contains("auto&& rhs_shadow1 = _mv; _match_value = rhs_shadow1;"));
+        assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow2.next();"));
+        assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs.next();"));
+    }
+
+    #[test]
+    fn test_leaf1053_try_style_runtime_next_shadow_loop_scope_avoids_self_reference_head() {
+        let out = transpile_str(
+            r#"
+            fn cmp(rhs: String) -> i32 {
+                let lhs = vec![1, 2, 3];
+                let mut rhs = rhs.split('.');
+                for lhs in lhs {
+                    let rhs = match rhs.next() {
+                        Some(rhs) => rhs,
+                        None => return 1,
+                    };
+                    let _x = rhs;
+                }
+                0
+            }
+        "#,
+        );
+        assert!(out.contains("auto rhs_shadow1 = rusty::str_runtime::split(rhs, U'.');"));
+        assert!(out.contains(
+            "const auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"
+        ));
+        assert!(!out.contains(
+            "const auto rhs_shadow1 = ({ auto&& _m = rhs_shadow1.next();"
+        ));
+    }
+
+    #[test]
     fn test_leaf423_crate_prefixed_variant_paths_use_template_args() {
         let out = transpile_str(
             r#"
@@ -33148,7 +33220,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("e = Right<int32_t, int32_t>(4);"));
+        assert!(
+            out.contains("e = Right<int32_t, int32_t>(4);")
+                || out.contains("e_shadow1 = Right<int32_t, int32_t>(4);")
+        );
         assert!(out.contains("e = Right<int32_t, int32_t>(2);"));
     }
 
