@@ -3984,7 +3984,25 @@ Active work items:
      - new first deterministic head remains at `runner.cpp:1064` but is now a `std::visit` argument-shape mismatch (`bool, bool`) in the same `Prerelease::cmp` branch family.
    - canonical artifacts: `/tmp/rusty-parity-matrix-21-14-1b-1775860634/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and shape-gated in AST-aware lowering/runtime surfaces; no crate-specific rewrites/scripts and no blanket callsite rewrites were introduced.
-159. Current active next leaf is `10.5.6` (collapse the post-10.5.5 deterministic semver `std::visit` bool-branch dispatch head and re-probe parity).
+159. `Leaf 10.5.6` is complete.
+   - plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - added shape-gated tuple-value match lowering (`emit_match_expr_tuple_value_conditions`) for non-variant tuple scrutinees (literal/path/wild/ident tuple-element pattern families), avoiding invalid `std::visit` usage on scalar tuples.
+     - added tuple-pattern support gating (`tuple_match_can_lower_as_value_conditions`) so tuple value matches lower via deterministic condition chains while tuple-variant visit lowering remains available for non-value pattern families.
+     - hardened tuple-value arm emission to avoid duplicated `return return ...` forms when arm-body lowering already emits `return`.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`: `test_leaf1056_tuple_bool_match_uses_value_conditions_not_visit`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1056 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-6b-1775863888 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1064` (`std::visit(..., bool, bool)` from tuple `bytes().all(...)` flags) is collapsed.
+     - new first deterministic head remains at `runner.cpp:1064`, now in `Prerelease::cmp` ordering/lambda-return family (`cmp(...).then_with(...)` on non-chainable `Ordering`, plus adjacent lambda return-shape mismatch `Ordering` vs `void`).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-6b-1775863888/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated, with no blanket callsite rewrites, no crate-specific scripts, and no generated-text patching.
+160. Current active next leaf is `10.5.7` (collapse the post-10.5.6 deterministic semver ordering/lambda-return head and re-probe parity).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

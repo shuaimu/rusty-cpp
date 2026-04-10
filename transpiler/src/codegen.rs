@@ -9622,6 +9622,178 @@ impl CodeGen {
         parts.join(", ")
     }
 
+    fn tuple_pattern_elem_supports_value_match(&self, pat: &syn::Pat) -> bool {
+        match pat {
+            syn::Pat::Lit(_)
+            | syn::Pat::Path(_)
+            | syn::Pat::Wild(_)
+            | syn::Pat::Ident(_) => true,
+            syn::Pat::Or(or_pat) => or_pat
+                .cases
+                .iter()
+                .all(|case| matches!(case, syn::Pat::Lit(_) | syn::Pat::Path(_) | syn::Pat::Wild(_))),
+            _ => false,
+        }
+    }
+
+    fn tuple_match_can_lower_as_value_conditions(&self, arms: &[syn::Arm], arity: usize) -> bool {
+        arms.iter().all(|arm| match &arm.pat {
+            syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => tuple_pat
+                .elems
+                .iter()
+                .all(|elem| self.tuple_pattern_elem_supports_value_match(elem)),
+            syn::Pat::Wild(_) => true,
+            _ => false,
+        })
+    }
+
+    fn tuple_pattern_elem_value_condition(
+        &self,
+        pat: &syn::Pat,
+        value_expr: &str,
+    ) -> Option<Option<String>> {
+        match pat {
+            syn::Pat::Lit(lit_pat) => Some(Some(format!("{} == {}", value_expr, self.emit_lit(&lit_pat.lit)))),
+            syn::Pat::Path(path_pat) => {
+                let value = self.emit_path_to_string(&path_pat.path);
+                Some(Some(format!("{} == {}", value_expr, value)))
+            }
+            syn::Pat::Wild(_) => Some(None),
+            syn::Pat::Ident(pi) => {
+                if pi.ident == "_" {
+                    Some(None)
+                } else {
+                    Some(None)
+                }
+            }
+            syn::Pat::Or(or_pat) => {
+                let mut sub_conds = Vec::new();
+                for case in &or_pat.cases {
+                    match case {
+                        syn::Pat::Wild(_) => return Some(None),
+                        syn::Pat::Lit(lit_pat) => {
+                            sub_conds.push(format!(
+                                "{} == {}",
+                                value_expr,
+                                self.emit_lit(&lit_pat.lit)
+                            ));
+                        }
+                        syn::Pat::Path(path_pat) => {
+                            let value = self.emit_path_to_string(&path_pat.path);
+                            sub_conds.push(format!("{} == {}", value_expr, value));
+                        }
+                        _ => return None,
+                    }
+                }
+                if sub_conds.is_empty() {
+                    Some(None)
+                } else {
+                    Some(Some(format!("({})", sub_conds.join(" || "))))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit a tuple-scrutinee match as value-condition if/else chain.
+    /// This is used for non-variant tuple heads like `(bool, bool)` where
+    /// `std::visit` is not valid.
+    fn emit_match_expr_tuple_value_conditions(
+        &self,
+        tuple_scrutinee: &syn::ExprTuple,
+        arms: &[syn::Arm],
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let mut out = String::from("[&]() { ");
+        let tuple_values: Vec<String> = tuple_scrutinee
+            .elems
+            .iter()
+            .map(|expr| self.emit_expr_to_string(expr))
+            .collect();
+        for (idx, value) in tuple_values.iter().enumerate() {
+            out.push_str(&format!("auto&& _m{} = {}; ", idx, value));
+        }
+
+        for arm in arms {
+            let body = {
+                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                self.maybe_wrap_variant_constructor_with_expected_enum(&arm.body, emitted, expected_ty)
+            };
+            let diverging = self.is_expr_diverging(&arm.body);
+            let body_is_return_expr = body.trim_start().starts_with("return ");
+            let ret_prefix = if diverging || body_is_return_expr {
+                ""
+            } else {
+                "return "
+            };
+            match &arm.pat {
+                syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == tuple_values.len() => {
+                    let mut conditions = Vec::new();
+                    let mut bindings = Vec::new();
+                    let mut supported = true;
+                    for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                        let value_name = format!("_m{}", idx);
+                        let Some(cond) = self.tuple_pattern_elem_value_condition(elem_pat, &value_name) else {
+                            supported = false;
+                            break;
+                        };
+                        if let Some(cond_expr) = cond {
+                            conditions.push(cond_expr);
+                        }
+                        if let syn::Pat::Ident(pi) = elem_pat {
+                            if pi.ident != "_" {
+                                bindings.push(format!("const auto& {} = {};", pi.ident, value_name));
+                            }
+                        }
+                    }
+                    if !supported {
+                        continue;
+                    }
+                    let cond_expr = if conditions.is_empty() {
+                        "true".to_string()
+                    } else {
+                        conditions.join(" && ")
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    for binding in bindings {
+                        out.push_str(&binding);
+                        out.push(' ');
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Wild(_) => {
+                    out.push_str("if (true) { ");
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = self.emit_expr_to_string(guard);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                _ => {}
+            }
+        }
+
+        out.push_str(&format!(
+            "return {}; }}()",
+            self.match_expr_unreachable_fallback_with_expected(expected_ty)
+        ));
+        out
+    }
+
     fn emit_tuple_visit_subpattern(
         &self,
         pat: &syn::Pat,
@@ -19254,6 +19426,16 @@ impl CodeGen {
                 self.emit_match_expr_switch(&match_expr.arms, expected_ty)
             )
         } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
+            if self.tuple_match_can_lower_as_value_conditions(
+                &match_expr.arms,
+                tuple_scrutinee.elems.len(),
+            ) {
+                return self.emit_match_expr_tuple_value_conditions(
+                    tuple_scrutinee,
+                    &match_expr.arms,
+                    expected_ty,
+                );
+            }
             let tuple_variant_ctx = tuple_scrutinee
                 .elems
                 .iter()
@@ -27217,6 +27399,36 @@ mod tests {
         assert!(
             !out.contains(".bytes().all("),
             "raw .bytes().all(...) member chain should not remain, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1056_tuple_bool_match_uses_value_conditions_not_visit() {
+        let out = transpile_str(
+            r#"
+            fn cmp_flags(lhs: &str, rhs: &str) -> i32 {
+                let is_ascii_digit = |b: u8| b.is_ascii_digit();
+                match (
+                    lhs.bytes().all(is_ascii_digit),
+                    rhs.bytes().all(is_ascii_digit),
+                ) {
+                    (true, true) => 1,
+                    (false, false) => 2,
+                    (true, false) => 3,
+                    (false, true) => 4,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m0 == true && _m1 == true)"),
+            "tuple bool match should lower to value-conditions, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "tuple bool match should not lower via std::visit, got:\n{}",
             out
         );
     }

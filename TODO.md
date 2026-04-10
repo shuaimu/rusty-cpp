@@ -2715,7 +2715,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-21-14-1b-1775860634/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in core lowering/runtime surfaces; no crate-specific rewrites/scripts or blanket callsite rewrites were introduced.
-        - [ ] Leaf 10.5.6: Collapse the post-10.5.5 deterministic semver Stage D `std::visit` bool-branch dispatch head generically (starting with `runner.cpp:1064` `std::visit` argument-shape mismatch on `bool, bool`), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.6: Collapse the post-10.5.5 deterministic semver Stage D `std::visit` bool-branch dispatch head generically (starting with `runner.cpp:1064` `std::visit` argument-shape mismatch on `bool, bool`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - added shape-gated tuple-value match lowering for non-variant tuple scrutinees (`emit_match_expr_tuple_value_conditions`) supporting tuple-element literal/path/wild/ident pattern families without `std::visit`.
+            - added tuple-pattern support gating (`tuple_match_can_lower_as_value_conditions`) so tuple value matches lower via deterministic condition chains while existing tuple-variant visit lowering remains available for non-value pattern families.
+            - hardened tuple-value match arm emission to avoid `return return ...` duplication when arm body emission already includes `return`.
+          - Added focused fixture-agnostic regression:
+            - `transpiler/src/codegen.rs`: `test_leaf1056_tuple_bool_match_uses_value_conditions_not_visit`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf1056 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-6b-1775863888 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior first hard-error family at `runner.cpp:1064` (`std::visit(..., bool, bool)` on tuple `bytes().all(...)` flags) is removed.
+            - new deterministic Stage D head starts at `runner.cpp:1064` in the same `Prerelease::cmp` block: `Ordering` surface mismatch (`cmp(...).then_with(...)`) plus adjacent lambda return-shape inconsistency (`Ordering` vs `void` from `unreachable()` path).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-6b-1775863888/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated, avoided blanket method-call rewrites, and introduced no crate-specific scripts or generated-text patching.
+        - [ ] Leaf 10.5.7: Collapse the post-10.5.6 deterministic semver Stage D `Prerelease::cmp` ordering/lambda-return family generically (starting with `runner.cpp:1064` `cmp(...).then_with(...)` on non-chainable `Ordering` and adjacent `Ordering` vs `void` lambda-return mismatch), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
