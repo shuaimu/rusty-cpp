@@ -2642,7 +2642,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - When Kahn's algorithm fails to sort all nodes, identifies cyclic nodes and moves them to end of emission order
             - Forward declarations for all types are already emitted before definitions
             - Added regression tests: `test_circular_type_ordering_cyclic_types_last`, `test_circular_type_ordering_with_reference`
-          - [ ] Leaf 11.2: For types used only by pointer/reference in the cycle, emit forward declaration; for types used by value, extract to separate definition block
+          - [ ] Leaf 11.2: BLOCKED - Not actionable in current form. Forward declarations are already emitted for all types before definitions (via `emit_item_forward_decls`). Leaf 11.1 already moves cyclic types to end of emission order. For true value-type circular dependencies (A contains B by value, B contains A by value), C++ requires using pointers - there's no solution within the current single-file .cppm architecture without semantic changes to the generated code.
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [ ] Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
