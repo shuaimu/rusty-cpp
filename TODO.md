@@ -2979,10 +2979,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): implementation is AST-aware and deterministic with shared transpile-stage validation; no bridge wrappers, no global text substitution, and no crate-specific shortcuts were introduced.
-      - [ ] Leaf 22.7: Define and enforce MVP support limits for `cpp::` imports
-        - Start with free/static function calls and module constants.
-        - Emit explicit TODO diagnostics for unsupported surfaces (member-function import syntax, template-only exports without resolvable call shape, macros).
-        - Document unsupported surfaces in docs/rusty-cpp-transpiler.md §3.13 once enforced in code.
+      - [x] *done* Leaf 22.7: Define and enforce MVP support limits for `cpp::` imports
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented transpile-stage MVP limit enforcement in `transpiler/src/transpile.rs` on top of existing `cpp::` resolution validation:
+          - extended `CppForeignCallResolutionVisitor` to validate both call and non-call `cpp::` symbol usage.
+          - enforced supported MVP surfaces as:
+            - free/static function calls (`binding::symbol(...)`),
+            - module constants in value position (`binding::CONSTANT`).
+          - added deterministic TODO diagnostics for unsupported surfaces:
+            - member-function import syntax (`binding::Type::method(...)` / multi-segment symbol paths),
+            - template-only exports without indexed callable signatures,
+            - `cpp::` macro imports/usage (`binding::name!(...)`).
+          - kept existing unresolved module/symbol/call-family diagnostics and index-source attribution behavior.
+        - Added focused regressions:
+          - `transpile::tests::test_cpp_module_constant_value_access_is_allowed`
+          - `transpile::tests::test_cpp_module_constant_access_errors_when_symbol_missing_from_index_module`
+          - `transpile::tests::test_cpp_module_call_errors_for_member_function_import_syntax`
+          - `transpile::tests::test_cpp_module_call_errors_for_template_only_export_without_call_shape`
+          - `transpile::tests::test_cpp_module_macro_usage_errors_as_unsupported_surface`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): implementation is AST-aware and shape-gated per call/value/macro surface, with no bridge wrappers, no global text substitution, and no crate-specific shortcuts.
       - [ ] Leaf 22.8: Integration coverage for `cpp::` interop path
         - Add transpiler integration fixtures that include a tiny C++ module (`import std;` and one custom module fixture) consumed via Rust `use cpp::...`.
         - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.

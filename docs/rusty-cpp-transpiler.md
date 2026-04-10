@@ -1543,6 +1543,20 @@ CLI configuration:
 
 If a `cpp::` import or referenced symbol cannot be resolved, transpilation fails with an explicit import/symbol error.
 
+#### MVP Support Limits (Enforced)
+
+Current enforced MVP surface is intentionally narrow:
+
+- supported:
+  - free/static function calls through imported bindings (`binding::symbol(...)`),
+  - module constants in value position (`binding::CONSTANT`).
+- unsupported (fail-fast with explicit `TODO(leaf22.7)` diagnostics):
+  - member-function import syntax (`binding::Type::method(...)` and other multi-segment member-like paths),
+  - template-only exports without indexed callable signatures (no resolvable call shape),
+  - macro imports/usage through `cpp::` bindings (`binding::name!(...)`).
+
+Non-call function symbol usage in value position (for example function-pointer-like usage) is also rejected in MVP mode; only module constants are allowed in non-call positions.
+
 #### Direct-Call Lowering Rule
 
 For each resolved C++ module call:
@@ -3873,7 +3887,29 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): implementation is AST-aware and deterministic in shared transpile validation; no bridge wrappers, no blanket/global text rewrites, and no crate-specific shortcuts were introduced.
-152. Current active next leaf is `22.7` (define and enforce MVP support limits for `cpp::` imports), now that `22.6` deterministic resolution diagnostics are complete.
+152. `Leaf 22.7` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented enforced MVP support limits for `cpp::` imports in `transpiler/src/transpile.rs`:
+     - extended `CppForeignCallResolutionVisitor` to validate both call and non-call `cpp::` symbol access.
+     - supported MVP surfaces are now explicitly enforced as:
+       - free/static function calls (`binding::symbol(...)`),
+       - module constants in value position (`binding::CONSTANT`).
+     - added deterministic fail-fast `TODO(leaf22.7)` diagnostics for unsupported surfaces:
+       - member-function import syntax (`binding::Type::method(...)` / multi-segment member-like paths),
+       - template-only exports without indexed callable signatures,
+       - `cpp::` macro imports/usage (`binding::name!(...)`).
+     - unresolved module/symbol/call-family diagnostics remain in place and keep configured index-source attribution.
+   - focused regressions:
+     - `transpile::tests::test_cpp_module_constant_value_access_is_allowed`
+     - `transpile::tests::test_cpp_module_constant_access_errors_when_symbol_missing_from_index_module`
+     - `transpile::tests::test_cpp_module_call_errors_for_member_function_import_syntax`
+     - `transpile::tests::test_cpp_module_call_errors_for_template_only_export_without_call_shape`
+     - `transpile::tests::test_cpp_module_macro_usage_errors_as_unsupported_surface`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): implementation is AST-aware and shape-gated by surface kind (call/value/macro), and introduces no bridge wrappers, no blanket/global text rewriting, and no crate-specific shortcuts.
+153. Current active next leaf is `22.8` (integration coverage for `cpp::` interop path), now that `22.7` MVP support-limit enforcement is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

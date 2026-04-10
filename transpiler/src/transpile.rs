@@ -594,12 +594,11 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
 
     fn record_diagnostic(
         &mut self,
-        call: &syn::ExprCall,
+        site: &str,
         module_path: &str,
         symbol_name: &str,
         detail: &str,
     ) {
-        let call_site = call.to_token_stream().to_string();
         let context = self.current_context_label();
         let key = format!(
             "{}|{}|{}|{}",
@@ -612,24 +611,20 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
                 module_path,
                 symbol_name,
                 self.index_source_label,
-                call_site,
+                site,
                 context
             ));
         }
     }
 
-    fn resolve_cpp_symbol_for_call(
-        &self,
-        path_expr: &syn::ExprPath,
-    ) -> Option<(String, String)> {
-        if path_expr.path.segments.len() < 2 {
+    fn resolve_cpp_symbol_for_path(&self, path: &syn::Path) -> Option<(String, String)> {
+        if path.segments.len() < 2 {
             return None;
         }
-        let first_segment = path_expr.path.segments.first()?;
+        let first_segment = path.segments.first()?;
         let binding_name = first_segment.ident.to_string();
         let module_path = self.lookup_cpp_binding(&binding_name)?.to_string();
-        let symbol_name = path_expr
-            .path
+        let symbol_name = path
             .segments
             .iter()
             .skip(1)
@@ -642,42 +637,112 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         Some((module_path, symbol_name))
     }
 
+    fn lookup_index_symbol<'b>(
+        &self,
+        module: &'b CppModuleIndexModule,
+        symbol_name: &str,
+    ) -> Option<&'b CppModuleIndexSymbol> {
+        module
+            .symbols
+            .get(symbol_name)
+            .or_else(|| symbol_name.rsplit("::").next().and_then(|tail| module.symbols.get(tail)))
+    }
+
+    fn symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
+        symbol
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind.to_ascii_lowercase().contains(needle))
+    }
+
+    fn symbol_is_macro(symbol: &CppModuleIndexSymbol) -> bool {
+        Self::symbol_kind_contains(symbol, "macro")
+    }
+
+    fn symbol_is_template(symbol: &CppModuleIndexSymbol) -> bool {
+        Self::symbol_kind_contains(symbol, "template")
+    }
+
+    fn symbol_is_callable_kind(symbol: &CppModuleIndexSymbol) -> bool {
+        Self::symbol_kind_contains(symbol, "function")
+            || Self::symbol_kind_contains(symbol, "method")
+            || Self::symbol_kind_contains(symbol, "callable")
+            || Self::symbol_kind_contains(symbol, "ctor")
+            || Self::symbol_kind_contains(symbol, "constructor")
+    }
+
+    fn validate_cpp_module_symbol_access(
+        &mut self,
+        site: &str,
+        module_path: &str,
+        symbol_name: &str,
+    ) -> Option<CppModuleIndexSymbol> {
+        let Some(module) = self.index.modules.get(module_path) else {
+            self.record_diagnostic(
+                site,
+                module_path,
+                symbol_name,
+                "module path is not present in configured C++ module symbol index",
+            );
+            return None;
+        };
+        let Some(symbol) = self.lookup_index_symbol(module, symbol_name) else {
+            self.record_diagnostic(
+                site,
+                module_path,
+                symbol_name,
+                "symbol is not present in configured C++ module symbol index module entry",
+            );
+            return None;
+        };
+        Some(symbol.clone())
+    }
+
     fn validate_cpp_call_symbol(&mut self, call: &syn::ExprCall) {
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return;
         };
-        let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_call(path_expr) else {
+        let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_path(&path_expr.path)
+        else {
             return;
         };
-
-        let Some(module) = self.index.modules.get(&module_path) else {
+        let call_site = call.to_token_stream().to_string();
+        if path_expr.path.segments.len() > 2 {
             self.record_diagnostic(
-                call,
+                &call_site,
                 &module_path,
                 &symbol_name,
-                "module path is not present in configured C++ module symbol index",
+                "TODO(leaf22.7): member-function import syntax is unsupported for `cpp::` MVP (only free/static function calls are supported)",
             );
             return;
-        };
+        }
 
-        let symbol = module
-            .symbols
-            .get(&symbol_name)
-            .or_else(|| symbol_name.rsplit("::").next().and_then(|tail| module.symbols.get(tail)));
-        let Some(symbol) = symbol else {
+        let Some(symbol) = self.validate_cpp_module_symbol_access(&call_site, &module_path, &symbol_name) else {
+            return;
+        };
+        if Self::symbol_is_macro(&symbol) {
             self.record_diagnostic(
-                call,
+                &call_site,
                 &module_path,
                 &symbol_name,
-                "symbol is not present in configured C++ module symbol index module entry",
+                "TODO(leaf22.7): `cpp::` macro exports are unsupported in MVP",
             );
             return;
-        };
+        }
 
         let call_arity = call.args.len();
+        if Self::symbol_is_template(&symbol) && symbol.callable_signatures.is_empty() {
+            self.record_diagnostic(
+                &call_site,
+                &module_path,
+                &symbol_name,
+                "TODO(leaf22.7): template-only export without indexed callable signatures is unsupported in MVP",
+            );
+            return;
+        }
         if symbol.callable_signatures.is_empty() {
             self.record_diagnostic(
-                call,
+                &call_site,
                 &module_path,
                 &symbol_name,
                 "call cannot be matched to indexed callable family (no callable signatures indexed)",
@@ -694,7 +759,7 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         }
         if !has_arity_match {
             self.record_diagnostic(
-                call,
+                &call_site,
                 &module_path,
                 &symbol_name,
                 &format!(
@@ -704,6 +769,69 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
                 ),
             );
         }
+    }
+
+    fn validate_cpp_value_symbol(&mut self, path_expr: &syn::ExprPath) {
+        let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_path(&path_expr.path)
+        else {
+            return;
+        };
+        let path_site = path_expr.to_token_stream().to_string();
+        if path_expr.path.segments.len() > 2 {
+            self.record_diagnostic(
+                &path_site,
+                &module_path,
+                &symbol_name,
+                "TODO(leaf22.7): member-function import syntax is unsupported for `cpp::` MVP (only module constants are supported in non-call positions)",
+            );
+            return;
+        }
+        let Some(symbol) =
+            self.validate_cpp_module_symbol_access(&path_site, &module_path, &symbol_name)
+        else {
+            return;
+        };
+
+        if Self::symbol_is_macro(&symbol) {
+            self.record_diagnostic(
+                &path_site,
+                &module_path,
+                &symbol_name,
+                "TODO(leaf22.7): `cpp::` macro exports are unsupported in MVP",
+            );
+            return;
+        }
+
+        if Self::symbol_is_template(&symbol) && symbol.callable_signatures.is_empty() {
+            self.record_diagnostic(
+                &path_site,
+                &module_path,
+                &symbol_name,
+                "TODO(leaf22.7): template-only export without indexed callable signatures is unsupported in MVP",
+            );
+            return;
+        }
+
+        if Self::symbol_is_callable_kind(&symbol) || !symbol.callable_signatures.is_empty() {
+            self.record_diagnostic(
+                &path_site,
+                &module_path,
+                &symbol_name,
+                "TODO(leaf22.7): non-call function symbol usage is unsupported for `cpp::` MVP (only module constants are supported in value position)",
+            );
+        }
+    }
+
+    fn validate_cpp_macro_symbol_with_site(&mut self, path: &syn::Path, site: &str) {
+        let Some((module_path, symbol_name)) = self.resolve_cpp_symbol_for_path(path) else {
+            return;
+        };
+        self.record_diagnostic(
+            site,
+            &module_path,
+            &symbol_name,
+            "TODO(leaf22.7): `cpp::` macro imports are unsupported in MVP",
+        );
     }
 
     fn into_diagnostics(mut self) -> Vec<String> {
@@ -757,7 +885,33 @@ impl<'ast> Visit<'ast> for CppForeignCallResolutionVisitor<'_> {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         self.validate_cpp_call_symbol(call);
-        visit::visit_expr_call(self, call);
+        let cpp_bound_call_path = match call.func.as_ref() {
+            syn::Expr::Path(path_expr) => self.resolve_cpp_symbol_for_path(&path_expr.path).is_some(),
+            _ => false,
+        };
+        if !cpp_bound_call_path {
+            self.visit_expr(&call.func);
+        }
+        for arg in &call.args {
+            self.visit_expr(arg);
+        }
+    }
+
+    fn visit_expr_path(&mut self, path_expr: &'ast syn::ExprPath) {
+        self.validate_cpp_value_symbol(path_expr);
+        visit::visit_expr_path(self, path_expr);
+    }
+
+    fn visit_expr_macro(&mut self, expr_macro: &'ast syn::ExprMacro) {
+        let site = expr_macro.to_token_stream().to_string();
+        self.validate_cpp_macro_symbol_with_site(&expr_macro.mac.path, &site);
+        visit::visit_expr_macro(self, expr_macro);
+    }
+
+    fn visit_stmt_macro(&mut self, stmt_macro: &'ast syn::StmtMacro) {
+        let site = stmt_macro.mac.to_token_stream().to_string();
+        self.validate_cpp_macro_symbol_with_site(&stmt_macro.mac.path, &site);
+        visit::visit_stmt_macro(self, stmt_macro);
     }
 }
 
@@ -1496,6 +1650,214 @@ fn f() -> i32 {
         assert!(err.contains("call cannot be matched to indexed callable family"));
         assert!(err.contains("arity 1"));
         assert!(err.contains("int(int,int)"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_constant_value_access_is_allowed() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "ANSWER".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("constant".to_string()),
+                callable_signatures: Vec::new(),
+            },
+        );
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f() -> i32 {
+    cpp_std::ANSWER
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("module-constant access should transpile");
+
+        assert!(output.contains("std::ANSWER"));
+    }
+
+    #[test]
+    fn test_cpp_module_constant_access_errors_when_symbol_missing_from_index_module() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "max".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function".to_string()),
+                callable_signatures: vec!["int(int,int)".to_string()],
+            },
+        );
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f() -> i32 {
+    cpp_std::ANSWER
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("missing module constant should fail");
+
+        assert!(err.contains("symbol is not present"));
+        assert!(err.contains("symbol `ANSWER`"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_call_errors_for_member_function_import_syntax() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f(v: i32) -> i32 {
+    unsafe { cpp_std::vector::push_back(v) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("member-function import syntax should fail under MVP limits");
+
+        assert!(err.contains("TODO(leaf22.7)"));
+        assert!(err.contains("member-function import syntax is unsupported"));
+        assert!(err.contains("symbol `vector::push_back`"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_call_errors_for_template_only_export_without_call_shape() {
+        let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "sort".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("function_template".to_string()),
+                callable_signatures: Vec::new(),
+            },
+        );
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols,
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f(v: i32) -> i32 {
+    unsafe { cpp_std::sort(v) }
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("template-only symbol without callable shape should fail");
+
+        assert!(err.contains("TODO(leaf22.7)"));
+        assert!(err.contains("template-only export without indexed callable signatures is unsupported"));
+        assert!(err.contains("symbol `sort`"));
+        assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    #[test]
+    fn test_cpp_module_macro_usage_errors_as_unsupported_surface() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            cpp_module_symbol_index_sources: vec![PathBuf::from("/tmp/cpp-index.toml")],
+            ..TranspileOptions::default()
+        };
+
+        let err = transpile_full_with_options(
+            r#"
+use cpp::std as cpp_std;
+fn f() -> i32 {
+    unsafe {
+        let _ = cpp_std::max!(1, 2);
+    }
+    0
+}
+"#,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect_err("cpp macro usage should fail under MVP limits");
+
+        assert!(err.contains("TODO(leaf22.7)"));
+        assert!(err.contains("`cpp::` macro imports are unsupported in MVP"));
+        assert!(err.contains("symbol `max`"));
         assert!(err.contains("/tmp/cpp-index.toml"));
     }
 }
