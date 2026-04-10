@@ -3645,8 +3645,22 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf131 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): this leaf only adds AST-aware metadata collection and does not apply blanket call-site rewrites.
-138. Current active next leaf is `13.2`.
-   - focus: apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`), especially for `FnOnce(&mut Self)`-style bounds.
+138. `Leaf 13.2` is complete.
+   - plan/scope check: implemented as a focused call-argument lowering change and stayed well below the <1000 LOC target.
+   - implemented callable-bound pass-intent application in extension free-function bodies (`transpiler/src/codegen.rs`):
+     - added a scoped callable-bound metadata context while emitting extension free-function blocks.
+     - call-argument emission now checks callable-bound arg pass intent for callable params (for example `f`).
+     - for callable bounds that expect borrowed args (`Fn(&...)` / `FnMut(&mut ...)` / `FnOnce(&mut ...)`), explicit borrow arguments are preserved as borrow-shaped call arguments (`f(&self_)`, `f(&val)`) instead of falling back to by-value stripped forms.
+   - focused regressions:
+     - updated `test_leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg` (now asserts `f(&self_)`).
+     - added `test_leaf132_extension_trait_callable_bound_preserves_borrow_shape_for_inner_binding` (asserts `f(&val)` for `tap_err`-style inner binding).
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf13 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): fix is scoped to recognized callable-bound extension-method call sites; no blanket reference rewrite across all call expressions.
+139. Current active next leaf is `13.3`.
+   - focus: add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

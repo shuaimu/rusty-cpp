@@ -254,6 +254,10 @@ pub struct CodeGen {
     local_manually_drop_bindings: Vec<HashSet<String>>,
     /// Function/method parameter bindings visible to expression/type inference.
     param_bindings: Vec<HashMap<String, syn::Type>>,
+    /// Scoped callable-bound metadata for function parameters (for example
+    /// extension-trait callable params like `f: F` where `F: FnOnce(&mut Self)`).
+    /// Used to preserve borrow-shaped callback argument emission at call sites.
+    callable_param_bound_scopes: Vec<HashMap<String, CallableParamBoundMetadata>>,
     /// Tracks whether the current method receiver is a reference (`&self` / `&mut self`).
     /// Used to lower deref of `self` correctly (`*self` should not become `*(*this)` recursion).
     self_receiver_ref_scopes: Vec<bool>,
@@ -428,6 +432,7 @@ impl CodeGen {
             local_type_bindings: Vec::new(),
             local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
+            callable_param_bound_scopes: Vec::new(),
             self_receiver_ref_scopes: Vec::new(),
             pattern_ref_bindings: Vec::new(),
             deref_method_scopes: Vec::new(),
@@ -569,6 +574,7 @@ impl CodeGen {
         self.repeat_elem_type_hints.clear();
         self.local_placeholder_type_hints.clear();
         self.param_bindings.clear();
+        self.callable_param_bound_scopes.clear();
         self.local_bindings.clear();
         self.local_cpp_bindings.clear();
         self.local_cpp_names_used.clear();
@@ -3541,12 +3547,46 @@ impl CodeGen {
         self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
     }
 
+    fn lookup_callable_param_bound_arg_intent(
+        &self,
+        func: &syn::Expr,
+        arg_idx: usize,
+    ) -> Option<CallableArgPassIntent> {
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        if path_expr.path.segments.len() != 1 {
+            return None;
+        }
+        let name = path_expr.path.segments[0].ident.to_string();
+        for scope in self.callable_param_bound_scopes.iter().rev() {
+            if let Some(meta) = scope.get(&name) {
+                return meta.arg_pass_intents.get(arg_idx).copied();
+            }
+        }
+        None
+    }
+
+    fn emit_explicit_reference_call_arg(
+        &self,
+        reference: &syn::ExprReference,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let inner = self.emit_expr_to_string_with_expected(&reference.expr, expected_ty);
+        if inner.starts_with('&') {
+            format!("&({})", inner)
+        } else {
+            format!("&{}", inner)
+        }
+    }
+
     fn emit_call_arg_with_pass_style(
         &self,
         arg: &syn::Expr,
         style: Option<ArgPassStyle>,
         expected_ty: Option<&syn::Type>,
         callable_type_param_fallback: bool,
+        callable_bound_arg_intent: Option<CallableArgPassIntent>,
     ) -> String {
         if let syn::Expr::Reference(_) = self.peel_paren_group_expr(arg) {
             if let Some(expected) = expected_ty {
@@ -3556,6 +3596,15 @@ impl CodeGen {
             }
         }
         if let syn::Expr::Reference(r) = arg {
+            if matches!(
+                callable_bound_arg_intent,
+                Some(CallableArgPassIntent::SharedRef | CallableArgPassIntent::MutRef)
+            ) {
+                // Preserve explicit borrow shape for callable-bound callbacks
+                // (for example `F: FnOnce(&mut Self)`), so closure params that
+                // dereference their argument keep pointer-like call semantics.
+                return self.emit_explicit_reference_call_arg(r, expected_ty);
+            }
             if matches!(style, Some(ArgPassStyle::Reference))
                 || (style.is_none() && callable_type_param_fallback && r.mutability.is_none())
             {
@@ -6033,7 +6082,6 @@ impl CodeGen {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
         let escaped_method_name = escape_cpp_keyword(&method_name);
-        let _callable_param_metadata = &method_spec.callable_param_metadata;
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
             self.writeln(&format!(
@@ -6083,11 +6131,13 @@ impl CodeGen {
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
+        self.push_callable_param_bound_scope(method_spec.callable_param_metadata.clone());
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_self_path_override(Some("self_".to_string()));
         self.emit_block(&method.block);
         self.pop_self_path_override();
         self.pop_self_receiver_ref_scope();
+        self.pop_callable_param_bound_scope();
         self.pop_param_bindings();
         self.pop_return_type_hint();
         self.pop_return_value_scope();
@@ -12820,6 +12870,17 @@ impl CodeGen {
         self.param_bindings.pop();
     }
 
+    fn push_callable_param_bound_scope(
+        &mut self,
+        scope: HashMap<String, CallableParamBoundMetadata>,
+    ) {
+        self.callable_param_bound_scopes.push(scope);
+    }
+
+    fn pop_callable_param_bound_scope(&mut self) {
+        self.callable_param_bound_scopes.pop();
+    }
+
     fn push_self_receiver_ref_scope(
         &mut self,
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
@@ -13781,7 +13842,13 @@ impl CodeGen {
                 .as_ref()
                 .or(expected_ty)
                 .or(inferred_expected.as_ref());
-            args.push(self.emit_call_arg_with_pass_style(arg, style, arg_expected, false));
+            args.push(self.emit_call_arg_with_pass_style(
+                arg,
+                style,
+                arg_expected,
+                false,
+                None,
+            ));
         }
         let method_template_args = self.emit_method_call_template_args(mc, &args);
         if method_name == "clone_from_slice"
@@ -16633,11 +16700,14 @@ impl CodeGen {
             .map(|(idx, arg)| {
                 let style = self.lookup_function_arg_pass_style(&call.func, idx);
                 let expected_ty = self.lookup_function_arg_expected_type(&call.func, idx);
+                let callable_bound_arg_intent =
+                    self.lookup_callable_param_bound_arg_intent(&call.func, idx);
                 self.emit_call_arg_with_pass_style(
                     arg,
                     style,
                     expected_ty,
                     callable_type_param_fallback,
+                    callable_bound_arg_intent,
                 )
             })
             .collect();
@@ -25469,9 +25539,28 @@ mod tests {
             }
             "#,
         );
-        // `&mut self` should emit just `self_` (not `&self_`) because
-        // C++ references bind automatically — no address-of needed.
-        assert!(out.contains("static_cast<void>(f(self_));"));
+        assert!(out.contains("static_cast<void>(f(&self_));"));
+        assert!(!out.contains("static_cast<void>(f(self_));"));
+    }
+
+    #[test]
+    fn test_leaf132_extension_trait_callable_bound_preserves_borrow_shape_for_inner_binding() {
+        let out = transpile_str(
+            r#"
+            trait TapResultOps<T, E> { fn tap_err<R, F: FnOnce(&mut E) -> R>(self, f: F) -> Self; }
+            impl<T, E> TapResultOps<T, E> for Result<T, E> {
+                fn tap_err<R, F: FnOnce(&mut E) -> R>(mut self, f: F) -> Self {
+                    if let Err(mut val) = self.as_mut() {
+                        let _ = f(&mut val);
+                    }
+                    self
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto& val = *_iflet_scrutinee.unwrap_err();"));
+        assert!(out.contains("static_cast<void>(f(&val));"));
+        assert!(!out.contains("static_cast<void>(f(val));"));
     }
 
     #[test]

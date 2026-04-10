@@ -2768,8 +2768,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf131 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-        - [ ] Leaf 13.2: Apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`)
-          - For `FnOnce(&mut Self)`-style bounds, pass borrow-shaped arguments instead of by-value fallback.
+        - [x] *done* Leaf 13.2: Apply callable-bound pass intent in `emit_extension_trait_free_function` call sites (`f(self_)`, `f(val)`)
+          - Plan/scope check: implemented as a focused call-argument lowering update in `transpiler/src/codegen.rs`; change stayed well under the <1000 LOC target.
+          - Implemented callable-bound pass-intent usage for extension free-function bodies:
+            - added scoped callable-bound metadata context while emitting extension free-function method bodies
+            - call expression emission now consults callable-bound arg intent for callable parameters (for example `f`)
+            - for callable bounds expecting borrowed args (`Fn(&...)` / `FnMut(&mut ...)` / `FnOnce(&mut ...)`), explicit borrow arguments are preserved as address-of call shapes instead of being stripped to by-value fallback
+          - Added/updated focused regressions:
+            - updated `test_leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg` to assert `f(&self_)`
+            - added `test_leaf132_extension_trait_callable_bound_preserves_borrow_shape_for_inner_binding` to assert `f(&val)` for `tap_err`-style inner bindings
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf13 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf4154_extension_trait_preserves_explicit_mut_borrow_for_callable_arg -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
         - [ ] Leaf 13.3: Add focused regressions for `tap`, `tap_err`, and `tap_some` call shapes (including closure bodies that dereference callback params)
         - [ ] Leaf 13.4: Re-run tap parity matrix and record Stage D delta
       - [x] *done* Leaf 5: Verification matrix (required)
