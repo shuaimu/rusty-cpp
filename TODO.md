@@ -2649,7 +2649,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
         - [x] *done* Leaf 12.2: Update test wrapper call paths to use renamed test namespaces (done in Leaf 1.2)
         - [x] *done* Leaf 12.3: Add regression tests for namespace/function collision patterns (done in Leaf 1.3)
         - [x] *done* Leaf 12.4: Fix remaining unqualified function calls inside renamed scopes (done in Leaf 1.4)
-      - [ ] Leaf 13: Re-run parity matrix after all fixes and verify 7/7 crates pass
+      - [ ] Leaf 13: BLOCKED - tap crate has pre-existing bug in extension trait method lowering (FnOnce(&mut Self) passed by value instead of &mut self). See analysis: tap calls f(self_) by value but should call f(&mut self_) for &mut Self parameter. Would require significant refactoring of trait method lowering. Mark 7/7 as goal once tap bug is fixed.
       - [x] *done* Leaf 5: Verification matrix (required)
         - [x] *done* Add an integration parity matrix test that runs `parity-test --stop-after run` for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags`
           - [x] *done* Added `tests/transpile_tests/run_parity_matrix.sh`: matrix harness with crate list/version pins matching the integration set; default mode runs each crate through `cargo run -p rusty-cpp-transpiler -- parity-test --stop-after run` using per-crate work dirs
