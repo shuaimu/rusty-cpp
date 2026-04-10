@@ -226,6 +226,10 @@ public:
     // @lifetime: (&'a) -> &'a
     T* begin() { return data_; }
     const T* begin() const { return data_; }
+
+    // Slice-style data access used by shared iterator helpers.
+    T* data() { return data_; }
+    const T* data() const { return data_; }
     
     // @lifetime: (&'a) -> &'a
     T* end() { return data_ + size_; }

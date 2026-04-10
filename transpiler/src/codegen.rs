@@ -7447,6 +7447,379 @@ impl CodeGen {
         }
     }
 
+    fn augment_local_generic_placeholder_hints_from_function_calls(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let mut candidate_owner_targets: HashMap<String, String> = HashMap::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let has_placeholder_type = get_local_type(local).is_some_and(type_has_generic_placeholder);
+            let owner_target = local
+                .init
+                .as_ref()
+                .and_then(|init| call_owner_placeholder_target(&init.expr));
+            let has_placeholder_owner_call = owner_target.is_some();
+            if has_placeholder_type || has_placeholder_owner_call {
+                if let Some(owner_target) = owner_target {
+                    candidate_owner_targets.insert(name, owner_target);
+                }
+            }
+        }
+
+        if candidate_owner_targets.is_empty() {
+            return;
+        }
+
+        for stmt in stmts {
+            self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                stmt,
+                &candidate_owner_targets,
+                hints,
+            );
+        }
+    }
+
+    fn collect_local_generic_placeholder_function_call_hints_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        candidate_owner_targets: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        &init.expr,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_local_generic_placeholder_function_call_hints_in_expr(
+        &self,
+        expr: &syn::Expr,
+        candidate_owner_targets: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match expr {
+            syn::Expr::Call(call) => {
+                self.collect_local_generic_placeholder_function_call_hints_from_call(
+                    call,
+                    candidate_owner_targets,
+                    hints,
+                );
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &call.func,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for arg in &call.args {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        arg,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::MethodCall(method_call) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &method_call.receiver,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for arg in &method_call.args {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        arg,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &assign.left,
+                    candidate_owner_targets,
+                    hints,
+                );
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &assign.right,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &if_expr.cond,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        else_expr,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &while_expr.cond,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for stmt in &while_expr.body.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::ForLoop(for_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &for_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for stmt in &for_expr.body.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &match_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+                for arm in &match_expr.arms {
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                            guard,
+                            candidate_owner_targets,
+                            hints,
+                        );
+                    }
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        &arm.body,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        &field.expr,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        rest,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Array(array_expr) => {
+                for elem in &array_expr.elems {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        elem,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Tuple(tuple_expr) => {
+                for elem in &tuple_expr.elems {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        elem,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_local_generic_placeholder_function_call_hints_in_stmt(
+                        stmt,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Closure(closure_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &closure_expr.body,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &await_expr.base,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &try_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Return(return_expr) => {
+                if let Some(value) = &return_expr.expr {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        value,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Break(break_expr) => {
+                if let Some(value) = &break_expr.expr {
+                    self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                        value,
+                        candidate_owner_targets,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Reference(reference_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &reference_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Unary(unary_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &unary_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Paren(paren_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &paren_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Group(group_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &group_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            syn::Expr::Let(let_expr) => {
+                self.collect_local_generic_placeholder_function_call_hints_in_expr(
+                    &let_expr.expr,
+                    candidate_owner_targets,
+                    hints,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_local_generic_placeholder_function_call_hints_from_call(
+        &self,
+        call: &syn::ExprCall,
+        candidate_owner_targets: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let syn::Expr::Path(_) = call.func.as_ref() else {
+            return;
+        };
+        for (idx, arg) in call.args.iter().enumerate() {
+            let Some(name) = extract_simple_local_ident(arg) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let Some(owner_target) = candidate_owner_targets.get(&name) else {
+                continue;
+            };
+            let Some(expected_ty) = self.lookup_function_arg_expected_type(call.func.as_ref(), idx)
+            else {
+                continue;
+            };
+            let Some(hint_ty) = self
+                .placeholder_hint_from_expected_argument_type(owner_target, expected_ty)
+            else {
+                continue;
+            };
+            hints.insert(name, hint_ty);
+        }
+    }
+
+    fn placeholder_hint_from_expected_argument_type(
+        &self,
+        owner_target: &str,
+        expected_ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        match owner_target {
+            "Vec" => extract_vec_element_type_for_hint(expected_ty),
+            _ => None,
+        }
+    }
+
     fn emit_block(&mut self, block: &syn::Block) {
         // Pre-scan: find variables used multiple times (skip std::move for these)
         let multi_use = collect_multi_use_vars(&block.stmts);
@@ -7455,7 +7828,11 @@ impl CodeGen {
         let reassigned = collect_reassigned_vars(&block.stmts);
         let consuming = collect_consuming_method_receiver_vars(&block.stmts);
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
-        let placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
+        let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
+        self.augment_local_generic_placeholder_hints_from_function_calls(
+            &block.stmts,
+            &mut placeholder_hints,
+        );
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
         let prev_repeat_hints = std::mem::replace(&mut self.repeat_elem_type_hints, repeat_hints);
@@ -10863,6 +11240,10 @@ impl CodeGen {
                     inferred_binding_ty =
                         self.infer_local_type_from_placeholder_hint(local, &name_str);
                 }
+                if inferred_binding_ty.is_none() {
+                    inferred_binding_ty =
+                        self.infer_local_binding_type_from_current_struct_field(local, &name_str);
+                }
                 if let Some(ty) = inferred_binding_ty.clone() {
                     self.update_local_binding_type(name_str.clone(), ty);
                 }
@@ -11796,6 +12177,52 @@ impl CodeGen {
             qself: None,
             path: owner_path,
         }))
+    }
+
+    fn infer_local_binding_type_from_current_struct_field(
+        &self,
+        local: &syn::Local,
+        binding_name: &str,
+    ) -> Option<syn::Type> {
+        let current_struct = self.current_struct.as_ref()?;
+        let field_ty = self
+            .struct_field_types
+            .get(current_struct)?
+            .get(binding_name)?
+            .clone();
+        let init = local.init.as_ref()?;
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr) else {
+            return None;
+        };
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+        let owner_name = owner_seg.ident.to_string();
+        match owner_name.as_str() {
+            "Vec" if extract_vec_element_type_for_hint(&field_ty).is_some() => Some(field_ty),
+            "ArrayVec" if extract_arrayvec_element_type_for_hint(&field_ty).is_some() => {
+                Some(field_ty)
+            }
+            "ArrayString" if extract_arraystring_capacity_expr_for_hint(&field_ty).is_some() => {
+                Some(field_ty)
+            }
+            "HashMap" if extract_hashmap_key_value_types_for_hint(&field_ty).is_some() => {
+                Some(field_ty)
+            }
+            "Cell" => {
+                let peeled = peel_reference_paren_group_type_hint(&field_ty);
+                let syn::Type::Path(tp) = peeled else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                (last.ident == "Cell").then_some(field_ty)
+            }
+            _ => None,
+        }
     }
 
     fn infer_local_binding_type_from_initializer(
@@ -15507,6 +15934,12 @@ impl CodeGen {
         {
             return Some(format!("{}()", owner_cpp));
         }
+        if owner_cpp.starts_with("rusty::Vec<")
+            && method == "from_iter"
+            && args.len() == 1
+        {
+            return Some(format!("rusty::collect_range({})", args[0]));
+        }
         Some(format!("{}::{}({})", owner_cpp, method, args.join(", ")))
     }
 
@@ -17081,6 +17514,15 @@ impl CodeGen {
                 if expected_cpp.starts_with("rusty::Vec<") {
                     return format!("{}::new_()", expected_cpp);
                 }
+            }
+        }
+        if call.args.len() == 1 {
+            let is_vec_from_iter_call = matches!(func.as_str(), "Vec::from_iter" | "rusty::Vec::from_iter")
+                || ((func.starts_with("rusty::Vec<") || func.starts_with("::rusty::Vec<"))
+                    && func.ends_with(">::from_iter"));
+            if is_vec_from_iter_call {
+                let arg = self.emit_expr_maybe_move(&call.args[0]);
+                return format!("rusty::collect_range({})", arg);
             }
         }
         if func == "rusty::boxed::into_vec" && call.args.len() == 1 {
@@ -24792,6 +25234,26 @@ fn peel_reference_paren_group_type_hint<'a>(mut ty: &'a syn::Type) -> &'a syn::T
     }
 }
 
+fn extract_vec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "Vec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) if !matches!(inner, syn::Type::Infer(_)) => {
+            Some(inner.clone())
+        }
+        _ => None,
+    })
+}
+
 fn extract_arrayvec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
     let ty = peel_reference_paren_group_type_hint(ty);
     let syn::Type::Path(tp) = ty else {
@@ -28181,16 +28643,73 @@ mod tests {
 
     #[test]
     fn test_vec_from_iter_mapping() {
-        // Vec::from_iter should be rewritten to rusty::Vec::from_iter
+        // Vec::from_iter should lower to the shared collect helper.
         let out = transpile_str("fn f(iter: impl IntoIterator<Item=i32>) { let v = Vec::from_iter(iter); }");
-        assert!(out.contains("rusty::Vec::from_iter"));
+        assert!(out.contains("rusty::collect_range"));
+        assert!(!out.contains("rusty::Vec::from_iter"));
     }
 
     #[test]
     fn test_vec_from_iter_with_turbofish() {
-        // Vec::from_iter::<i32>(iter) should be rewritten to rusty::Vec<int32_t>::from_iter
+        // Turbofish forms should also lower to the shared collect helper.
         let out = transpile_str("fn f(iter: impl IntoIterator<Item=i32>) { let v = Vec::<i32>::from_iter(iter); }");
-        assert!(out.contains("rusty::Vec<int32_t>::from_iter"));
+        assert!(out.contains("rusty::collect_range"));
+        assert!(!out.contains("rusty::Vec<int32_t>::from_iter"));
+    }
+
+    #[test]
+    fn test_vec_from_iter_with_expected_type_uses_collect_range() {
+        let out = transpile_str(
+            r#"
+            fn f(iter: impl IntoIterator<Item=i32>) -> Vec<i32> {
+                Vec::from_iter(iter)
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::collect_range"));
+        assert!(!out.contains("::from_iter("));
+    }
+
+    #[test]
+    fn test_leaf1058_vec_new_placeholder_uses_function_arg_expected_type_hint() {
+        let out = transpile_str(
+            r#"
+            fn sink(v: &mut Vec<i32>) {}
+            fn f() {
+                let mut comparators = Vec::new_();
+                sink(&mut comparators);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Vec<int32_t>::new_()"),
+            "expected Vec new_ call specialized from function-arg expected type, got: {}",
+            out
+        );
+        assert!(!out.contains("rusty::Vec::new_()"));
+    }
+
+    #[test]
+    fn test_leaf1058_vec_new_placeholder_uses_impl_field_name_fallback() {
+        let out = transpile_str(
+            r#"
+            struct VersionReq {
+                comparators: Vec<i32>,
+            }
+            impl VersionReq {
+                fn new_local() {
+                    let mut comparators = Vec::new_();
+                    let _ = comparators;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Vec<int32_t>::new_()"),
+            "expected Vec new_ call specialized from impl field fallback, got: {}",
+            out
+        );
+        assert!(!out.contains("rusty::Vec::new_()"));
     }
 
     #[test]

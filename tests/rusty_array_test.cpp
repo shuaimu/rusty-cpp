@@ -474,6 +474,17 @@ void test_take_iterator_adapter_shape() {
     printf("PASS\n");
 }
 
+void test_collect_range_iterator_adapter_shape() {
+    printf("test_collect_range_iterator_adapter_shape: ");
+    auto collected = rusty::collect_range(
+        rusty::map(rusty::range(1, 4), [](int value) { return value * 3; }));
+    assert(collected.len() == 3);
+    assert(collected[0] == 3);
+    assert(collected[1] == 6);
+    assert(collected[2] == 9);
+    printf("PASS\n");
+}
+
 void test_rev_enumerate_iterator_adapter_shape() {
     printf("test_rev_enumerate_iterator_adapter_shape: ");
     {
@@ -505,6 +516,24 @@ void test_rev_enumerate_iterator_adapter_shape() {
         }
         assert((values == std::array<int, 3>{{10, 21, 32}}));
     }
+    printf("PASS\n");
+}
+
+void test_iter_vec_enumerate_adapter_shape() {
+    printf("test_iter_vec_enumerate_adapter_shape: ");
+    rusty::Vec<int> values = rusty::Vec<int>::new_();
+    values.push(7);
+    values.push(9);
+    values.push(11);
+
+    const rusty::Vec<int>& values_ref = values;
+    size_t idx = 0;
+    for (auto&& [i, elt] : rusty::for_in(rusty::enumerate(rusty::iter(values_ref)))) {
+        assert(i == idx);
+        assert(*elt == static_cast<int>(7 + (static_cast<int>(idx) * 2)));
+        ++idx;
+    }
+    assert(idx == 3);
     printf("PASS\n");
 }
 
@@ -613,7 +642,9 @@ int main() {
     test_for_in_map_fold_rusty_option_next_shape();
     test_all_iterator_helper_shape();
     test_take_iterator_adapter_shape();
+    test_collect_range_iterator_adapter_shape();
     test_rev_enumerate_iterator_adapter_shape();
+    test_iter_vec_enumerate_adapter_shape();
     test_iter_mut_enumerate_preserves_mutability_shape();
     test_maybe_uninit_reference_pointer_shape();
     test_maybe_uninit_array_payload_pointer_adaptation_shape();

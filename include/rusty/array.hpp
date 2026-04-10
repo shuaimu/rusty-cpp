@@ -100,6 +100,9 @@ constexpr bool operator==(const std::array<L, N>& lhs, const std::array<R, N>& r
 namespace rusty {
 
 namespace detail {
+template<typename T>
+inline constexpr bool collect_range_dependent_false_v = false;
+
 template<typename Index>
 size_t checked_index(Index idx) {
     if constexpr (std::is_signed_v<Index>) {
@@ -253,12 +256,43 @@ std::vector<T> array_repeat(T value, size_t count) {
 /// Used by transpiled Rust range `.collect()` calls.
 template<typename Range>
 auto collect_range(Range&& range_like) {
-    using Elem = std::decay_t<decltype(*std::begin(range_like))>;
-    Vec<Elem> out = Vec<Elem>::new_();
-    for (auto&& item : range_like) {
-        out.push(std::forward<decltype(item)>(item));
+    if constexpr (requires(Range&& r) {
+        std::begin(r);
+        std::end(r);
+    }) {
+        using Elem = std::decay_t<decltype(*std::begin(range_like))>;
+        Vec<Elem> out = Vec<Elem>::new_();
+        for (auto&& item : range_like) {
+            out.push(std::forward<decltype(item)>(item));
+        }
+        return out;
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+        return collect_range(std::forward<Range>(range_like).into_iter());
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
+        auto iter = std::forward<Range>(range_like);
+        using NextResult = decltype(iter.next());
+        static_assert(
+            requires(NextResult& next_item) {
+                detail::option_has_value(next_item);
+                detail::option_take_value(next_item);
+            },
+            "rusty::collect_range requires next() to return an Option/optional-like value");
+        using Elem = std::decay_t<decltype(detail::option_take_value(
+            std::declval<NextResult&>()))>;
+        Vec<Elem> out = Vec<Elem>::new_();
+        while (true) {
+            auto item = iter.next();
+            if (!detail::option_has_value(item)) {
+                break;
+            }
+            out.push(detail::option_take_value(item));
+        }
+        return out;
+    } else {
+        static_assert(
+            detail::collect_range_dependent_false_v<Range>,
+            "rusty::collect_range requires a range, into_iter(), or Option-like next()");
     }
-    return out;
 }
 
 template<typename T>

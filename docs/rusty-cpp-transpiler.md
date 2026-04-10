@@ -4002,7 +4002,59 @@ Active work items:
      - new first deterministic head remains at `runner.cpp:1064`, now in `Prerelease::cmp` ordering/lambda-return family (`cmp(...).then_with(...)` on non-chainable `Ordering`, plus adjacent lambda return-shape mismatch `Ordering` vs `void`).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-6b-1775863888/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated, with no blanket callsite rewrites, no crate-specific scripts, and no generated-text patching.
-160. Current active next leaf is `10.5.7` (collapse the post-10.5.6 deterministic semver ordering/lambda-return head and re-probe parity).
+160. `Leaf 10.5.7` is complete.
+   - plan/scope check: shared transpiler/runtime-fallback updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - added shape-gated `Ordering::then_with` lowering (`try_emit_ordering_then_with_call`) to `rusty::cmp::then_with(receiver, callback)` for Ordering-typed receiver families (`cmp(...)`, inferred Ordering receivers, and chained `.then_with(...).then_with(...)`).
+     - hardened tuple-value match fallback for non-void contexts to emit terminal `rusty::intrinsics::unreachable();` statement form instead of invalid `return void` shapes.
+     - added runtime fallback helper surface for `rusty::cmp::then_with(Ordering, F&&)` in `runtime_path_fallback_helpers_text()`.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf1057_ordering_then_with_lowers_to_runtime_helper`
+       - `test_leaf1057_ordering_then_with_lowers_for_cmp_call_receiver_shape`
+       - `test_leaf1057_ordering_then_with_chain_lowers_to_runtime_helper_calls`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1057 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf1056 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf2114 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-7c-1775862052 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1064` (`cmp(...).then_with(...)` + lambda return-shape mismatch) is collapsed.
+     - new deterministic head moved to `include/rusty/slice.hpp:514` (`rusty::enumerate` deduction recursion) with adjacent omitted-template `rusty::Vec` fallout at `runner.cpp:1267`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-7c-1775862052/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated, with no crate-specific rewrites/scripts and no generated-text patching.
+161. `Leaf 10.5.8` is complete.
+   - plan/scope check: shared transpiler/runtime updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes:
+     - `include/rusty/vec.hpp`: added `data()`/`const data()` accessors so `rusty::iter(vec)` uses the slice-style `data()/size()` path and no longer recurses through `rusty::enumerate(iter(vec))`.
+     - `include/rusty/array.hpp`: hardened `rusty::collect_range` to support generic C++ ranges (`begin/end`), `into_iter()`, and Option-like `next()` iterator surfaces.
+     - `transpiler/src/codegen.rs`:
+       - added function-call expected-argument placeholder hint augmentation for block-local generic placeholders (Vec-focused shape), enabling `Vec::new_()` specialization from callee signatures.
+       - added impl-struct field fallback local type recovery for same-name placeholder constructor locals (e.g., `comparators` in `impl VersionReq`).
+       - lowered `Vec::from_iter(...)` to `rusty::collect_range(...)` in both generic call path and expected-type associated-call path.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf1058_vec_new_placeholder_uses_function_arg_expected_type_hint`
+       - `test_leaf1058_vec_new_placeholder_uses_impl_field_name_fallback`
+       - `test_vec_from_iter_mapping`
+       - `test_vec_from_iter_with_turbofish`
+       - `test_vec_from_iter_with_expected_type_uses_collect_range`
+     - `tests/rusty_array_test.cpp`:
+       - `test_collect_range_iterator_adapter_shape`
+       - `test_iter_vec_enumerate_adapter_shape`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf1058 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_vec_from_iter -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-8b-1775863750 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `include/rusty/slice.hpp:514` (`rusty::enumerate` recursion) + adjacent omitted-template Vec family (`runner.cpp:1267`) is collapsed.
+     - new deterministic head starts at `runner.cpp:1278` (`VersionReq::STAR` deleted-copy path), with immediate adjacent fallout at `runner.cpp:1280` (`ch` unresolved) and `runner.cpp:1290` (`Vec::set_len` missing runtime surface).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-8b-1775863750/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in core transpiler/runtime surfaces, with no crate-specific scripts and no generated-text patching.
+162. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.8` (`runner.cpp:1278` deleted-copy/`VersionReq::STAR` + adjacent `set_len`/shadow fallout).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

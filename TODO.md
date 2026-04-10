@@ -2761,7 +2761,39 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-7c-1775862052/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated, avoided crate-specific rewrites/scripts and avoided blanket callsite text patching.
-        - [ ] Leaf 10.5.8: Collapse the post-10.5.7 deterministic semver Stage D iterator/enumerate-template frontier generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:514` `rusty::enumerate` deduction recursion and adjacent `runner.cpp:1267` omitted-template `rusty::Vec` usage), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.8: Collapse the post-10.5.7 deterministic semver Stage D iterator/enumerate-template frontier generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:514` `rusty::enumerate` deduction recursion and adjacent `runner.cpp:1267` omitted-template `rusty::Vec` usage), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler/runtime updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared runtime/transpiler fixes:
+            - `include/rusty/vec.hpp`:
+              - added `data()`/`const data()` accessors so `rusty::iter(vec)` takes the slice-style `data()/size()` path instead of falling back to `begin/end`, collapsing the `rusty::enumerate` recursive deduction head.
+            - `include/rusty/array.hpp`:
+              - hardened `rusty::collect_range` to support three generic iterator surfaces: C++ ranges (`begin/end`), Rust-style `into_iter()`, and Option-like `next()` iterators.
+            - `transpiler/src/codegen.rs`:
+              - added block pre-scan augmentation from function-call expected argument types to recover placeholder `Vec` element hints for untyped locals (`let mut v = Vec::new_(); sink(&mut v);`).
+              - added impl-scope struct-field fallback local type recovery for constructor-like placeholder calls (e.g., `comparators` local in `impl VersionReq` infers from `VersionReq::comparators: Vec<Comparator>`).
+              - lowered `Vec::from_iter(...)` to `rusty::collect_range(...)` for both generic call path and expected-type associated-call path (so `Vec::<T>::from_iter` and `Vec::from_iter` in typed contexts no longer emit nonexistent `Vec::from_iter` runtime calls).
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf1058_vec_new_placeholder_uses_function_arg_expected_type_hint`
+              - `test_leaf1058_vec_new_placeholder_uses_impl_field_name_fallback`
+              - `test_vec_from_iter_mapping`
+              - `test_vec_from_iter_with_turbofish`
+              - `test_vec_from_iter_with_expected_type_uses_collect_range`
+            - `tests/rusty_array_test.cpp`:
+              - `test_collect_range_iterator_adapter_shape`
+              - `test_iter_vec_enumerate_adapter_shape`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf1058 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_vec_from_iter -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-8b-1775863750 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior first hard-error family at `include/rusty/slice.hpp:514` (`rusty::enumerate` recursion) + adjacent omitted-template Vec family (`runner.cpp:1267`) is collapsed.
+            - new deterministic Stage D head starts at `runner.cpp:1278` (`VersionReq::STAR` copy-ctor/deleted-copy family), with immediate adjacent fallout including `runner.cpp:1280` (`ch` unresolved) and `runner.cpp:1290` (`Vec::set_len` missing runtime surface).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-8b-1775863750/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-surface-gated, with no crate-specific scripts and no post-generation text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
