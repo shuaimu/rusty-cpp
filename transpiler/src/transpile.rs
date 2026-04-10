@@ -2,6 +2,13 @@ use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
 use std::collections::HashSet;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TranspileOptions {
+    /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
+    /// Default is `false`.
+    pub by_value_cycle_breaking_prototype: bool,
+}
+
 /// Transpile Rust source code to C++ code.
 /// If `module_name` is provided, emit C++20 module declarations.
 pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
@@ -14,7 +21,13 @@ pub fn transpile_with_type_map(
     module_name: Option<&str>,
     type_map: &UserTypeMap,
 ) -> Result<String, String> {
-    transpile_with_type_map_and_extension_hints(rust_source, module_name, type_map, &HashSet::new())
+    transpile_with_type_map_and_extension_hints_and_options(
+        rust_source,
+        module_name,
+        type_map,
+        &HashSet::new(),
+        &TranspileOptions::default(),
+    )
 }
 
 /// Transpile with user-provided type mappings plus cross-source extension-method hints.
@@ -24,7 +37,32 @@ pub fn transpile_with_type_map_and_extension_hints(
     type_map: &UserTypeMap,
     extension_method_hints: &HashSet<String>,
 ) -> Result<String, String> {
-    transpile_full(rust_source, module_name, type_map, extension_method_hints, None)
+    transpile_with_type_map_and_extension_hints_and_options(
+        rust_source,
+        module_name,
+        type_map,
+        extension_method_hints,
+        &TranspileOptions::default(),
+    )
+}
+
+/// Transpile with user-provided type mappings plus cross-source extension-method
+/// hints and explicit transpilation options.
+pub fn transpile_with_type_map_and_extension_hints_and_options(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    options: &TranspileOptions,
+) -> Result<String, String> {
+    transpile_full_with_options(
+        rust_source,
+        module_name,
+        type_map,
+        extension_method_hints,
+        None,
+        options,
+    )
 }
 
 /// Transpile with all options including crate name for path stripping.
@@ -34,6 +72,26 @@ pub fn transpile_full(
     type_map: &UserTypeMap,
     extension_method_hints: &HashSet<String>,
     crate_name: Option<&str>,
+) -> Result<String, String> {
+    transpile_full_with_options(
+        rust_source,
+        module_name,
+        type_map,
+        extension_method_hints,
+        crate_name,
+        &TranspileOptions::default(),
+    )
+}
+
+/// Transpile with all options including crate name for path stripping and
+/// explicit transpilation options.
+pub fn transpile_full_with_options(
+    rust_source: &str,
+    module_name: Option<&str>,
+    type_map: &UserTypeMap,
+    extension_method_hints: &HashSet<String>,
+    crate_name: Option<&str>,
+    options: &TranspileOptions,
 ) -> Result<String, String> {
     let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
 
@@ -45,6 +103,7 @@ pub fn transpile_full(
     if let Some(name) = crate_name {
         codegen.set_crate_name(name);
     }
+    codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
 }
@@ -298,5 +357,40 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("static_cast<void>(rusty::tap(10));"));
+    }
+
+    #[test]
+    fn test_transpile_options_toggle_by_value_cycle_breaking_prototype_diagnostics() {
+        let src = r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                a: A,
+            }
+        "#;
+        let default_out = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !default_out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
+            "default mode should not emit prototype cycle-breaking diagnostics\nGot: {default_out}"
+        );
+
+        let options = TranspileOptions {
+            by_value_cycle_breaking_prototype: true,
+        };
+        let opt_in_out = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("opt-in transpile should succeed");
+        assert!(
+            opt_in_out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
+            "opt-in mode should emit prototype cycle-breaking diagnostics\nGot: {opt_in_out}"
+        );
     }
 }

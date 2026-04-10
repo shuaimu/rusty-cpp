@@ -328,12 +328,26 @@ pub struct CodeGen {
     unsupported_by_value_cycle_diagnostics: Vec<String>,
     /// De-duplication keys for by-value cycle diagnostics.
     unsupported_by_value_cycle_keys: HashSet<String>,
+    /// Opt-in prototype mode for by-value SCC cycle breaking diagnostics.
+    enable_by_value_cycle_breaking_prototype: bool,
+    /// Deterministic prototype diagnostics describing selected feedback edges.
+    by_value_cycle_breaking_prototype_diagnostics: Vec<String>,
+    /// De-duplication keys for prototype cycle-breaking diagnostics.
+    by_value_cycle_breaking_prototype_keys: HashSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ByValueCycleDiagnostic {
     type_names: Vec<String>,
     cycle_path: Vec<String>,
+    feedback_edges: Vec<ByValueCycleFeedbackEdge>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct ByValueCycleFeedbackEdge {
+    owner_type: String,
+    field_name: String,
+    target_type: String,
 }
 
 impl CodeGen {
@@ -424,6 +438,9 @@ impl CodeGen {
             cyclic_type_names: HashSet::new(),
             unsupported_by_value_cycle_diagnostics: Vec::new(),
             unsupported_by_value_cycle_keys: HashSet::new(),
+            enable_by_value_cycle_breaking_prototype: false,
+            by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
+            by_value_cycle_breaking_prototype_keys: HashSet::new(),
         }
     }
 
@@ -469,6 +486,13 @@ impl CodeGen {
     /// Set the crate name for stripping crate-qualified paths in test targets.
     pub fn set_crate_name(&mut self, name: &str) {
         self.crate_name = Some(name.replace('-', "_"));
+    }
+
+    /// Enable or disable prototype diagnostics for by-value SCC cycle breaking.
+    /// This mode does not rewrite emitted code yet; it only reports deterministic
+    /// candidate feedback edges selected by the prototype planner.
+    pub fn set_by_value_cycle_breaking_prototype(&mut self, enabled: bool) {
+        self.enable_by_value_cycle_breaking_prototype = enabled;
     }
 
     /// Emit a complete Rust file as C++ code.
@@ -540,6 +564,8 @@ impl CodeGen {
         self.cyclic_type_names.clear();
         self.unsupported_by_value_cycle_diagnostics.clear();
         self.unsupported_by_value_cycle_keys.clear();
+        self.by_value_cycle_breaking_prototype_diagnostics.clear();
+        self.by_value_cycle_breaking_prototype_keys.clear();
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -584,6 +610,9 @@ impl CodeGen {
         let cycle_components = Self::detect_by_value_cycle_components(&all_type_items);
         for diagnostic in cycle_components {
             self.record_unsupported_by_value_cycle_diagnostic(&diagnostic);
+            if self.enable_by_value_cycle_breaking_prototype {
+                self.record_by_value_cycle_breaking_prototype_diagnostic(&diagnostic);
+            }
         }
 
         // Pass 2: emit all items
@@ -681,6 +710,17 @@ impl CodeGen {
             diagnostics.dedup();
             for diagnostic in diagnostics {
                 prologue_text.push_str("// UNSUPPORTED: ");
+                prologue_text.push_str(&diagnostic);
+                prologue_text.push('\n');
+            }
+            prologue_text.push('\n');
+        }
+        if !self.by_value_cycle_breaking_prototype_diagnostics.is_empty() {
+            let mut diagnostics = self.by_value_cycle_breaking_prototype_diagnostics.clone();
+            diagnostics.sort();
+            diagnostics.dedup();
+            for diagnostic in diagnostics {
+                prologue_text.push_str("// PROTOTYPE: ");
                 prologue_text.push_str(&diagnostic);
                 prologue_text.push('\n');
             }
@@ -889,6 +929,56 @@ impl CodeGen {
                 "unsupported by-value circular type dependency in scope {}: [{}]; cycle path: {}",
                 scope,
                 sorted_names.join(", "),
+                cycle_path
+            ));
+        }
+    }
+
+    fn record_by_value_cycle_breaking_prototype_diagnostic(
+        &mut self,
+        diagnostic: &ByValueCycleDiagnostic,
+    ) {
+        if diagnostic.type_names.is_empty() {
+            return;
+        }
+        let mut sorted_names = diagnostic.type_names.clone();
+        sorted_names.sort();
+        sorted_names.dedup();
+        if sorted_names.is_empty() {
+            return;
+        }
+        let cycle_path = if diagnostic.cycle_path.is_empty() {
+            sorted_names.join(" -> ")
+        } else {
+            diagnostic.cycle_path.join(" -> ")
+        };
+        let scope = if self.module_stack.is_empty() {
+            "<crate>".to_string()
+        } else {
+            self.module_stack.join("::")
+        };
+        let key = format!("{}|{}", scope, sorted_names.join(","));
+        if self.by_value_cycle_breaking_prototype_keys.insert(key) {
+            let selected_edges = if diagnostic.feedback_edges.is_empty() {
+                "<none>".to_string()
+            } else {
+                diagnostic
+                    .feedback_edges
+                    .iter()
+                    .map(|edge| {
+                        format!(
+                            "{}.{} -> {}",
+                            edge.owner_type, edge.field_name, edge.target_type
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            self.by_value_cycle_breaking_prototype_diagnostics.push(format!(
+                "by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope {}: [{}]; selected feedback edges: [{}]; cycle path: {}",
+                scope,
+                sorted_names.join(", "),
+                selected_edges,
                 cycle_path
             ));
         }
@@ -1143,31 +1233,64 @@ impl CodeGen {
             return Vec::new();
         }
 
+        let pos_to_name: Vec<String> = struct_indices
+            .iter()
+            .map(|&idx| {
+                items
+                    .get(idx)
+                    .and_then(|item| match item {
+                        syn::Item::Struct(s) => Some(s.ident.to_string()),
+                        syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                            Some(e.ident.to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("_unknown_{}", idx))
+            })
+            .collect();
+
         let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut by_value_field_edges_by_pair: HashMap<(usize, usize), Vec<ByValueCycleFeedbackEdge>> =
+            HashMap::new();
         for (pos, &idx) in struct_indices.iter().enumerate() {
-            let deps = match items[idx] {
+            let owner_name = pos_to_name
+                .get(pos)
+                .cloned()
+                .unwrap_or_else(|| format!("_owner_{}", pos));
+            let by_value_edges = match items[idx] {
                 syn::Item::Struct(s) => {
-                    Self::collect_by_value_field_type_names(&s.fields, &type_names)
+                    Self::collect_by_value_field_edges(&s.fields, None, &owner_name, &type_names)
                 }
                 syn::Item::Enum(e) => {
-                    let mut out = HashSet::new();
+                    let mut out = Vec::new();
                     for variant in &e.variants {
-                        out.extend(Self::collect_by_value_field_type_names(
+                        let variant_name = variant.ident.to_string();
+                        out.extend(Self::collect_by_value_field_edges(
                             &variant.fields,
+                            Some(variant_name.as_str()),
+                            &owner_name,
                             &type_names,
                         ));
                     }
                     out
                 }
-                _ => HashSet::new(),
+                _ => Vec::new(),
             };
-            for dep_name in deps {
-                if let Some(&dep_pos) = name_to_pos.get(dep_name.as_str()) {
+            for field_edge in by_value_edges {
+                if let Some(&dep_pos) = name_to_pos.get(field_edge.target_type.as_str()) {
                     edges[pos].push(dep_pos);
+                    by_value_field_edges_by_pair
+                        .entry((pos, dep_pos))
+                        .or_default()
+                        .push(field_edge);
                 }
             }
             edges[pos].sort_unstable();
             edges[pos].dedup();
+        }
+        for field_edges in by_value_field_edges_by_pair.values_mut() {
+            field_edges.sort();
+            field_edges.dedup();
         }
 
         let mut reversed: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -1280,9 +1403,14 @@ impl CodeGen {
                     &edges,
                     &pos_to_name,
                 );
+                let feedback_edges = Self::select_deterministic_feedback_edges_for_component(
+                    &component,
+                    &by_value_field_edges_by_pair,
+                );
                 cycle_components.push(ByValueCycleDiagnostic {
                     type_names: names,
                     cycle_path,
+                    feedback_edges,
                 });
             }
         }
@@ -1291,9 +1419,171 @@ impl CodeGen {
             a.type_names
                 .cmp(&b.type_names)
                 .then_with(|| a.cycle_path.cmp(&b.cycle_path))
+                .then_with(|| a.feedback_edges.cmp(&b.feedback_edges))
         });
-        cycle_components.dedup_by(|a, b| a.type_names == b.type_names && a.cycle_path == b.cycle_path);
+        cycle_components.dedup_by(|a, b| {
+            a.type_names == b.type_names
+                && a.cycle_path == b.cycle_path
+                && a.feedback_edges == b.feedback_edges
+        });
         cycle_components
+    }
+
+    fn collect_by_value_field_edges(
+        fields: &syn::Fields,
+        variant_name: Option<&str>,
+        owner_type: &str,
+        known: &HashSet<String>,
+    ) -> Vec<ByValueCycleFeedbackEdge> {
+        let mut result = Vec::new();
+        for (field_idx, field) in fields.iter().enumerate() {
+            let mut targets = HashSet::new();
+            Self::collect_by_value_type_name_segments(&field.ty, known, &mut targets, false);
+            if targets.is_empty() {
+                continue;
+            }
+            let base_name = field
+                .ident
+                .as_ref()
+                .map(|ident| ident.to_string())
+                .unwrap_or_else(|| format!("#{}", field_idx));
+            let field_name = if let Some(variant) = variant_name {
+                format!("{}::{}", variant, base_name)
+            } else {
+                base_name
+            };
+            let mut sorted_targets: Vec<String> = targets.into_iter().collect();
+            sorted_targets.sort();
+            sorted_targets.dedup();
+            for target_type in sorted_targets {
+                result.push(ByValueCycleFeedbackEdge {
+                    owner_type: owner_type.to_string(),
+                    field_name: field_name.clone(),
+                    target_type,
+                });
+            }
+        }
+        result.sort();
+        result.dedup();
+        result
+    }
+
+    fn select_deterministic_feedback_edges_for_component(
+        component: &[usize],
+        by_value_field_edges_by_pair: &HashMap<(usize, usize), Vec<ByValueCycleFeedbackEdge>>,
+    ) -> Vec<ByValueCycleFeedbackEdge> {
+        if component.is_empty() {
+            return Vec::new();
+        }
+
+        let component_set: HashSet<usize> = component.iter().copied().collect();
+        let mut remaining_pair_field_counts: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut candidate_field_edges: Vec<((usize, usize), ByValueCycleFeedbackEdge)> = Vec::new();
+
+        for (&pair, field_edges) in by_value_field_edges_by_pair {
+            if !component_set.contains(&pair.0) || !component_set.contains(&pair.1) {
+                continue;
+            }
+            if field_edges.is_empty() {
+                continue;
+            }
+            remaining_pair_field_counts.insert(pair, field_edges.len());
+            for field_edge in field_edges {
+                candidate_field_edges.push((pair, field_edge.clone()));
+            }
+        }
+
+        candidate_field_edges.sort_by(|(pair_a, edge_a), (pair_b, edge_b)| {
+            edge_a.cmp(edge_b).then_with(|| pair_a.cmp(pair_b))
+        });
+        candidate_field_edges
+            .dedup_by(|(pair_a, edge_a), (pair_b, edge_b)| pair_a == pair_b && edge_a == edge_b);
+
+        let mut selected = Vec::new();
+        if Self::by_value_component_pairs_acyclic(component, &remaining_pair_field_counts) {
+            return selected;
+        }
+
+        for (pair, edge) in candidate_field_edges {
+            let remove_pair;
+            {
+                let Some(count) = remaining_pair_field_counts.get_mut(&pair) else {
+                    continue;
+                };
+                if *count == 0 {
+                    continue;
+                }
+                *count -= 1;
+                remove_pair = *count == 0;
+            }
+            if remove_pair {
+                remaining_pair_field_counts.remove(&pair);
+            }
+            selected.push(edge);
+            if Self::by_value_component_pairs_acyclic(component, &remaining_pair_field_counts) {
+                break;
+            }
+        }
+
+        selected.sort();
+        selected.dedup();
+        selected
+    }
+
+    fn by_value_component_pairs_acyclic(
+        component: &[usize],
+        remaining_pair_field_counts: &HashMap<(usize, usize), usize>,
+    ) -> bool {
+        if component.is_empty() {
+            return true;
+        }
+
+        let component_set: HashSet<usize> = component.iter().copied().collect();
+        let mut indegree: HashMap<usize, usize> =
+            component.iter().copied().map(|node| (node, 0usize)).collect();
+        let mut outgoing: HashMap<usize, Vec<usize>> = HashMap::new();
+
+        for (&(from, to), &count) in remaining_pair_field_counts {
+            if count == 0 || !component_set.contains(&from) || !component_set.contains(&to) {
+                continue;
+            }
+            outgoing.entry(from).or_default().push(to);
+            if let Some(indegree_entry) = indegree.get_mut(&to) {
+                *indegree_entry += 1;
+            }
+        }
+
+        for nexts in outgoing.values_mut() {
+            nexts.sort_unstable();
+            nexts.dedup();
+        }
+
+        let mut ready: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+        for (&node, &deg) in &indegree {
+            if deg == 0 {
+                ready.push(Reverse(node));
+            }
+        }
+
+        let mut visited = 0usize;
+        while let Some(Reverse(node)) = ready.pop() {
+            visited += 1;
+            if let Some(nexts) = outgoing.get(&node) {
+                for &next in nexts {
+                    if let Some(indegree_entry) = indegree.get_mut(&next) {
+                        if *indegree_entry == 0 {
+                            continue;
+                        }
+                        *indegree_entry -= 1;
+                        if *indegree_entry == 0 {
+                            ready.push(Reverse(next));
+                        }
+                    }
+                }
+            }
+        }
+
+        visited == component.len()
     }
 
     fn find_deterministic_cycle_path_for_component(
@@ -1432,20 +1722,6 @@ impl CodeGen {
         let mut result = HashSet::new();
         for field in fields {
             Self::collect_type_name_segments(&field.ty, known, &mut result);
-        }
-        result
-    }
-
-    /// Collect by-value top-level type dependencies from fields.
-    /// Type arguments nested under pointer/ownership indirection wrappers (`Box`, `Rc`, ...)
-    /// or reference/raw-pointer types are intentionally excluded.
-    fn collect_by_value_field_type_names(
-        fields: &syn::Fields,
-        known: &HashSet<String>,
-    ) -> HashSet<String> {
-        let mut result = HashSet::new();
-        for field in fields {
-            Self::collect_by_value_type_name_segments(&field.ty, known, &mut result, false);
         }
         result
     }
@@ -24711,6 +24987,14 @@ mod tests {
         cg.into_output()
     }
 
+    fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> String {
+        let file: syn::File = syn::parse_str(rust_code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_by_value_cycle_breaking_prototype(true);
+        cg.emit_file(&file, None);
+        cg.into_output()
+    }
+
     #[test]
     fn test_simple_function() {
         let out = transpile_str("fn add(a: i32, b: i32) -> i32 { a + b }");
@@ -35840,6 +36124,70 @@ mod tests {
                 "// UNSUPPORTED: unsupported by-value circular type dependency in scope <crate>: [A, B, C]; cycle path: A -> B -> C -> A"
             ),
             "Expected cycle diagnostic with explicit path and type names\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1124_default_mode_does_not_emit_cycle_breaking_prototype_diagnostics() {
+        let out = transpile_str(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
+            "Default mode must remain diagnostic-only without prototype cycle-breaking banner\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1124_opt_in_mode_emits_deterministic_cycle_breaking_feedback_edge() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b: B,
+            }
+
+            struct B {
+                c: C,
+            }
+
+            struct C {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "// PROTOTYPE: by-value cycle-breaking flag enabled (diagnostic-only prototype) in scope <crate>: [A, B, C]; selected feedback edges: [A.b -> B]; cycle path: A -> B -> C -> A"
+            ),
+            "Expected deterministic prototype feedback-edge diagnostic for opt-in mode\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1124_opt_in_mode_can_select_multiple_feedback_edges_for_same_pair() {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            struct A {
+                b1: B,
+                b2: B,
+            }
+
+            struct B {
+                a: A,
+            }
+            "#,
+        );
+        assert!(
+            out.contains("selected feedback edges: [A.b1 -> B, A.b2 -> B]"),
+            "Expected deterministic multi-edge feedback selection when one edge is insufficient to break SCC\nGot: {out}"
         );
     }
 

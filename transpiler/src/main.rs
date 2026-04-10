@@ -49,6 +49,10 @@ struct Cli {
     #[arg(long)]
     type_map: Option<PathBuf>,
 
+    /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
+    #[arg(long)]
+    by_value_cycle_breaking_prototype: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -104,6 +108,10 @@ struct ParityTestArgs {
     /// User-provided type mapping file
     #[arg(long)]
     type_map: Option<PathBuf>,
+
+    /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
+    #[arg(long)]
+    by_value_cycle_breaking_prototype: bool,
 }
 
 /// Transpile an entire Rust crate in one command.
@@ -115,6 +123,7 @@ fn transpile_crate(
     type_map: &types::UserTypeMap,
     expand: bool,
     verify: bool,
+    transpile_options: &transpile::TranspileOptions,
 ) -> Result<(), String> {
     // Step 1: Parse Cargo.toml and discover source files
     let cargo = cmake::parse_cargo_toml(cargo_toml_path)?;
@@ -148,7 +157,14 @@ fn transpile_crate(
                 let dep_cargo_toml = project_dir.join(dep_path).join("Cargo.toml");
                 if dep_cargo_toml.exists() {
                     let dep_out_dir = output_dir.join(&dep.name);
-                    match transpile_crate(&dep_cargo_toml, &dep_out_dir, type_map, expand, verify) {
+                    match transpile_crate(
+                        &dep_cargo_toml,
+                        &dep_out_dir,
+                        type_map,
+                        expand,
+                        verify,
+                        transpile_options,
+                    ) {
                         Ok(()) => {
                             local_dep_dirs.push(dep.name.clone());
                         }
@@ -185,11 +201,12 @@ fn transpile_crate(
                 let cppm_path = output_dir.join(format!("{}.cppm", crate_name));
                 let extension_method_hints =
                     transpile::collect_extension_method_hints(&expanded_source);
-                match transpile::transpile_with_type_map_and_extension_hints(
+                match transpile::transpile_with_type_map_and_extension_hints_and_options(
                     &expanded_source,
                     Some(crate_name),
                     type_map,
                     &extension_method_hints,
+                    transpile_options,
                 ) {
                     Ok(cpp_output) => {
                         std::fs::write(&cppm_path, &cpp_output)
@@ -249,11 +266,12 @@ fn transpile_crate(
             }
         };
 
-        match transpile::transpile_with_type_map_and_extension_hints(
+        match transpile::transpile_with_type_map_and_extension_hints_and_options(
             &source,
             Some(&module_name),
             type_map,
             &extension_method_hints,
+            transpile_options,
         ) {
             Ok(cpp_output) => {
                 if let Err(e) = std::fs::write(&full_cppm_path, &cpp_output) {
@@ -1356,6 +1374,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     } else {
         types::UserTypeMap::default()
     };
+    let transpile_options = transpile::TranspileOptions {
+        by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
+    };
 
     let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
     let mut extension_method_hints = HashSet::new();
@@ -1371,12 +1392,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
     } else {
         for (target, source) in &expanded_sources {
-            let cpp = transpile::transpile_full(
+            let cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&target.module_name),
                 &type_map,
                 &extension_method_hints,
                 Some(crate_name),
+                &transpile_options,
             )?;
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
@@ -1817,6 +1839,9 @@ fn main() {
     } else {
         types::UserTypeMap::default()
     };
+    let transpile_options = transpile::TranspileOptions {
+        by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
+    };
 
     // Handle --crate: transpile entire crate
     if let Some(ref cargo_toml_path) = cli.crate_ {
@@ -1826,6 +1851,7 @@ fn main() {
             &type_map,
             cli.expand,
             cli.verify,
+            &transpile_options,
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -1886,14 +1912,20 @@ fn main() {
         }
     };
 
-    let cpp_output =
-        match transpile::transpile_with_type_map(&source, cli.module_name.as_deref(), &type_map) {
-            Ok(output) => output,
-            Err(e) => {
-                eprintln!("Transpilation error: {}", e);
-                process::exit(1);
-            }
-        };
+    let cpp_output = match transpile::transpile_full_with_options(
+        &source,
+        cli.module_name.as_deref(),
+        &type_map,
+        &HashSet::new(),
+        None,
+        &transpile_options,
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("Transpilation error: {}", e);
+            process::exit(1);
+        }
+    };
 
     match std::fs::write(&output_path, &cpp_output) {
         Ok(()) => {

@@ -3612,8 +3612,28 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): added explicit anti-pattern constraints so cycle breaking cannot silently become default behavior.
-136. Current active next leaf is `11.2.4`.
-   - focus: prototype opt-in implementation flag for cycle breaking, gated by the documented design contract.
+136. `Leaf 11.2.4` is complete.
+   - plan/scope check: implementation stayed well under the <1000 LOC target and was delivered as an opt-in prototype (no default semantic rewrite changes).
+   - implemented option plumbing in `transpiler/src/transpile.rs` and `transpiler/src/main.rs`:
+     - added `TranspileOptions { by_value_cycle_breaking_prototype: bool }`.
+     - added option-aware entry points (`transpile_with_type_map_and_extension_hints_and_options`, `transpile_full_with_options`).
+     - wired CLI/runtime flag `--by-value-cycle-breaking-prototype` for single-file/crate flows and `parity-test`.
+   - implemented deterministic prototype planning diagnostics in `transpiler/src/codegen.rs`:
+     - default mode remains unchanged (`// UNSUPPORTED: ...` only).
+     - opt-in mode emits `// PROTOTYPE: ...` diagnostics listing deterministic selected feedback edges (`owner.field -> target`) and cycle path.
+     - prototype remains diagnostic-only (no by-value field rewrite lowering yet).
+   - focused regressions:
+     - `test_leaf1124_default_mode_does_not_emit_cycle_breaking_prototype_diagnostics`
+     - `test_leaf1124_opt_in_mode_emits_deterministic_cycle_breaking_feedback_edge`
+     - `test_leaf1124_opt_in_mode_can_select_multiple_feedback_edges_for_same_pair`
+     - `test_transpile_options_toggle_by_value_cycle_breaking_prototype_diagnostics`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler transpile_options_toggle -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): kept default behavior diagnostic-only and made edge selection deterministic under explicit opt-in only.
+137. Current active next leaf is `13.1`.
+   - focus: collect callable-bound metadata for extension-trait method parameters (`Fn`/`FnMut`/`FnOnce`) before call-site emission fixes.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

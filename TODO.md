@@ -2730,7 +2730,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - Verification:
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
-            - [ ] Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)
+            - [x] *done* Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)
+              - Added opt-in cycle-breaking prototype flag plumbing in `transpiler/src/transpile.rs` and `transpiler/src/main.rs`:
+                - introduced `TranspileOptions { by_value_cycle_breaking_prototype: bool }`
+                - added option-aware transpile entry points (`transpile_full_with_options`, `transpile_with_type_map_and_extension_hints_and_options`)
+                - wired CLI/runtime activation with `--by-value-cycle-breaking-prototype` for both single-file/crate modes and `parity-test`
+              - Implemented deterministic prototype feedback-edge planning diagnostics in `transpiler/src/codegen.rs` while preserving default behavior:
+                - default path remains `// UNSUPPORTED: ...` only
+                - opt-in mode adds `// PROTOTYPE: ...` diagnostics that list deterministic selected feedback edges `(owner.field -> target)` and cycle path
+                - prototype remains diagnostic-only (no emitted field/type rewrites yet)
+              - Added focused regressions:
+                - `test_leaf1124_default_mode_does_not_emit_cycle_breaking_prototype_diagnostics`
+                - `test_leaf1124_opt_in_mode_emits_deterministic_cycle_breaking_feedback_edge`
+                - `test_leaf1124_opt_in_mode_can_select_multiple_feedback_edges_for_same_pair`
+                - `test_transpile_options_toggle_by_value_cycle_breaking_prototype_diagnostics`
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler transpile_options_toggle -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [x] *done* Leaf 12: Fix test namespace / function name collision (architecture gap #7)
         - [x] *done* Leaf 12.1: Detect when expanded test code creates sub-modules with the same name as function templates and apply `_tests` suffix to test sub-module namespaces (done in Leaf 1.1)
