@@ -1484,14 +1484,16 @@ Because the transpiler target is C++, Rust code should be able to call selected 
 
 This is **not** C ABI FFI (`extern "C"`). This is a source-level C++ interop layer resolved at C++ compile time.
 
-#### Rust Surface (Proposed)
+For the module-only target profile, this design adopts a **no-bridge model**: do not generate typed wrapper layers; emit direct C++ calls and let the C++ compiler resolve overloads/conversions.
+
+#### Rust Surface (Proposed, Module-Oriented)
 
 ```rust
 #[cpp(include = "<my_api.hpp>", ns = "my::api")]
 unsafe extern "C++" {
     fn normalize(v: &mut Vec<f32>);
 
-    #[cpp_name = "hash_value"] // disambiguates C++ symbol/overload name
+    #[cpp_name = "hash_value"] // optional explicit symbol name
     fn hash_string(s: &String) -> u64;
 }
 ```
@@ -1499,23 +1501,23 @@ unsafe extern "C++" {
 MVP rules:
 
 1. `unsafe extern "C++"` is required at declaration sites.
-2. Calls are emitted through generated typed bridge wrappers (no textual call rewriting hacks).
+2. Calls are emitted as direct qualified C++ calls to declared symbols (no generated bridge wrappers).
 3. Free/static C++ functions are in scope for MVP; member/template-heavy surfaces require explicit C++ shim functions.
 
-#### Canonical Type Lowering Rule
+#### Direct-Call Lowering Rule
 
 For each declared Rust interop item:
 
 1. lower Rust parameter/return types to canonical emitted C++ types (same lowering table used by normal Rust emission),
-2. build a typed C++ bridge wrapper with that exact signature,
-3. bind target C++ symbol (with namespace/name overrides from `#[cpp(...)]` attributes),
-4. fail at C++ compile time if no callable symbol matches the canonical signature.
+2. map Rust item path to target C++ symbol (using namespace/name overrides from `#[cpp(...)]` attributes),
+3. emit call sites as direct C++ calls to that symbol,
+4. let C++ compiler perform overload resolution/implicit conversion checks and report diagnostics.
 
-This keeps one source of truth for type mapping and avoids interop-only ad-hoc conversions.
+This keeps one source of truth for type mapping while avoiding extra wrapper codegen.
 
 #### Borrow/Move Semantics at the Boundary
 
-| Rust signature shape | C++ bridge parameter shape | Boundary behavior |
+| Rust signature shape | Emitted C++ argument shape | Boundary behavior |
 |---|---|---|
 | `T` | `T` | caller passes moved value when Rust semantics require move |
 | `&T` | `const T&` | shared borrow |
@@ -1526,27 +1528,21 @@ For Rust-owned runtime types (`rusty::String`, `rusty::Vec<T>`, `rusty::HashMap<
 
 #### Overload and Name Resolution
 
-C++ overload sets are resolved in generated wrappers via explicit type selection (`static_cast` to the canonical function pointer type). Rust call sites remain non-overloaded and deterministic.
+C++ overload sets are resolved directly by the C++ compiler at transpiled call sites.
 
-When overload resolution still cannot be made unambiguous, require `#[cpp_name = "..."]` + an explicit C++ shim function.
+If resolution is ambiguous or picks an undesired overload, constrain from Rust with stronger types/casts or provide an explicit C++ shim symbol.
 
 #### Generated C++ Shape
 
 ```cpp
 #include <my_api.hpp>
 
-namespace __rusty_cpp_bridge {
-inline void normalize(rusty::Vec<float>& v) {
-    my::api::normalize(v);
-}
-
-inline std::uint64_t hash_string(const rusty::String& s) {
-    return my::api::hash_value(s);
-}
-} // namespace __rusty_cpp_bridge
+// Transpiled from Rust call sites (no wrapper layer)
+my::api::normalize(v);
+auto h = my::api::hash_value(s);
 ```
 
-Transpiled Rust call sites then lower to these bridge functions, preserving existing Rust lowering and ownership rules.
+Transpiled Rust call sites lower directly to target C++ symbols, preserving existing Rust lowering and ownership rules.
 
 #### Safety Contract
 
@@ -1554,11 +1550,17 @@ Transpiled Rust call sites then lower to these bridge functions, preserving exis
 - Rust-side safe wrappers are allowed, but only when the crate author can prove callee behavior is compatible with Rust invariants.
 - No automatic lifetime extension is introduced by the transpiler.
 
-#### Rejected Shortcuts
+#### Accepted Tradeoff (No-Bridge Mode)
+
+- overload choice and implicit conversion behavior are delegated to C++ compiler rules,
+- diagnostics surface at direct call sites instead of synthesized wrapper functions,
+- behavior can shift when target C++ declarations or visible overload sets change.
+
+#### Rejected Patterns
 
 - no automatic C ABI thunk generation for this surface (that is a separate `extern "C"` path),
 - no global text substitution of unresolved `foo::bar` paths into C++ calls,
-- no best-effort fallback to untyped `auto` call adapters.
+- no generated bridge wrappers in module-only no-bridge profile.
 
 ---
 
@@ -1791,7 +1793,7 @@ Section 10 remains status/frontier tracking only.
 | Derive macros | Code generation | Medium | Per-derive mapping |
 | Unsafe blocks | Raw code | Easy | Just emit the code |
 | FFI (`extern "C"`) | `extern "C"` | Easy | Direct mapping |
-| C++ interop (`extern "C++"`) | Typed bridge wrappers over native C++ symbols | Medium | See §3.13 |
+| C++ interop (`extern "C++"`) | Direct native C++ calls (no bridge wrappers) | Medium | See §3.13 |
 
 ---
 
