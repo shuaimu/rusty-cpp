@@ -3602,8 +3602,18 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11): kept the fix shared and deterministic in AST-aware dependency analysis; no crate-specific rewrites/scripts were introduced.
-135. Current active next leaf is `11.2.3`.
-   - focus: add design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion) for true by-value SCCs.
+135. `Leaf 11.2.3` is complete.
+   - plan/scope check: this was a design-only documentation leaf and stayed well below the <1000 LOC threshold.
+   - added architecture design note in `§11.9.1` for opt-in by-value SCC cycle breaking:
+     - explicit opt-in activation contract (default remains diagnostic-only).
+     - deterministic edge-selection and rewrite boundaries for SCC cycle breaking.
+     - safety/compatibility constraints, artifact expectations, and non-goals before implementation.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): added explicit anti-pattern constraints so cycle breaking cannot silently become default behavior.
+136. Current active next leaf is `11.2.4`.
+   - focus: prototype opt-in implementation flag for cycle breaking, gated by the documented design contract.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -3729,6 +3739,7 @@ Required approach:
 - for nested local-shadow initializer lowering (for example `let rhs = match rhs.next() { ... }`), do not hide outer same-name bindings before initializer emission or reuse outer same-name C++ shadow identifiers in inner scopes; preserve prior binding visibility and allocate distinct shadow identifiers to avoid self-reference/use-before-deduction
 - for circular type-ordering fallback, do not silently reorder true by-value SCCs and proceed without explicit unsupported diagnostics; emit deterministic cycle diagnostics so unsupported architecture gaps are visible at generation time
 - for by-value SCC diagnostics, do not emit only unordered type sets; include deterministic cycle paths so failure fixtures can assert concrete cycle structure and avoid ambiguous diagnostics
+- for opt-in by-value cycle breaking, do not enable rewriting by default and do not choose feedback edges with non-deterministic traversal order; require explicit activation and deterministic edge selection with emitted rewrite diagnostics
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
@@ -3790,7 +3801,7 @@ Required approach:
 
 The following Rust→C++ translation gaps remain and require fundamental transpiler architecture changes to resolve:
 
-1. **Circular type ordering** — Some Rust crates have circular module dependencies where `mod A` defines a struct used by `mod B`'s function signatures, and `mod B` defines a struct used by `mod A`. C++ requires types to be complete before use in `std::tuple<T>`, creating ordering cycles. Example: semver's `parse::Error` ↔ `Prerelease` ↔ `Version` cycle. Fix requires: module-level dependency analysis and potential struct extraction.
+1. **Circular type ordering** — Some Rust crates have circular module dependencies where `mod A` defines a struct used by `mod B`'s function signatures, and `mod B` defines a struct used by `mod A`. C++ requires types to be complete before use in `std::tuple<T>`, creating ordering cycles. Example: semver's `parse::Error` ↔ `Prerelease` ↔ `Version` cycle. Current status: by-value SCC detection + deterministic diagnostics are in place; opt-in cycle-breaking lowering design is documented in §11.9.1 and implementation remains pending.
 
 2. **Rust iterator protocol** — `collect::<Vec<_>>()`, `into_iter()`, `map()`, `fold()` on C++ types. Rust desugars iterators through `IntoIterator` trait. No C++ equivalent exists for the full Rust iterator adapter chain. Fix requires: iterator trait protocol translation or runtime adapter layer.
 
@@ -3803,6 +3814,42 @@ The following Rust→C++ translation gaps remain and require fundamental transpi
 6. **`format_args!` with complex patterns** — `format_args!` with Rust-specific format specs (`:?`, `:#x`), non-formattable types (`char32_t` in some contexts), or variable references is limited to `std::string{}` fallback. Simple cases with `{}` or `{0}` with literal args work via `std::format()`.
 
 7. **Test namespace / function template name collision** — When expanded test code creates sub-modules with the same name as function templates in a sibling module (e.g., `mod parser { fn from_str<B>(...) }` alongside `mod parser { mod from_str { fn valid() } }`), the C++ `namespace from_str` shadows the function template `from_str<B>`. In C++, namespaces hide functions of the same name — no standard mechanism can override this. Attempted fixes: path qualification (fails because `parser::from_str` is ambiguous), namespace renaming (breaks all cross-references), using-declarations (can't disambiguate). Fix requires: comprehensive test-module path rewrite that prefixes test sub-modules with `_test` suffix and updates all references.
+
+### 11.9.1 Design Note: Opt-In By-Value SCC Cycle Breaking
+
+Goal:
+
+- provide an explicit non-default path that can make true by-value SCC crates compilable in C++ when diagnostic-only mode is insufficient.
+
+Activation contract:
+
+- default behavior remains diagnostic-only (`// UNSUPPORTED: ...`) with no semantic rewrites.
+- cycle breaking is activated only under an explicit opt-in flag in the transpiler CLI/runtime configuration.
+
+Scope eligibility:
+
+- input units are analyzed with the existing by-value SCC detector.
+- only SCCs formed by by-value edges are eligible; reference/raw-pointer/indirection edges are not rewritten.
+
+Proposed lowering strategy:
+
+1. Build a by-value dependency graph with field-level edge metadata `(owner_type, field_name, target_type)`.
+2. For each SCC, choose a deterministic feedback edge cut set (stable lexical ordering by owner, then field, then target).
+3. Rewrite selected edges to indirection-form storage (default candidate: `rusty::Box<T>`), preserving non-selected edges.
+4. Emit explicit diagnostics listing rewritten edges and the cycle path that motivated each rewrite.
+5. Keep rewritten surfaces consistent across declarations/constructors/field initializers for affected types.
+
+Safety and compatibility constraints:
+
+- opt-in mode is allowed to change generated C++ layout/ABI for affected types.
+- rewritten-edge diagnostics must be emitted to generated output and parity artifacts.
+- cycle breaking must be deterministic across runs and independent of hash-map iteration order.
+
+Non-goals for MVP:
+
+- no automatic enablement in default parity runs.
+- no crate-specific rewrite scripts.
+- no deep semantic reconstruction of Rust ownership behavior beyond explicit indirection edge insertion.
 
 ### 11.10 Do Not Expand This Doc as a Chronological Diary
 

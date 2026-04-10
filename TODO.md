@@ -2721,7 +2721,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - Verification:
                 - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
                 - `cargo test -p rusty-cpp-transpiler`
-            - [ ] Leaf 11.2.3: Write design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion)
+            - [x] *done* Leaf 11.2.3: Write design note for opt-in cycle-breaking lowering (`Box`/pointer edge insertion)
+              - Added architecture design note in `docs/rusty-cpp-transpiler.md` (`§11.9.1`) for opt-in by-value SCC cycle breaking:
+                - explicit opt-in activation contract (default remains diagnostic-only)
+                - deterministic SCC edge-selection strategy and rewrite boundaries
+                - safety/compatibility constraints and non-goals before implementation
+              - Added wrong-approach guardrail in `§11.3` to prevent silent/default-on cycle breaking and non-deterministic edge rewriting.
+              - Verification:
+                - `cargo test -p rusty-cpp-transpiler leaf112 -- --nocapture`
+                - `cargo test -p rusty-cpp-transpiler`
             - [ ] Leaf 11.2.4: Prototype opt-in implementation flag for cycle breaking (deferred until design acceptance)
           - [x] *done* Leaf 11.3: Add regression tests for circular type dependencies
       - [x] *done* Leaf 12: Fix test namespace / function name collision (architecture gap #7)
