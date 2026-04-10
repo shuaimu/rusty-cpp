@@ -19682,10 +19682,19 @@ impl CodeGen {
     fn should_insert_move(&self, expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Path(path) => {
-                // Only single-segment paths (local variables)
-                if path.path.segments.len() != 1 {
+                // Multi-segment paths like `VersionReq::STAR` or `SomeEnum::Variant`
+                // These are const/static values passed by value to Ok/Err constructors.
+                // Always insert move for safety: for Copy types it's a no-op, for non-Copy
+                // types (containing Vec/String) it prevents "deleted copy constructor" errors.
+                if path.path.segments.len() > 1 {
+                    let first_seg = path.path.segments[0].ident.to_string();
+                    // Only handle Type::CONST pattern (first segment uppercase)
+                    if first_seg.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        return true;
+                    }
                     return false;
                 }
+
                 let name = path.path.segments[0].ident.to_string();
 
                 // By-value receiver methods treat `self` as a consumable value path.
@@ -25286,6 +25295,17 @@ mod tests {
         assert!(out.contains("std::move(foo)"));
         // Should NOT have bare `foo` without std::move in the assignment
         assert!(!out.contains("foo2 = foo;") || out.contains("foo2 = std::move"));
+    }
+
+    #[test]
+    fn test_ok_variant_with_struct_const_uses_move() {
+        // Struct const values like VersionReq::STAR passed to Ok() must use std::move
+        // because the struct's copy constructor is deleted (contains Vec).
+        // This prevents "use of deleted function" compilation errors.
+        let out = transpile_str("struct VersionReq { comparators: Vec<i32> } impl VersionReq { pub const STAR: Self = VersionReq { comparators: Vec::new() }; } fn from_str(s: &str) -> Result<VersionReq, ()> { Ok(VersionReq::STAR) }");
+        // VersionReq::STAR should be wrapped in std::move when passed to Ok
+        assert!(out.contains("std::move(VersionReq::STAR)"),
+            "Expected std::move(VersionReq::STAR) but got:\n{}", out);
     }
 
     #[test]
