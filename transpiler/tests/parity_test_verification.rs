@@ -16,6 +16,14 @@ fn either_manifest() -> PathBuf {
     repo_root().join("tests/transpile_tests/either/Cargo.toml")
 }
 
+fn cpp_module_interop_manifest() -> PathBuf {
+    repo_root().join("tests/transpile_tests/cpp_module_interop/Cargo.toml")
+}
+
+fn cpp_module_interop_index() -> PathBuf {
+    repo_root().join("tests/transpile_tests/cpp_module_interop/cpp_module_index.toml")
+}
+
 fn target_artifacts_root(work_dir: &Path) -> PathBuf {
     work_dir.join("targets")
 }
@@ -1051,6 +1059,61 @@ fn test_stop_after_transpile_rewrites_std_runtime_import_fixture() {
     assert!(!cppm.contains("using std::panic;"));
     assert!(!cppm.contains("using std::cell::Cell;"));
     assert!(!cppm.contains("using std::marker::PhantomData;"));
+}
+
+#[test]
+fn test_cpp_module_interop_stop_after_transpile_emits_module_imports_and_direct_calls() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(cpp_module_interop_manifest())
+        .arg("--cpp-module-index")
+        .arg(cpp_module_interop_index())
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "cpp_module_interop"))
+        .expect("failed to read transpiled cpp module fixture");
+    assert!(cppm.contains("import std;"));
+    assert!(cppm.contains("import custom.math;"));
+    assert!(cppm.contains("std::max("));
+    assert!(cppm.contains("custom::math::add_one("));
+    assert!(cppm.contains("custom::math::DEFAULT_BIAS"));
+}
+
+#[test]
+fn test_cpp_module_interop_stop_after_transpile_requires_symbol_index() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(cpp_module_interop_manifest())
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no C++ module symbol index is configured"));
+    assert!(stderr.contains("--cpp-module-index"));
 }
 
 #[test]

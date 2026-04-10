@@ -1,0 +1,18 @@
+version = 1
+
+[modules.std]
+namespace = "std"
+
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+
+[modules."custom::math"]
+namespace = "custom::math"
+
+[modules."custom::math".symbols.add_one]
+kind = "function"
+callable_signatures = ["int(int)"]
+
+[modules."custom::math".symbols.DEFAULT_BIAS]
+kind = "constant"

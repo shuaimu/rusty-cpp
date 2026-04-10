@@ -18,3 +18,12 @@ compile_test*
 !run_tests.sh
 !README.md
 !.gitignore
+
+# Track committed cpp:: interop fixture assets
+!cpp_module_interop/
+!cpp_module_interop/Cargo.toml
+!cpp_module_interop/src/
+!cpp_module_interop/src/lib.rs
+!cpp_module_interop/cpp_module_index.toml
+!cpp_module_interop/cpp_modules/
+!cpp_module_interop/cpp_modules/custom.math.cppm

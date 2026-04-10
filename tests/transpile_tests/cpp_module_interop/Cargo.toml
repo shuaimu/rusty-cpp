@@ -1,0 +1,8 @@
+[package]
+name = "cpp_module_interop"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cpp_module_interop"
+path = "src/lib.rs"

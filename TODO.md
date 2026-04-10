@@ -3002,6 +3002,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): implementation is AST-aware and shape-gated per call/value/macro surface, with no bridge wrappers, no global text substitution, and no crate-specific shortcuts.
       - [ ] Leaf 22.8: Integration coverage for `cpp::` interop path
-        - Add transpiler integration fixtures that include a tiny C++ module (`import std;` and one custom module fixture) consumed via Rust `use cpp::...`.
-        - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.
-        - Extend parity harness dry-run checks to assert `cpp::` imports produce module-import emission and expected diagnostics when index is missing.
+        - [x] *done* Leaf 22.8.1: Add a dedicated `cpp::` interop fixture crate and transpile-stage parity coverage
+          - Plan/scope check: fixture + parity verification updates stayed well below the <1000 LOC target and required no additional decomposition.
+          - Added committed integration fixture crate at `tests/transpile_tests/cpp_module_interop/`:
+            - `Cargo.toml` + `src/lib.rs` with Rust surface `use cpp::std as cpp_std; use cpp::custom::math as cpp_math;`.
+            - fixture exercises both MVP-supported `cpp::` surfaces: free/static calls and module constants.
+            - added `cpp_module_index.toml` sidecar and `cpp_modules/custom.math.cppm` custom module fixture (`import std;`, `DEFAULT_BIAS`, `add_one`).
+          - Added parity-test verification coverage in `transpiler/tests/parity_test_verification.rs`:
+            - `test_cpp_module_interop_stop_after_transpile_emits_module_imports_and_direct_calls`
+            - `test_cpp_module_interop_stop_after_transpile_requires_symbol_index`
+          - Coverage asserts:
+            - generated `.cppm` includes `import std;` and `import custom.math;`,
+            - direct call lowering to `std::max(...)` / `custom::math::add_one(...)`,
+            - module constant lowering to `custom::math::DEFAULT_BIAS`,
+            - expected missing-index diagnostics in parity stage C when `--cpp-module-index` is omitted.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_stop_after_transpile -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): coverage uses shared parity/transpile flows and fixture-agnostic assertions; no crate-specific generated-output patching, no bridge wrappers, and no global text substitutions were introduced.
+        - [ ] Leaf 22.8.2: Extend parity harness dry-run coverage for `cpp::` interop
+          - Extend parity harness dry-run checks to assert `cpp::` interop fixtures are discovered and staged with deterministic Stage B/Stage C dry-run reporting.
+          - Add dry-run guardrail checks covering both configured-index and missing-index invocation shapes (without running build/run stages).
+        - [ ] Leaf 22.8.3: Add compile-stage CI coverage for generated `cpp::` interop units
+          - Add compile-stage CI coverage ensuring generated `.cppm` units with `import std;` compile under supported compilers.
+          - Ensure failure diagnostics and artifact retention for this compile-only interop check align with existing parity CI patterns.

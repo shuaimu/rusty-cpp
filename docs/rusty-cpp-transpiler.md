@@ -3909,7 +3909,25 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): implementation is AST-aware and shape-gated by surface kind (call/value/macro), and introduces no bridge wrappers, no blanket/global text rewriting, and no crate-specific shortcuts.
-153. Current active next leaf is `22.8` (integration coverage for `cpp::` interop path), now that `22.7` MVP support-limit enforcement is complete.
+153. `Leaf 22.8` was decomposed into sub-leaves (`22.8.1`-`22.8.3`) to keep each execution step below the <1000 LOC target while preserving deterministic integration coverage scope.
+154. `Leaf 22.8.1` is complete.
+   - plan/scope check: fixture + parity verification updates stayed well below the <1000 LOC target and required no additional decomposition.
+   - added dedicated integration fixture assets under `tests/transpile_tests/cpp_module_interop/`:
+     - fixture Rust crate (`Cargo.toml`, `src/lib.rs`) uses `use cpp::std as cpp_std;` and `use cpp::custom::math as cpp_math;` and exercises both supported MVP surfaces (free/static calls and module constants).
+     - committed symbol index sidecar (`cpp_module_index.toml`) with `std::max`, `custom::math::add_one`, and `custom::math::DEFAULT_BIAS`.
+     - committed tiny custom C++ module fixture (`cpp_modules/custom.math.cppm`) that imports `std` and exports `DEFAULT_BIAS` and `add_one`.
+   - added parity transpile-stage integration regressions in `transpiler/tests/parity_test_verification.rs`:
+     - `test_cpp_module_interop_stop_after_transpile_emits_module_imports_and_direct_calls`
+     - `test_cpp_module_interop_stop_after_transpile_requires_symbol_index`
+   - regression assertions cover:
+     - generated `.cppm` emits expected C++20 imports (`import std;`, `import custom.math;`),
+     - direct call lowering (`std::max(...)`, `custom::math::add_one(...)`) and constant lowering (`custom::math::DEFAULT_BIAS`),
+     - expected parity Stage C missing-index diagnostics when `--cpp-module-index` is omitted.
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_cpp_module_interop_stop_after_transpile -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): validation stays in shared parity/transpile flows with fixture-agnostic assertions; no generated-output patching, no bridge wrappers, and no global text rewrites were introduced.
+155. Current active next leaf is `22.8.2` (extend parity harness dry-run coverage for `cpp::` interop), now that `22.8.1` fixture + transpile-stage parity coverage is complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
