@@ -1478,6 +1478,88 @@ Canonical constraint:
 - recover omitted owner args through expected-type/scope inference,
 - do not apply blanket global rewrites that force template args where they are not required.
 
+### 3.13 Transparent C++ Calls with Rust Objects (`extern "C++"`) ⚠️
+
+Because the transpiler target is C++, Rust code should be able to call selected C++ APIs directly when Rust types lower to compatible C++ runtime types.
+
+This is **not** C ABI FFI (`extern "C"`). This is a source-level C++ interop layer resolved at C++ compile time.
+
+#### Rust Surface (Proposed)
+
+```rust
+#[cpp(include = "<my_api.hpp>", ns = "my::api")]
+unsafe extern "C++" {
+    fn normalize(v: &mut Vec<f32>);
+
+    #[cpp_name = "hash_value"] // disambiguates C++ symbol/overload name
+    fn hash_string(s: &String) -> u64;
+}
+```
+
+MVP rules:
+
+1. `unsafe extern "C++"` is required at declaration sites.
+2. Calls are emitted through generated typed bridge wrappers (no textual call rewriting hacks).
+3. Free/static C++ functions are in scope for MVP; member/template-heavy surfaces require explicit C++ shim functions.
+
+#### Canonical Type Lowering Rule
+
+For each declared Rust interop item:
+
+1. lower Rust parameter/return types to canonical emitted C++ types (same lowering table used by normal Rust emission),
+2. build a typed C++ bridge wrapper with that exact signature,
+3. bind target C++ symbol (with namespace/name overrides from `#[cpp(...)]` attributes),
+4. fail at C++ compile time if no callable symbol matches the canonical signature.
+
+This keeps one source of truth for type mapping and avoids interop-only ad-hoc conversions.
+
+#### Borrow/Move Semantics at the Boundary
+
+| Rust signature shape | C++ bridge parameter shape | Boundary behavior |
+|---|---|---|
+| `T` | `T` | caller passes moved value when Rust semantics require move |
+| `&T` | `const T&` | shared borrow |
+| `&mut T` | `T&` | exclusive mutable borrow |
+| `&str` | `std::string_view` | non-owning view |
+
+For Rust-owned runtime types (`rusty::String`, `rusty::Vec<T>`, `rusty::HashMap<K,V>`, etc.), direct interop is allowed only when the C++ side consumes the same lowered type family.
+
+#### Overload and Name Resolution
+
+C++ overload sets are resolved in generated wrappers via explicit type selection (`static_cast` to the canonical function pointer type). Rust call sites remain non-overloaded and deterministic.
+
+When overload resolution still cannot be made unambiguous, require `#[cpp_name = "..."]` + an explicit C++ shim function.
+
+#### Generated C++ Shape
+
+```cpp
+#include <my_api.hpp>
+
+namespace __rusty_cpp_bridge {
+inline void normalize(rusty::Vec<float>& v) {
+    my::api::normalize(v);
+}
+
+inline std::uint64_t hash_string(const rusty::String& s) {
+    return my::api::hash_value(s);
+}
+} // namespace __rusty_cpp_bridge
+```
+
+Transpiled Rust call sites then lower to these bridge functions, preserving existing Rust lowering and ownership rules.
+
+#### Safety Contract
+
+- `extern "C++"` declarations remain `unsafe`: C++ callees may violate Rust aliasing/lifetime expectations by storing references, mutating through hidden aliases, etc.
+- Rust-side safe wrappers are allowed, but only when the crate author can prove callee behavior is compatible with Rust invariants.
+- No automatic lifetime extension is introduced by the transpiler.
+
+#### Rejected Shortcuts
+
+- no automatic C ABI thunk generation for this surface (that is a separate `extern "C"` path),
+- no global text substitution of unresolved `foo::bar` paths into C++ calls,
+- no best-effort fallback to untyped `auto` call adapters.
+
 ---
 
 ## 4. Semantic Gaps and Challenges
@@ -1709,6 +1791,7 @@ Section 10 remains status/frontier tracking only.
 | Derive macros | Code generation | Medium | Per-derive mapping |
 | Unsafe blocks | Raw code | Easy | Just emit the code |
 | FFI (`extern "C"`) | `extern "C"` | Easy | Direct mapping |
+| C++ interop (`extern "C++"`) | Typed bridge wrappers over native C++ symbols | Medium | See §3.13 |
 
 ---
 
