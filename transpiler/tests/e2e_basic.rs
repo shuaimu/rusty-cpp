@@ -399,6 +399,114 @@ fn test_type_map_flag() {
 }
 
 #[test]
+fn test_cli_cpp_module_index_flag_single_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("test.rs");
+    let output_path = dir.path().join("test.cppm");
+    let index_path = dir.path().join("cpp_index.toml");
+
+    std::fs::write(&input, "use cpp::std as cpp_std;\nfn f() {}").unwrap();
+    std::fs::write(
+        &index_path,
+        r#"
+version = 1
+[modules.std]
+namespace = "std"
+"#,
+    )
+    .unwrap();
+
+    let output = transpiler_bin()
+        .arg(input.to_str().unwrap())
+        .arg("-o")
+        .arg(output_path.to_str().unwrap())
+        .arg("--cpp-module-index")
+        .arg(index_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cpp = std::fs::read_to_string(&output_path).unwrap();
+    assert!(cpp.contains("// C++ module import (reserved cpp::): std as cpp_std"));
+}
+
+#[test]
+fn test_crate_mode_cpp_import_requires_symbol_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"cpp_dep\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"cpp_dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "use cpp::std;\npub fn f() {}").unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--output-dir")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no C++ module symbol index is configured"));
+    assert!(stderr.contains("--cpp-module-index"));
+}
+
+#[test]
+fn test_crate_mode_cpp_import_with_symbol_index_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"cpp_dep\"\nversion = \"0.1.0\"\n\n[lib]\nname = \"cpp_dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "use cpp::std;\npub fn f() {}").unwrap();
+    let index_path = dir.path().join("cpp_index.toml");
+    std::fs::write(
+        &index_path,
+        r#"
+version = 1
+[modules.std]
+namespace = "std"
+"#,
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("cpp_out");
+
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(dir.path().join("Cargo.toml").to_str().unwrap())
+        .arg("--output-dir")
+        .arg(out_dir.to_str().unwrap())
+        .arg("--cpp-module-index")
+        .arg(index_path.to_str().unwrap())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out_dir.join("cpp_dep.cppm").exists());
+}
+
+#[test]
 fn test_crate_mode_with_path_dependency() {
     let dir = tempfile::tempdir().unwrap();
 

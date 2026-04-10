@@ -1,12 +1,211 @@
 use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
-use std::collections::HashSet;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CppModuleSymbolIndex {
+    pub modules: BTreeMap<String, CppModuleIndexModule>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CppModuleIndexModule {
+    pub namespace: Option<String>,
+    pub symbols: BTreeMap<String, CppModuleIndexSymbol>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CppModuleIndexSymbol {
+    pub kind: Option<String>,
+    pub callable_signatures: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CppModuleSymbolIndexFile {
+    #[serde(default = "default_cpp_module_symbol_index_version")]
+    version: u32,
+    #[serde(default)]
+    modules: BTreeMap<String, CppModuleIndexModuleFile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CppModuleIndexModuleFile {
+    #[serde(default)]
+    namespace: Option<String>,
+    #[serde(default)]
+    symbols: BTreeMap<String, CppModuleIndexSymbolFile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CppModuleIndexSymbolFile {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    callable_signatures: Vec<String>,
+}
+
+fn default_cpp_module_symbol_index_version() -> u32 {
+    1
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TranspileOptions {
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
     /// Default is `false`.
     pub by_value_cycle_breaking_prototype: bool,
+    /// Optional C++ module symbol index for `use cpp::...` interop resolution.
+    pub cpp_module_symbol_index: Option<CppModuleSymbolIndex>,
+}
+
+pub fn load_cpp_module_symbol_index_files(
+    index_paths: &[PathBuf],
+) -> Result<CppModuleSymbolIndex, String> {
+    let mut merged = CppModuleSymbolIndex::default();
+    for path in index_paths {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read C++ module symbol index {}: {}", path.display(), e))?;
+        let file = parse_cpp_module_symbol_index_file(path, &content)?;
+        merge_cpp_module_symbol_index_file(&mut merged, path, file)?;
+    }
+    Ok(merged)
+}
+
+fn parse_cpp_module_symbol_index_file(
+    path: &Path,
+    content: &str,
+) -> Result<CppModuleSymbolIndexFile, String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let parsed: CppModuleSymbolIndexFile = match ext.as_deref() {
+        Some("json") => serde_json::from_str(content).map_err(|e| {
+            format!(
+                "Invalid JSON C++ module symbol index {}: {}",
+                path.display(),
+                e
+            )
+        })?,
+        Some("toml") => toml::from_str(content).map_err(|e| {
+            format!(
+                "Invalid TOML C++ module symbol index {}: {}",
+                path.display(),
+                e
+            )
+        })?,
+        _ => match serde_json::from_str(content) {
+            Ok(v) => v,
+            Err(json_err) => toml::from_str(content).map_err(|toml_err| {
+                format!(
+                    "Failed to parse C++ module symbol index {} as JSON ({}) or TOML ({})",
+                    path.display(),
+                    json_err,
+                    toml_err
+                )
+            })?,
+        },
+    };
+
+    if parsed.version != 1 {
+        return Err(format!(
+            "Unsupported C++ module symbol index version {} in {} (expected version 1)",
+            parsed.version,
+            path.display()
+        ));
+    }
+    Ok(parsed)
+}
+
+fn merge_cpp_module_symbol_index_file(
+    merged: &mut CppModuleSymbolIndex,
+    source_path: &Path,
+    file: CppModuleSymbolIndexFile,
+) -> Result<(), String> {
+    for (raw_module_path, module) in file.modules {
+        let module_path = canonical_cpp_module_path(&raw_module_path);
+        if module_path.is_empty() {
+            return Err(format!(
+                "C++ module symbol index {} contains an empty module path key",
+                source_path.display()
+            ));
+        }
+
+        let incoming = CppModuleIndexModule {
+            namespace: module.namespace,
+            symbols: module
+                .symbols
+                .into_iter()
+                .map(|(name, symbol)| {
+                    (
+                        name,
+                        CppModuleIndexSymbol {
+                            kind: symbol.kind,
+                            callable_signatures: symbol.callable_signatures,
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        if let Some(existing) = merged.modules.get_mut(&module_path) {
+            merge_cpp_module_entry(existing, &incoming, source_path, &module_path)?;
+        } else {
+            merged.modules.insert(module_path, incoming);
+        }
+    }
+    Ok(())
+}
+
+fn merge_cpp_module_entry(
+    existing: &mut CppModuleIndexModule,
+    incoming: &CppModuleIndexModule,
+    source_path: &Path,
+    module_path: &str,
+) -> Result<(), String> {
+    match (&existing.namespace, &incoming.namespace) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(format!(
+                "C++ module symbol index {} has conflicting namespace for module '{}': '{}' vs '{}'",
+                source_path.display(),
+                module_path,
+                a,
+                b
+            ));
+        }
+        (None, Some(ns)) => {
+            existing.namespace = Some(ns.clone());
+        }
+        _ => {}
+    }
+
+    for (symbol_name, symbol) in &incoming.symbols {
+        if symbol_name.trim().is_empty() {
+            return Err(format!(
+                "C++ module symbol index {} has empty symbol name in module '{}'",
+                source_path.display(),
+                module_path
+            ));
+        }
+        if let Some(existing_symbol) = existing.symbols.get(symbol_name) {
+            if existing_symbol != symbol {
+                return Err(format!(
+                    "C++ module symbol index {} has conflicting definition for '{}::{}'",
+                    source_path.display(),
+                    module_path,
+                    symbol_name
+                ));
+            }
+        } else {
+            existing.symbols.insert(symbol_name.clone(), symbol.clone());
+        }
+    }
+    Ok(())
+}
+
+fn canonical_cpp_module_path(path: &str) -> String {
+    path.trim().replace('.', "::")
 }
 
 /// Transpile Rust source code to C++ code.
@@ -94,6 +293,23 @@ pub fn transpile_full_with_options(
     options: &TranspileOptions,
 ) -> Result<String, String> {
     let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
+    if file_contains_cpp_module_imports(&file) {
+        match options.cpp_module_symbol_index.as_ref() {
+            Some(index) if !index.modules.is_empty() => {}
+            Some(_) => {
+                return Err(
+                    "Found `use cpp::...` import, but configured C++ module symbol index is empty"
+                        .to_string(),
+                )
+            }
+            None => {
+                return Err(
+                    "Found `use cpp::...` import, but no C++ module symbol index is configured. Pass --cpp-module-index <path>"
+                        .to_string(),
+                )
+            }
+        }
+    }
 
     let mut codegen = if extension_method_hints.is_empty() {
         CodeGen::with_type_map(type_map.clone())
@@ -106,6 +322,37 @@ pub fn transpile_full_with_options(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
+}
+
+fn file_contains_cpp_module_imports(file: &syn::File) -> bool {
+    file.items.iter().any(item_contains_cpp_module_import)
+}
+
+fn item_contains_cpp_module_import(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Use(use_item) => use_tree_contains_cpp_module_root(&use_item.tree, true),
+        syn::Item::Mod(module) => module
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| items.iter().any(item_contains_cpp_module_import)),
+        _ => false,
+    }
+}
+
+fn use_tree_contains_cpp_module_root(tree: &syn::UseTree, at_root: bool) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            if at_root && path.ident == "cpp" {
+                return true;
+            }
+            use_tree_contains_cpp_module_root(&path.tree, false)
+        }
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_contains_cpp_module_root(item, at_root)),
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => false,
+    }
 }
 
 /// Collect extension-method names from a Rust source unit.
@@ -255,6 +502,7 @@ fn qualify_relative_path(raw: &str, module_path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_transpile_basic() {
@@ -378,6 +626,7 @@ mod tests {
 
         let options = TranspileOptions {
             by_value_cycle_breaking_prototype: true,
+            ..TranspileOptions::default()
         };
         let opt_in_out = transpile_full_with_options(
             src,
@@ -392,5 +641,100 @@ mod tests {
             opt_in_out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
             "opt-in mode should emit prototype cycle-breaking diagnostics\nGot: {opt_in_out}"
         );
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_json() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("cpp_index.json");
+        std::fs::write(
+            &index_path,
+            r#"
+{
+  "version": 1,
+  "modules": {
+    "std": {
+      "namespace": "std",
+      "symbols": {
+        "max": {
+          "kind": "function",
+          "callable_signatures": ["int(int,int)"]
+        }
+      }
+    }
+  }
+}
+"#,
+        )
+        .expect("write json index");
+
+        let index = load_cpp_module_symbol_index_files(&[index_path]).expect("load json index");
+        let std_module = index.modules.get("std").expect("std module");
+        assert_eq!(std_module.namespace.as_deref(), Some("std"));
+        let max = std_module.symbols.get("max").expect("max symbol");
+        assert_eq!(max.kind.as_deref(), Some("function"));
+        assert_eq!(max.callable_signatures, vec!["int(int,int)".to_string()]);
+    }
+
+    #[test]
+    fn test_load_cpp_module_symbol_index_toml() {
+        let dir = tempdir().expect("tempdir");
+        let index_path = dir.path().join("cpp_index.toml");
+        std::fs::write(
+            &index_path,
+            r#"
+version = 1
+
+[modules.std]
+namespace = "std"
+
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+"#,
+        )
+        .expect("write toml index");
+
+        let index = load_cpp_module_symbol_index_files(&[index_path]).expect("load toml index");
+        let std_module = index.modules.get("std").expect("std module");
+        assert_eq!(std_module.namespace.as_deref(), Some("std"));
+        let max = std_module.symbols.get("max").expect("max symbol");
+        assert_eq!(max.kind.as_deref(), Some("function"));
+        assert_eq!(max.callable_signatures, vec!["int(int,int)".to_string()]);
+    }
+
+    #[test]
+    fn test_cpp_module_import_requires_symbol_index() {
+        let err = transpile("use cpp::std as cpp_std;\nfn f() {}", None)
+            .expect_err("cpp import without index should fail");
+        assert!(err.contains("no C++ module symbol index is configured"));
+        assert!(err.contains("--cpp-module-index"));
+    }
+
+    #[test]
+    fn test_cpp_module_import_with_symbol_index_is_allowed() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "std".to_string(),
+            CppModuleIndexModule {
+                namespace: Some("std".to_string()),
+                symbols: BTreeMap::new(),
+            },
+        );
+        let options = TranspileOptions {
+            cpp_module_symbol_index: Some(CppModuleSymbolIndex { modules }),
+            ..TranspileOptions::default()
+        };
+
+        let output = transpile_full_with_options(
+            "use cpp::std as cpp_std;\nfn f() {}",
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("cpp import with index should transpile");
+        assert!(output.contains("// C++ module import (reserved cpp::): std as cpp_std"));
     }
 }

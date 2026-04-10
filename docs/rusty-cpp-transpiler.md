@@ -1516,6 +1516,31 @@ The index must provide enough metadata to validate symbol existence and emit cal
 - exported function names/callable sets,
 - callable type shapes needed by emission diagnostics.
 
+MVP sidecar format (`version = 1`) is supported in both JSON and TOML with this shape:
+
+- `modules.<module_path>.namespace` (optional)
+- `modules.<module_path>.symbols.<symbol_name>.kind` (optional)
+- `modules.<module_path>.symbols.<symbol_name>.callable_signatures[]` (optional)
+
+Example TOML:
+
+```toml
+version = 1
+
+[modules.std]
+namespace = "std"
+
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+```
+
+CLI configuration:
+
+- pass one or more `--cpp-module-index <path>` flags in single-file, crate, or parity flows.
+- index files are merged deterministically; conflicting duplicate module/symbol definitions are rejected.
+- when `use cpp::...` imports are present and no non-empty index is configured, transpilation fails immediately.
+
 If a `cpp::` import or referenced symbol cannot be resolved, transpilation fails with an explicit import/symbol error.
 
 #### Direct-Call Lowering Rule
@@ -3767,7 +3792,30 @@ Active work items:
      - `cargo test -p rusty-cpp-transpiler leaf221 -- --nocapture`
      - `cargo test -p rusty-cpp-transpiler`
    - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf stayed parser/classification-scoped, introduced no bridge wrappers, and avoided global text substitution of unresolved paths.
-147. Current active next leaf is `22.2` (C++ module symbol index input/loader), with `22.1` now providing deterministic `cpp::` import classification and alias/module tracking groundwork.
+147. `Leaf 22.2` is complete.
+   - plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+   - implemented shared C++ module symbol-index loading and fail-fast plumbing:
+     - added stable sidecar model + loader in `transpiler/src/transpile.rs` (`version = 1`, `modules` map with optional `namespace`, per-symbol `kind` and `callable_signatures`) with JSON/TOML parsing.
+     - added deterministic multi-file merge with explicit conflict diagnostics for duplicate module/symbol definitions.
+     - normalized module keys to canonical `::` path form (`a.b` and `a::b` accepted).
+     - added transpile-stage fail-fast check: when `use cpp::...` imports are present and no non-empty symbol index is configured, transpilation now errors before code generation.
+     - added CLI support in `transpiler/src/main.rs`:
+       - top-level `--cpp-module-index <path>` for single-file and `--crate` flows,
+       - parity subcommand `--cpp-module-index <path>`,
+       - all wired through shared `TranspileOptions`.
+   - focused regressions:
+     - `transpile::tests::test_load_cpp_module_symbol_index_json`
+     - `transpile::tests::test_load_cpp_module_symbol_index_toml`
+     - `transpile::tests::test_cpp_module_import_requires_symbol_index`
+     - `transpile::tests::test_cpp_module_import_with_symbol_index_is_allowed`
+     - `tests/e2e_basic.rs::test_cli_cpp_module_index_flag_single_file`
+     - `tests/e2e_basic.rs::test_crate_mode_cpp_import_requires_symbol_index`
+     - `tests/e2e_basic.rs::test_crate_mode_cpp_import_with_symbol_index_succeeds`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11 and §3.13): this leaf remained loader/configuration-only; no bridge-wrapper generation, no call-lowering shortcuts, and no global path text substitution were introduced.
+148. Current active next leaf is `22.3` (resolve `cpp::` module paths to emitted C++ `import` lines), now that `22.1/22.2` classification and index-loading prerequisites are complete.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

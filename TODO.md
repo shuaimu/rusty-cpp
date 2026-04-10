@@ -2894,10 +2894,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - `cargo test -p rusty-cpp-transpiler leaf221 -- --nocapture`
           - `cargo test -p rusty-cpp-transpiler`
         - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): kept `cpp::` handling parser/classification-only for this leaf, avoided bridge-wrapper generation and global path text substitution shortcuts, and preserved deterministic import handling.
-      - [ ] Leaf 22.2: Add a C++ module symbol index input and loader for transpiler resolution
-        - Define a stable sidecar format (JSON/TOML) mapping module path → exported symbols/callable signatures.
-        - Add CLI flag(s) to pass index path(s) in single-file and crate-mode runs.
-        - Fail fast when `cpp::` imports are present but no symbol index is configured.
+      - [x] *done* Leaf 22.2: Add a C++ module symbol index input and loader for transpiler resolution
+        - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
+        - Implemented shared index model + loader in `transpiler/src/transpile.rs`:
+          - added stable sidecar model for C++ module symbol index files with `version = 1` and `modules` map:
+            - `module_path -> { namespace?, symbols: { symbol_name -> { kind?, callable_signatures[] } } }`.
+          - added JSON/TOML loading support (`load_cpp_module_symbol_index_files`) with deterministic merge semantics across multiple files and conflict diagnostics for incompatible duplicate module/symbol definitions.
+          - normalized module-path keys to canonical `::` form (`a.b` and `a::b` both accepted in index files).
+        - Added fail-fast contract for `cpp::` imports in transpilation:
+          - `transpile_full_with_options` now detects `use cpp::...` import roots and errors immediately when no symbol index is configured (or when configured index is empty).
+        - Added CLI wiring in `transpiler/src/main.rs`:
+          - top-level `--cpp-module-index <PATH>` (repeatable) now loads symbol index files for single-file and `--crate` flows.
+          - parity subcommand also accepts `--cpp-module-index <PATH>` and passes loaded index through shared transpile options.
+        - Added focused regressions:
+          - `transpile::tests::test_load_cpp_module_symbol_index_json`
+          - `transpile::tests::test_load_cpp_module_symbol_index_toml`
+          - `transpile::tests::test_cpp_module_import_requires_symbol_index`
+          - `transpile::tests::test_cpp_module_import_with_symbol_index_is_allowed`
+          - `tests/e2e_basic.rs::test_cli_cpp_module_index_flag_single_file`
+          - `tests/e2e_basic.rs::test_crate_mode_cpp_import_requires_symbol_index`
+          - `tests/e2e_basic.rs::test_crate_mode_cpp_import_with_symbol_index_succeeds`
+        - Verification:
+          - `cargo test -p rusty-cpp-transpiler cpp_module -- --nocapture`
+          - `cargo test -p rusty-cpp-transpiler`
+        - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11 and §3.13): this leaf remains loader/configuration-only (no bridge wrappers, no call-lowering shortcuts, no global path text substitution).
       - [ ] Leaf 22.3: Resolve `cpp::` module paths and emit C++20 module imports
         - `use cpp::a::b` resolves to C++ module `a.b` and emits `import a.b;` once per unit.
         - Keep deterministic ordering and de-dup behavior for repeated imports across files.

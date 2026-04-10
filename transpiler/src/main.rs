@@ -49,6 +49,10 @@ struct Cli {
     #[arg(long)]
     type_map: Option<PathBuf>,
 
+    /// C++ module symbol index sidecar file(s) for `use cpp::...` imports (JSON or TOML)
+    #[arg(long = "cpp-module-index")]
+    cpp_module_index: Vec<PathBuf>,
+
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
@@ -108,6 +112,10 @@ struct ParityTestArgs {
     /// User-provided type mapping file
     #[arg(long)]
     type_map: Option<PathBuf>,
+
+    /// C++ module symbol index sidecar file(s) for `use cpp::...` imports (JSON or TOML)
+    #[arg(long = "cpp-module-index")]
+    cpp_module_index: Vec<PathBuf>,
 
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
@@ -1374,8 +1382,16 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     } else {
         types::UserTypeMap::default()
     };
+    let cpp_module_symbol_index = if args.cpp_module_index.is_empty() {
+        None
+    } else {
+        Some(transpile::load_cpp_module_symbol_index_files(
+            &args.cpp_module_index,
+        )?)
+    };
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
+        cpp_module_symbol_index,
     };
 
     let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
@@ -1839,8 +1855,20 @@ fn main() {
     } else {
         types::UserTypeMap::default()
     };
+    let cpp_module_symbol_index = if cli.cpp_module_index.is_empty() {
+        None
+    } else {
+        match transpile::load_cpp_module_symbol_index_files(&cli.cpp_module_index) {
+            Ok(index) => Some(index),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    };
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
+        cpp_module_symbol_index,
     };
 
     // Handle --crate: transpile entire crate
