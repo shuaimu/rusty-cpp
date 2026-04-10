@@ -2636,12 +2636,20 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Deterministic Stage D head now starts at `runner.cpp:1060` in `Prerelease::cmp`: generated `auto&& _for_iter = rusty::for_in(lhs); for (auto&& lhs : _for_iter)` fails because `_for_iter` does not provide range `begin/end` for C++ range-for.
             - Immediate adjacent fallout in the same block follows at `runner.cpp:1061` (`rhs_shadow1` self-reference/use-before-deduction from nested match shadowing).
             - Canonical artifacts: `/tmp/rusty-parity-matrix-10-2-3-1775846232/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
-          - [ ] Leaf 10.2.4: Fix self-shadowing loop stabilization to preserve C++ range-for compatibility
-            - Replace direct `for (auto&& pat : _for_iter)` over `rusty::for_in(...)` temp with a shape that still iterates via `rusty::for_in(...)` at the loop site (for example, stabilize only the source iterable expression, then emit `for (auto&& pat : rusty::for_in(stable_iterable))`).
-            - Keep the fix shape-gated to self-shadowing patterns only; avoid blanket loop rewrite.
-          - [ ] Leaf 10.2.5: Add focused regression for the semver `Prerelease::cmp` self-shadowing split-iterator shape
-            - Assert codegen does not emit range-for over a `rusty::for_in(...)` temp lacking `begin/end`, while preserving self-shadowing correctness.
-          - [ ] Leaf 10.2.6: Re-run semver parity after 10.2.4/10.2.5 and capture next deterministic Stage D head
+          - [x] *done* Leaf 10.2.4: Fix self-shadowing loop stabilization to preserve C++ range-for compatibility
+            - Implemented shape-gated lowering in `transpiler/src/codegen.rs`: when iterable self-shadowing is detected, stabilize only the iterable source expression (`_for_iter`) and keep range-for over `rusty::for_in(...)` directly (`for (auto&& pat : rusty::for_in(_for_iter))` / borrowed variant with `rusty::iter(_for_iter)`).
+            - Removed the previous `for (auto&& pat : _for_iter)` shape over a `rusty::for_in(...)` temporary that broke C++ range-for `begin/end` lookup in semver.
+          - [x] *done* Leaf 10.2.5: Add focused regression for the semver `Prerelease::cmp` self-shadowing split-iterator shape
+            - Updated/added focused transpiler regressions in `transpiler/src/codegen.rs`:
+              - `test_leaf1021_for_loop_iterable_self_shadowing_uses_stable_iter_temp`
+              - `test_leaf1021_for_loop_borrowed_iterable_self_shadowing_uses_stable_iter_temp`
+              - `test_leaf1024_self_shadowing_next_iterable_stabilizes_source_before_for_in`
+            - New assertions ensure self-shadowing loops no longer emit range-for over `rusty::for_in(...)` temp variables.
+          - [x] *done* Leaf 10.2.6: Re-run semver parity after 10.2.4/10.2.5 and capture next deterministic Stage D head
+            - Re-ran semver parity: `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-2-4-1775846704 --keep-work-dirs`.
+            - Previous head at `runner.cpp:1060` (`begin/end` missing on `_for_iter`) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1061` in `Prerelease::cmp`: `rhs_shadow1` self-reference/use-before-deduction in nested try-style match binding (`rhs_shadow1.next()` inside `const auto rhs_shadow1 = ...`).
+            - Canonical artifacts: `/tmp/rusty-parity-matrix-10-2-4-1775846704/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
         - [x] *done* Leaf 10.3: Fix `Vec` used without template arguments in emitted code
           - Fixed `Vec::from_iter` → `rusty::Vec::from_iter` by adding special handling in `emit_expr_path_to_string` and `map_type` to rewrite unqualified `Vec` to `rusty::Vec`
           - Added regression tests `test_vec_from_iter_mapping` and `test_vec_from_iter_with_turbofish`

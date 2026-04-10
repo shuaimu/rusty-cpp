@@ -3496,8 +3496,31 @@ Active work items:
      - immediate adjacent fallout in the same block starts at `runner.cpp:1061` (`rhs_shadow1` use-before-deduction from nested match shadowing).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-2-3-1775846232/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): this leaf remained deterministic-first and evidence-capture only; no crate-specific rewrite or blanket lowering was introduced.
-127. Current active next leaf is `10.2.4`.
-   - focus: fix self-shadowing loop stabilization so it preserves C++ range-for compatibility without broad loop rewrites.
+127. `Leaf 10.2.4` and `Leaf 10.2.5` are complete.
+   - plan/scope check: implementation + focused regression updates stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs` (no crate-specific scripts):
+     - self-shadowing `for` loops now stabilize the iterable source expression only, then keep range-for over `rusty::for_in(...)` directly.
+     - non-borrowed self-shadowing shape now emits `auto _for_iter = <iterable>; for (auto&& pat : rusty::for_in(_for_iter))`.
+     - borrowed self-shadowing shape now emits `auto&& _for_iter = <iterable>; for (auto&& pat : rusty::for_in(rusty::iter(_for_iter)))`.
+     - removed prior `for (auto&& pat : _for_iter)` over `rusty::for_in(...)` temp result.
+   - focused regressions:
+     - updated `test_leaf1021_for_loop_iterable_self_shadowing_uses_stable_iter_temp`
+     - updated `test_leaf1021_for_loop_borrowed_iterable_self_shadowing_uses_stable_iter_temp`
+     - added `test_leaf1024_self_shadowing_next_iterable_stabilizes_source_before_for_in`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf102 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+   - guardrail check against wrong-approach checklist (§11): changes are shape-gated to self-shadowing loop cases, avoid blanket loop rewrites, and remain shared transpiler behavior.
+128. `Leaf 10.2.6` is complete.
+   - verification run:
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-2-4-1775846704 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - prior first head at `runner.cpp:1060` (`begin/end` missing on `_for_iter` range-for) is removed.
+     - new first deterministic head starts at `runner.cpp:1061` in `Prerelease::cmp`: nested try-style match binding self-reference (`rhs_shadow1` use-before-deduction).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-2-4-1775846704/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): kept deterministic-first workflow with canonical artifacts and no crate-specific patching.
+129. Current active next leaf is `10.5.1`.
+   - focus: refactor try-style pattern binding collection to return emitted bindings plus Rust-name→C++-name mapping, then apply that mapping in runtime try-style match lowering.
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

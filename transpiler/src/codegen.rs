@@ -9174,36 +9174,41 @@ impl CodeGen {
             }
             _ => self.emit_expr_to_string(&for_expr.expr),
         };
-        let iter_expr = if iter_is_borrowed {
-            // Borrowed Rust `for x in &expr` iterates by reference, NOT consuming.
-            // Use `rusty::iter(expr)` to get a non-consuming iterator, then
-            // `rusty::for_in(...)` to adapt it for range-based for.
-            format!("rusty::for_in(rusty::iter({}))", iter)
-        } else {
-            // Rust `for x in expr` desugars through IntoIterator; `for_in` handles:
-            // - types with `.into_iter()`
-            // - next()-style iterators
-            // - plain C++ ranges.
-            format!("rusty::for_in({})", iter)
-        };
         if iter_is_borrowed {
             let mut refs = HashSet::new();
             self.collect_pattern_binding_names(&for_expr.pat, &mut refs);
             self.pattern_ref_bindings.push(refs);
         }
 
+        let mut iter_source = iter;
+        if iterable_self_shadows_loop_binding {
+            // Preserve Rust name resolution when loop pattern shadows the iterable local
+            // (e.g., `for lhs in lhs`) by stabilizing the iterable SOURCE before
+            // introducing the loop binding name.
+            let stable_iter_name = self.reserve_synthetic_cpp_name("_for_iter");
+            if iter_is_borrowed {
+                self.writeln(&format!("auto&& {} = {};", stable_iter_name, iter_source));
+            } else {
+                self.writeln(&format!("auto {} = {};", stable_iter_name, iter_source));
+            }
+            iter_source = stable_iter_name;
+        }
+        let iter_expr = if iter_is_borrowed {
+            // Borrowed Rust `for x in &expr` iterates by reference, NOT consuming.
+            // Use `rusty::iter(expr)` to get a non-consuming iterator, then
+            // `rusty::for_in(...)` to adapt it for range-based for.
+            format!("rusty::for_in(rusty::iter({}))", iter_source)
+        } else {
+            // Rust `for x in expr` desugars through IntoIterator; `for_in` handles:
+            // - types with `.into_iter()`
+            // - next()-style iterators
+            // - plain C++ ranges.
+            format!("rusty::for_in({})", iter_source)
+        };
+
         // Rust `for x in expr` → C++ `for (auto& x : expr)` or `for (auto x : expr)`
         // Use auto&& to handle both references and values correctly
-        let iter_source = if iterable_self_shadows_loop_binding {
-            // Preserve Rust name resolution when loop pattern shadows the iterable local
-            // (e.g., `for lhs in lhs`) by stabilizing the iterable before binding `lhs`.
-            let stable_iter_name = self.reserve_synthetic_cpp_name("_for_iter");
-            self.writeln(&format!("auto&& {} = {};", stable_iter_name, iter_expr));
-            stable_iter_name
-        } else {
-            iter_expr
-        };
-        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_source));
+        self.writeln(&format!("for (auto&& {} : {}) {{", pat, iter_expr));
         self.indent += 1;
 
         // Temporarily store the binding names; emit_block will push a new scope,
@@ -25248,9 +25253,10 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("auto&& _for_iter = rusty::for_in(lhs);"));
-        assert!(out.contains("for (auto&& lhs : _for_iter) {"));
-        assert!(!out.contains("for (auto&& lhs : rusty::for_in(lhs)) {"));
+        assert!(out.contains("auto _for_iter = lhs;"));
+        assert!(out.contains("for (auto&& lhs : rusty::for_in(_for_iter)) {"));
+        assert!(!out.contains("auto&& _for_iter = rusty::for_in(lhs);"));
+        assert!(!out.contains("for (auto&& lhs : _for_iter) {"));
     }
 
     #[test]
@@ -25265,9 +25271,33 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("auto&& _for_iter = rusty::for_in(rusty::iter(lhs));"));
-        assert!(out.contains("for (auto&& lhs : _for_iter) {"));
-        assert!(!out.contains("for (auto&& lhs : rusty::for_in(rusty::iter(lhs))) {"));
+        assert!(out.contains("auto&& _for_iter = lhs;"));
+        assert!(out.contains("for (auto&& lhs : rusty::for_in(rusty::iter(_for_iter))) {"));
+        assert!(!out.contains("auto&& _for_iter = rusty::for_in(rusty::iter(lhs));"));
+        assert!(!out.contains("for (auto&& lhs : _for_iter) {"));
+    }
+
+    #[test]
+    fn test_leaf1024_self_shadowing_next_iterable_stabilizes_source_before_for_in() {
+        let out = transpile_str(
+            r#"
+            struct Iter;
+            impl Iter {
+                fn next(&mut self) -> Option<i32> { None }
+            }
+            fn make() -> Iter { Iter {} }
+            fn f() {
+                let lhs = make();
+                for lhs in lhs {
+                    let _ = lhs;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto _for_iter = lhs;"));
+        assert!(out.contains("for (auto&& lhs : rusty::for_in(_for_iter)) {"));
+        assert!(!out.contains("auto&& _for_iter = rusty::for_in(lhs);"));
+        assert!(!out.contains("for (auto&& lhs : _for_iter) {"));
     }
 
     #[test]
