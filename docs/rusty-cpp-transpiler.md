@@ -1734,6 +1734,34 @@ rusty::enumerate(
 
 Use helper-chain lowering over direct member calls when the receiver is an adapter value rather than a native C++ range class with those members.
 
+6. `.collect()` must not emit `Target::from_iter(...)` for non-owning view targets.
+
+```rust
+let out: &[u8] = iter.into_iter().collect();
+```
+
+```cpp
+const std::span<const uint8_t> out = rusty::collect_range(rusty::iter(iter));
+```
+
+Treat `std::span<...>` / `std::string_view`-family targets as view surfaces and route through `rusty::collect_range(...)` instead of emitting unavailable `view::from_iter(...)` members.
+
+7. Iterator-adapter receiver evidence must include callable-return and qualified-call shapes, but preserve `Option::map` semantics on `next()` payloads.
+
+```rust
+Flags::iter(&value).map(|f| f.bits()).collect::<Vec<_>>();
+inherent(&value).map(|f| f.bits()).collect::<Vec<_>>();
+it.next().map(|x| x + 1); // Option::map, not iterator adapter map
+```
+
+```cpp
+rusty::collect_range(rusty::map(value.iter(), ...));
+rusty::collect_range(rusty::map(inherent(value), ...));
+it.next().map(...);
+```
+
+This keeps adapter-chain lowering robust for call-return iterator sources while avoiding false-positive rewrites of optional-like map surfaces.
+
 ### 4.7 Trait Objects with Multiple Traits
 
 ```rust
@@ -4673,6 +4701,8 @@ Required approach:
 - when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
 - for iterator adapter lowering, do not rely on a single direct-receiver item-type inference path; include callable-return and receiver-shape evidence gates so adapter chains (for example call-return iterators and `iter_names()`-style surfaces) do not leak raw `.map()`/`.count()` member calls into C++
+- for collect lowering, do not emit `Target::from_iter(...)` on non-owning C++ view targets (`std::span`, `std::string_view`, `std::basic_string_view`) that do not provide Rust-style constructor surfaces
+- for map adapter lowering, do not rewrite optional-like payload maps (`next()` / `next_back()` receivers) into iterator helper calls; keep `Option::map`/`Result::map` semantics when receiver shape indicates optional next-payload surfaces
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)

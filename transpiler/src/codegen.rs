@@ -5734,13 +5734,13 @@ impl CodeGen {
                     // extend: OR in flags from an iterator
                     if !merged_methods.contains("extend") {
                         self.writeln(&format!(
-                            "template<typename Iter> void extend(Iter&& iter) {{ for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) this->_0 |= item._0; }}",
+                            "template<typename Iter> void extend(Iter&& iter) {{ for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) {{ if constexpr (requires {{ item._0; }}) {{ this->_0 |= static_cast<decltype(this->_0)>(item._0); }} else if constexpr (requires {{ item.bits(); }}) {{ this->_0 |= static_cast<decltype(this->_0)>(item.bits()); }} else {{ this->_0 |= static_cast<decltype(this->_0)>(item); }} }} }}",
                         ));
                     }
                     // from_iter: collect iterator elements via bitwise OR
                     if !merged_methods.contains("from_iter") {
                         self.writeln(&format!(
-                            "template<typename Iter> static {} from_iter(Iter&& iter) {{ {} result{{}}; for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) result._0 |= item._0; return result; }}",
+                            "template<typename Iter> static {} from_iter(Iter&& iter) {{ {} result{{}}; for (auto&& item : rusty::for_in(std::forward<Iter>(iter))) {{ if constexpr (requires {{ item._0; }}) {{ result._0 |= static_cast<decltype(result._0)>(item._0); }} else if constexpr (requires {{ item.bits(); }}) {{ result._0 |= static_cast<decltype(result._0)>(item.bits()); }} else {{ result._0 |= static_cast<decltype(result._0)>(item); }} }} return result; }}",
                             n, n
                         ));
                     }
@@ -17028,6 +17028,7 @@ impl CodeGen {
                 if collect_type != "auto"
                     && !collect_type.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&collect_type)
+                    && self.collect_target_supports_from_iter(&collect_type)
                 {
                     return format!("{}::from_iter({})", collect_type, receiver);
                 }
@@ -17043,6 +17044,7 @@ impl CodeGen {
                 if expected_cpp != "auto"
                     && !expected_cpp.contains("/* TODO")
                     && !type_string_has_auto_placeholder(&expected_cpp)
+                    && self.collect_target_supports_from_iter(&expected_cpp)
                 {
                     return format!("{}::from_iter({})", expected_cpp, receiver);
                 }
@@ -17051,6 +17053,11 @@ impl CodeGen {
                 return format!("rusty::collect_range({})", receiver);
             }
             if Self::is_range_expression(&mc.receiver) {
+                return format!("rusty::collect_range({})", receiver);
+            }
+            if self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver)
+            {
                 return format!("rusty::collect_range({})", receiver);
             }
         }
@@ -19419,6 +19426,8 @@ impl CodeGen {
                 let last = tp.path.segments.last()?;
                 match last.ident.to_string().as_str() {
                     "ArrayVec"
+                    | "IntoIter"
+                    | "Iter"
                     | "Vec"
                     | "span"
                     | "range"
@@ -22848,6 +22857,41 @@ impl CodeGen {
                 let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
                     return false;
                 };
+                let last = path_expr
+                    .path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident.to_string());
+                if matches!(
+                    last.as_deref(),
+                    Some(
+                        "iter"
+                            | "iter_mut"
+                            | "into_iter"
+                            | "iter_names"
+                            | "bytes"
+                            | "as_bytes"
+                            | "chars"
+                            | "map"
+                            | "filter_map"
+                            | "enumerate"
+                            | "rev"
+                            | "take"
+                    )
+                ) {
+                    return true;
+                }
+                if path_expr.path.segments.len() == 1 {
+                    let binding_name = path_expr.path.segments[0].ident.to_string();
+                    if let Some(callee_ty) = self.lookup_local_binding_type(&binding_name) {
+                        if let Some(return_ty) = self.extract_callable_return_type_from_type(&callee_ty)
+                        {
+                            if self.extract_iter_item_type_from_type(&return_ty).is_some() {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 let joined = path_expr
                     .path
                     .segments
@@ -22888,6 +22932,12 @@ impl CodeGen {
         if mc.method != "map" || mc.args.len() != 1 {
             return None;
         }
+        if let syn::Expr::MethodCall(inner) = self.peel_paren_group_expr(&mc.receiver) {
+            if inner.args.is_empty() && matches!(inner.method.to_string().as_str(), "next" | "next_back")
+            {
+                return None;
+            }
+        }
         if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
             return None;
         }
@@ -22896,7 +22946,24 @@ impl CodeGen {
         {
             return None;
         }
-        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let receiver = if let syn::Expr::MethodCall(inner_mc) =
+            self.peel_paren_group_expr(&mc.receiver)
+        {
+            if inner_mc.method == "into_iter" && inner_mc.args.is_empty() {
+                if !self.is_iterator_like_receiver_expr(&inner_mc.receiver)
+                    && !self.is_probably_iterator_receiver_expr(&inner_mc.receiver)
+                {
+                    let inner = self.emit_expr_to_string(&inner_mc.receiver);
+                    format!("rusty::iter({})", inner)
+                } else {
+                    self.emit_expr_to_string(&mc.receiver)
+                }
+            } else {
+                self.emit_expr_to_string(&mc.receiver)
+            }
+        } else {
+            self.emit_expr_to_string(&mc.receiver)
+        };
         let mapper = self.emit_expr_maybe_move(mc.args.first()?);
         Some(format!("rusty::map({}, {})", receiver, mapper))
     }
@@ -22966,6 +23033,17 @@ impl CodeGen {
         mapped == "Ordering"
             || mapped == "rusty::cmp::Ordering"
             || mapped.ends_with("::Ordering")
+    }
+
+    fn collect_target_supports_from_iter(&self, cpp_type: &str) -> bool {
+        let canonical = self.canonical_into_target_cpp_type(cpp_type);
+        if canonical.starts_with("std::span<")
+            || canonical == "std::string_view"
+            || canonical.starts_with("std::basic_string_view<")
+        {
+            return false;
+        }
+        true
     }
 
     fn is_ordering_then_with_receiver_shape(&self, expr: &syn::Expr) -> bool {
@@ -32744,6 +32822,82 @@ mod tests {
             out
         );
         assert!(!out.contains("inherent(value).map("));
+    }
+
+    #[test]
+    fn test_leaf105406_collect_with_slice_expected_type_uses_collect_range_not_span_from_iter() {
+        let out = transpile_str(
+            r#"
+            fn f(iter: Vec<u8>) {
+                let values: &[u8] = iter.into_iter().collect();
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::collect_range("));
+        assert!(!out.contains("std::span<const uint8_t>::from_iter("));
+    }
+
+    #[test]
+    fn test_leaf105406_map_after_ufcs_iter_call_lowers_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            trait Flags {
+                type Bits;
+                fn iter(&self) -> std::ops::Range<i32>;
+            }
+            fn case_<T: Flags>(value: T) -> Vec<i32> {
+                Flags::iter(&value).map(|x| x + 1).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::map("),
+            "expected runtime map lowering for UFCS iter call, got:\n{out}"
+        );
+        assert!(!out.contains(".map([&](auto&& x) { return x + 1; }).collect"));
+    }
+
+    #[test]
+    fn test_leaf105406_callable_returning_iter_type_lowers_map_chain_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            mod iter {
+                pub struct Iter<T>(T);
+            }
+            fn case_<T>(value: T, inherent: impl FnOnce(&T) -> iter::Iter<T>) -> Vec<T> {
+                inherent(&value).map(|f| f).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::map(inherent("), "expected runtime map lowering, got:\n{out}");
+        assert!(!out.contains("inherent(&value).map("));
+        assert!(!out.contains("inherent(value).map("));
+    }
+
+    #[test]
+    fn test_leaf105406_map_into_iter_on_unknown_generic_receiver_uses_iter_bridge() {
+        let out = transpile_str(
+            r#"
+            fn case_<T>(value: T) -> Vec<i32> {
+                value.into_iter().map(|x| x + 1).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::map(rusty::iter(value),"));
+        assert!(!out.contains("rusty::map(value.into_iter(),"));
+    }
+
+    #[test]
+    fn test_leaf105406_option_next_map_is_not_rewritten_to_iterator_map() {
+        let out = transpile_str(
+            r#"
+            fn f(mut it: std::ops::Range<i32>) -> Option<i32> {
+                it.next().map(|x| x + 1)
+            }
+            "#,
+        );
+        assert!(out.contains("return it.next().map("), "expected Option::map shape, got:\n{out}");
+        assert!(!out.contains("rusty::map(it.next(),"));
     }
 
     #[test]
@@ -43404,6 +43558,29 @@ mod tests {
         // Collection methods
         assert!(out.contains("void extend("), "missing extend()\nGot: {out}");
         assert!(out.contains("from_iter("), "missing from_iter()\nGot: {out}");
+    }
+
+    #[test]
+    fn test_leaf105406_bitflags_synthetic_from_iter_supports_scalar_items() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            impl std::ops::BitAnd for Flags {
+                type Output = Self;
+                fn bitand(self, rhs: Self) -> Self { Flags(self.0 & rhs.0) }
+            }
+            fn f() {
+                let _ = Flags::from_iter([1, 2].into_iter());
+            }
+            "#,
+        );
+        assert!(out.contains("if constexpr (requires { item._0; })"));
+        assert!(out.contains("else if constexpr (requires { item.bits(); })"));
+        assert!(out.contains("else { result._0 |= static_cast<decltype(result._0)>(item); }"));
     }
 
     #[test]

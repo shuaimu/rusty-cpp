@@ -3656,7 +3656,44 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in callable and format lowering; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.6: Collapse the post-10.5.40.5 `bitflags` iterator/collection call-shape head (`runner.cpp:1550` `item._0` instantiation mismatch and adjacent `runner.cpp:4379/4396/4413` `std::span<...>::from_iter` surface mismatch) with shared iterator/collection lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.6: Collapse the post-10.5.40.5 `bitflags` iterator/collection call-shape head (`runner.cpp:1550` `item._0` instantiation mismatch and adjacent `runner.cpp:4379/4396/4413` `std::span<...>::from_iter` surface mismatch) with shared iterator/collection lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared iterator/collect lowering hardening + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - synthetic bitflags `extend`/`from_iter` assumed iterator items always exposed tuple/newtype payload `. _0`, which fails for scalar iter payload instantiations (`int`, `u8`) at `runner.cpp:1550`.
+              - collect lowering emitted `Target::from_iter(receiver)` for non-owning view targets (`std::span`, `string_view` family), producing unresolved `std::span<...>::from_iter(...)` at `runner.cpp:4379/4396/4413`.
+              - once `span::from_iter` was removed, adjacent adapter-shape fallout surfaced in the same family (`call_expr.map(...)` / generic `into_iter()` and `Option::map` false-positive rewrite), requiring receiver-shape hardening to keep fixes shared and non-regressing.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - hardened synthetic bitflags methods:
+                - `extend`/`from_iter` now shape-gate item extraction (`item._0` / `item.bits()` / scalar fallback cast) instead of assuming `. _0`.
+              - hardened collect lowering:
+                - added `collect_target_supports_from_iter(...)` guard to block `Target::from_iter(...)` for non-owning view targets (`std::span<...>`, `std::string_view`, `std::basic_string_view<...>`).
+                - for iterator-like/probably-iterator receivers, fallback to `rusty::collect_range(...)` when `from_iter` target emission is not valid.
+              - hardened iterator adapter receiver-shape inference:
+                - extended iterator item extraction to include iterator wrapper path shapes (`Iter`, `IntoIter`).
+                - expanded probable-iterator call-shape detection to include qualified call tails (`Type::iter(...)`, etc.) and callable-bound return types from local callable bindings.
+              - hardened `map` adapter lowering:
+                - normalize unknown-generic `.into_iter().map(...)` receiver shape to `rusty::iter(base)` bridge path.
+                - guard `next()`/`next_back()` receiver shapes so `Option::map` is preserved and not rewritten to iterator `rusty::map(...)`.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf105406_collect_with_slice_expected_type_uses_collect_range_not_span_from_iter`
+              - `test_leaf105406_bitflags_synthetic_from_iter_supports_scalar_items`
+              - `test_leaf105406_map_after_ufcs_iter_call_lowers_to_runtime_map`
+              - `test_leaf105406_callable_returning_iter_type_lowers_map_chain_to_runtime_map`
+              - `test_leaf105406_map_into_iter_on_unknown_generic_receiver_uses_iter_bridge`
+              - `test_leaf105406_option_next_map_is_not_rewritten_to_iterator_map`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105406 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-6c-1775905718 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:1550` (`item._0` iterator payload assumption) and adjacent `runner.cpp:4379/4396/4413` (`std::span<...>::from_iter`) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to span-vs-collected-container assertion-shape mismatch rooted at:
+                - `runner.cpp:4386/4403/4420` invalid equality comparison between `std::span<const typename T::Bits>` and collected `rusty::Vec<typename T::Bits>`.
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-6c-1775905718/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in iterator/collect lowering; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.7: Collapse the post-10.5.40.6 `bitflags` iterator-assertion collection-shape head (`runner.cpp:4386/4403/4420` span-vs-vec equality mismatch after iterator-chain lowering) with shared assertion/collection coercion fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
