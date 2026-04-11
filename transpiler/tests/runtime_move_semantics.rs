@@ -372,6 +372,56 @@ fn test_ptr_nonnull_supports_equality_comparison() {
 }
 
 #[test]
+fn test_as_ptr_const_value_supports_nonconst_as_ptr_const_pointer_surface() {
+    let source = r#"
+        #include <rusty/array.hpp>
+
+        struct Wrapper {
+            int value;
+            const int* as_ptr() { return &value; }
+        };
+
+        int main() {
+            const Wrapper wrapped{7};
+            auto ptr = rusty::as_ptr(wrapped);
+            return (*ptr == 7) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "as_ptr_const_nonconst_method_const_pointer");
+}
+
+#[test]
+fn test_as_ref_ptr_balances_pointer_wrappers_and_string_like_values() {
+    let source = r#"
+        #include <rusty/array.hpp>
+        #include <rusty/string.hpp>
+
+        struct Wrapper {
+            int value;
+            const int* as_ptr() { return &value; }
+        };
+
+        int main() {
+            const Wrapper wrapped{7};
+            auto wrapped_ptr = rusty::as_ref_ptr(wrapped);
+            if (*wrapped_ptr != 7) {
+                return 1;
+            }
+
+            rusty::String text = rusty::String::from("hi");
+            auto text_ptr = rusty::as_ref_ptr(text);
+            if (!(*text_ptr == "hi")) {
+                return 2;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "as_ref_ptr_wrapper_and_string_balance");
+}
+
+#[test]
 fn test_mem_transmute_supports_equal_size_byte_reinterpretation() {
     let source = r#"
         #include <array>

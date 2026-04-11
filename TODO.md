@@ -4417,6 +4417,36 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-19-20260411b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering paths, with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [x] *done* Leaf 5.1.20: `smallvec` Stage D index-reference/assertion compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime-surface hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - softened reference-return methods now preserve reference category by emitting `decltype(auto)` (instead of `auto`) when dependent-associated return softening is active.
+            - binding-tuple reference lowering for index targets now uses shared pointer-bridge emission (`rusty::as_ref_ptr(...)`) instead of raw address-of wrappers, preventing pointer-wrapper/string-like mismatches in assertion scaffolding.
+            - runtime pointer helpers were hardened:
+              - `rusty::as_ptr(const T&)` now supports const-call sites where only non-const `.as_ptr()` exists but returns a const pointer.
+              - added `rusty::as_ref_ptr(const T&)` to prefer pointer-wrapper element pointers while preserving string-like object-address semantics.
+          - Added focused regressions:
+            - `test_leaf5120_softened_reference_return_method_uses_decltype_auto`
+            - `test_leaf5120_tuple_match_reference_to_index_uses_as_ptr_bridge`
+            - `test_as_ptr_const_value_supports_nonconst_as_ptr_const_pointer_surface`
+            - `test_as_ref_ptr_balances_pointer_wrappers_and_string_like_values`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5120 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_as_ptr_const_value_supports_nonconst_as_ptr_const_pointer_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_as_ref_ptr_balances_pointer_wrappers_and_string_like_values -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-20-20260411a --keep-work-dirs`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-20-20260411b --keep-work-dirs`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-20-20260411c --keep-work-dirs`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-20-20260411d --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.19 first-head family at `runner.cpp:2379`/`runner.cpp:2387` (`taking address of rvalue` and adjacent tuple-assertion equality mismatch on `test_spill`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `/usr/include/c++/14/array:103` (`forming pointer to reference type` for `std::array<const unsigned int&, 2>`) with immediate adjacent reference-element array instantiation fallout (`array:104/107/108/111/112` and `array:61`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-20-20260411d/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-shape-gated in core lowering/runtime helpers, with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.21: `smallvec` Stage D reference-element array/MaybeUninit compile-head family collapse
+          - Collapse the new post-5.1.20 deterministic `smallvec` Stage D family beginning at `/usr/include/c++/14/array:103` (`std::array<const unsigned int&, 2>` pointer-to-reference instantiation fallout via `MaybeUninit<std::array<const unsigned int&, 2>>`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

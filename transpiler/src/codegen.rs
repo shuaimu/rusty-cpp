@@ -8809,6 +8809,7 @@ impl CodeGen {
         let is_deref_mut_method = method_ident == "deref_mut";
 
         let mut return_type = self.map_return_type(&method.sig.output);
+        let method_returns_reference = self.return_type_is_reference(&method.sig.output);
         // operator<=> must return std::partial_ordering for C++ comparison synthesis.
         // When body returns Option<Ordering>, we wrap it with to_partial_ordering.
         let wrap_body_with_partial_ordering = name == "operator<=>"
@@ -8830,6 +8831,12 @@ impl CodeGen {
             if !can_keep_explicit_current_struct_assoc_return {
                 return_type = "auto".to_string();
             }
+        }
+        // When softening dependent associated-type signatures, preserve reference
+        // category for methods that are semantically `-> &T` in Rust (notably
+        // `Index::index`) to avoid silently decaying lvalue references to values.
+        if return_type == "auto" && method_returns_reference {
+            return_type = "decltype(auto)".to_string();
         }
         // For Deref/DerefMut implementations where Target resolves to a view-like
         // runtime type (`std::span`/`std::string_view`), returning `Target&` creates
@@ -8989,6 +8996,22 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();
+    }
+
+    fn return_type_is_reference(&self, output: &syn::ReturnType) -> bool {
+        match output {
+            syn::ReturnType::Default => false,
+            syn::ReturnType::Type(_, ty) => self.type_is_reference_like(ty),
+        }
+    }
+
+    fn type_is_reference_like(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Reference(_) => true,
+            syn::Type::Paren(p) => self.type_is_reference_like(&p.elem),
+            syn::Type::Group(g) => self.type_is_reference_like(&g.elem),
+            _ => false,
+        }
     }
 
     /// Try to inline operator method bodies that call known bitwise helpers.
@@ -10525,6 +10548,8 @@ impl CodeGen {
                     }
 
                     let reference_target_raw = self.emit_expr_to_string(reference_target);
+                    let is_index_reference_target =
+                        matches!(reference_target, syn::Expr::Index(_)) && !is_slice_range_target;
                     let can_take_address_directly = self.is_stable_reference_lvalue_expr(reference_target)
                         && !is_slice_range_target
                         && !should_normalize_to_slice_full
@@ -10532,11 +10557,25 @@ impl CodeGen {
                         // be materialized before taking an address in tuple assertion scaffolding.
                         && inner_raw == reference_target_raw;
                     if can_take_address_directly {
-                        self.writeln(&format!("auto {} = &{};", elem_name, inner_raw));
+                        if is_index_reference_target {
+                            self.writeln(&format!(
+                                "auto {} = rusty::as_ref_ptr({});",
+                                elem_name, inner_raw
+                            ));
+                        } else {
+                            self.writeln(&format!("auto {} = &{};", elem_name, inner_raw));
+                        }
                     } else {
                         let tmp_name = format!("_m{}_tmp", idx);
                         self.writeln(&format!("auto {} = {};", tmp_name, inner_raw));
-                        self.writeln(&format!("auto {} = &{};", elem_name, tmp_name));
+                        if is_index_reference_target {
+                            self.writeln(&format!(
+                                "auto {} = rusty::as_ref_ptr({});",
+                                elem_name, tmp_name
+                            ));
+                        } else {
+                            self.writeln(&format!("auto {} = &{};", elem_name, tmp_name));
+                        }
                     }
                 }
                 _ => {
@@ -35754,6 +35793,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_leaf5120_tuple_match_reference_to_index_uses_as_ptr_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<String>) {
+                match (&v[0], &"hello") {
+                    (left_val, right_val) => {
+                        let _same = *left_val == *right_val;
+                    }
+                };
+            }
+            "#,
+        );
+        assert!(out.contains("auto _m0 = rusty::as_ref_ptr(v[0]);"), "{out}");
+        assert!(!out.contains("auto _m0 = &v[0];"), "{out}");
+    }
+
     // ── Tuple and destructuring tests ───────────────────────────
 
     #[test]
@@ -39146,6 +39202,25 @@ mod tests {
         "#,
         );
         assert!(out.contains("operator[]("));
+    }
+
+    #[test]
+    fn test_leaf5120_softened_reference_return_method_uses_decltype_auto() {
+        let out = transpile_str_module(
+            r#"
+            trait Array { type Item; }
+            struct SmallVec<A>(A);
+            impl<A: Array, I> std::ops::Index<I> for SmallVec<A> {
+                type Output = A::Item;
+                fn index(&self, _index: I) -> &Self::Output {
+                    todo!()
+                }
+            }
+        "#,
+            "smallvec_like",
+        );
+        assert!(out.contains("decltype(auto) operator[]("), "{out}");
+        assert!(!out.contains("auto operator[]("), "{out}");
     }
 
     #[test]
@@ -45970,7 +46045,7 @@ mod tests {
         "#,
             "either",
         );
-        assert!(out.contains("auto operator*() const {"));
+        assert!(out.contains("decltype(auto) operator*() const {"));
         assert!(out.contains("auto&& _m = (*this);"));
         assert!(!out.contains("auto _m = *(*this);"));
         assert!(out.contains("return rusty::deref_ref("));

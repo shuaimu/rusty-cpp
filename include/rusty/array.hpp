@@ -454,6 +454,18 @@ template<typename T>
 decltype(auto) as_ptr(const T& value) {
     if constexpr (requires { value.as_ptr(); }) {
         return detail::adapt_as_ptr_result(value, value.as_ptr());
+    } else if constexpr (requires { const_cast<std::remove_cvref_t<T>&>(value).as_ptr(); }) {
+        using RawPtr =
+            decltype(const_cast<std::remove_cvref_t<T>&>(value).as_ptr());
+        if constexpr (std::is_pointer_v<std::remove_reference_t<RawPtr>>
+                      && std::is_const_v<
+                          std::remove_pointer_t<std::remove_reference_t<RawPtr>>>) {
+            return detail::adapt_as_ptr_result(
+                value,
+                const_cast<std::remove_cvref_t<T>&>(value).as_ptr());
+        } else {
+            return &value;
+        }
     } else if constexpr (requires { value.data(); }) {
         return detail::adapt_as_ptr_result(value, value.data());
     } else if constexpr (requires { value.begin(); }) {
@@ -476,6 +488,47 @@ decltype(auto) as_mut_ptr(T& value) {
     } else if constexpr (requires { value.begin(); }) {
         if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(value.begin())>>) {
             return detail::adapt_as_mut_ptr_result(value, value.begin());
+        } else {
+            return &value;
+        }
+    } else {
+        return &value;
+    }
+}
+
+// Borrow helper for tuple-assertion style reference scaffolding.
+// Prefer pointer-wrapper `.as_ptr()` surfaces when they expose element pointers,
+// but keep string-like objects addressable as whole values.
+template<typename T>
+decltype(auto) as_ref_ptr(const T& value) {
+    if constexpr (requires { value.as_ptr(); }) {
+        using RawPtr = decltype(value.as_ptr());
+        if constexpr (std::is_pointer_v<std::remove_reference_t<RawPtr>>) {
+            using Pointee =
+                std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<RawPtr>>>;
+            if constexpr (!std::is_same_v<Pointee, char>) {
+                return detail::adapt_as_ptr_result(value, value.as_ptr());
+            } else {
+                return &value;
+            }
+        } else {
+            return &value;
+        }
+    } else if constexpr (requires { const_cast<std::remove_cvref_t<T>&>(value).as_ptr(); }) {
+        using RawPtr =
+            decltype(const_cast<std::remove_cvref_t<T>&>(value).as_ptr());
+        if constexpr (std::is_pointer_v<std::remove_reference_t<RawPtr>>
+                      && std::is_const_v<
+                          std::remove_pointer_t<std::remove_reference_t<RawPtr>>>) {
+            using Pointee =
+                std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<RawPtr>>>;
+            if constexpr (!std::is_same_v<Pointee, char>) {
+                return detail::adapt_as_ptr_result(
+                    value,
+                    const_cast<std::remove_cvref_t<T>&>(value).as_ptr());
+            } else {
+                return &value;
+            }
         } else {
             return &value;
         }
