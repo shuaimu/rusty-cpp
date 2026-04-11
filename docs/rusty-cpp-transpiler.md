@@ -2170,6 +2170,7 @@ Integrated outcomes:
 - `while let` and related control-flow lowering avoids invalid bool-context expressions.
 - destructor-tail expression emission no longer produces invalid value-return statements in `Drop`/destructor-like contexts.
 - closure-body return-context handling was hardened to avoid regressions.
+- expression-block IIFE lowering now reuses shared statement/local emission paths (`emit_stmt`/`emit_local`) so local shadowing semantics in `{ let x = x; ... }` value-position blocks stay aligned with normal block lowering.
 
 Directly supports:
 
@@ -2229,9 +2230,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-36c-1775896673`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-37a-1775897398`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
 - confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- current deterministic `bitflags` Stage D head starts at `runner.cpp:2833` (self-shadowed `auto value = value` initializer in assertion lowering), followed by iterator/type-shape fallout at `runner.cpp:3121+` (`Vec<auto>` plus missing `.map()`/`.count()` member surfaces)
+- current deterministic `bitflags` Stage D head starts at `runner.cpp:3121+` (iterator/type-shape fallout: `Vec<auto>` template placeholder emission plus missing `.map()`/`.count()` member surfaces on iterator adapters), with adjacent tuple element-type harmonization fallout.
 
 Crate-focused progress integrated from former appendices:
 
@@ -2240,18 +2241,18 @@ Crate-focused progress integrated from former appendices:
 - `cfg-if`: baseline resiliency and alias/import typing fixes
 - `take_mut`: type/lifetime order, ptr/mem path lowering, and template/context fixes
 - `semver`: import/re-export lowering and expanded build-shape fixes
-- `bitflags`: re-export/type-order fixes plus call-argument specialization and selective tuple/option constructor coercion hardening; active Stage D frontier remains
+- `bitflags`: re-export/type-order fixes plus call-argument specialization, selective tuple/option constructor coercion hardening, and block-expression shadow-safe IIFE lowering; active Stage D frontier remains
 - `arrayvec`: remaining deterministic frontier, advanced through many Stage D blocker families
 
 ### 10.6 Active Frontier and Next Work
 
 From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
 
-Current deterministic head (post-Leaf 10.5.36):
+Current deterministic head (post-Leaf 10.5.37):
 
-1. `runner.cpp:2833`: self-shadowed local initializer emission (`auto value = value`) in assertion-lowered mutating-expression shape.
-2. `runner.cpp:3121+`: iterator adapter/value-typing family on `rusty::iter(...)` receiver chains (`Vec<auto>`, missing `.map()`/`.count()` member surfaces).
-3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-36c-1775896673/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. `runner.cpp:3121+`: iterator adapter/value-typing family on `rusty::iter(...)` receiver chains (`Vec<auto>`, missing `.map()`/`.count()` member surfaces).
+2. Adjacent head family includes tuple literal element-type harmonization fallout in the same bitflags compile region.
+3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
 
 Historical active-work chain (retained for traceability):
 
@@ -4669,6 +4670,7 @@ Required approach:
 - for omitted-template owner constructor fallout (`Type<auto, ...>::new_()`), do not hardcode crate/type-specific constructor rewrites or globally strip placeholder args; recover owner template args through explicit expected-type/scope inference gates so unaffected constructor sites keep their existing behavior
 - for function-call template specialization, do not append inferred template arguments when explicit turbofish/template arguments are already present on the call path
 - for tuple/option constructor coercion, do not globally replace `std::make_tuple(...)` / `std::make_optional(...)` with typed constructor forms; emit typed forms only when expected associated-type context requires coercion
+- for expression-position block lowering (`[&]() { ... }()`), do not maintain ad-hoc local/statement emission paths that bypass shared shadow-allocation/state-tracking logic; route through shared statement/local lowering so `let x = x` shadow chains keep outer-binding resolution.
 - for expected-type associated-call specialization, do not reuse only the mapped function-tail when the mapped path is actually a free helper (for example `std::mem::ManuallyDrop::new` → `rusty::mem::manually_drop_new`); emit `Owner::method(...)` only when mapped owner path matches the expected owner base
 - for forward-declaration signatures, do not rely on later in-namespace `use` alias emission for single-segment imported type names; emit explicitly qualified paths when a unique declared crate type is known
 - for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies

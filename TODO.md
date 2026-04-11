@@ -3428,6 +3428,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-35b-1775894980/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-36c-1775896673/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in generic call/constructor lowering paths, with no crate-specific scripts and no generated-text patching.
+        - [x] *done* Leaf 10.5.37: Collapse the post-10.5.36 deterministic full-matrix `bitflags` Stage D block-expression local-shadowing family generically (starting with `runner.cpp:2833` self-referential `auto value = value` emission in assertion-lowered mutating block expressions), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only block-expression IIFE statement-lowering changes plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - `block_expr_to_iife_string` used a bespoke local-statement emitter that bypassed shared local shadow-allocation/state tracking logic (`emit_local` path), so expression blocks like `{ let mut value = value; ... }` lowered to invalid self-initializing C++ (`auto value = value`) instead of shadow-safe names.
+            - the bespoke path also duplicated statement emission behavior from main block lowering and drifted from shared semantics.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - rewired non-tail statement emission inside `block_expr_to_iife_string` to use shared mutable `emit_stmt` lowering on a cloned inner codegen state, so local shadow allocation, init-expression resolution, and statement control-flow lowering stay aligned with normal block emission.
+            - removed now-unused helper `control_flow_stmt_to_string` after statement emission was unified on `emit_stmt`.
+            - adjusted leaf46 block-expression regression assertion to validate the required no-TODO/correct-expression lowering shape without over-constraining local constness detail.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10537_block_iife_local_shadow_uses_outer_binding`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf10537_block_iife_local_shadow_uses_outer_binding -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf46_block_expr_arm_no_todo_placeholder -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-37a-1775897398 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `bitflags` Stage D rooted at `runner.cpp:2833` (self-referential `auto value = value` in block-expression assertion lowering, plus repeated same-family sites) is removed.
+            - full-matrix frontier remains at `bitflags` Stage D and advances to the next deterministic compile family rooted at `runner.cpp:3121+` (iterator adapter/member-surface and generic placeholder `Vec<auto>` fallout, plus adjacent tuple literal element-type harmonization errors).
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-36c-1775896673/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/state-gated in core expression-block lowering; no crate-specific scripts and no generated-text patching were introduced.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

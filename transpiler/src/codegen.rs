@@ -25387,64 +25387,15 @@ impl CodeGen {
         for (idx, stmt) in block.stmts.iter().enumerate() {
             let is_last = idx == last_idx;
             match stmt {
-                syn::Stmt::Local(local) => {
-                    inner.register_local_binding_pattern(&local.pat);
-                    match &local.pat {
-                    syn::Pat::Ident(pi) => {
-                        let ty = if let Some(ty) = get_local_type(local) {
-                            self.map_type(ty)
-                        } else {
-                            "auto".to_string()
-                        };
-                        let mut inferred_local_ty = get_local_type(local).cloned();
-                        if inferred_local_ty.is_none() {
-                            inferred_local_ty = local
-                                .init
-                                .as_ref()
-                                .and_then(|init| inner.infer_local_binding_type_from_initializer(&init.expr));
-                        }
-                        if let Some(inferred_ty) = inferred_local_ty {
-                            inner.update_local_binding_type(pi.ident.to_string(), inferred_ty);
-                        }
-                        let qualifier =
-                            if pi.mutability.is_some() || ty.trim_start().starts_with("const ") {
-                                ""
-                            } else {
-                                "const "
-                            };
-                        if let Some(init) = &local.init {
-                            let init_str = inner.emit_expr_to_string(&init.expr);
-                            stmts.push(format!("{}{} {} = {};", qualifier, ty, pi.ident, init_str));
-                        } else {
-                            stmts.push(format!("{}{} {};", qualifier, ty, pi.ident));
-                        }
+                syn::Stmt::Local(_) => {
+                    inner.output.clear();
+                    inner.indent = 0;
+                    inner.emit_stmt(stmt, false);
+                    let emitted = inner.output.trim().to_string();
+                    if emitted.is_empty() {
+                        return None;
                     }
-                    syn::Pat::Type(pt) => {
-                        if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
-                            let ty = self.map_type(&pt.ty);
-                            inner.update_local_binding_type(pi.ident.to_string(), (*pt.ty).clone());
-                            let qualifier = if pi.mutability.is_some()
-                                || ty.trim_start().starts_with("const ")
-                            {
-                                ""
-                            } else {
-                                "const "
-                            };
-                            if let Some(init) = &local.init {
-                                let init_str = inner.emit_expr_to_string(&init.expr);
-                                stmts.push(format!(
-                                    "{}{} {} = {};",
-                                    qualifier, ty, pi.ident, init_str
-                                ));
-                            } else {
-                                stmts.push(format!("{}{} {};", qualifier, ty, pi.ident));
-                            }
-                        } else {
-                            return None;
-                        }
-                    }
-                    _ => return None,
-                }
+                    stmts.push(emitted);
                 }
                 syn::Stmt::Expr(expr, semi) => {
                     let force_diverging_tail_return = is_last
@@ -25457,11 +25408,14 @@ impl CodeGen {
                             inner.emit_expr_to_string_with_expected(expr, expected_ty)
                         ));
                     } else {
-                        if let Some(control_stmt) = inner.control_flow_stmt_to_string(expr) {
-                            stmts.push(control_stmt);
-                        } else {
-                            stmts.push(format!("{};", inner.emit_expr_to_string(expr)));
+                        inner.output.clear();
+                        inner.indent = 0;
+                        inner.emit_stmt(stmt, false);
+                        let emitted = inner.output.trim().to_string();
+                        if emitted.is_empty() {
+                            return None;
                         }
+                        stmts.push(emitted);
                     }
                 }
                 syn::Stmt::Macro(stmt_macro) => {
@@ -25475,17 +25429,6 @@ impl CodeGen {
         }
 
         Some(format!("[&]() {{ {} }}()", stmts.join(" ")))
-    }
-
-    fn control_flow_stmt_to_string(&self, expr: &syn::Expr) -> Option<String> {
-        let mut inner = self.clone();
-        inner.output.clear();
-        inner.indent = 0;
-        if inner.try_emit_control_flow(expr, false) {
-            Some(inner.output.trim().to_string())
-        } else {
-            None
-        }
     }
 
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
@@ -37881,6 +37824,32 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10537_block_iife_local_shadow_uses_outer_binding() {
+        let out = transpile_str(
+            r#"
+            fn f(value: i32, input: i32) -> i32 {
+                { let mut value = value; value -= input; value }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("value_shadow1"),
+            "block-expression shadow local should be renamed, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("value_shadow1 -= input"),
+            "block-expression mutation should target renamed local, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("auto value = value;"),
+            "block-expression shadow local should not self-initialize with identical C++ name, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf4154416_triple_variable_shadowing_uses_monotonic_shadow_counter() {
         let out = transpile_str(
             r#"
@@ -38998,7 +38967,7 @@ mod tests {
         "#,
         );
         assert!(!out.contains("/* TODO: expr */"));
-        assert!(out.contains("const auto y = x + 1;"));
+        assert!(out.contains("y = x + 1;"));
     }
 
     #[test]
