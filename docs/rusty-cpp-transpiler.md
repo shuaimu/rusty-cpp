@@ -4364,7 +4364,23 @@ Active work items:
      - new deterministic frontier moved to Stage E runtime failure: runner exits with `SIGSEGV` (exit 139) immediately after first printed pass, with gdb showing recursive `identifier::Identifier::is_empty()`/destructor chain rooted at `runner.cpp:811-815` and `runner.cpp:861-864` on the `test_align` path.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-24-1775879000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared in runtime headers with shape-gated fallback logic, with no generated-text patching and no crate-specific rewrites/scripts.
-178. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.24` (starting with `runner.cpp:811-815` `Identifier::is_empty` local-empty/forget recursion trigger and adjacent `runner.cpp:861-864` destructor `is_empty_or_inline` recursion causing `SIGSEGV` on `test_align`).
+178. `Leaf 10.5.25` is complete.
+   - plan/scope check: shared runtime-header `mem::forget` hardening + focused runtime regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared runtime fix:
+     - `include/rusty/mem.hpp`: hardened `rusty::mem::forget(T&&)` for const-markable values by matching `remove_cv_t<T>` `rusty_mark_forgotten` surfaces and directly marking the value address when the bound value is const.
+   - focused regressions:
+     - `test_mem_forget_marks_const_values_with_rusty_drop_guard`
+     - `test_mem_forget_const_prevents_is_empty_destructor_recursion_shape`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-25-1775880200 --keep-work-dirs`
+     - `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/runner` direct replay (`EXIT:1`, no segfault).
+   - deterministic semver frontier movement:
+     - previous Stage E head (`SIGSEGV`/exit 139 immediately after first pass, recursive `Identifier::is_empty`/destructor chain rooted at `runner.cpp:811-815` and `runner.cpp:861-864`) is removed.
+     - new deterministic head is runtime assertion/panic mismatch family starting at `test_align` (`runner.cpp:3114-3169`) with adjacent widespread assertion/unwrap fallout (`test_basic`, `test_new`, `test_parse`, `test_spec_order`, etc.); parity now reports 8 passed / 24 failed.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared in runtime headers with type/shape-gated behavior, with no generated-text patching and no crate-specific rewrites/scripts.
+179. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.25` (starting with `test_align` assertion mismatch at `runner.cpp:3114-3169` and adjacent comparator/parse assertion fallout across Stage E runtime tests).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

@@ -3134,7 +3134,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-24-1775879000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared in runtime headers with explicit shape-gated fallbacks, added no crate-specific rewrites/scripts, and performed no generated-text patching.
-        - [ ] Leaf 10.5.25: Collapse the post-10.5.24 deterministic semver Stage E identifier-empty/destructor recursion family generically (starting with `runner.cpp:811-815` `Identifier::is_empty` local-empty/forget shape and adjacent `runner.cpp:861-864` destructor `is_empty_or_inline` recursion causing `SIGSEGV` on `test_align`), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.25: Collapse the post-10.5.24 deterministic semver Stage E identifier-empty/destructor recursion family generically (starting with `runner.cpp:811-815` `Identifier::is_empty` local-empty/forget shape and adjacent `runner.cpp:861-864` destructor `is_empty_or_inline` recursion causing `SIGSEGV` on `test_align`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared runtime-header `mem::forget` hardening + focused runtime regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared runtime fix:
+            - `include/rusty/mem.hpp`: hardened `rusty::mem::forget(T&&)` for const-markable values by recognizing `remove_cv_t<T>` `rusty_mark_forgotten` surfaces and directly marking the value address when the bound value is const (instead of silently no-oping).
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_mem_forget_marks_const_values_with_rusty_drop_guard`
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_mem_forget_const_prevents_is_empty_destructor_recursion_shape`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-25-1775880200 --keep-work-dirs`
+            - `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/runner >/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/run-direct.log 2>&1; echo EXIT:$?`
+          - Deterministic frontier movement:
+            - previous semver Stage E head (`SIGSEGV`/exit 139 immediately after first pass, recursive `Identifier::is_empty`/destructor chain rooted at `runner.cpp:811-815` and `runner.cpp:861-864`) is removed.
+            - new deterministic Stage E head is runtime assertion/panic mismatch family starting at `test_align` (`runner.cpp:3114-3169`), with broad adjacent assertion/unwrap fallout across formatting/comparator tests (`test_basic`, `test_new`, `test_parse`, `test_spec_order`, etc.; parity now reports 8 passed / 24 failed).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared in runtime headers, used shape-gated type traits (no blanket rewrites), and added no generated-text patching or crate-specific scripts.
+        - [ ] Leaf 10.5.26: Collapse the post-10.5.25 deterministic semver Stage E display/assertion mismatch family generically (starting with `test_align` failure surface at `runner.cpp:3114-3169` and adjacent comparator/parse assertion fallout), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

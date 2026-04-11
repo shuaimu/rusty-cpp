@@ -195,8 +195,15 @@ inline void drop(T value) {
 template<typename T>
 inline void forget(T&& value) noexcept {
     using Value = std::remove_reference_t<T>;
-    if constexpr (requires(Value& v) { v.rusty_mark_forgotten(); }) {
-        value.rusty_mark_forgotten();
+    using Plain = std::remove_cv_t<Value>;
+    if constexpr (requires(Plain& v) { v.rusty_mark_forgotten(); }) {
+        if constexpr (std::is_const_v<Value>) {
+            // `mem::forget` may be emitted on const locals in generated code.
+            // Mark the object address directly so drop guards still short-circuit.
+            mark_forgotten_address(std::addressof(value));
+        } else {
+            value.rusty_mark_forgotten();
+        }
     }
 }
 

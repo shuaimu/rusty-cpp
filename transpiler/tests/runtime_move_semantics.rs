@@ -585,3 +585,75 @@ fn test_len_supports_as_str_wrappers_without_size_surface() {
 
     compile_and_run_cpp(source, "len_as_str_wrapper_fallback");
 }
+
+#[test]
+fn test_mem_forget_marks_const_values_with_rusty_drop_guard() {
+    let source = r#"
+        #include <rusty/mem.hpp>
+
+        struct GuardedDrop {
+            static inline int drop_count = 0;
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+            ~GuardedDrop() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                ++drop_count;
+            }
+        };
+
+        int main() {
+            {
+                const auto value = GuardedDrop{};
+                rusty::mem::forget(std::move(value));
+            }
+            return GuardedDrop::drop_count == 0 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_forget_const_guarded_drop");
+}
+
+#[test]
+fn test_mem_forget_const_prevents_is_empty_destructor_recursion_shape() {
+    let source = r#"
+        #include <rusty/mem.hpp>
+
+        struct RecursiveDrop {
+            int tag;
+            explicit RecursiveDrop(int v) : tag(v) {}
+
+            static RecursiveDrop empty() { return RecursiveDrop(-1); }
+
+            bool is_empty() const {
+                const auto empty_value = RecursiveDrop::empty();
+                const bool eq = (tag == empty_value.tag);
+                rusty::mem::forget(std::move(empty_value));
+                return eq;
+            }
+
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+
+            ~RecursiveDrop() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                if (is_empty()) {
+                    return;
+                }
+            }
+        };
+
+        int main() {
+            RecursiveDrop value(5);
+            (void)value.tag;
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_forget_const_recursion_shape");
+}
