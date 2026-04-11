@@ -4264,8 +4264,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-12-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-12-20260411c/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated shared lowering/runtime improvements; no crate-specific script patching and no generated-output text rewriting.
-        - [ ] Leaf 5.1.13: `smallvec` Stage D block-scope template/control-flow compile-head family collapse
-          - Collapse the post-5.1.12 deterministic `smallvec` Stage D family (starting at `runner.cpp:1761` with block-scope template declaration emission and adjacent `return break` malformed control-flow lowering around `runner.cpp:1827`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.13: `smallvec` Stage D block-scope template/control-flow compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC scope target; no extra decomposition was required.
+          - Deterministic failure family addressed (shared transpiler lowering changes only, no crate-specific scripts):
+            - method-local generic struct items are now hoisted out of method block scope before signature emission (while preserving local impl/operator/drop overrides and filtering hoisted local items from emitted body blocks), collapsing the `template declaration cannot appear at block scope` head.
+            - local `let` initializers of shape `match ... { None => break, ... }` now lower as statement-flow guards (`if (_m.is_none()) { break; }`) instead of expression-form `return break` IIFE emission.
+            - single-segment `Range` type references in hoisted local-generic struct fields now map to runtime `rusty::range<...>` when not locally declared, avoiding unresolved `Range` type names at class scope.
+          - Added focused regressions:
+            - `test_leaf5113_method_local_generic_struct_is_hoisted_out_of_method_body`
+            - `test_leaf5113_local_match_none_break_initializer_lowers_as_statement_flow`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5113 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-13-20260411c --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.12 first head at `runner.cpp:1761` (block-scope template declaration) and adjacent malformed control-flow at `runner.cpp:1827` (`return break ...`) are collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1789` (`rusty::range<size_t>` has no `.contains(...)`), followed by downstream template/path fallout (`rusty::Vec::from_raw_parts` used without template args and unresolved `mem::swap` namespace member).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-13-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-13-20260411c/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated shared lowering changes; no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.14: `smallvec` Stage D range/member/path compile-head family collapse
+          - Collapse the post-5.1.13 deterministic `smallvec` Stage D family (starting at `runner.cpp:1789` with `rusty::range<size_t>` `.contains(...)` surface mismatch and adjacent `rusty::Vec::from_raw_parts` template omission / `mem::swap` namespace-path fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

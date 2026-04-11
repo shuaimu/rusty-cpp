@@ -5320,6 +5320,103 @@ impl CodeGen {
         self.writeln("};");
     }
 
+    fn collect_hoistable_local_generic_structs_in_block(
+        &self,
+        block: &syn::Block,
+    ) -> Vec<syn::ItemStruct> {
+        block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Struct(s)) if !s.generics.params.is_empty() => {
+                    Some(s.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn local_impl_target_type_name(impl_block: &syn::ItemImpl) -> Option<String> {
+        let syn::Type::Path(tp) = impl_block.self_ty.as_ref() else {
+            return None;
+        };
+        if tp.qself.is_some() {
+            return None;
+        }
+        tp.path.segments.last().map(|seg| seg.ident.to_string())
+    }
+
+    fn strip_hoisted_local_generic_struct_items_from_block(
+        &self,
+        block: &syn::Block,
+        hoisted_type_names: &HashSet<String>,
+    ) -> syn::Block {
+        let mut filtered = block.clone();
+        filtered.stmts.retain(|stmt| match stmt {
+            syn::Stmt::Item(syn::Item::Struct(s)) => !hoisted_type_names.contains(&s.ident.to_string()),
+            syn::Stmt::Item(syn::Item::Impl(impl_block)) => Self::local_impl_target_type_name(
+                impl_block,
+            )
+            .map_or(true, |name| !hoisted_type_names.contains(&name)),
+            _ => true,
+        });
+        filtered
+    }
+
+    fn emit_hoisted_local_generic_structs_for_block(
+        &mut self,
+        block: &syn::Block,
+        hoisted_structs: &[syn::ItemStruct],
+    ) {
+        if hoisted_structs.is_empty() {
+            return;
+        }
+        let hoisted_type_names: HashSet<String> =
+            hoisted_structs.iter().map(|s| s.ident.to_string()).collect();
+        let (local_impl_overrides, local_drop_overrides, local_operator_overrides) =
+            self.collect_local_impl_overrides(&block.stmts, &hoisted_type_names);
+
+        let mut prev_impl_overrides: Vec<(String, Option<Vec<syn::ImplItem>>)> = Vec::new();
+        for (type_name, impl_items) in local_impl_overrides {
+            let prev = self.impl_blocks.insert(type_name.clone(), impl_items);
+            prev_impl_overrides.push((type_name, prev));
+        }
+        let mut inserted_drop_overrides: Vec<((String, String), bool)> = Vec::new();
+        for drop_key in local_drop_overrides {
+            let inserted = self.drop_trait_methods.insert(drop_key.clone());
+            inserted_drop_overrides.push((drop_key, inserted));
+        }
+        let mut prev_operator_overrides: Vec<((String, String), Option<String>)> = Vec::new();
+        for (op_key, op_value) in local_operator_overrides {
+            let prev = self.operator_renames.insert(op_key.clone(), op_value);
+            prev_operator_overrides.push((op_key, prev));
+        }
+
+        for struct_item in hoisted_structs {
+            self.emit_struct(struct_item);
+        }
+
+        for (op_key, prev) in prev_operator_overrides {
+            if let Some(prev_value) = prev {
+                self.operator_renames.insert(op_key, prev_value);
+            } else {
+                self.operator_renames.remove(&op_key);
+            }
+        }
+        for (drop_key, inserted) in inserted_drop_overrides {
+            if inserted {
+                self.drop_trait_methods.remove(&drop_key);
+            }
+        }
+        for (type_name, prev) in prev_impl_overrides {
+            if let Some(prev_items) = prev {
+                self.impl_blocks.insert(type_name, prev_items);
+            } else {
+                self.impl_blocks.remove(&type_name);
+            }
+        }
+    }
+
     fn emit_function(&mut self, f: &syn::ItemFn) {
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
@@ -8411,6 +8508,30 @@ impl CodeGen {
     }
 
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
+        let hoisted_local_generic_structs =
+            self.collect_hoistable_local_generic_structs_in_block(&method.block);
+        if !hoisted_local_generic_structs.is_empty() {
+            self.push_type_param_scope(&method.sig.generics);
+            self.emit_hoisted_local_generic_structs_for_block(
+                &method.block,
+                &hoisted_local_generic_structs,
+            );
+            self.pop_type_param_scope();
+        }
+        let hoisted_local_type_names: HashSet<String> = hoisted_local_generic_structs
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        let filtered_method_block = if hoisted_local_type_names.is_empty() {
+            None
+        } else {
+            Some(self.strip_hoisted_local_generic_struct_items_from_block(
+                &method.block,
+                &hoisted_local_type_names,
+            ))
+        };
+        let block_for_emission = filtered_method_block.as_ref().unwrap_or(&method.block);
+
         let method_ident = method.sig.ident.to_string();
         let emitted_template_key = self.emitted_template_signature_key(&method.sig.generics);
 
@@ -8616,7 +8737,7 @@ impl CodeGen {
                 return;
             }
         }
-        self.emit_block(&method.block);
+        self.emit_block(block_for_emission);
         self.pop_deref_mut_method_scope();
         self.pop_deref_method_scope();
         self.pop_self_receiver_ref_scope();
@@ -13919,6 +14040,102 @@ impl CodeGen {
         }
     }
 
+    fn expr_is_unlabeled_break_without_value(&self, expr: &syn::Expr) -> bool {
+        matches!(
+            self.extract_value_expr(expr),
+            Some(syn::Expr::Break(break_expr))
+                if break_expr.label.is_none() && break_expr.expr.is_none()
+        )
+    }
+
+    fn try_emit_local_match_break_initializer(
+        &mut self,
+        local: &syn::Local,
+        cpp_name: &str,
+        decl_type: &str,
+        inferred_binding_ty: Option<&syn::Type>,
+    ) -> bool {
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Match(match_expr) = self.peel_paren_group_expr(&init.expr) else {
+            return false;
+        };
+        if match_expr.arms.len() != 2 || match_expr.arms.iter().any(|arm| arm.guard.is_some()) {
+            return false;
+        }
+
+        let mut break_arm: Option<&syn::Arm> = None;
+        let mut success_arm: Option<&syn::Arm> = None;
+        for arm in &match_expr.arms {
+            if self.expr_is_unlabeled_break_without_value(&arm.body) {
+                if break_arm.is_some() {
+                    return false;
+                }
+                break_arm = Some(arm);
+            } else {
+                if success_arm.is_some() {
+                    return false;
+                }
+                success_arm = Some(arm);
+            }
+        }
+        let Some(break_arm) = break_arm else {
+            return false;
+        };
+        let Some(success_arm) = success_arm else {
+            return false;
+        };
+
+        let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        let Some((success_cond, success_bindings, success_binding_map, _)) =
+            self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")
+        else {
+            return false;
+        };
+        let Some((break_cond, break_bindings, break_binding_map, _)) =
+            self.runtime_try_pattern_details(&break_arm.pat, variant_ctx.as_ref(), "_mv_break")
+        else {
+            return false;
+        };
+        if !break_bindings.is_empty() || !break_binding_map.is_empty() {
+            return false;
+        }
+        if break_cond == "true" {
+            return false;
+        }
+
+        let expected_ty = get_local_type(local).or(inferred_binding_ty);
+        let success_expr = {
+            let emitted = self.emit_expr_with_try_style_binding_scope(
+                &success_arm.body,
+                expected_ty,
+                &success_binding_map,
+            );
+            self.maybe_wrap_variant_constructor_with_expected_enum(
+                &success_arm.body,
+                emitted,
+                expected_ty,
+            )
+        };
+
+        let scrutinee =
+            self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
+        self.writeln(&format!("auto&& _m = {};", scrutinee));
+        self.writeln(&format!("if ({}) {{ break; }}", break_cond));
+        if success_cond != "true" {
+            self.writeln(&format!(
+                "if (!({})) {{ rusty::intrinsics::unreachable(); }}",
+                success_cond
+            ));
+        }
+        for binding in success_bindings {
+            self.writeln(&binding);
+        }
+        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, success_expr));
+        true
+    }
+
     fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
@@ -14100,6 +14317,23 @@ impl CodeGen {
                                 return;
                             }
                         }
+                    }
+                    if self.try_emit_local_match_break_initializer(
+                        local,
+                        &cpp_name,
+                        &decl_type,
+                        inferred_binding_ty.as_ref(),
+                    ) {
+                        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                            scope.insert(name_str.clone(), cpp_name.clone());
+                        }
+                        if let Some(used) = self.local_cpp_names_used.last_mut() {
+                            used.insert(cpp_name.clone());
+                        }
+                        if track_in_progress_initializer {
+                            self.pop_in_progress_local_initializer();
+                        }
+                        return;
                     }
                     // Special case: `let x = loop { ... break val; }` → lambda wrapper
                     if let syn::Expr::Loop(loop_expr) = init.expr.as_ref() {
@@ -26838,6 +27072,13 @@ impl CodeGen {
                 {
                     path_str = "rusty::Bound".to_string();
                 }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Range"
+                    && !self.is_local_type_name_in_scope("Range")
+                    && !self.local_declared_types.contains("Range")
+                {
+                    path_str = "rusty::range".to_string();
+                }
                 if let Some(mapped_iter_adapter) = self.try_map_iterator_adapter_type(tp) {
                     return mapped_iter_adapter;
                 }
@@ -32934,6 +33175,94 @@ mod tests {
         assert!(out.contains("return Outer{.len_field = this->len_field};"));
         assert!(!out.contains("auto second() {"));
         assert!(!out.contains("Self::"));
+    }
+
+    #[test]
+    fn test_leaf5113_method_local_generic_struct_is_hoisted_out_of_method_body() {
+        let out = transpile_str(
+            r#"
+            struct Bucket<T> {
+                item: T,
+            }
+            impl<T> Bucket<T> {
+                fn fill<I: Iterator<Item = T>>(&mut self, mut iter: I) {
+                    let mut count = 0usize;
+                    while count < 1 {
+                        let value = match iter.next() {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        self.item = value;
+                        count += 1;
+                    }
+                    struct DropOnPanic<U> {
+                        ptr: *mut U,
+                        skip: Range<usize>,
+                        len: usize,
+                    }
+                    impl<U> Drop for DropOnPanic<U> {
+                        fn drop(&mut self) {
+                            let _ = self.skip.start;
+                        }
+                    }
+                    let _guard = DropOnPanic {
+                        ptr: std::ptr::null_mut(),
+                        skip: 0..0,
+                        len: 0,
+                    };
+                }
+            }
+            "#,
+        );
+        let struct_pos = out
+            .find("struct DropOnPanic {")
+            .expect("missing hoisted DropOnPanic struct");
+        let method_pos = out
+            .find("void fill(I iter)")
+            .expect("missing fill method signature");
+        assert!(
+            struct_pos < method_pos,
+            "method-local generic struct should be hoisted before method signature; got:\n{}",
+            out
+        );
+        assert!(
+            !out[method_pos..].contains("struct DropOnPanic {"),
+            "DropOnPanic should not be emitted inside method body; got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::range<size_t> skip;"),
+            "hoisted local generic structs should keep fully-qualified range types, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5113_local_match_none_break_initializer_lowers_as_statement_flow() {
+        let out = transpile_str(
+            r#"
+            fn f(mut v: Vec<i32>) {
+                let mut iter = v.into_iter();
+                while true {
+                    let element = match iter.next() {
+                        Some(x) => x,
+                        None => break,
+                    };
+                    let _ = element;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_none()) { break; }"),
+            "match-break local init should lower to statement break guard, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return break;"),
+            "local match-break lowering must not emit return break in an expression context, got:\n{}",
+            out
+        );
     }
 
     #[test]
