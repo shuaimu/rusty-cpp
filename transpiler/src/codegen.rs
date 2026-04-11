@@ -11780,9 +11780,17 @@ impl CodeGen {
                     // Special case: `let x = if let Some(y) = ... { ...?... } else { val };`
                     // Emit as statement block to keep ? in outer function scope.
                     if let syn::Expr::If(if_expr) = init.expr.as_ref() {
-                        if self.block_contains_early_return_or_try(&if_expr.then_branch) {
-                            if let Some(emitted) =
-                                self.emit_single_if_let_as_statement_block(&cpp_name, &decl_type, if_expr)
+                        if self.block_contains_early_return_or_try(&if_expr.then_branch)
+                            || if_expr
+                                .else_branch
+                                .as_ref()
+                                .is_some_and(|(_, else_expr)| {
+                                    self.expr_contains_early_return_or_try(else_expr)
+                                })
+                        {
+                            if self
+                                .emit_single_if_let_as_statement_block(&cpp_name, &decl_type, if_expr)
+                                .is_some()
                             {
                                 if let Some(scope) = self.local_cpp_bindings.last_mut() {
                                     scope.insert(name_str.clone(), cpp_name.clone());
@@ -11916,9 +11924,17 @@ impl CodeGen {
                 // IIFE approach can't propagate ? to the outer function).
                 if let Some(init) = &local.init {
                     if let syn::Expr::If(if_expr) = &*init.expr {
-                        if self.block_contains_early_return_or_try(&if_expr.then_branch) {
-                            if let Some(emitted) =
-                                self.emit_if_let_as_statement_block(tuple, if_expr)
+                        if self.block_contains_early_return_or_try(&if_expr.then_branch)
+                            || if_expr
+                                .else_branch
+                                .as_ref()
+                                .is_some_and(|(_, else_expr)| {
+                                    self.expr_contains_early_return_or_try(else_expr)
+                                })
+                        {
+                            if self
+                                .emit_if_let_as_statement_block(tuple, if_expr)
+                                .is_some()
                             {
                                 return;
                             }
@@ -20057,7 +20073,13 @@ impl CodeGen {
             self.writeln(&format!("{} {} = {};", init_decl_type, cpp_name, else_value));
         } else if else_has_early_return {
             // Else always returns early — use default-init (never reached via else path)
-            self.writeln(&format!("{} {} {{}};", init_decl_type, cpp_name));
+            if init_decl_type == "auto" || type_string_has_auto_placeholder(&init_decl_type) {
+                let then_tail = self.extract_tail_expr_from_block(&if_expr.then_branch)?;
+                let then_tail_str = self.emit_expr_to_string(then_tail);
+                self.writeln(&format!("decltype({}) {} {{}};", then_tail_str, cpp_name));
+            } else {
+                self.writeln(&format!("{} {} {{}};", init_decl_type, cpp_name));
+            }
         } else {
             return None;
         }
@@ -21200,23 +21222,23 @@ impl CodeGen {
     }
 
     fn match_expr_has_explicit_return_arm(&self, match_expr: &syn::ExprMatch) -> bool {
-        match_expr.arms.iter().any(|arm| {
-            self.extract_value_expr(&arm.body)
-                .is_some_and(|expr| self.expr_is_try_style_return_flow(expr))
-        })
+        match_expr
+            .arms
+            .iter()
+            .any(|arm| self.expr_is_try_style_return_flow(&arm.body))
     }
 
     fn expr_is_try_style_return_flow(&self, expr: &syn::Expr) -> bool {
         match self.peel_paren_group_expr(expr) {
             syn::Expr::Return(_) => true,
             syn::Expr::Block(block_expr) => self
-                .single_stmt_expr_from_block(&block_expr.block)
+                .block_tail_expr_for_try_style_return_flow(&block_expr.block)
                 .is_some_and(|inner| self.expr_is_try_style_return_flow(inner)),
             syn::Expr::If(if_expr) => {
                 let Some((_, else_expr)) = &if_expr.else_branch else {
                     return false;
                 };
-                self.single_stmt_expr_from_block(&if_expr.then_branch)
+                self.block_tail_expr_for_try_style_return_flow(&if_expr.then_branch)
                     .is_some_and(|then_expr| self.expr_is_try_style_return_flow(then_expr))
                     && self.expr_is_try_style_return_flow(else_expr)
             }
@@ -21224,13 +21246,57 @@ impl CodeGen {
         }
     }
 
-    fn single_stmt_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
-        if block.stmts.len() != 1 {
-            return None;
-        }
-        match &block.stmts[0] {
+    fn block_tail_expr_for_try_style_return_flow<'a>(
+        &self,
+        block: &'a syn::Block,
+    ) -> Option<&'a syn::Expr> {
+        let last = block.stmts.last()?;
+        match last {
             syn::Stmt::Expr(expr, _) => Some(expr),
             _ => None,
+        }
+    }
+
+    fn new_inner_with_try_style_binding_scope(
+        &self,
+        binding_map: &HashMap<String, String>,
+    ) -> Self {
+        let mut inner = self.new_inner_for_block();
+        if binding_map.is_empty() {
+            return inner;
+        }
+        inner.local_cpp_bindings.push(binding_map.clone());
+        let mut binding_types = HashMap::new();
+        let mut binding_consts = HashMap::new();
+        for rust_name in binding_map.keys() {
+            binding_types.insert(rust_name.clone(), None);
+            binding_consts.insert(rust_name.clone(), false);
+        }
+        inner.local_bindings.push(binding_types);
+        inner.local_const_bindings.push(binding_consts);
+        inner
+    }
+
+    fn emit_try_style_return_flow_block_statement(
+        &self,
+        block: &syn::Block,
+        binding_map: &HashMap<String, String>,
+    ) -> Option<String> {
+        let (tail_stmt, prefix) = block.stmts.split_last()?;
+        let syn::Stmt::Expr(tail_expr, _) = tail_stmt else {
+            return None;
+        };
+
+        let mut inner = self.new_inner_with_try_style_binding_scope(binding_map);
+        for stmt in prefix {
+            inner.emit_stmt(stmt, false);
+        }
+        let prefix_emitted = inner.output.trim();
+        let tail_emitted = inner.emit_try_style_return_flow_statement(tail_expr, binding_map)?;
+        if prefix_emitted.is_empty() {
+            Some(tail_emitted)
+        } else {
+            Some(format!("{} {}", prefix_emitted, tail_emitted))
         }
     }
 
@@ -21257,14 +21323,13 @@ impl CodeGen {
                 Some(stmt)
             }
             syn::Expr::Block(block_expr) => {
-                let inner = self.single_stmt_expr_from_block(&block_expr.block)?;
-                self.emit_try_style_return_flow_statement(inner, binding_map)
+                self.emit_try_style_return_flow_block_statement(&block_expr.block, binding_map)
             }
             syn::Expr::If(if_expr) => {
                 let (_, else_expr) = if_expr.else_branch.as_ref()?;
-                let then_expr = self.single_stmt_expr_from_block(&if_expr.then_branch)?;
                 let cond = self.emit_expr_with_try_style_binding_scope(&if_expr.cond, None, binding_map);
-                let then_stmt = self.emit_try_style_return_flow_statement(then_expr, binding_map)?;
+                let then_stmt =
+                    self.emit_try_style_return_flow_block_statement(&if_expr.then_branch, binding_map)?;
                 let else_stmt = self.emit_try_style_return_flow_statement(else_expr, binding_map)?;
                 Some(format!(
                     "if ({}) {{ {} }} else {{ {} }}",
@@ -21281,19 +21346,7 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
         binding_map: &HashMap<String, String>,
     ) -> String {
-        if binding_map.is_empty() {
-            return self.emit_expr_to_string_with_expected(expr, expected_ty);
-        }
-        let mut inner = self.new_inner_for_block();
-        inner.local_cpp_bindings.push(binding_map.clone());
-        let mut binding_types = HashMap::new();
-        let mut binding_consts = HashMap::new();
-        for rust_name in binding_map.keys() {
-            binding_types.insert(rust_name.clone(), None);
-            binding_consts.insert(rust_name.clone(), false);
-        }
-        inner.local_bindings.push(binding_types);
-        inner.local_const_bindings.push(binding_consts);
+        let inner = self.new_inner_with_try_style_binding_scope(binding_map);
         inner.emit_expr_to_string_with_expected(expr, expected_ty)
     }
 
@@ -21303,19 +21356,7 @@ impl CodeGen {
         variant_ctx: &VariantTypeContext,
         binding_map: &HashMap<String, String>,
     ) -> String {
-        if binding_map.is_empty() {
-            return self.emit_return_expr_with_variant_ctx(ret, variant_ctx);
-        }
-        let mut inner = self.new_inner_for_block();
-        inner.local_cpp_bindings.push(binding_map.clone());
-        let mut binding_types = HashMap::new();
-        let mut binding_consts = HashMap::new();
-        for rust_name in binding_map.keys() {
-            binding_types.insert(rust_name.clone(), None);
-            binding_consts.insert(rust_name.clone(), false);
-        }
-        inner.local_bindings.push(binding_types);
-        inner.local_const_bindings.push(binding_consts);
+        let inner = self.new_inner_with_try_style_binding_scope(binding_map);
         inner.emit_return_expr_with_variant_ctx(ret, variant_ctx)
     }
 
@@ -21395,9 +21436,7 @@ impl CodeGen {
         let mut return_arm: Option<&syn::Arm> = None;
         let mut success_arm: Option<&syn::Arm> = None;
         for arm in &match_expr.arms {
-            let is_return = self
-                .extract_value_expr(&arm.body)
-                .is_some_and(|expr| self.expr_is_try_style_return_flow(expr));
+            let is_return = self.expr_is_try_style_return_flow(&arm.body);
             if is_return {
                 if return_arm.is_some() {
                     return None;
@@ -21449,9 +21488,8 @@ impl CodeGen {
             )
         };
 
-        let return_expr = self.extract_value_expr(&return_arm.body)?;
         let return_stmt =
-            self.emit_try_style_return_flow_statement(return_expr, &return_binding_map)?;
+            self.emit_try_style_return_flow_statement(&return_arm.body, &return_binding_map)?;
 
         let mut scrutinee =
             self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
@@ -21486,7 +21524,7 @@ impl CodeGen {
         };
 
         Some(format!(
-            "({{ auto&& _m = {}; {} _match_value; if ({}) {{ {}_match_value = {}; }} else {{ {}{}{} }} _match_value; }})",
+            "({{ auto&& _m = {}; std::optional<{}> _match_value; if ({}) {{ {}_match_value.emplace({}); }} else {{ {}{}{} }} std::move(_match_value).value(); }})",
             scrutinee,
             value_ty,
             success_cond,
@@ -31189,8 +31227,10 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto&& rhs_shadow1 = _mv;"));
-        assert!(out.contains("_match_value = rhs_shadow1;"));
-        assert!(!out.contains("auto&& rhs = _mv; _match_value = rhs_shadow1;"));
+        assert!(out.contains("_match_value.emplace(rhs_shadow1);"));
+        assert!(!out.contains(
+            "auto&& rhs = _mv; _match_value.emplace(rhs_shadow1);"
+        ));
     }
 
     #[test]
@@ -31213,7 +31253,7 @@ mod tests {
         );
         assert!(out.contains("auto&& lhs_shadow1 = std::get<0>(_mv);"));
         assert!(out.contains("auto&& rhs_shadow1 = std::get<1>(_mv);"));
-        assert!(out.contains("_match_value = lhs_shadow1 + rhs_shadow1;"));
+        assert!(out.contains("_match_value.emplace(lhs_shadow1 + rhs_shadow1);"));
     }
 
     #[test]
@@ -31237,7 +31277,7 @@ mod tests {
         );
         assert!(out.contains("auto&& left_shadow1 = _mv.left;"));
         assert!(out.contains("auto&& right_shadow1 = _mv.right;"));
-        assert!(out.contains("_match_value = left_shadow1 + right_shadow1;"));
+        assert!(out.contains("_match_value.emplace(left_shadow1 + right_shadow1);"));
     }
 
     #[test]
@@ -31542,7 +31582,9 @@ mod tests {
         );
         assert!(out.contains("auto rhs_shadow1 = rhs.into_iter();"));
         assert!(out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"));
-        assert!(out.contains("auto&& rhs_shadow1 = _mv; _match_value = rhs_shadow1;"));
+        assert!(out.contains(
+            "auto&& rhs_shadow1 = _mv; _match_value.emplace(rhs_shadow1);"
+        ));
         assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow2.next();"));
         assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs.next();"));
     }
@@ -35178,6 +35220,78 @@ mod tests {
         assert!(
             out.contains("trim_start_matches(text_shadow1, U' ')"),
             "post-if trim should use outer result binding, not inner branch shadow, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10521_runtime_match_return_block_with_iflet_lowers_without_todo() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(input: &str) -> Option<(char, &str)> { None }
+            fn comparator(input: &str) -> Result<(i32, &str), i32> { Err(input.len() as i32) }
+            fn parse(input: &str) -> Result<i32, i32> {
+                let (value, rest) = match comparator(input) {
+                    Ok(success) => success,
+                    Err(mut error) => {
+                        if let Some((ch, mut rest)) = wildcard(input) {
+                            rest = rest.trim_start_matches(' ');
+                            if rest.is_empty() || rest.starts_with(',') {
+                                error = ch as i32;
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                Ok(value + rest.len() as i32)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_ok())"),
+            "runtime match should keep try-style success dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_m.is_err()"),
+            "runtime match should keep try-style return dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("wildcard(std::string_view(input))")
+                || out.contains("wildcard(input)"),
+            "return-arm block should preserve setup statements before return, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "return-arm block with setup statements must not fall back to TODO if-expression, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10521_if_let_else_return_local_uses_statement_lowering_without_todo() {
+        let out = transpile_str(
+            r#"
+            fn parse(input: &str) -> Result<&str, i32> {
+                let text = if let Some(text) = input.strip_prefix(',') {
+                    text.trim_start_matches(' ')
+                } else {
+                    return Err(7);
+                };
+                Ok(text)
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "if-let local init with return-only else branch should lower via statement form, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_iflet_scrutinee"),
+            "statement-lowered if-let local init should materialize scrutinee temp, got:\n{}",
             out
         );
     }

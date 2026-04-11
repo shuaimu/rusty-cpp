@@ -3059,6 +3059,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-20c-1775874276/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow/type-context-gated in core statement-lowering/inference paths, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.21: Collapse the post-10.5.20 deterministic semver Stage D try-style runtime return-block and auto-init statement-lowering family generically (starting with `runner.cpp:2209` in `parse::version_req` and adjacent `runner.cpp:2226`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only try-style/control-flow/type-inference hardening + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - extended try-style runtime return-flow detection/emission to support multi-statement block arms with tail return expressions (not only direct expression arms), including scoped shadow-binding emission for block statements.
+            - removed default-construction requirements for try-style runtime match value temporaries by emitting `std::optional<T>` storage with `.emplace(...)` and terminal `.value()` extraction.
+            - widened local-if statement-lowering trigger to include else-branch early-return/`?` control-flow detection so `let x = if let ... { ... } else { return Err(...); };` remains in statement lowering.
+            - fixed single if-let statement-lowering default-init emission when inferred local type is unresolved `auto`: emit `decltype(<then-tail>) local{}` instead of invalid `auto local{}`.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10521_runtime_match_return_block_with_iflet_lowers_without_todo`
+            - `test_leaf10521_if_let_else_return_local_uses_statement_lowering_without_todo`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10521 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf1052 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf1051 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-21c-1775875758 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family at `runner.cpp:2209` (try-style error-arm `/* TODO: if-expression */` return-shape mismatch), plus adjacent fallout at `runner.cpp:2218/2223` (void placeholder propagation) and `runner.cpp:2226` (`auto text_shadow1 {}`), is removed.
+            - new deterministic Stage D head starts at `runner.cpp:2411` (`rusty::String` missing `repeat`), with adjacent downstream families led by `runner.cpp:3115` (local/function-name collision) and `runner.cpp:3271/3282` (`util::req` function/member call-shape mismatch).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-21c-1775875758/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow/type-context-gated in core try-style runtime and statement-lowering paths, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
