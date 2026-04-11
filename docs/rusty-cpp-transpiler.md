@@ -4188,7 +4188,28 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2060` (`std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`), with adjacent comparator/local-deduction fallback errors later at `runner.cpp:2090+`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-15-1775869800/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and type-context-gated in core checked-arithmetic lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-169. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.15` (`runner.cpp:2060` `std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`, with adjacent downstream comparator/local-deduction fallback at `runner.cpp:2090+`).
+169. `Leaf 10.5.16` is complete.
+   - plan/scope check: shared transpiler-only control-flow/match-lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - added value-shape gating for forced tail match expression lowering (`match_expr_is_value_like` + fallthrough analysis helpers), so loop-tail `match` blocks with unit-like arms are emitted via statement control-flow lowering instead of `return <match-iife>;`.
+     - extended runtime statement match lowering (`try_emit_runtime_match_stmt`) to support tuple payload value conditions and top-level OR runtime patterns through deterministic matcher-state synthesis (`_m_or_match*`) on shared `is_some`/`unwrap` surfaces.
+     - switched runtime statement lowering to a two-pass plan-then-emit flow so unsupported runtime patterns fail cleanly without partial output corruption.
+     - extended tuple payload value-condition lowering (`tuple_pattern_elem_value_condition`) for range payloads (`Pat::Range`) and recursive wrapper payload patterns (`Pat::Reference`/`Pat::Type`/`Pat::Paren`), including range cases inside OR payloads.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10516_runtime_option_payload_range_pattern_uses_runtime_match_not_visit`
+       - `test_leaf10516_tail_loop_runtime_option_or_pattern_uses_statement_lowering`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10516 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler --test either_parity_harness test_either_parity_harness_stop_after_run_passes_as_control_crate -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-16-1775877400 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:2060` (`std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`) is removed.
+     - new deterministic head starts at `runner.cpp:2094` (`std::string_view` has no `split_at` in `parse::identifier` boundary return path), with adjacent comparator/local-deduction fallback errors later at `runner.cpp:2129+`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-16-1775877400/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow-shape-gated in core match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+170. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.16` (`runner.cpp:2094` `std::string_view` missing `split_at` in `parse::identifier`, with adjacent downstream comparator/local-deduction fallback at `runner.cpp:2129+`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

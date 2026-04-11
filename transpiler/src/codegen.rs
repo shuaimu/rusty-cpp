@@ -7974,7 +7974,7 @@ impl CodeGen {
                 let force_expr_path = self.in_value_return_scope()
                     && is_tail
                     && semi.is_none()
-                    && matches!(expr, syn::Expr::Match(_));
+                    && matches!(expr, syn::Expr::Match(match_expr) if self.match_expr_is_value_like(match_expr));
                 let preserve_control_flow_tail_returns =
                     is_tail && semi.is_none() && self.in_value_return_scope();
                 // Control flow expressions are emitted as statements directly
@@ -8038,6 +8038,50 @@ impl CodeGen {
         self.return_value_scopes.push(false);
         emit(self);
         self.return_value_scopes.pop();
+    }
+
+    fn block_can_fallthrough_without_value(&self, block: &syn::Block) -> bool {
+        let Some(last_stmt) = block.stmts.last() else {
+            return true;
+        };
+        match last_stmt {
+            syn::Stmt::Expr(expr, None) => self.expr_can_fallthrough_without_value(expr),
+            _ => true,
+        }
+    }
+
+    fn expr_can_fallthrough_without_value(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        if self.is_expr_diverging(expr) {
+            return false;
+        }
+        match expr {
+            syn::Expr::Block(block_expr) => {
+                self.block_can_fallthrough_without_value(&block_expr.block)
+            }
+            syn::Expr::If(if_expr) => {
+                let then_fallthrough = self.block_can_fallthrough_without_value(&if_expr.then_branch);
+                let else_fallthrough = if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.expr_can_fallthrough_without_value(else_expr)
+                } else {
+                    true
+                };
+                then_fallthrough || else_fallthrough
+            }
+            syn::Expr::Match(match_expr) => match_expr
+                .arms
+                .iter()
+                .any(|arm| self.expr_can_fallthrough_without_value(&arm.body)),
+            syn::Expr::Loop(_) | syn::Expr::While(_) | syn::Expr::ForLoop(_) => true,
+            _ => false,
+        }
+    }
+
+    fn match_expr_is_value_like(&self, match_expr: &syn::ExprMatch) -> bool {
+        !match_expr
+            .arms
+            .iter()
+            .any(|arm| self.expr_can_fallthrough_without_value(&arm.body))
     }
 
     /// Try to emit an expression as a control flow statement.
@@ -8126,11 +8170,14 @@ impl CodeGen {
         match_expr: &syn::ExprMatch,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> bool {
-        let mut parsed_arms: Vec<(Option<(&'static str, &'static str)>, Option<&'static str>)> =
+        let mut arm_plans: Vec<(String, Vec<String>, Vec<String>, Vec<String>)> =
             Vec::with_capacity(match_expr.arms.len());
 
-        for arm in &match_expr.arms {
-            match &arm.pat {
+        for (idx, arm) in match_expr.arms.iter().enumerate() {
+            let mut arm_pre_lines = Vec::new();
+            let mut arm_binding_lines = Vec::new();
+            let mut arm_post_conditions = Vec::new();
+            let arm_condition = match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
                         self.runtime_tuple_struct_match_methods(&ts.path, variant_ctx)
@@ -8140,7 +8187,22 @@ impl CodeGen {
                     if ts.elems.len() != 1 {
                         return false;
                     }
-                    parsed_arms.push((Some((cond_method, unwrap_method)), None));
+                    let matched_value = format!("_mv{}", idx);
+                    arm_binding_lines.push(format!("auto {} = _m.{}();", matched_value, unwrap_method));
+                    let mut binding_stmts = Vec::new();
+                    if !self.collect_pattern_binding_stmts(&ts.elems[0], &matched_value, &mut binding_stmts) {
+                        let Some(payload_condition) =
+                            self.tuple_pattern_elem_value_condition(&ts.elems[0], &matched_value)
+                        else {
+                            return false;
+                        };
+                        if let Some(payload_condition) = payload_condition {
+                            arm_post_conditions.push(payload_condition);
+                        }
+                    } else {
+                        arm_binding_lines.extend(binding_stmts);
+                    }
+                    format!("_m.{}()", cond_method)
                 }
                 syn::Pat::Path(pp) => {
                     let Some(cond_method) =
@@ -8148,13 +8210,134 @@ impl CodeGen {
                     else {
                         return false;
                     };
-                    parsed_arms.push((None, Some(cond_method)));
+                    format!("_m.{}()", cond_method)
                 }
-                syn::Pat::Wild(_) | syn::Pat::Ident(_) => {
-                    parsed_arms.push((None, None));
+                syn::Pat::Wild(_) => "true".to_string(),
+                syn::Pat::Ident(pi) => {
+                    if pi.ident != "_" {
+                        arm_binding_lines.push(format!("const auto& {} = _m;", pi.ident));
+                    }
+                    "true".to_string()
+                }
+                syn::Pat::Or(or_pat) => {
+                    let mut has_wild = false;
+                    let mut tuple_methods: Option<(&'static str, &'static str)> = None;
+                    let mut tuple_payload_conditions: Vec<Option<String>> = Vec::new();
+                    let mut path_conditions = Vec::new();
+                    let tuple_matched_value = format!("_m_orv{}", idx);
+                    let arm_match_var = format!("_m_or_match{}", idx);
+
+                    for case in &or_pat.cases {
+                        match case {
+                            syn::Pat::TupleStruct(ts_case) => {
+                                let Some((cond_method, unwrap_method)) =
+                                    self.runtime_tuple_struct_match_methods(&ts_case.path, variant_ctx)
+                                else {
+                                    return false;
+                                };
+                                if ts_case.elems.len() != 1 {
+                                    return false;
+                                }
+                                if let Some((existing_cond, existing_unwrap)) = tuple_methods {
+                                    if existing_cond != cond_method || existing_unwrap != unwrap_method {
+                                        return false;
+                                    }
+                                } else {
+                                    tuple_methods = Some((cond_method, unwrap_method));
+                                }
+
+                                let mut case_binding_stmts = Vec::new();
+                                if !self.collect_pattern_binding_stmts(
+                                    &ts_case.elems[0],
+                                    &tuple_matched_value,
+                                    &mut case_binding_stmts,
+                                ) {
+                                    let Some(case_condition) = self
+                                        .tuple_pattern_elem_value_condition(
+                                            &ts_case.elems[0],
+                                            &tuple_matched_value,
+                                        )
+                                    else {
+                                        return false;
+                                    };
+                                    tuple_payload_conditions.push(case_condition);
+                                } else if case_binding_stmts.is_empty() {
+                                    tuple_payload_conditions.push(None);
+                                } else {
+                                    // OR arms with runtime payload bindings require branch-scoped
+                                    // binding synthesis to keep names/guards coherent.
+                                    return false;
+                                }
+                            }
+                            syn::Pat::Path(pp_case) => {
+                                let Some(cond_method) = self
+                                    .runtime_path_match_condition_method(&pp_case.path, variant_ctx)
+                                else {
+                                    return false;
+                                };
+                                path_conditions.push(format!("_m.{}()", cond_method));
+                            }
+                            syn::Pat::Wild(_) => {
+                                has_wild = true;
+                            }
+                            syn::Pat::Ident(pi) if pi.ident == "_" => {
+                                has_wild = true;
+                            }
+                            _ => return false,
+                        }
+                    }
+
+                    if has_wild {
+                        "true".to_string()
+                    } else {
+                        arm_pre_lines.push(format!("bool {} = false;", arm_match_var));
+                        if let Some((cond_method, unwrap_method)) = tuple_methods {
+                            let tuple_case_condition = if tuple_payload_conditions.is_empty()
+                                || tuple_payload_conditions.iter().any(|cond| cond.is_none())
+                            {
+                                "true".to_string()
+                            } else {
+                                tuple_payload_conditions
+                                    .iter()
+                                    .filter_map(|cond| cond.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(" || ")
+                            };
+                            arm_pre_lines.push(format!(
+                                "if (_m.{}()) {{ auto {} = _m.{}(); {} = ({}); }}",
+                                cond_method,
+                                tuple_matched_value,
+                                unwrap_method,
+                                arm_match_var,
+                                tuple_case_condition
+                            ));
+                        }
+                        if !path_conditions.is_empty() {
+                            arm_pre_lines.push(format!(
+                                "if (!{} && ({})) {{ {} = true; }}",
+                                arm_match_var,
+                                path_conditions.join(" || "),
+                                arm_match_var
+                            ));
+                        }
+                        if tuple_methods.is_none() && path_conditions.is_empty() {
+                            return false;
+                        }
+                        arm_match_var
+                    }
                 }
                 _ => return false,
+            };
+
+            if let Some((_, guard)) = &arm.guard {
+                arm_post_conditions.push(self.emit_expr_to_string(guard));
             }
+            arm_plans.push((
+                arm_condition,
+                arm_pre_lines,
+                arm_binding_lines,
+                arm_post_conditions,
+            ));
         }
 
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
@@ -8164,50 +8347,21 @@ impl CodeGen {
         self.writeln("do {");
         self.indent += 1;
 
-        for (idx, arm) in match_expr.arms.iter().enumerate() {
-            let (tuple_info, path_cond) = parsed_arms[idx];
-            let condition = if let Some((cond_method, _)) = tuple_info {
-                format!("_m.{}()", cond_method)
-            } else if let Some(cond_method) = path_cond {
-                format!("_m.{}()", cond_method)
-            } else {
-                "true".to_string()
-            };
+        for (arm, (arm_condition, arm_pre_lines, arm_binding_lines, arm_post_conditions)) in
+            match_expr.arms.iter().zip(arm_plans.into_iter())
+        {
 
-            self.writeln(&format!("if ({}) {{", condition));
+            for pre_line in arm_pre_lines {
+                self.writeln(&pre_line);
+            }
+            self.writeln(&format!("if ({}) {{", arm_condition));
             self.indent += 1;
-
-            if let Some((_, unwrap_method)) = tuple_info {
-                let matched_value = format!("_mv{}", idx);
-                self.writeln(&format!("auto {} = _m.{}();", matched_value, unwrap_method));
-                if let syn::Pat::TupleStruct(ts) = &arm.pat {
-                    let mut binding_stmts = Vec::new();
-                    if !self.collect_pattern_binding_stmts(
-                        &ts.elems[0],
-                        &matched_value,
-                        &mut binding_stmts,
-                    ) {
-                        self.indent -= 1;
-                        self.writeln("}");
-                        self.indent -= 1;
-                        self.writeln("} while (false);");
-                        self.indent -= 1;
-                        self.writeln("}");
-                        return false;
-                    }
-                    for stmt in binding_stmts {
-                        self.writeln(&stmt);
-                    }
-                }
-            } else if let syn::Pat::Ident(pi) = &arm.pat {
-                if pi.ident != "_" {
-                    self.writeln(&format!("const auto& {} = _m;", pi.ident));
-                }
+            for binding_line in arm_binding_lines {
+                self.writeln(&binding_line);
             }
 
-            if let Some((_, guard)) = &arm.guard {
-                let guard_str = self.emit_expr_to_string(guard);
-                self.writeln(&format!("if ({}) {{", guard_str));
+            if !arm_post_conditions.is_empty() {
+                self.writeln(&format!("if ({}) {{", arm_post_conditions.join(" && ")));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.writeln("break;");
@@ -10066,6 +10220,33 @@ impl CodeGen {
                 let value = self.emit_path_to_string(&path_pat.path);
                 Some(Some(format!("{} == {}", value_expr, value)))
             }
+            syn::Pat::Range(range_pat) => {
+                let mut range_conds = Vec::new();
+                if let Some(start) = &range_pat.start {
+                    range_conds.push(format!(
+                        "{} >= {}",
+                        value_expr,
+                        self.emit_expr_to_string(start)
+                    ));
+                }
+                if let Some(end) = &range_pat.end {
+                    let op = match range_pat.limits {
+                        syn::RangeLimits::HalfOpen(_) => "<",
+                        syn::RangeLimits::Closed(_) => "<=",
+                    };
+                    range_conds.push(format!(
+                        "{} {} {}",
+                        value_expr,
+                        op,
+                        self.emit_expr_to_string(end)
+                    ));
+                }
+                if range_conds.is_empty() {
+                    Some(None)
+                } else {
+                    Some(Some(format!("({})", range_conds.join(" && "))))
+                }
+            }
             syn::Pat::Wild(_) => Some(None),
             syn::Pat::Ident(pi) => {
                 if pi.ident == "_" {
@@ -10074,6 +10255,9 @@ impl CodeGen {
                     Some(None)
                 }
             }
+            syn::Pat::Reference(r) => self.tuple_pattern_elem_value_condition(&r.pat, value_expr),
+            syn::Pat::Type(pt) => self.tuple_pattern_elem_value_condition(&pt.pat, value_expr),
+            syn::Pat::Paren(p) => self.tuple_pattern_elem_value_condition(&p.pat, value_expr),
             syn::Pat::Or(or_pat) => {
                 let mut sub_conds = Vec::new();
                 for case in &or_pat.cases {
@@ -10089,6 +10273,32 @@ impl CodeGen {
                         syn::Pat::Path(path_pat) => {
                             let value = self.emit_path_to_string(&path_pat.path);
                             sub_conds.push(format!("{} == {}", value_expr, value));
+                        }
+                        syn::Pat::Range(range_pat) => {
+                            let mut range_conds = Vec::new();
+                            if let Some(start) = &range_pat.start {
+                                range_conds.push(format!(
+                                    "{} >= {}",
+                                    value_expr,
+                                    self.emit_expr_to_string(start)
+                                ));
+                            }
+                            if let Some(end) = &range_pat.end {
+                                let op = match range_pat.limits {
+                                    syn::RangeLimits::HalfOpen(_) => "<",
+                                    syn::RangeLimits::Closed(_) => "<=",
+                                };
+                                range_conds.push(format!(
+                                    "{} {} {}",
+                                    value_expr,
+                                    op,
+                                    self.emit_expr_to_string(end)
+                                ));
+                            }
+                            if range_conds.is_empty() {
+                                return Some(None);
+                            }
+                            sub_conds.push(format!("({})", range_conds.join(" && ")));
                         }
                         _ => return None,
                     }
@@ -28528,6 +28738,85 @@ mod tests {
         assert!(
             !out.contains("std::visit(overloaded {"),
             "runtime Option return-arm match should not lower via std::visit, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10516_runtime_option_payload_range_pattern_uses_runtime_match_not_visit() {
+        let out = transpile_str(
+            r#"
+            fn f(value: Option<i32>) -> i32 {
+                match value {
+                    Some(10..=20) => 1,
+                    _ => 0,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_some())"),
+            "Option range-pattern match should use runtime is_some dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_mv0 >= 10") && out.contains("_mv0 <= 20"),
+            "Option range-pattern should lower to value-range condition on unwrap payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "Option range-pattern match should not lower via std::visit, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10516_tail_loop_runtime_option_or_pattern_uses_statement_lowering() {
+        let out = transpile_str(
+            r#"
+            fn f(input: &str) -> i32 {
+                let mut segment_len = 0;
+                loop {
+                    match input.as_bytes().get(segment_len) {
+                        Some(b'A'..=b'Z') | Some(b'a'..=b'z') | Some(b'-') => {
+                            segment_len += 1;
+                        }
+                        boundary => {
+                            if segment_len == 0 && boundary != Some(&b'.') {
+                                return 0;
+                            } else {
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("bool _m_or_match0 = false;"),
+            "runtime statement lowering should synthesize OR-arm matcher state, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("if (_m_or_match0) {"),
+            "runtime statement lowering should dispatch OR-arm body via matcher state, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return [&]() { auto&& _m ="),
+            "tail loop runtime match should not be forced through return-IIFE expression lowering, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "tail loop runtime OR-pattern should not lower via std::visit, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "tail loop runtime OR-pattern should not emit if-expression TODO placeholders, got:\n{}",
             out
         );
     }

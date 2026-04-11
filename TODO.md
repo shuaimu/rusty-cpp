@@ -2941,6 +2941,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Canonical artifacts:
               - `/tmp/rusty-parity-matrix-10-5-15-1775869800/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and type-context-gated in core checked-arithmetic lowering, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.16: Collapse the post-10.5.15 deterministic semver Stage D runtime Option OR-pattern loop-tail lowering family generically (starting with `runner.cpp:2060` `std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`), add fixture-agnostic regressions, then re-run semver parity.
+          - [x] *done* Leaf 10.5.16.1: Implement shared transpiler fixes for runtime Option/Result OR-pattern statement lowering and tail-match value-path gating (no crate-specific scripts): avoid forcing tail loop matches through return-IIFE expression lowering when arms can fall through without value, and lower runtime statement OR payload patterns (including byte ranges) through shared `is_some`/`unwrap` + condition chaining.
+            - Plan/scope check: shared transpiler-only control-flow/match-lowering updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - added value-shape gating for forced tail match expression lowering (`match_expr_is_value_like` + fallthrough analysis helpers) so loop-tail `match` blocks with unit-like arms are emitted through statement control-flow lowering instead of `return <match-iife>;`.
+              - extended runtime statement match lowering (`try_emit_runtime_match_stmt`) to support:
+                - tuple payload value conditions (including non-binding payload patterns),
+                - top-level OR patterns over runtime tuple/path cases via deterministic precomputed matcher-state booleans,
+                - two-pass planning before emission to prevent partial output corruption when a pattern is unsupported.
+              - extended tuple payload value-condition lowering (`tuple_pattern_elem_value_condition`) to support `Pat::Range` plus `Pat::Reference`/`Pat::Type`/`Pat::Paren` recursion, including range cases inside OR payload patterns.
+            - Added focused fixture-agnostic regressions:
+              - `transpiler/src/codegen.rs`:
+                - `test_leaf10516_runtime_option_payload_range_pattern_uses_runtime_match_not_visit`
+                - `test_leaf10516_tail_loop_runtime_option_or_pattern_uses_statement_lowering`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf10516 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler --test either_parity_harness test_either_parity_harness_stop_after_run_passes_as_control_crate -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+          - [x] *done* Leaf 10.5.16.2: Re-run semver parity after 10.5.16.1, record deterministic first-head movement with canonical artifacts, and update active-frontier docs/TODO status.
+            - Re-ran semver parity:
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-16-1775877400 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:2060` (`std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`) is removed.
+              - new deterministic Stage D head starts at `runner.cpp:2094` (`std::string_view` missing `split_at` method in `parse::identifier` boundary return path), with adjacent downstream comparator/local-deduction fallback errors later in `runner.cpp:2129+`.
+            - Canonical artifacts:
+              - `/tmp/rusty-parity-matrix-10-5-16-1775877400/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow-shape-gated in core match lowering, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
