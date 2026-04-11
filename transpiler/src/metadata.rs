@@ -88,6 +88,7 @@ struct Package {
     #[allow(dead_code)]
     version: String,
     targets: Vec<Target>,
+    manifest_path: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +103,38 @@ struct RawTarget {
     name: String,
     kind: TargetKind,
     src_path: PathBuf,
+}
+
+fn canonicalized_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn select_target_package<'a>(
+    metadata: &'a CargoMetadata,
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+) -> Result<&'a Package, String> {
+    if let Some(filter) = package_filter {
+        return metadata
+            .packages
+            .iter()
+            .find(|p| p.name == filter)
+            .ok_or_else(|| format!("Package '{}' not found in metadata", filter));
+    }
+
+    let requested_manifest = canonicalized_path(manifest_path);
+    if let Some(pkg) = metadata
+        .packages
+        .iter()
+        .find(|p| canonicalized_path(&p.manifest_path) == requested_manifest)
+    {
+        return Ok(pkg);
+    }
+
+    metadata
+        .packages
+        .first()
+        .ok_or_else(|| "No packages found in cargo metadata".to_string())
 }
 
 fn normalize_module_base(name: &str) -> String {
@@ -203,19 +236,9 @@ pub fn discover_targets(
     let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse cargo metadata: {}", e))?;
 
-    // Find the target package
-    let pkg = if let Some(filter) = package_filter {
-        metadata
-            .packages
-            .iter()
-            .find(|p| p.name == filter)
-            .ok_or_else(|| format!("Package '{}' not found in metadata", filter))?
-    } else {
-        metadata
-            .packages
-            .first()
-            .ok_or_else(|| "No packages found in cargo metadata".to_string())?
-    };
+    // Select target package. Without an explicit package filter, prefer the package
+    // whose Cargo.toml matches the requested manifest path instead of metadata order.
+    let pkg = select_target_package(&metadata, manifest_path, package_filter)?;
 
     let mut raw_targets = Vec::new();
     let mut skipped = Vec::new();
@@ -351,5 +374,107 @@ mod tests {
         assert_eq!(targets[0].module_name, "demo_lib");
         assert_eq!(targets[1].module_name, "demo_lib_bin");
         assert_eq!(targets[2].module_name, "demo_lib_test");
+    }
+
+    #[test]
+    fn test_select_target_package_prefers_manifest_owner_when_filter_missing() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root_manifest = fixture.path().join("Cargo.toml");
+        let xtask_manifest = fixture.path().join("xtask").join("Cargo.toml");
+        std::fs::create_dir_all(xtask_manifest.parent().unwrap()).unwrap();
+        std::fs::write(&root_manifest, "[package]\nname = \"root_pkg\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        std::fs::write(
+            &xtask_manifest,
+            "[package]\nname = \"xtask\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let metadata = CargoMetadata {
+            packages: vec![
+                Package {
+                    name: "xtask".to_string(),
+                    version: "0.0.0".to_string(),
+                    targets: vec![],
+                    manifest_path: xtask_manifest,
+                },
+                Package {
+                    name: "root_pkg".to_string(),
+                    version: "0.1.0".to_string(),
+                    targets: vec![],
+                    manifest_path: root_manifest.clone(),
+                },
+            ],
+        };
+
+        let selected = select_target_package(&metadata, &root_manifest, None).unwrap();
+        assert_eq!(selected.name, "root_pkg");
+    }
+
+    #[test]
+    fn test_select_target_package_respects_explicit_filter() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root_manifest = fixture.path().join("Cargo.toml");
+        let member_manifest = fixture.path().join("xtask").join("Cargo.toml");
+        std::fs::create_dir_all(member_manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &root_manifest,
+            "[package]\nname = \"root_pkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &member_manifest,
+            "[package]\nname = \"xtask\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let metadata = CargoMetadata {
+            packages: vec![
+                Package {
+                    name: "root_pkg".to_string(),
+                    version: "0.1.0".to_string(),
+                    targets: vec![],
+                    manifest_path: root_manifest.clone(),
+                },
+                Package {
+                    name: "xtask".to_string(),
+                    version: "0.0.0".to_string(),
+                    targets: vec![],
+                    manifest_path: member_manifest,
+                },
+            ],
+        };
+
+        let selected = select_target_package(&metadata, &root_manifest, Some("xtask")).unwrap();
+        assert_eq!(selected.name, "xtask");
+    }
+
+    #[test]
+    fn test_discover_targets_prefers_manifest_owner_package_when_workspace_member_precedes_it() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root_manifest = fixture.path().join("Cargo.toml");
+        let root_src = fixture.path().join("src");
+        let xtask_src = fixture.path().join("xtask").join("src");
+        std::fs::create_dir_all(&root_src).unwrap();
+        std::fs::create_dir_all(&xtask_src).unwrap();
+
+        std::fs::write(
+            &root_manifest,
+            "[package]\nname = \"manifest_owned_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"xtask\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(root_src.join("lib.rs"), "pub fn value() -> i32 { 7 }\n").unwrap();
+        std::fs::write(
+            fixture.path().join("xtask").join("Cargo.toml"),
+            "[package]\nname = \"xtask\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(xtask_src.join("main.rs"), "fn main() {}\n").unwrap();
+
+        let (pkg_name, targets) = discover_targets(&root_manifest, None).unwrap();
+        assert_eq!(pkg_name, "manifest_owned_fixture");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "manifest_owned_fixture");
+        assert_eq!(targets[0].kind, TargetKind::Lib);
     }
 }

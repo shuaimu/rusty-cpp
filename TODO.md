@@ -4014,6 +4014,39 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added dedicated `parity-matrix` CI job in `.github/workflows/ci.yml` (runs after `build-and-test`) that executes `tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`
           - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
           - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads
+      - [ ] Leaf 5.1: Stabilize expanded ten-crate parity matrix (`smallvec`, `itertools`, `once_cell`)
+        - Current status snapshot (2026-04-11): `7/10` pass from `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-priority-20260411`
+          - pass: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`
+          - fail: `smallvec`, `itertools`, `once_cell`
+          - canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`
+        - [x] *done* Expand matrix harness/CI coverage from seven crates to ten crates and add harness regression checks for the new matrix shape
+          - Added matrix entries/version pins for `smallvec`, `itertools`, and `once_cell` in `tests/transpile_tests/run_parity_matrix.sh` and `tests/transpile_tests/run_tests.sh`
+          - Extended CI parity artifact upload paths and parity harness assertions for the ten-crate list
+        - [x] *done* Leaf 5.1.1: `once_cell` target-discovery/package-selection fix
+          - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target, so no additional decomposition was required.
+          - Deterministic failure head addressed: target discovery no longer selects workspace tooling package/bin (`xtask`) when the requested manifest owns a different package.
+          - Implemented generic package selection in `transpiler/src/metadata.rs`:
+            - added manifest-owned package resolution (`select_target_package`) that prefers the package whose `manifest_path` matches the requested `--manifest-path` when `--package` is omitted
+            - preserved explicit `--package` behavior (filter still wins when provided)
+          - Added fixture-agnostic regressions:
+            - unit tests in `transpiler/src/metadata.rs`:
+              - `test_select_target_package_prefers_manifest_owner_when_filter_missing`
+              - `test_select_target_package_respects_explicit_filter`
+              - `test_discover_targets_prefers_manifest_owner_package_when_workspace_member_precedes_it`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_select_target_package -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_discover_targets_prefers_manifest_owner_package_when_workspace_member_precedes_it -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is generic manifest/path-driven package resolution with no crate-specific scripts or hardcoded crate-name special cases.
+        - [ ] Leaf 5.1.2: `smallvec` Stage D compile-head family collapse
+          - Deterministic failure head: unresolved Rust-path imports/surfaces in generated C++ (`std::boxed`, `std::rc`) with downstream incomplete/owner-template `SmallVec` shape fallout
+          - Implement generic path/surface lowering + template-owner recovery fixes (no crate-specific scripts), add focused regressions, then re-probe `--crate smallvec`
+        - [ ] Leaf 5.1.3: `itertools` Stage D compile-head family collapse
+          - Deterministic failure head: missing adapter type surfaces and namespace/type-order collisions (`Coalesce`, `DedupBy`, `MapOk`, `namespace free` collision, related unresolved iter namespace forms)
+          - Implement generic type-surface/import-order lowering fixes (no crate-specific scripts), add focused regressions, then re-probe `--crate itertools`
+        - [ ] Leaf 5.1.4: Re-run full ten-crate parity matrix and record closure status
+          - Run `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-<timestamp> --keep-work-dirs`
+          - If all ten pass, mark Leaf 5.1 complete; otherwise record first deterministic failure head and canonical artifact paths for next leaf
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
