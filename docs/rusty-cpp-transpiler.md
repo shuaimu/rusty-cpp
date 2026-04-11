@@ -4231,7 +4231,26 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2129` (`parse::comparator` emits `use of 'op' before deduction of 'auto'`), with adjacent structured-binding/void-deduction fallout at `runner.cpp:2133+`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-17-1775870140/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and receiver-shape/type-gated in core method lowering/runtime helpers, with no crate-specific rewrites/scripts and no generated-text patching.
-171. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.17` (`runner.cpp:2129` `parse::comparator` destructuring/call-order `use of 'op' before deduction of 'auto'`, with adjacent structured-binding/void-deduction fallout at `runner.cpp:2133+`).
+171. `Leaf 10.5.18` is complete.
+   - plan/scope check: shared transpiler-only local-binding/control-flow lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - hardened local binding allocation to avoid collisions with visible function names in scope (top-level and module-qualified), including tuple/ident binding paths; this removes self-colliding forms like `auto [op, text] = op(...)`.
+     - extended recursive if-assignment lowering for nested `else if` branches in if-let statement-block mode so return/`?` branches stay in statement lowering and no longer fall back to `/* TODO: if-expression */` in this family.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10518_tuple_binding_shadowing_function_name_is_renamed`
+       - `test_leaf10518_ident_binding_shadowing_function_name_is_renamed`
+       - `test_leaf10518_if_let_nested_else_if_with_return_and_try_lowers_without_todo`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10518 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-18-1775870799 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:2129` (`parse::comparator` local destructuring/function-call name collision `use of 'op' before deduction of 'auto'`) is removed.
+     - new deterministic head starts at `runner.cpp:2180` in `parse::comparator` (`patch_shadow1` lowered as `std::nullopt_t` and then used via `.is_some()`), with adjacent fallout at `runner.cpp:2193` (`.is_some()` repeat), `runner.cpp:2200` (const assignment), and `runner.cpp:2203` (stale `text_shadow12` binding use).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-18-1775870799/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow-shape-gated in core local-binding + if-let lowering paths, with no crate-specific rewrites/scripts and no generated-text patching.
+172. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.18` (`runner.cpp:2180` `parse::comparator` if-let result-shape drift where `_iflet_result*` tuple element degrades to `std::nullopt_t` and breaks option-like `.is_some()` flow, with adjacent stale-binding/const-assignment fallout at `runner.cpp:2193/2200/2203`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

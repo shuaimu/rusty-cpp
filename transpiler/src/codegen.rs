@@ -12323,6 +12323,19 @@ impl CodeGen {
             .any(|scope| scope.contains(name))
     }
 
+    fn local_binding_name_conflicts_with_scope_function(&self, name: &str) -> bool {
+        if self.is_local_function_name_in_scope(name) {
+            return true;
+        }
+        let scoped = if self.module_stack.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), name)
+        };
+        self.function_return_types.contains_key(&scoped)
+            || self.emitted_top_level_functions.contains(&scoped)
+    }
+
     fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
         let param_scope_has_rust_name = self
             .param_bindings
@@ -12344,47 +12357,54 @@ impl CodeGen {
                     .collect()
             })
             .unwrap_or_default();
-        let Some(scope) = self.local_cpp_bindings.last_mut() else {
+        let Some(scope_snapshot) = self.local_cpp_bindings.last() else {
             return escape_cpp_keyword(rust_name);
         };
+        let scope_contains_rust_name = scope_snapshot.contains_key(rust_name);
 
         let escaped_name = escape_cpp_keyword(rust_name);
         // Check ALL previously used C++ names (not just current bindings) to prevent
         // re-declaring the same shadow name when a Rust variable is shadowed 3+ times.
         let used = self.local_cpp_names_used.last().cloned().unwrap_or_default();
-        if !scope.contains_key(rust_name)
+        let mut chosen = None;
+        if !scope_contains_rust_name
             && !used.contains(&escaped_name)
             && !param_scope_has_rust_name
             && !param_cpp_names.contains(&escaped_name)
+            && !self.local_binding_name_conflicts_with_scope_function(rust_name)
             && !outer_same_rust_cpp_name
                 .as_ref()
                 .is_some_and(|outer| outer == &escaped_name)
         {
-            let cpp_name = escaped_name;
-            scope.insert(rust_name.to_string(), cpp_name.clone());
-            if let Some(used_set) = self.local_cpp_names_used.last_mut() {
-                used_set.insert(cpp_name.clone());
-            }
-            return cpp_name;
+            chosen = Some(escaped_name);
         }
 
-        let mut idx = 1usize;
-        loop {
-            let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
-            if !used.contains(&candidate)
-                && !param_cpp_names.contains(&candidate)
-                && !outer_same_rust_cpp_name
-                    .as_ref()
-                    .is_some_and(|outer| outer == &candidate)
-            {
-                scope.insert(rust_name.to_string(), candidate.clone());
-                if let Some(used_set) = self.local_cpp_names_used.last_mut() {
-                    used_set.insert(candidate.clone());
+        if chosen.is_none() {
+            let mut idx = 1usize;
+            loop {
+                let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
+                if !used.contains(&candidate)
+                    && !param_cpp_names.contains(&candidate)
+                    && !self.local_binding_name_conflicts_with_scope_function(&candidate)
+                    && !outer_same_rust_cpp_name
+                        .as_ref()
+                        .is_some_and(|outer| outer == &candidate)
+                {
+                    chosen = Some(candidate);
+                    break;
                 }
-                return candidate;
+                idx += 1;
             }
-            idx += 1;
         }
+
+        let cpp_name = chosen.expect("allocate_local_cpp_name should always select a name");
+        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+            scope.insert(rust_name.to_string(), cpp_name.clone());
+        }
+        if let Some(used_set) = self.local_cpp_names_used.last_mut() {
+            used_set.insert(cpp_name.clone());
+        }
+        cpp_name
     }
 
     fn reserve_synthetic_cpp_name(&mut self, base_name: &str) -> String {
@@ -19656,6 +19676,22 @@ impl CodeGen {
                         }
                         self.indent -= 1;
                         self.writeln("}}");
+                    }
+                }
+                syn::Expr::If(else_if) => {
+                    if self.block_contains_early_return_or_try(&else_if.then_branch)
+                        || else_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                            self.expr_contains_early_return_or_try(e)
+                        })
+                    {
+                        self.writeln("} else {");
+                        self.indent += 1;
+                        self.emit_if_assign_as_statement_block(result_var, else_if);
+                        self.indent -= 1;
+                        self.writeln("}}");
+                    } else {
+                        let val = self.emit_expr_to_string(else_expr);
+                        self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
                     }
                 }
                 other => {
@@ -34253,6 +34289,108 @@ mod tests {
         assert!(
             !out.contains("rusty::split_at(v,"),
             "non-string receiver split_at should not lower to string helper, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10518_tuple_binding_shadowing_function_name_is_renamed() {
+        let out = transpile_str(
+            r#"
+            fn op(input: &str) -> (&str, &str) {
+                ("=", input)
+            }
+            fn comparator(input: &str) -> usize {
+                let (op, text) = op(input);
+                op.len() + text.len()
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("auto [op, text] = op("),
+            "tuple binding should not reuse function name directly, got: {}",
+            out
+        );
+        assert!(
+            out.contains("auto [op_shadow1, text] = op("),
+            "tuple binding should rename colliding `op` local, got: {}",
+            out
+        );
+        assert!(
+            out.contains("rusty::len(op_shadow1)"),
+            "later uses should resolve to renamed binding, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10518_ident_binding_shadowing_function_name_is_renamed() {
+        let out = transpile_str(
+            r#"
+            fn op(input: &str) -> &str {
+                input
+            }
+            fn comparator(input: &str) -> usize {
+                let op = op(input);
+                op.len()
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("auto op = op(") && !out.contains("const auto op = op("),
+            "ident binding should not reuse function name directly, got: {}",
+            out
+        );
+        assert!(
+            out.contains("op_shadow1 = op(") || out.contains("op_shadow1 = std::move(op("),
+            "ident binding should rename colliding `op` local, got: {}",
+            out
+        );
+        assert!(
+            out.contains("rusty::len(op_shadow1)"),
+            "later uses should resolve to renamed binding, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10518_if_let_nested_else_if_with_return_and_try_lowers_without_todo() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(text: &str) -> Option<(char, &str)> { None }
+            fn numeric_identifier(text: &str) -> Result<(u64, &str), i32> {
+                Ok((1, text))
+            }
+            fn parse_patch(text: &str, has_wildcard: bool) -> Result<(Option<u64>, &str), i32> {
+                let (patch, rest) = if let Some(text) = text.strip_prefix('.') {
+                    if let Some((_, text)) = wildcard(text) {
+                        (None, text)
+                    } else if has_wildcard {
+                        return Err(7);
+                    } else {
+                        let (patch, text) = numeric_identifier(text)?;
+                        (Some(patch), text)
+                    }
+                } else {
+                    (None, text)
+                };
+                Ok((patch, rest))
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "nested else-if under if-let statement lowering should not emit TODO placeholder, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("if (has_wildcard)"),
+            "nested else-if branch should be preserved as statement control flow, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("RUSTY_TRY_INTO(numeric_identifier"),
+            "nested else branch with `?` should stay in outer function scope lowering, got:\n{}",
             out
         );
     }

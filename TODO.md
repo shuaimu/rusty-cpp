@@ -2995,6 +2995,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Canonical artifacts:
               - `/tmp/rusty-parity-matrix-10-5-17-1775870140/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and receiver-shape/type-gated in core method lowering/runtime helpers, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.18: Collapse the post-10.5.17 deterministic semver Stage D local-binding/function-name collision and nested if-let else-if assignment family generically (starting with `runner.cpp:2129` `parse::comparator` destructuring/call-order `use of 'op' before deduction of 'auto'`), add fixture-agnostic regressions, then re-run semver parity.
+          - [x] *done* Leaf 10.5.18.1: Implement shared transpiler fixes for function-name-aware local shadow allocation and nested else-if assignment lowering in if-let statement blocks (no crate-specific scripts).
+            - Plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - hardened local C++ binding allocation to avoid collisions with visible function names in scope (top-level and module-qualified), including tuple/ident binding paths, so local destructuring no longer emits self-colliding declarations like `auto [op, text] = op(...)`.
+              - extended recursive if-assignment lowering for nested `else if` branches in if-let statement-block mode so return/`?` control-flow branches stay in statement lowering and do not fall back to `/* TODO: if-expression */`.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf10518_tuple_binding_shadowing_function_name_is_renamed`
+              - `test_leaf10518_ident_binding_shadowing_function_name_is_renamed`
+              - `test_leaf10518_if_let_nested_else_if_with_return_and_try_lowers_without_todo`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf10518 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+          - [x] *done* Leaf 10.5.18.2: Re-run semver parity after 10.5.18.1, record deterministic first-head movement with canonical artifacts, and update active-frontier docs/TODO status.
+            - Re-ran semver parity:
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-18-1775870799 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:2129` (`parse::comparator` local destructuring/function-call name-collision `use of 'op' before deduction of 'auto'`) is removed.
+              - new deterministic Stage D head starts at `runner.cpp:2180` in `parse::comparator` (`patch_shadow1` lowered as `std::nullopt_t` instead of option-like surface, causing `.is_some()` fallout), with adjacent downstream fallout at `runner.cpp:2193` (`.is_some()` repeat), `runner.cpp:2200` (const assignment), and `runner.cpp:2203` (stale `text_shadow12` binding use).
+            - Canonical artifacts:
+              - `/tmp/rusty-parity-matrix-10-5-18-1775870799/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow-shape-gated in core local-binding and if-let lowering paths, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
