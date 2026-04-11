@@ -3517,6 +3517,35 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-39a-1775905600/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime adapters; no crate-specific scripts, no generated C++ patching, and no blanket receiver rewrites were introduced.
         - [ ] Leaf 10.5.40: Collapse the post-10.5.39 deterministic full-matrix `bitflags` Stage D tuple-harmonization + helper-surface + pointer-call-shape family generically (starting with `runner.cpp:3123/3171` `std::array` tuple CTAD mismatch, `runner.cpp:4405` `|=` surface gap, and `runner.cpp:5967/5994` unresolved `write_hex`/`parse_hex`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.1: Collapse the first deterministic `std::array` tuple CTAD harmonization head (`runner.cpp:3123/3171`) by propagating element expected-types through `into_vec(box_new([...]))` tuple-array payload lowering and emitting tuple elements with stable typed shape.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared transpiler lowering + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - the failing bitflags paths build `into_vec(box_new([("A", 1u8), ("B", 1 << 1), ...]))`; C++ `std::array` CTAD failed because tuple element types diverged (`uint8_t` vs `int`) across array elements.
+              - peer expected-type hints were insufficient in the failing expanded path; harmonization needed to work even without external type context on the `into_vec(box_new(...))` argument itself.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - added tuple-shaped array harmonization for `rusty::boxed::into_vec(rusty::boxed::box_new([...]))` by inferring tuple element types from the first tuple literal and emitting stable typed tuple constructors for all array elements.
+              - retained/extended expected-type specialization path so tuple arrays also harmonize when explicit peer `Vec<tuple<...>>` expected type is available.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf105401_tuple_peer_hint_emits_typed_tuple_array_elements`
+              - `test_leaf105401_into_vec_box_new_infers_tuple_harmonization_without_peer_expected_type`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105401 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler leaf41543333333327361 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-1b-1775910400 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:3123/3171` (`std::array` tuple CTAD mismatch) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to:
+                - `runner.cpp:4405` missing `|=` surface,
+                - `runner.cpp:5967/5994` unresolved `rusty::write_hex` / `parse_hex`,
+                - adjacent pointer-deref call-shape fallout at `runner.cpp:2663+`.
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-39a-1775905600/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-1b-1775910400/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in core transpiler lowering; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.2: Collapse the post-10.5.40.1 bitflags operator-surface head (`runner.cpp:4405` missing `|=`) with shared transpiler/runtime operator-lowering or runtime surface fixes and targeted regressions.
+          - [ ] Leaf 10.5.40.3: Collapse the post-10.5.40.2 formatter/parser helper-surface head (`runner.cpp:5967/5994` unresolved `rusty::write_hex` / `parse_hex`) with shared runtime/transpiler mapping fixes and targeted regressions.
+          - [ ] Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2663+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

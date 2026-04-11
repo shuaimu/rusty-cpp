@@ -19072,6 +19072,96 @@ impl CodeGen {
         }
     }
 
+    fn emit_tuple_expr_with_expected_shape(
+        &self,
+        tuple_expr: &syn::ExprTuple,
+        expected_tuple_ty: &syn::TypeTuple,
+    ) -> Option<String> {
+        if tuple_expr.elems.len() != expected_tuple_ty.elems.len() {
+            return None;
+        }
+        let elems: Vec<String> = tuple_expr
+            .elems
+            .iter()
+            .enumerate()
+            .map(|(idx, elem)| {
+                self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    elem,
+                    expected_tuple_ty.elems.iter().nth(idx),
+                )
+            })
+            .collect();
+        let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+        Some(format!("{}{{{}}}", expected_tuple_cpp, elems.join(", ")))
+    }
+
+    fn try_emit_boxed_tuple_array_expr_with_expected_tuple(
+        &self,
+        expr: &syn::Expr,
+        expected_tuple_ty: &syn::TypeTuple,
+    ) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(expr);
+        let syn::Expr::Array(arr) = peeled else {
+            return None;
+        };
+        if arr.elems.is_empty() {
+            let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+            return Some(format!("std::array<{}, 0>{{}}", expected_tuple_cpp));
+        }
+        let elems: Vec<String> = arr
+            .elems
+            .iter()
+            .map(|elem| {
+                let tuple = self.peel_paren_group_expr(elem);
+                let syn::Expr::Tuple(tuple_expr) = tuple else {
+                    return None;
+                };
+                self.emit_tuple_expr_with_expected_shape(tuple_expr, expected_tuple_ty)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("std::array{{{}}}", elems.join(", ")))
+    }
+
+    fn infer_tuple_type_from_tuple_expr(&self, tuple_expr: &syn::ExprTuple) -> Option<syn::TypeTuple> {
+        let mut elems: syn::punctuated::Punctuated<syn::Type, syn::token::Comma> =
+            syn::punctuated::Punctuated::new();
+        for elem in tuple_expr.elems.iter() {
+            elems.push(self.infer_hint_type_from_expr(elem)?);
+        }
+        Some(syn::TypeTuple {
+            paren_token: syn::token::Paren::default(),
+            elems,
+        })
+    }
+
+    fn try_emit_boxed_tuple_array_expr_with_inferred_tuple_harmonization(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<String> {
+        let peeled = self.peel_paren_group_expr(expr);
+        let syn::Expr::Array(arr) = peeled else {
+            return None;
+        };
+        let first = arr.elems.first()?;
+        let first = self.peel_paren_group_expr(first);
+        let syn::Expr::Tuple(first_tuple) = first else {
+            return None;
+        };
+        let expected_tuple_ty = self.infer_tuple_type_from_tuple_expr(first_tuple)?;
+        let elems: Vec<String> = arr
+            .elems
+            .iter()
+            .map(|elem| {
+                let tuple = self.peel_paren_group_expr(elem);
+                let syn::Expr::Tuple(tuple_expr) = tuple else {
+                    return None;
+                };
+                self.emit_tuple_expr_with_expected_shape(tuple_expr, &expected_tuple_ty)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("std::array{{{}}}", elems.join(", ")))
+    }
+
     fn try_emit_into_vec_box_new_with_u8_payload(
         &self,
         arg: &syn::Expr,
@@ -19099,6 +19189,69 @@ impl CodeGen {
             return None;
         }
         let payload = self.try_emit_boxed_u8_array_expr(&box_call.args[0])?;
+        Some(format!("rusty::boxed::box_new({})", payload))
+    }
+
+    fn try_emit_into_vec_box_new_with_expected_tuple_payload(
+        &self,
+        arg: &syn::Expr,
+        expected_tuple_ty: &syn::TypeTuple,
+    ) -> Option<String> {
+        let syn::Expr::Call(box_call) = self.peel_paren_group_expr(arg) else {
+            return None;
+        };
+        if box_call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(box_call.func.as_ref()) else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(
+            joined.as_str(),
+            "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
+        ) {
+            return None;
+        }
+        let payload =
+            self.try_emit_boxed_tuple_array_expr_with_expected_tuple(&box_call.args[0], expected_tuple_ty)?;
+        Some(format!("rusty::boxed::box_new({})", payload))
+    }
+
+    fn try_emit_into_vec_box_new_with_inferred_tuple_payload(
+        &self,
+        arg: &syn::Expr,
+    ) -> Option<String> {
+        let syn::Expr::Call(box_call) = self.peel_paren_group_expr(arg) else {
+            return None;
+        };
+        if box_call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(box_call.func.as_ref()) else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(
+            joined.as_str(),
+            "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
+        ) {
+            return None;
+        }
+        let payload =
+            self.try_emit_boxed_tuple_array_expr_with_inferred_tuple_harmonization(&box_call.args[0])?;
         Some(format!("rusty::boxed::box_new({})", payload))
     }
 
@@ -20086,14 +20239,27 @@ impl CodeGen {
             }
         }
         if func == "rusty::boxed::into_vec" && call.args.len() == 1 {
-            if self
-                .expected_vec_element_type(expected_ty)
-                .is_some_and(Self::is_u8_syn_type)
+            if let Some(specialized_arg) =
+                self.try_emit_into_vec_box_new_with_inferred_tuple_payload(&call.args[0])
             {
-                if let Some(specialized_arg) =
-                    self.try_emit_into_vec_box_new_with_u8_payload(&call.args[0])
-                {
-                    return format!("{}({})", func, specialized_arg);
+                return format!("{}({})", func, specialized_arg);
+            }
+            if let Some(elem_ty) = self.expected_vec_element_type(expected_ty) {
+                if Self::is_u8_syn_type(elem_ty) {
+                    if let Some(specialized_arg) =
+                        self.try_emit_into_vec_box_new_with_u8_payload(&call.args[0])
+                    {
+                        return format!("{}({})", func, specialized_arg);
+                    }
+                } else if let Some(expected_tuple_ty) = self.expected_tuple_type(Some(elem_ty)) {
+                    if let Some(specialized_arg) = self
+                        .try_emit_into_vec_box_new_with_expected_tuple_payload(
+                            &call.args[0],
+                            expected_tuple_ty,
+                        )
+                    {
+                        return format!("{}({})", func, specialized_arg);
+                    }
                 }
             }
         }
@@ -41156,6 +41322,43 @@ mod tests {
         assert!(out.contains("auto _m0_tmp = rusty::slice_full(var);"));
         assert!(out.contains("box_new(std::array{3, 5, 8})"));
         assert!(!out.contains("static_cast<uint8_t>(3)"));
+    }
+
+    #[test]
+    fn test_leaf105401_tuple_peer_hint_emits_typed_tuple_array_elements() {
+        let out = transpile_str(
+            r#"
+            use alloc::boxed::{into_vec, box_new};
+            fn f(flags: Vec<(&'static str, u8)>) {
+                match (
+                    &into_vec(box_new([("A", 1u8), ("B", 1 << 1), ("C", 1 << 2), ("ABC", 1 | 1 << 1 | 1 << 2)])),
+                    &flags,
+                ) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("box_new(std::array{std::tuple<std::string_view, uint8_t>{"));
+        assert!(out.contains("std::tuple<std::string_view, uint8_t>{\"B\", 1 << 1}"));
+        assert!(!out.contains("std::make_tuple(\"B\", 1 << 1)"));
+    }
+
+    #[test]
+    fn test_leaf105401_into_vec_box_new_infers_tuple_harmonization_without_peer_expected_type() {
+        let out = transpile_str(
+            r#"
+            use alloc::boxed::{into_vec, box_new};
+            fn f() {
+                let _flags = into_vec(box_new([("A", 1u8), ("B", 1 << 1), ("C", 1 << 2), ("ABC", 1 | 1 << 1 | 1 << 2)]));
+            }
+        "#,
+        );
+        assert!(out.contains("box_new(std::array{std::tuple<std::string_view, uint8_t>{"));
+        assert!(out.contains("std::tuple<std::string_view, uint8_t>{\"B\", 1 << 1}"));
+        assert!(!out.contains("box_new(std::array{std::make_tuple(\"B\", 1 << 1)"));
     }
 
     #[test]
