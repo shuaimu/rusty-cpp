@@ -4134,7 +4134,25 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1930` (`identifier::decode_len` `/* TODO: complex pattern binding */` fallout causing missing `first`/`second` bindings and `decode_len_cold` call-shape breakage), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-12-1775866809/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/context-gated in local-shadow + cast lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-166. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.12` (`runner.cpp:1930` `identifier::decode_len` `/* TODO: complex pattern binding */` fallout with missing `first`/`second` bindings and `decode_len_cold` call-shape breakage, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
+166. `Leaf 10.5.13` is complete.
+   - plan/scope check: shared transpiler-only pattern-lowering + block-emission ordering updates with focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - added local slice-pattern destructuring support for `let [a, b] = expr;` in block locals (`emit_local`, `register_local_binding_pattern`, `emit_pat_to_string`) so these patterns lower as structured bindings instead of complex-pattern TODO fallbacks.
+     - hoisted nested block-local function item emission (`Stmt::Item(Item::Fn)`) ahead of non-function statements in each block, preserving Rust item visibility semantics for same-block call sites where the nested item appears later in lexical order.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10513_local_slice_binding_lowers_without_todo`
+       - `test_leaf10513_nested_local_fn_call_before_item_definition_is_hoisted`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10513 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-13-1775867215 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1930` (`decode_len` missing `[first, second]` binding + nested `decode_len_cold` call-order breakage) is removed.
+     - new deterministic head starts at `runner.cpp:1977` in `parse::numeric_identifier` (`while let Some(&digit)` lowering fallout emitting `while (rusty::intrinsics::unreachable())` with missing `digit` binding), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-13-1775867215/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/context-gated in local pattern + block emission lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+167. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.13` (`runner.cpp:1977` `parse::numeric_identifier` `while let Some(&digit)` lowering fallout with missing `digit` binding and `while (rusty::intrinsics::unreachable())` emission, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

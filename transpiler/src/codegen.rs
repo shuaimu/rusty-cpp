@@ -7909,9 +7909,21 @@ impl CodeGen {
         }
 
         let stmts = &block.stmts;
-        let len = stmts.len();
+        // Rust block-scoped `fn` items are usable across the whole block regardless
+        // of lexical order. Emit nested local functions first so same-block call sites
+        // that appear earlier in source still resolve in C++.
+        for stmt in stmts {
+            if matches!(stmt, syn::Stmt::Item(syn::Item::Fn(_))) {
+                self.emit_stmt(stmt, false);
+            }
+        }
 
-        for (i, stmt) in stmts.iter().enumerate() {
+        let non_fn_stmts: Vec<&syn::Stmt> = stmts
+            .iter()
+            .filter(|stmt| !matches!(stmt, syn::Stmt::Item(syn::Item::Fn(_))))
+            .collect();
+        let len = non_fn_stmts.len();
+        for (i, stmt) in non_fn_stmts.iter().enumerate() {
             let is_last = i == len - 1;
             self.emit_stmt(stmt, is_last);
         }
@@ -11260,6 +11272,14 @@ impl CodeGen {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
+            syn::Pat::Slice(ps) => {
+                let elems: Vec<String> = ps
+                    .elems
+                    .iter()
+                    .map(|p| self.emit_pat_to_string(p))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
             syn::Pat::Reference(pr) => self.emit_pat_to_string(&pr.pat),
             _ => "/* TODO: pattern */".to_string(),
         }
@@ -11576,6 +11596,52 @@ impl CodeGen {
                     }
                 }
             }
+            syn::Pat::Slice(slice) => {
+                let has_rest = slice
+                    .elems
+                    .iter()
+                    .any(|elem| matches!(elem, syn::Pat::Rest(_)));
+                if has_rest {
+                    self.writeln("// TODO: complex slice pattern binding");
+                    return;
+                }
+
+                let expr_str = if let Some(init) = &local.init {
+                    Some(self.emit_expr_to_string(&init.expr))
+                } else {
+                    None
+                };
+                let names: Vec<String> = slice
+                    .elems
+                    .iter()
+                    .map(|p| {
+                        let raw = self.emit_pat_to_string(p);
+                        if raw == "_" {
+                            raw
+                        } else {
+                            self.allocate_local_cpp_name(&raw)
+                        }
+                    })
+                    .collect();
+                if names.iter().any(|name| name.contains("/* TODO:")) {
+                    self.writeln("// TODO: complex slice pattern binding");
+                    return;
+                }
+                if let Some(expr_str) = expr_str {
+                    let is_incomplete_constructor = local.init.as_ref().is_some_and(|init| {
+                        self.init_expr_is_incomplete_constructor_call(&init.expr)
+                    });
+                    if is_incomplete_constructor {
+                        self.writeln(&format!("static_cast<void>({});", expr_str));
+                    } else {
+                        self.writeln(&format!(
+                            "auto [{}] = {};",
+                            names.join(", "),
+                            expr_str
+                        ));
+                    }
+                }
+            }
             syn::Pat::Wild(_) => {
                 // `let _ = expr;` keeps side effects while discarding the value.
                 if let Some(init) = &local.init {
@@ -11862,6 +11928,11 @@ impl CodeGen {
             }
             syn::Pat::Tuple(tuple) => {
                 for elem in &tuple.elems {
+                    self.register_local_binding_pattern(elem);
+                }
+            }
+            syn::Pat::Slice(slice) => {
+                for elem in &slice.elems {
                     self.register_local_binding_pattern(elem);
                 }
             }
@@ -33303,6 +33374,64 @@ mod tests {
         assert!(
             !out.contains("static_cast<std::uintptr_t>(repr)"),
             "shadowed param cast-chain should not integer-cast non-scalar reference binding, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10513_local_slice_binding_lowers_without_todo() {
+        let out = transpile_str(
+            r#"
+            fn f(ptr: *const u8) -> usize {
+                let [first, second] = unsafe { std::ptr::read(ptr as *const [u8; 2]) };
+                (first as usize) + (second as usize)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto [first, second] = rusty::ptr::read("),
+            "slice-pattern local binding should lower as structured binding, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("// TODO: complex pattern binding"),
+            "slice-pattern local binding should not fall back to complex-pattern TODO, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10513_nested_local_fn_call_before_item_definition_is_hoisted() {
+        let out = transpile_str(
+            r#"
+            fn f(flag: bool, ptr: *const u8) -> usize {
+                if flag {
+                    return decode_len_cold(ptr);
+                    fn decode_len_cold(mut ptr: *const u8) -> usize {
+                        let mut len = 0usize;
+                        loop {
+                            let byte = unsafe { *ptr };
+                            if byte < 0x80 {
+                                return len;
+                            }
+                            ptr = unsafe { ptr.add(1) };
+                            len += ((byte & 0x7f) as usize) << 1;
+                        }
+                    }
+                }
+                0
+            }
+            "#,
+        );
+        let decl_pos = out
+            .find("decode_len_cold = +[](")
+            .expect("nested function declaration should be emitted");
+        let call_pos = out
+            .find("return decode_len_cold")
+            .expect("nested function call should be emitted");
+        assert!(
+            decl_pos < call_pos,
+            "nested function declaration should be emitted before same-block call site, got:\n{}",
             out
         );
     }

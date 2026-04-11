@@ -2878,6 +2878,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-12-1775866809/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/context-gated in local-shadow + cast lowering, with no generated-text patching or crate-specific rewrites.
+        - [x] *done* Leaf 10.5.13: Collapse the post-10.5.12 deterministic semver Stage D local-slice-pattern/nested-local-fn ordering family generically (starting with `runner.cpp:1930` `identifier::decode_len` `/* TODO: complex pattern binding */` + `decode_len_cold` call-order fallout), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only pattern-lowering + block-emission ordering updates with focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - Added local slice-pattern destructuring support for `let [a, b] = expr;` in block locals (`emit_local`, `register_local_binding_pattern`, `emit_pat_to_string`) with structured binding lowering instead of complex-pattern TODO fallback.
+            - Hoisted nested block-local function item emission (`Stmt::Item(Item::Fn)`) ahead of non-function statements in each block to preserve Rust item visibility semantics for same-block call sites where the item appears later in lexical order (e.g., `decode_len_cold` usage).
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf10513_local_slice_binding_lowers_without_todo`
+              - `test_leaf10513_nested_local_fn_call_before_item_definition_is_hoisted`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10513 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-13-1775867215 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - Previous first hard-error family at `runner.cpp:1930` (`decode_len` missing `[first, second]` binding + nested `decode_len_cold` call-order breakage) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1977` in `parse::numeric_identifier` (`while let Some(&digit)` lowering fallout emitting `while (rusty::intrinsics::unreachable())` with missing `digit` binding), with adjacent downstream runtime Option `std::visit` fallback still present later at `runner.cpp:2056`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-13-1775867215/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/context-gated in local pattern + block emission lowering, with no generated-text patching or crate-specific rewrites.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
