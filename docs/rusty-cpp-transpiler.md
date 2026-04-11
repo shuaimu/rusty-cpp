@@ -4425,7 +4425,47 @@ Active work items:
      - new deterministic Stage E frontier is `test_eq_hash FAILED: panic` with follow-on `free(): double free detected in tcache 2` abort.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-27-1775885088/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in AST-aware lowering/runtime surfaces, with no crate-specific rewrites/scripts and no generated-text patching.
-181. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.27` (starting with `test_eq_hash` panic + follow-on ownership/teardown abort).
+181. `Leaf 10.5.28` is complete.
+   - plan/scope check: shared transpiler/runtime parity fixes plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - implemented shared fixes:
+     - `transpiler/src/codegen.rs`: runtime hash fallback now hashes range-like values (`std::begin/std::end`) element-by-element before `std::hash`/byte fallback.
+     - `transpiler/src/codegen.rs`: `Drop`-struct Rule-of-Five emission now generates custom move-assignment reconstruction (`this->~T(); new (this) T(std::move(other));`) instead of defaulted move assignment, preserving forgotten-address transfer semantics.
+   - focused regressions:
+     - `test_leaf10528_runtime_hash_helper_hashes_ranges_by_elements`
+     - `test_leaf10528_tuple_payload_consumes_local_binding_non_const`
+     - `test_leaf10528_drop_struct_move_assignment_reconstructs_via_move_ctor`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10528 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/semver/Cargo.toml --work-dir /tmp/rusty-parity-semver-10-5-28-full-1775886945 --keep-work-dir`
+   - deterministic semver frontier movement:
+     - previous Stage E `test_eq_hash FAILED: panic` + follow-on ownership teardown abort is removed.
+     - semver parity now reaches full Stage E success (`32 passed, 0 failed`).
+   - canonical artifacts: `/tmp/rusty-parity-semver-10-5-28-full-1775886945/{baseline.txt,build.log,run.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in core codegen/runtime helper paths, with no crate-specific rewrites/scripts and no generated-text patching.
+182. `Leaf 10.5.29` is complete.
+   - plan/scope check: shared transpiler-only lowering update plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - root-cause finding:
+     - in dependent-assoc softening mode, Option value-position lowering still emitted explicit typed constructors (`rusty::Option<typename IterEither::Item>(...)`) even when associated aliases were intentionally skipped; this caused deterministic `either` Stage D failure.
+   - implemented shared fix in `transpiler/src/codegen.rs`:
+     - generalized dependent-assoc Option ctor suppression to `should_soften_dependent_assoc_mode()` so `None`/`Some(...)` lower to `std::nullopt` / `std::make_optional(...)` in softened associated-type contexts.
+     - updated prior module-mode regression to assert softened Option value shapes.
+   - focused regressions:
+     - `test_leaf10529_module_mode_option_none_avoids_assoc_ctor_type_in_value_position`
+     - `test_leaf10529_module_mode_option_some_avoids_assoc_ctor_type_in_value_position`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10529 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf4154333333381_module_mode_option_self_assoc_next_uses_explicit_option_shape -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-29-1775890201 --keep-work-dirs`
+   - deterministic full-matrix frontier movement:
+     - previous first failing crate (`either` Stage D `IterEither::Item` Option-ctor family) is removed; `either` now passes.
+     - new first failing crate is `arrayvec` Stage D (`runner.cpp:803/806/810` comparator/member-shape family), with adjacent `CAPERROR`/`BackshiftOnDrop` fallout.
+   - canonical artifacts:
+     - previous head capture: `/tmp/rusty-parity-matrix-rerun-top-1775887363/either/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-shape-gated in core Option constructor lowering; no crate-specific rewrites/scripts or generated-text patching were introduced.
+183. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D family after `10.5.29` (starting with comparator/member-shape emission at `runner.cpp:803`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

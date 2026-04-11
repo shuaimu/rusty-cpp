@@ -17958,11 +17958,12 @@ impl CodeGen {
 
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
-        // In expanded mode, avoid reintroducing associated projections like
-        // `Self::Item` through explicit Option ctor typing in value position.
-        // This keeps legacy `std::nullopt` / `std::make_optional` shapes for
-        // dependent associated items while allowing module-mode explicit typing.
-        if self.module_name.is_none() && self.expanded_libtest_mode && is_dependent_assoc_inner {
+        // In dependent-assoc softening modes, avoid reintroducing associated
+        // projections like `Self::Item` through explicit Option ctor typing in
+        // value position (`rusty::Option<...>(...)`). This keeps value lowering
+        // on `std::nullopt` / `std::make_optional` and avoids requiring skipped
+        // associated aliases (for example `typename IterEither::Item`).
+        if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
             return None;
         }
 
@@ -17995,7 +17996,7 @@ impl CodeGen {
 
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
-        if self.module_name.is_none() && self.expanded_libtest_mode && is_dependent_assoc_inner {
+        if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
             return None;
         }
 
@@ -32533,10 +32534,10 @@ mod tests {
             "#,
             "leaf4154333333381",
         );
-        assert!(out.contains("rusty::Option<typename IntoIter::Item>(rusty::None)"));
-        assert!(out.contains("rusty::Option<typename IntoIter::Item>(value)"));
-        assert!(!out.contains("return std::nullopt;"));
-        assert!(!out.contains("return std::make_optional(value);"));
+        assert!(out.contains("return std::nullopt;"));
+        assert!(out.contains("return std::make_optional(value);"));
+        assert!(!out.contains("rusty::Option<typename IntoIter::Item>(rusty::None)"));
+        assert!(!out.contains("rusty::Option<typename IntoIter::Item>(value)"));
     }
 
     #[test]
@@ -39762,6 +39763,42 @@ mod tests {
         );
         assert!(out.contains("return std::make_optional("));
         assert!(!out.contains("rusty::Option<Either::Item>("));
+    }
+
+    #[test]
+    fn test_leaf10529_module_mode_option_none_avoids_assoc_ctor_type_in_value_position() {
+        let out = transpile_str_module(
+            r#"
+            trait IteratorLike { type Item; fn next(self) -> Option<Self::Item>; }
+            enum IterEither<L, R> { Left(L), Right(R) }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for IterEither<L, R> {
+                type Item = L::Item;
+                fn next(self) -> Option<IterEither::Item> { None }
+            }
+        "#,
+            "either",
+        );
+        assert!(out.contains("return std::nullopt;"));
+        assert!(!out.contains("rusty::Option<typename IterEither::Item>(rusty::None)"));
+        assert!(!out.contains("rusty::Option<IterEither::Item>(rusty::None)"));
+    }
+
+    #[test]
+    fn test_leaf10529_module_mode_option_some_avoids_assoc_ctor_type_in_value_position() {
+        let out = transpile_str_module(
+            r#"
+            trait IteratorLike { type Item; fn next(self) -> Option<Self::Item>; }
+            enum IterEither<L, R> { Left(L), Right(R) }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for IterEither<L, R> {
+                type Item = L::Item;
+                fn next(self) -> Option<IterEither::Item> { Some(todo!()) }
+            }
+        "#,
+            "either",
+        );
+        assert!(out.contains("return std::make_optional("));
+        assert!(!out.contains("rusty::Option<typename IterEither::Item>("));
+        assert!(!out.contains("rusty::Option<IterEither::Item>("));
     }
 
     #[test]

@@ -3221,6 +3221,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-semver-10-5-28-full-1775886945/{baseline.txt,build.log,run.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.3): fixes remained shared and shape-gated in core codegen/runtime helper paths, with no crate-specific rewrites and no generated-text patching.
+        - [x] *done* Leaf 10.5.29: Collapse the post-10.5.28 deterministic full-matrix `either` Stage D dependent-associated Option-constructor family generically (starting with `runner.cpp:1118/1147/1150/1181/1184` `no type named 'Item' in 'IterEither<L, R>'` from `rusty::Option<typename IterEither::Item>(...)`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only lowering updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - module/constrained dependent-associated return softening intentionally skips emitting current-struct associated aliases (for example `IterEither::Item`), but Option value-position constructor lowering still forced explicit typed constructors (`rusty::Option<typename IterEither::Item>(...)`) for `Some(...)` and `None`.
+            - this reintroduced the skipped alias requirement in method bodies and produced deterministic Stage D failures in `either` after full-matrix rerun.
+          - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+            - generalized dependent-associated Option constructor suppression from expanded-only mode to all dependent-assoc softening modes (`should_soften_dependent_assoc_mode()`), so `None`/`Some(...)` in these contexts lower as `std::nullopt` / `std::make_optional(...)` instead of explicit `rusty::Option<assoc>(...)`.
+            - updated existing module-mode regression that previously asserted explicit typed Option ctor emission for `Option<Self::Item>` to assert the softened `std::nullopt` / `std::make_optional(...)` shape.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10529_module_mode_option_none_avoids_assoc_ctor_type_in_value_position`
+            - `test_leaf10529_module_mode_option_some_avoids_assoc_ctor_type_in_value_position`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10529 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf4154333333381_module_mode_option_self_assoc_next_uses_explicit_option_shape -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-29-1775890201 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in full matrix (`either` Stage D `IterEither::Item` missing-associated-alias fallout from explicit Option ctor typing) is removed; `either` now passes.
+            - new first failing crate in full matrix is `arrayvec` Stage D, led by comparator/member-shape fallout at `runner.cpp:803/806/810` (`other.element` emitted as method reference) with adjacent dependent errors (`CAPERROR` unresolved, `BackshiftOnDrop` unknown type).
+          - Canonical artifacts:
+            - previous `either` first-head capture: `/tmp/rusty-parity-matrix-rerun-top-1775887363/either/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix full-matrix rerun: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in core Option constructor lowering, with no crate-specific rewrites/scripts and no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
