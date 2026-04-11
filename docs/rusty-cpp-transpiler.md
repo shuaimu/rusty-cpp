@@ -2230,9 +2230,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-4a-1775902990`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-5b-1775904094`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
 - confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- previous pointer-deref family from Leaf 10.5.40.3 (`runner.cpp:2850/2868`, `2966+` invalid `*input` shape) is removed by Leaf 10.5.40.4; current deterministic `bitflags` Stage D head is method-item callable arity + format consteval fallout (`runner.cpp:2850/2966`, `3428+`).
+- previous method-item callable arity + format consteval family from Leaf 10.5.40.4 (`runner.cpp:2850/2966`, `3428+`) is removed by Leaf 10.5.40.5; current deterministic `bitflags` Stage D head is iterator/collection call-shape fallout (`runner.cpp:1550`, `4379/4396/4413`).
 
 Crate-focused progress integrated from former appendices:
 
@@ -2248,11 +2248,11 @@ Crate-focused progress integrated from former appendices:
 
 From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
 
-Current deterministic head (post-Leaf 10.5.40.4):
+Current deterministic head (post-Leaf 10.5.40.5):
 
-1. `runner.cpp:2850/2966`: method-item callable arity mismatch (`inherent(value, input)` emitted against unary callable forms like `[](const auto& _f) { return _f.contains(); }` / `difference()`).
-2. `runner.cpp:3428+`: adjacent consteval `std::format` format-string expression fallout in generated assertion/debug formatting calls.
-3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. `runner.cpp:1550`: iterator payload/member-shape mismatch (`item._0` instantiated on non-bitflags payload in `TestFlags::from_iter`).
+2. `runner.cpp:4379/4396/4413`: iterator/collection call-surface mismatch (`std::span<const typename T::Bits>::from_iter(...)` unresolved surface).
+3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
 
 Historical active-work chain (retained for traceability):
 
@@ -4543,7 +4543,29 @@ Active work items:
      - previous head capture: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
      - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and type-shape-gated in core codegen paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
-186. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D reference-element pointer/storage-cast family after `10.5.32` (starting with `runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and adjacent `runner.cpp:1245` `ArrayVec::from` storage-cast fallout).
+186. `Leaf 10.5.40.5` is complete.
+   - plan/scope check: shared callable/format lowering fixes + focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - method-item path arguments now lower to variadic forwarding wrappers (`receiver + args`) instead of unary wrappers, removing `inherent(value, input)` arity mismatch fallout.
+     - `format_args!` now tracks native conversion chars per placeholder and applies integer-format bridging (`rusty::format_numeric_arg(...)`) for non-integer args on `x/X/o/b/B/d` conversions.
+     - runtime fallback helper text now includes `rusty::format_numeric_arg(T&&)` with shape-gated extraction (integral passthrough, integral `_0` payload, integral `bits()` payload).
+   - focused regressions:
+     - `test_leaf105405_format_args_hex_spec_uses_native_numeric_argument`
+     - `test_leaf105405_format_args_hex_spec_uses_numeric_bridge_for_non_integer_arg`
+     - `test_leaf105405_method_reference_callable_wrapper_forwards_receiver_and_args`
+     - `test_leaf105405_runtime_fallback_has_numeric_format_arg_helper`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf105405 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-5b-1775904094 --keep-work-dirs`
+   - deterministic frontier movement:
+     - removed prior `bitflags` Stage D head (`runner.cpp:2850/2966` method-item arity + `runner.cpp:3428+` format consteval family).
+     - next deterministic `bitflags` Stage D head is `runner.cpp:1550` (`item._0` payload-shape mismatch) plus adjacent `runner.cpp:4379/4396/4413` `std::span<...>::from_iter` surface mismatch.
+   - canonical artifacts:
+     - pre-fix: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - post-fix: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in callable/format lowering; no crate-specific scripts or generated C++ patching were introduced.
+187. Current active next leaf is `Leaf 10.5.40.6` (deterministic `bitflags` Stage D iterator/collection call-shape family: `runner.cpp:1550`, `4379/4396/4413`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

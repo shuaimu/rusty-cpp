@@ -4093,9 +4093,10 @@ impl CodeGen {
             }
         }
         // Member method reference: `Type::method` used as a function argument.
-        // In Rust, this creates a function item `fn(&Type) -> RetType`.
-        // In C++, member functions can't be passed as function pointers,
-        // so emit a lambda wrapper: `[](const auto& _f) { return _f.method(); }`
+        // In Rust, this creates a function item `fn(&Type, ...) -> RetType`.
+        // In C++, member functions can't be passed as free function pointers,
+        // so emit a forwarding lambda wrapper that accepts explicit receiver
+        // plus any additional arguments.
         if let syn::Expr::Path(path_expr) = arg {
             if let Some(lambda) = self.try_emit_method_reference_lambda(&path_expr.path) {
                 return lambda;
@@ -4105,7 +4106,7 @@ impl CodeGen {
     }
 
     /// If `path` is `Type::method` where `Type` is a known local type and
-    /// `method` is a lowercase instance method name, emit as lambda wrapper.
+    /// `method` is a lowercase instance method name, emit as forwarding lambda wrapper.
     fn try_emit_method_reference_lambda(&self, path: &syn::Path) -> Option<String> {
         if path.segments.len() < 2 {
             return None;
@@ -4137,7 +4138,7 @@ impl CodeGen {
         }
         let escaped = escape_cpp_keyword(&method_name);
         Some(format!(
-            "[](const auto& _f) {{ return _f.{}(); }}",
+            "[](auto&& _f, auto&&... _args) -> decltype(auto) {{ return _f.{}(std::forward<decltype(_args)>(_args)...); }}",
             escaped
         ))
     }
@@ -10203,10 +10204,16 @@ impl CodeGen {
                 } else {
                     let fmt_expr = parts[0].trim();
                     let mut debug_arg_positions = HashSet::new();
+                    let mut native_arg_conversions: HashMap<usize, char> = HashMap::new();
                     let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
                         let fmt_literal = lit.value();
                         debug_arg_positions = self
                             .format_literal_debug_arg_positions(
+                                &fmt_literal,
+                                parts.len().saturating_sub(1),
+                            );
+                        native_arg_conversions = self
+                            .format_literal_native_arg_conversions(
                                 &fmt_literal,
                                 parts.len().saturating_sub(1),
                             );
@@ -10224,16 +10231,22 @@ impl CodeGen {
                             .skip(1)
                             .enumerate()
                             .map(|(arg_idx, arg)| {
-                                let formatter = if debug_arg_positions.contains(&arg_idx) {
-                                    "rusty::to_debug_string"
+                                let lowered = self.convert_format_arg_expr(arg.trim());
+                                if debug_arg_positions.contains(&arg_idx) {
+                                    format!("rusty::to_debug_string({})", lowered)
+                                } else if let Some(conversion) =
+                                    native_arg_conversions.get(&arg_idx).copied()
+                                {
+                                    if self.format_conversion_requires_numeric_bridge(conversion)
+                                        && !self.format_arg_is_known_integer_like(arg.trim())
+                                    {
+                                        format!("rusty::format_numeric_arg({})", lowered)
+                                    } else {
+                                        lowered
+                                    }
                                 } else {
-                                    "rusty::to_string"
-                                };
-                                format!(
-                                    "{}({})",
-                                    formatter,
-                                    self.convert_format_arg_expr(arg.trim())
-                                )
+                                    format!("rusty::to_string({})", lowered)
+                                }
                             })
                             .collect();
                         format!("std::format({}, {})", fmt_cpp, wrapped_args.join(", "))
@@ -10477,6 +10490,117 @@ impl CodeGen {
             i += 1;
         }
         positions
+    }
+
+    fn format_literal_native_arg_conversions(
+        &self,
+        fmt: &str,
+        arg_count: usize,
+    ) -> HashMap<usize, char> {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut conversions = HashMap::new();
+        let mut next_implicit_idx = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let (arg_part_raw, spec_part_raw) = if let Some((arg_part, spec_part)) =
+                    inner.split_once(':')
+                {
+                    (arg_part, spec_part)
+                } else {
+                    (inner.as_str(), "")
+                };
+                let arg_part = arg_part_raw.trim();
+                let arg_idx = if arg_part.is_empty() {
+                    let idx = next_implicit_idx;
+                    next_implicit_idx += 1;
+                    Some(idx)
+                } else if arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    arg_part.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if let Some(idx) = arg_idx {
+                    if idx < arg_count {
+                        if let Some(conversion) =
+                            self.format_spec_native_conversion(spec_part_raw.trim())
+                        {
+                            conversions.insert(idx, conversion);
+                        }
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        conversions
+    }
+
+    fn format_spec_native_conversion(&self, spec: &str) -> Option<char> {
+        let conversion = spec.chars().rev().find(|c| c.is_ascii_alphabetic())?;
+        if matches!(
+            conversion,
+            'x'
+                | 'X'
+                | 'o'
+                | 'b'
+                | 'B'
+                | 'd'
+                | 'e'
+                | 'E'
+                | 'f'
+                | 'F'
+                | 'g'
+                | 'G'
+                | 'a'
+                | 'A'
+                | 'c'
+                | 'p'
+                | 'P'
+        ) {
+            Some(conversion)
+        } else {
+            None
+        }
+    }
+
+    fn format_conversion_requires_numeric_bridge(&self, conversion: char) -> bool {
+        matches!(conversion, 'x' | 'X' | 'o' | 'b' | 'B' | 'd')
+    }
+
+    fn format_arg_is_known_integer_like(&self, token_expr: &str) -> bool {
+        let trimmed = token_expr.trim();
+        let parsed = if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
+            Some(expr)
+        } else {
+            let normalized = normalize_token_text(trimmed.to_string());
+            if normalized != trimmed {
+                syn::parse_str::<syn::Expr>(&normalized).ok()
+            } else {
+                None
+            }
+        };
+        parsed
+            .as_ref()
+            .and_then(|expr| self.infer_simple_expr_type(expr))
+            .is_some_and(|ty| self.is_known_integer_like_type(&ty))
     }
 
     /// Convert raw macro tokens to a C++ expression string.
@@ -26699,6 +26823,8 @@ auto clone(const T& value) {\n\
 // Display-oriented conversion helper used by format_args lowering.\n\
 template<typename T>\n\
 std::string to_string(const T& value);\n\
+template<typename T>\n\
+constexpr decltype(auto) format_numeric_arg(T&& value);\n\
 // Rust u8::is_ascii_digit() — check if byte is in '0'..='9'.\n\
 inline bool is_ascii_digit(uint8_t b) { return b >= '0' && b <= '9'; }\n\
 } // namespace rusty\n\
@@ -26844,6 +26970,27 @@ std::string to_debug_string(const T& value) {\n\
         return std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\";\n\
     }\n\
     return rusty::to_string(value);\n\
+}\n\
+template<typename T>\n\
+constexpr decltype(auto) format_numeric_arg(T&& value) {\n\
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (std::is_integral_v<Value> && !std::is_same_v<Value, bool>) {\n\
+        return std::forward<T>(value);\n\
+    } else if constexpr (\n\
+        requires { value._0; }\n\
+        && std::is_integral_v<std::remove_cv_t<std::remove_reference_t<decltype(value._0)>>>\n\
+        && !std::is_same_v<std::remove_cv_t<std::remove_reference_t<decltype(value._0)>>, bool>\n\
+    ) {\n\
+        return value._0;\n\
+    } else if constexpr (\n\
+        requires { value.bits(); }\n\
+        && std::is_integral_v<std::remove_cv_t<std::remove_reference_t<decltype(value.bits())>>>\n\
+        && !std::is_same_v<std::remove_cv_t<std::remove_reference_t<decltype(value.bits())>>, bool>\n\
+    ) {\n\
+        return value.bits();\n\
+    } else {\n\
+        return std::forward<T>(value);\n\
+    }\n\
 }\n\
 namespace path {\n\
 using Path = std::string;\n\
@@ -37095,6 +37242,37 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf105405_format_args_hex_spec_uses_native_numeric_argument() {
+        let out = transpile_str(
+            r#"
+            fn f(v: usize) {
+                let _ = format_args!("{0:X}", v);
+                let _ = format_args!("{0:x}", v);
+            }
+            "#,
+        );
+        assert!(out.contains("std::format(\"{0:X}\", v)"));
+        assert!(out.contains("std::format(\"{0:x}\", v)"));
+        assert!(!out.contains("std::format(\"{0:X}\", rusty::to_string(v))"));
+        assert!(!out.contains("std::format(\"{0:x}\", rusty::to_string(v))"));
+    }
+
+    #[test]
+    fn test_leaf105405_format_args_hex_spec_uses_numeric_bridge_for_non_integer_arg() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+            fn f(value: Flags) {
+                let _ = format_args!("{0:X}", value);
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::format(\"{0:X}\", rusty::format_numeric_arg(value))"
+        ));
+    }
+
+    #[test]
     fn test_leaf10527_format_args_literal_with_comma_is_split_correctly() {
         let out = transpile_str(
             r#"
@@ -40598,6 +40776,27 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf105405_method_reference_callable_wrapper_forwards_receiver_and_args() {
+        let out = transpile_str(
+            r#"
+            #[derive(Clone, Copy)]
+            struct TestFlags;
+            impl TestFlags {
+                fn contains(&self, _other: Self) -> bool { true }
+            }
+            fn case<T: Copy>(value: T, mut inherent: impl FnMut(&T, T) -> bool) -> bool {
+                inherent(&value, value)
+            }
+            fn f(v: TestFlags) {
+                let _ = case(v, TestFlags::contains);
+            }
+            "#,
+        );
+        assert!(out.contains("[](auto&& _f, auto&&... _args) -> decltype(auto)"));
+        assert!(out.contains("_f.contains(std::forward<decltype(_args)>(_args)...)"));
+    }
+
+    #[test]
     fn test_leaf4154333333332761_default_trait_call_uses_expected_default_value_helper() {
         let out = transpile_str(
             r#"
@@ -43325,6 +43524,15 @@ mod tests {
         assert!(
             helpers.contains("rusty::Result<T, std::tuple<>> parse_hex("),
             "runtime fallback should expose parse_hex helper"
+        );
+    }
+
+    #[test]
+    fn test_leaf105405_runtime_fallback_has_numeric_format_arg_helper() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("constexpr decltype(auto) format_numeric_arg("),
+            "runtime fallback should expose numeric format argument helper"
         );
     }
 

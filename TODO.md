@@ -3623,7 +3623,40 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-3b-1775902336/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type/AST-shape-gated in core loop lowering; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.5: Collapse the post-10.5.40.4 method-item callable-arity + format-consteval head (`runner.cpp:2850/2966` unary callable passed as binary and adjacent `runner.cpp:3428+` consteval `std::format` shape) with shared callable/format lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.5: Collapse the post-10.5.40.4 method-item callable-arity + format-consteval head (`runner.cpp:2850/2966` unary callable passed as binary and adjacent `runner.cpp:3428+` consteval `std::format` shape) with shared callable/format lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared callable/format lowering + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - `Type::method` path arguments were lowered to unary wrappers (`[](const auto& _f){ return _f.method(); }`) even when Rust method-item call shape requires receiver + trailing args, causing binary-call arity failures at `runner.cpp:2850/2966`.
+              - `format_args!` native-spec lowering passed non-primitive bitflags values directly into `std::format("{0:X}", value)`/`{0:x}`/`{0:o}`/`{0:b}`, triggering deterministic Stage D consteval/formatter failures (`std::formatter<tests::TestFlags>` missing) rooted at `runner.cpp:3428+`.
+            - Implemented shared transpiler/runtime fixes in `transpiler/src/codegen.rs`:
+              - upgraded method-item argument wrapper lowering (`try_emit_method_reference_lambda`) to variadic forwarding lambda form:
+                - `[](auto&& _f, auto&&... _args) -> decltype(auto) { return _f.method(std::forward<...>(_args)...); }`
+              - hardened `format_args!` conversion handling:
+                - parse and track per-argument native conversion characters from format literals.
+                - for integer-style conversions (`x/X/o/b/B/d`), keep direct native args only when the argument is known integer-like; otherwise bridge via shared runtime helper `rusty::format_numeric_arg(...)`.
+              - added shared runtime fallback helper `rusty::format_numeric_arg(T&&)` with shape-gated numeric extraction:
+                - integral values pass through directly,
+                - otherwise uses integral tuple payload `_0` when present,
+                - otherwise uses integral `bits()` when present.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf105405_format_args_hex_spec_uses_native_numeric_argument`
+              - `test_leaf105405_format_args_hex_spec_uses_numeric_bridge_for_non_integer_arg`
+              - `test_leaf105405_method_reference_callable_wrapper_forwards_receiver_and_args`
+              - `test_leaf105405_runtime_fallback_has_numeric_format_arg_helper`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105405 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-5b-1775904094 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:2850/2966` (method-item unary/binary call-shape mismatch) and adjacent `runner.cpp:3428+` consteval format-family fallout is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to:
+                - `runner.cpp:1550` iterator payload/member-shape mismatch (`item._0` on non-bitflags payload instantiation in `from_iter`),
+                - adjacent iterator/collection call-surface fallout at `runner.cpp:4379/4396/4413` (`std::span<const typename T::Bits>::from_iter(...)` missing surface).
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in callable and format lowering; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.6: Collapse the post-10.5.40.5 `bitflags` iterator/collection call-shape head (`runner.cpp:1550` `item._0` instantiation mismatch and adjacent `runner.cpp:4379/4396/4413` `std::span<...>::from_iter` surface mismatch) with shared iterator/collection lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
