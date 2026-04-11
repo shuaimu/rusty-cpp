@@ -15074,7 +15074,7 @@ impl CodeGen {
         len_hint: &syn::Expr,
     ) -> String {
         let val = self.emit_expr_to_string_with_expected(&repeat.expr, Some(elem_hint));
-        let elem_ty = self.map_type(elem_hint);
+        let elem_ty = self.map_array_element_type(elem_hint);
         let len = self.emit_expr_to_string(len_hint);
         let repeat_len = if self.should_sanitize_array_capacity_expr(len_hint, &len) {
             format!("rusty::sanitize_array_capacity<{}>()", len)
@@ -20554,7 +20554,7 @@ impl CodeGen {
         let elem_expected = self.expected_array_element_type(expected_ty);
         if array_expr.elems.is_empty() {
             if let Some(elem_ty) = elem_expected {
-                return format!("std::array<{}, 0>{{}}", self.map_type(elem_ty));
+                return format!("std::array<{}, 0>{{}}", self.map_array_element_type(elem_ty));
             }
             return "std::array<int, 0>{}".to_string();
         }
@@ -27775,7 +27775,7 @@ impl CodeGen {
                 }
             }
             syn::Type::Array(a) => {
-                let elem = self.map_type(&a.elem);
+                let elem = self.map_array_element_type(&a.elem);
                 let len = self.emit_expr_to_string(&a.len);
                 if self.should_sanitize_array_capacity_expr(&a.len, &len) {
                     format!(
@@ -27935,6 +27935,28 @@ impl CodeGen {
             }
             syn::Type::Paren(p) => self.map_type(&p.elem),
             _ => "/* TODO: type */".to_string(),
+        }
+    }
+
+    fn map_array_element_type(&self, elem_ty: &syn::Type) -> String {
+        match elem_ty {
+            syn::Type::Reference(r) => {
+                let referent_cpp = self.map_type(&r.elem);
+                let normalized_referent_cpp = if referent_cpp.ends_with('&') {
+                    format!("std::remove_reference_t<{}>", referent_cpp)
+                } else {
+                    referent_cpp
+                };
+                let wrapper_target = if r.mutability.is_some() {
+                    normalized_referent_cpp
+                } else {
+                    format!("std::add_const_t<{}>", normalized_referent_cpp)
+                };
+                format!("std::reference_wrapper<{}>", wrapper_target)
+            }
+            syn::Type::Paren(p) => self.map_array_element_type(&p.elem),
+            syn::Type::Group(g) => self.map_array_element_type(&g.elem),
+            _ => self.map_type(elem_ty),
         }
     }
 
@@ -33117,6 +33139,42 @@ mod tests {
     fn test_array_type() {
         let out = transpile_str("fn f(a: [i32; 5]) {}");
         assert!(out.contains("std::array<int32_t, 5>"));
+    }
+
+    #[test]
+    fn test_leaf5121_array_type_with_shared_reference_elements_uses_reference_wrapper() {
+        let out = transpile_str("fn f(a: [&u32; 2]) {}");
+        assert!(out.contains("std::array<std::reference_wrapper<std::add_const_t<uint32_t>>, 2>"));
+        assert!(!out.contains("std::array<const uint32_t&, 2>"));
+    }
+
+    #[test]
+    fn test_leaf5121_array_type_with_mut_reference_elements_uses_reference_wrapper() {
+        let out = transpile_str("fn f(a: [&mut i32; 3]) {}");
+        assert!(out.contains("std::array<std::reference_wrapper<int32_t>, 3>"));
+        assert!(!out.contains("std::array<int32_t&, 3>"));
+    }
+
+    #[test]
+    fn test_leaf5121_smallvec_reference_array_new_avoids_reference_element_std_array() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec<A>;
+            impl<A> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+            }
+            fn f() {
+                let _ = SmallVec::<[&u32; 2]>::new();
+            }
+        "#,
+        );
+        assert!(
+            out.contains(
+                "SmallVec<std::array<std::reference_wrapper<std::add_const_t<uint32_t>>, 2>>::new_()"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("SmallVec<std::array<const uint32_t&, 2>>::new_()"), "{out}");
     }
 
     #[test]
