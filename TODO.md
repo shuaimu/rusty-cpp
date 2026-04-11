@@ -3117,7 +3117,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-23-1775876850/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/scope-gated in core name-resolution paths, with no generated-text patching and no crate-specific rewrites/scripts.
-        - [ ] Leaf 10.5.24: Collapse the post-10.5.23 deterministic semver Stage D runtime default-value/container-len surface family generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` `default_value<identifier::Identifier>()` and adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` `len(Prerelease|BuildMetadata)`), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.24: Collapse the post-10.5.23 deterministic semver Stage D runtime default-value/container-len surface family generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` `default_value<identifier::Identifier>()` and adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` `len(Prerelease|BuildMetadata)`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared runtime-header hardening + focused runtime regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared runtime fixes:
+            - `include/rusty/rusty.hpp`: hardened `rusty::default_value<T>()` fallback selection to prefer `T::default_()`, then `T::empty()` for non-default-constructible empty-surface types, and finally value-initialization only when `T{}` is well-formed.
+            - `include/rusty/array.hpp`: extended `rusty::len(const Container&)` with an `as_str()` fallback for string-view-like wrappers and guarded the terminal `std::size` path with explicit requires + dependent static assertion instead of unconditional instantiation.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_default_value_prefers_empty_for_non_default_constructible_types`
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_len_supports_as_str_wrappers_without_size_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-24-1775879000 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous Stage D compile-head family at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` (`default_value<identifier::Identifier>()` constructor mismatch) and adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` (`len(Prerelease|BuildMetadata)` `std::size` mismatch) is removed; semver Stage D now builds successfully.
+            - new deterministic semver frontier is Stage E runtime failure: runner exits with `SIGSEGV` (exit 139) immediately after first printed pass, with gdb showing recursive `identifier::Identifier::is_empty()`/destructor chain rooted at `runner.cpp:811-815` and `runner.cpp:861-864` on the `test_align` path.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-24-1775879000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared in runtime headers with explicit shape-gated fallbacks, added no crate-specific rewrites/scripts, and performed no generated-text patching.
+        - [ ] Leaf 10.5.25: Collapse the post-10.5.24 deterministic semver Stage E identifier-empty/destructor recursion family generically (starting with `runner.cpp:811-815` `Identifier::is_empty` local-empty/forget shape and adjacent `runner.cpp:861-864` destructor `is_empty_or_inline` recursion causing `SIGSEGV` on `test_align`), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

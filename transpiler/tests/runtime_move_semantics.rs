@@ -540,3 +540,48 @@ fn test_string_repeat_supports_zero_and_overflow_guard() {
 
     compile_and_run_cpp(source, "string_repeat_zero_and_overflow_guard");
 }
+
+#[test]
+fn test_default_value_prefers_empty_for_non_default_constructible_types() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+
+        struct NonDefaultWithEmpty {
+            int value;
+            explicit NonDefaultWithEmpty(int v) : value(v) {}
+            NonDefaultWithEmpty() = delete;
+            static NonDefaultWithEmpty empty() { return NonDefaultWithEmpty(41); }
+        };
+
+        int main() {
+            const auto v = rusty::default_value<NonDefaultWithEmpty>();
+            return v.value == 41 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(
+        source,
+        "default_value_non_default_constructible_empty_fallback",
+    );
+}
+
+#[test]
+fn test_len_supports_as_str_wrappers_without_size_surface() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+        #include <string_view>
+
+        struct AsStrOnly {
+            std::string_view text;
+            std::string_view as_str() const { return text; }
+        };
+
+        int main() {
+            const AsStrOnly pre{"alpha"};
+            const AsStrOnly empty{""};
+            return (rusty::len(pre) == 5 && rusty::len(empty) == 0) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "len_as_str_wrapper_fallback");
+}

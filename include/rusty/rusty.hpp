@@ -131,7 +131,13 @@ namespace rusty {
     }
 
     template<typename T>
-    requires (!requires { T::default_(); })
+    requires (!requires { T::default_(); } && requires { T::empty(); })
+    auto default_value() {
+        return T::empty();
+    }
+
+    template<typename T>
+    requires (!requires { T::default_(); } && !requires { T::empty(); } && requires { T{}; })
     T default_value() {
         return T{};
     }

@@ -360,8 +360,14 @@ size_t len(const Container& container) {
         return static_cast<size_t>(container.len());
     } else if constexpr (requires { container.size(); }) {
         return static_cast<size_t>(container.size());
-    } else {
+    } else if constexpr (requires { container.as_str(); }) {
+        return rusty::len(container.as_str());
+    } else if constexpr (requires { std::size(container); }) {
         return static_cast<size_t>(std::size(container));
+    } else {
+        static_assert(
+            detail::collect_range_dependent_false_v<Container>,
+            "rusty::len requires len(), size(), as_str(), or std::size-compatible range");
     }
 }
 

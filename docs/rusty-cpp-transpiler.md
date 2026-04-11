@@ -4348,7 +4348,23 @@ Active work items:
      - new deterministic first head starts at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` (`rusty::default_value<identifier::Identifier>()` requiring unavailable default constructor), with adjacent fallout at `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` (`rusty::len` on `Prerelease`/`BuildMetadata` lacking `size` surface).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-23-1775876850/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/scope-gated in core name-resolution paths, with no generated-text patching and no crate-specific rewrites/scripts.
-177. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.23` (starting at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` `default_value<identifier::Identifier>()` constructor-surface mismatch, with adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` `len(Prerelease|BuildMetadata)` container-surface fallout).
+177. `Leaf 10.5.24` is complete.
+   - plan/scope check: shared runtime-header hardening + focused runtime regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared runtime fixes:
+     - `include/rusty/rusty.hpp`: hardened `rusty::default_value<T>()` fallback selection so non-default-constructible empty-surface types resolve via `T::empty()` before value-init fallback.
+     - `include/rusty/array.hpp`: extended `rusty::len(const Container&)` with `as_str()` fallback and requires-gated `std::size` terminal path, preventing unconditional container-size instantiation failures on string-like wrappers.
+   - focused regressions:
+     - `test_default_value_prefers_empty_for_non_default_constructible_types`
+     - `test_len_supports_as_str_wrappers_without_size_surface`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-24-1775879000 --keep-work-dirs`
+   - deterministic semver frontier movement:
+     - previous Stage D compile-head family at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` (`default_value<identifier::Identifier>()` constructor mismatch) and adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` (`len(Prerelease|BuildMetadata)` `std::size` mismatch) is removed; Stage D now builds successfully.
+     - new deterministic frontier moved to Stage E runtime failure: runner exits with `SIGSEGV` (exit 139) immediately after first printed pass, with gdb showing recursive `identifier::Identifier::is_empty()`/destructor chain rooted at `runner.cpp:811-815` and `runner.cpp:861-864` on the `test_align` path.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-24-1775879000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared in runtime headers with shape-gated fallback logic, with no generated-text patching and no crate-specific rewrites/scripts.
+178. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.24` (starting with `runner.cpp:811-815` `Identifier::is_empty` local-empty/forget recursion trigger and adjacent `runner.cpp:861-864` destructor `is_empty_or_inline` recursion causing `SIGSEGV` on `test_align`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
