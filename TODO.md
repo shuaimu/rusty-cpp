@@ -3516,7 +3516,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-38a-1775903800/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-39a-1775905600/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime adapters; no crate-specific scripts, no generated C++ patching, and no blanket receiver rewrites were introduced.
-        - [ ] Leaf 10.5.40: Collapse the post-10.5.39 deterministic full-matrix `bitflags` Stage D tuple-harmonization + helper-surface + pointer-call-shape family generically (starting with `runner.cpp:3123/3171` `std::array` tuple CTAD mismatch, `runner.cpp:4405` `|=` surface gap, and `runner.cpp:5967/5994` unresolved `write_hex`/`parse_hex`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+        - [x] *done* Leaf 10.5.40: Collapse the post-10.5.39 deterministic full-matrix `bitflags` Stage D tuple-harmonization + helper-surface + pointer-call-shape family generically (starting with `runner.cpp:3123/3171` `std::array` tuple CTAD mismatch, `runner.cpp:4405` `|=` surface gap, and `runner.cpp:5967/5994` unresolved `write_hex`/`parse_hex`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
           - [x] *done* Leaf 10.5.40.1: Collapse the first deterministic `std::array` tuple CTAD harmonization head (`runner.cpp:3123/3171`) by propagating element expected-types through `into_vec(box_new([...]))` tuple-array payload lowering and emitting tuple elements with stable typed shape.
             - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared transpiler lowering + focused regressions) and did not require additional decomposition.
             - Root-cause findings:
@@ -3808,6 +3808,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - focused passing repro: `/tmp/rusty-parity-matrix-10-5-40-10n-1775915403/bitflags/{baseline.txt,build.log,run.log,matrix.log}`
               - full passing matrix: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape gated (no crate-specific scripts and no generated C++ patching).
+          - [x] *done* Leaf 10.5.40.11: Harden lazy if-let statement-lowering type probes so TRY macros are never emitted inside `decltype` template arguments (fixes deterministic `bitflags` Stage D regression rooted at `parser::from_str` lazy else probe shape), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: stayed under the <1000 LOC guardrail (small shared codegen hardening + one focused regression + matrix rerun), so no additional decomposition was needed.
+            - Root-cause findings:
+              - lazy if-let lowering used `std::remove_cvref_t<decltype((else_value))>` for auto-typed storage.
+              - when `else_value` lowered from `?`, it contained `RUSTY_TRY_INTO(...)`, and GCC rejects statement-expression macros in template-argument contexts (`decltype((RUSTY_TRY...))`).
+            - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+              - added TRY-macro detection for emitted expression text.
+              - for root-try else branches, lazy optional storage type probing now uses macro-free unwrap typing from the try operand (`decltype(((operand).unwrap()))`) instead of `decltype((RUSTY_TRY...))`.
+              - preserved existing runtime branch semantics: else branch still emits `RUSTY_TRY*` in statement context for outer-function early returns.
+            - Added focused fixture-agnostic regression:
+              - `test_leaf10540_if_let_lazy_optional_probe_avoids_try_macro_decltype`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler test_leaf10540_if_let_lazy_optional_probe_avoids_try_macro_decltype -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-iflet-try-decltype-1775920200 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - prior deterministic matrix failure (`bitflags` Stage D `decltype((RUSTY_TRY_INTO(...)))` template-argument rejection) is removed.
+              - full seven-crate parity matrix passes (`total=7`, `pass=7`, `fail=0`).
+            - Canonical artifacts:
+              - full matrix rerun: `/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...`
+              - failing-head predecessor: `/tmp/rusty-parity-matrix-4-15-4-3-3-3-1775916043/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shared and shape-gated in AST-aware codegen; no crate-specific scripts, no generated C++ patching, and no blanket method-call rewrites.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

@@ -22163,6 +22163,31 @@ impl CodeGen {
         self.first_try_operand_expr(expr).is_some()
     }
 
+    fn expr_text_contains_try_macro_invocation(&self, text: &str) -> bool {
+        [
+            "RUSTY_TRY(",
+            "RUSTY_TRY_INTO(",
+            "RUSTY_TRY_OPT(",
+            "RUSTY_CO_TRY(",
+            "RUSTY_CO_TRY_INTO(",
+            "RUSTY_CO_TRY_OPT(",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle))
+    }
+
+    fn root_try_operand_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
+        match expr {
+            syn::Expr::Try(try_expr) => Some(try_expr.expr.as_ref()),
+            syn::Expr::Paren(paren) => self.root_try_operand_expr(&paren.expr),
+            syn::Expr::Group(group) => self.root_try_operand_expr(&group.expr),
+            syn::Expr::Block(block_expr) => self
+                .extract_single_expr_from_block(&block_expr.block)
+                .and_then(|single| self.root_try_operand_expr(single)),
+            _ => None,
+        }
+    }
+
     fn first_try_operand_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
         match expr {
             syn::Expr::Try(try_expr) => Some(try_expr.expr.as_ref()),
@@ -22334,7 +22359,19 @@ impl CodeGen {
                 || type_string_has_auto_placeholder(&init_decl_type)
             {
                 let else_value = else_result.as_ref()?;
-                format!("std::remove_cvref_t<decltype(({}))>", else_value)
+                if self.expr_text_contains_try_macro_invocation(else_value) {
+                    if let Some(try_operand) = self.root_try_operand_expr(else_branch.as_ref()) {
+                        let try_operand_value = self.emit_expr_to_string(try_operand);
+                        format!(
+                            "std::remove_cvref_t<decltype((({}).unwrap()))>",
+                            try_operand_value
+                        )
+                    } else {
+                        format!("std::remove_cvref_t<decltype(({}))>", else_value)
+                    }
+                } else {
+                    format!("std::remove_cvref_t<decltype(({}))>", else_value)
+                }
             } else {
                 init_decl_type.clone()
             };
@@ -39074,6 +39111,41 @@ mod tests {
         assert!(
             !out.contains("const auto text_shadow1 = text;"),
             "statement-lowered if-init temp must not be const when branch assigns to it, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10540_if_let_lazy_optional_probe_avoids_try_macro_decltype() {
+        let out = transpile_str(
+            r#"
+            fn parse_hex(flag: &str) -> Result<i32, i32> { Ok(1) }
+            fn from_name(flag: &str) -> Result<i32, i32> { Ok(2) }
+            fn parse(input: Option<&str>, flag: &str) -> Result<i32, i32> {
+                let parsed_flag = if let Some(text) = input {
+                    let bits = parse_hex(text)?;
+                    bits + 1
+                } else {
+                    from_name(flag)?
+                };
+                Ok(parsed_flag)
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("decltype((RUSTY_TRY") && !out.contains("decltype((RUSTY_CO_TRY"),
+            "lazy if-let storage type probe must avoid TRY macros in decltype context, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains(".unwrap()))>> _iflet_value"),
+            "lazy if-let storage probe should infer type from a macro-free unwrap expression, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("else { _iflet_value0.emplace(RUSTY_TRY_INTO(from_name(")
+                || out.contains("else { _iflet_value1.emplace(RUSTY_TRY_INTO(from_name("),
+            "runtime else branch should still preserve TRY macro for outer-function early return semantics, got:\n{}",
             out
         );
     }
