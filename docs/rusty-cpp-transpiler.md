@@ -4098,7 +4098,24 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1858` (`/* TODO: if-expression */` in `matches_caret` lambda return-shape path), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-10-1775865623/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in runtime-match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-164. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.10` (`runner.cpp:1858` `/* TODO: if-expression */` lambda return-shape head in `matches_caret`, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
+164. `Leaf 10.5.11` is complete.
+   - plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - expanded try-style runtime match return-arm detection to support nested return-flow arm-body shapes (`if ... { return ... } else { return ... }`), not only direct `return` tails.
+     - added nested return-flow statement emission for try-style runtime match lowering so return arms with nested `if`/`block` shapes lower as concrete return-flow statements instead of `/* TODO: if-expression */` placeholders.
+   - focused regression:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10511 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-11-1775866015 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1858` (`/* TODO: if-expression */` return-shape in `matches_caret`) is removed.
+     - new deterministic head starts at `runner.cpp:1907` (invalid `static_cast` from `identifier::Identifier` to `uintptr_t` in `identifier::inline_len`), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-11-1775866015/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in try-style/runtime-match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+165. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.11` (`runner.cpp:1907` invalid `static_cast` from `identifier::Identifier` to `uintptr_t` in `identifier::inline_len`, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

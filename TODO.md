@@ -2840,6 +2840,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-10-1775865623/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed AST-shape-gated in core runtime-match lowering and avoided global/post-generation text patching and crate-specific rewrites.
+        - [x] *done* Leaf 10.5.11: Collapse the post-10.5.10 deterministic semver Stage D runtime return-arm nested-if match family generically (starting with `runner.cpp:1858` `/* TODO: if-expression */` lambda return-shape fallout in `matches_caret`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+            - Expanded try-style runtime match detection to recognize return-flow arms where the arm body is an `if` expression whose branches return (`expr_is_try_style_return_flow`), not just direct `return` expressions.
+            - Added return-flow statement emission for nested `if`/`block` return-arm shapes (`emit_try_style_return_flow_statement`) and wired `emit_try_style_runtime_match_expr` to use it, eliminating fallback to `/* TODO: if-expression */` in runtime Option/Result return-arm lowering.
+          - Added focused fixture-agnostic regression:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10511 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-11-1775866015 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - Previous first hard-error family at `runner.cpp:1858` (`/* TODO: if-expression */` return-shape in `matches_caret`) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1907` (invalid `static_cast` from `identifier::Identifier` to `uintptr_t` in `identifier::inline_len`), with adjacent downstream runtime Option `std::visit` fallout still present later at `runner.cpp:2056`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-11-1775866015/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed AST-shape-gated in core try-style/runtime-match lowering and avoided generated-text patching or crate-specific rewrites.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

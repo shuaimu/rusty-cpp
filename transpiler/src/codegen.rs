@@ -20058,8 +20058,77 @@ impl CodeGen {
     fn match_expr_has_explicit_return_arm(&self, match_expr: &syn::ExprMatch) -> bool {
         match_expr.arms.iter().any(|arm| {
             self.extract_value_expr(&arm.body)
-                .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)))
+                .is_some_and(|expr| self.expr_is_try_style_return_flow(expr))
         })
+    }
+
+    fn expr_is_try_style_return_flow(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Return(_) => true,
+            syn::Expr::Block(block_expr) => self
+                .single_stmt_expr_from_block(&block_expr.block)
+                .is_some_and(|inner| self.expr_is_try_style_return_flow(inner)),
+            syn::Expr::If(if_expr) => {
+                let Some((_, else_expr)) = &if_expr.else_branch else {
+                    return false;
+                };
+                self.single_stmt_expr_from_block(&if_expr.then_branch)
+                    .is_some_and(|then_expr| self.expr_is_try_style_return_flow(then_expr))
+                    && self.expr_is_try_style_return_flow(else_expr)
+            }
+            _ => false,
+        }
+    }
+
+    fn single_stmt_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
+        if block.stmts.len() != 1 {
+            return None;
+        }
+        match &block.stmts[0] {
+            syn::Stmt::Expr(expr, _) => Some(expr),
+            _ => None,
+        }
+    }
+
+    fn emit_try_style_return_flow_statement(
+        &self,
+        expr: &syn::Expr,
+        binding_map: &HashMap<String, String>,
+    ) -> Option<String> {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Return(ret) => {
+                let keyword = if self.in_async { "co_return" } else { "return" };
+                let stmt = match &ret.expr {
+                    Some(value_expr) => format!(
+                        "{} {};",
+                        keyword,
+                        self.emit_expr_with_try_style_binding_scope(
+                            value_expr,
+                            self.current_return_type_hint(),
+                            binding_map,
+                        )
+                    ),
+                    None => format!("{};", keyword),
+                };
+                Some(stmt)
+            }
+            syn::Expr::Block(block_expr) => {
+                let inner = self.single_stmt_expr_from_block(&block_expr.block)?;
+                self.emit_try_style_return_flow_statement(inner, binding_map)
+            }
+            syn::Expr::If(if_expr) => {
+                let (_, else_expr) = if_expr.else_branch.as_ref()?;
+                let then_expr = self.single_stmt_expr_from_block(&if_expr.then_branch)?;
+                let cond = self.emit_expr_with_try_style_binding_scope(&if_expr.cond, None, binding_map);
+                let then_stmt = self.emit_try_style_return_flow_statement(then_expr, binding_map)?;
+                let else_stmt = self.emit_try_style_return_flow_statement(else_expr, binding_map)?;
+                Some(format!(
+                    "if ({}) {{ {} }} else {{ {} }}",
+                    cond, then_stmt, else_stmt
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn emit_expr_with_try_style_binding_scope(
@@ -20184,7 +20253,7 @@ impl CodeGen {
         for arm in &match_expr.arms {
             let is_return = self
                 .extract_value_expr(&arm.body)
-                .is_some_and(|expr| matches!(expr, syn::Expr::Return(_)));
+                .is_some_and(|expr| self.expr_is_try_style_return_flow(expr));
             if is_return {
                 if return_arm.is_some() {
                     return None;
@@ -20236,24 +20305,9 @@ impl CodeGen {
             )
         };
 
-        let return_stmt = match self.extract_value_expr(&return_arm.body) {
-            Some(syn::Expr::Return(ret)) => {
-                let keyword = if self.in_async { "co_return" } else { "return" };
-                match &ret.expr {
-                    Some(expr) => format!(
-                        "{} {}",
-                        keyword,
-                        self.emit_expr_with_try_style_binding_scope(
-                            expr,
-                            self.current_return_type_hint(),
-                            &return_binding_map,
-                        )
-                    ),
-                    None => keyword.to_string(),
-                }
-            }
-            _ => return None,
-        };
+        let return_expr = self.extract_value_expr(&return_arm.body)?;
+        let return_stmt =
+            self.emit_try_style_return_flow_statement(return_expr, &return_binding_map)?;
 
         let mut scrutinee =
             self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
@@ -20288,7 +20342,7 @@ impl CodeGen {
         };
 
         Some(format!(
-            "({{ auto&& _m = {}; {} _match_value; if ({}) {{ {}_match_value = {}; }} else {{ {}{}{}; }} _match_value; }})",
+            "({{ auto&& _m = {}; {} _match_value; if ({}) {{ {}_match_value = {}; }} else {{ {}{}{} }} _match_value; }})",
             scrutinee,
             value_ty,
             success_cond,
@@ -28172,6 +28226,47 @@ mod tests {
         assert!(
             !out.contains("std::visit(overloaded {"),
             "Result payload literal-pattern match should not lower via std::visit, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo() {
+        let out = transpile_str(
+            r#"
+            fn f(opt: Option<usize>, flag: bool) -> bool {
+                let value = match opt {
+                    Some(value) => value,
+                    None => {
+                        if flag {
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    }
+                };
+                value > 0
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_some())"),
+            "runtime Option return-arm match should use is_some dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("if (flag) { return true; } else { return false; }"),
+            "return-arm if-expression should lower as return-flow statements, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "return-arm if-expression should not emit TODO placeholder, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "runtime Option return-arm match should not lower via std::visit, got:\n{}",
             out
         );
     }
