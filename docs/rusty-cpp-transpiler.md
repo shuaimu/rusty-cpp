@@ -4465,7 +4465,27 @@ Active work items:
      - previous head capture: `/tmp/rusty-parity-matrix-rerun-top-1775887363/either/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
      - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-shape-gated in core Option constructor lowering; no crate-specific rewrites/scripts or generated-text patching were introduced.
-183. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D family after `10.5.29` (starting with comparator/member-shape emission at `runner.cpp:803`).
+183. `Leaf 10.5.30` is complete.
+   - plan/scope check: shared transpiler-only lookup hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - root-cause finding:
+     - non-`self` field access rename recovery relied on bare `Type::Path` receiver lookup, so reference-typed receivers (`&Type`) dropped field-rename metadata and emitted method-name member references (`other.element`) instead of renamed fields (`other.element_field`).
+   - implemented shared fix in `transpiler/src/codegen.rs`:
+     - hardened `lookup_field_type_from_type` and `lookup_field_cpp_name_from_type` to peel reference/paren/group wrappers before struct-field metadata lookup.
+   - focused regression:
+     - `test_leaf10530_nonself_field_access_uses_renamed_member_for_ref_typed_receiver`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler test_leaf10530_nonself_field_access_uses_renamed_member_for_ref_typed_receiver -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41542_field_name_collision_with_method_is_renamed -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-30-1775891702 --keep-work-dirs`
+   - deterministic full-matrix frontier movement:
+     - previous first hard-error family at `runner.cpp:803/806/810` (`other.element` member-function reference misuse) is removed.
+     - new first hard-error family is declaration-order/local-type-order fallout at `runner.cpp:823` (`CAPERROR` undeclared in inline method) and `runner.cpp:1050` (`BackshiftOnDrop` unknown type in local callable signature).
+   - canonical artifacts:
+     - previous head capture: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-shape-gated in field-name recovery paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
+184. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D declaration-order/local-type-order family after `10.5.30` (starting with `CAPERROR`/`BackshiftOnDrop` at `runner.cpp:823/1050`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

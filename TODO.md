@@ -3244,6 +3244,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous `either` first-head capture: `/tmp/rusty-parity-matrix-rerun-top-1775887363/either/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix full-matrix rerun: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in core Option constructor lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+        - [x] *done* Leaf 10.5.30: Collapse the post-10.5.29 deterministic full-matrix `arrayvec` Stage D non-`self` field/member-collision receiver family generically (starting with `runner.cpp:803/806/810` `other.element` emitted as non-called member-function reference inside `CapacityError<T>` comparators), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only lookup hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - non-`self` field access name recovery (`other.field`) relies on receiver type lookup; for reference-typed receivers (`&Type`, `&mut Type`) the lookup path only handled bare `Type::Path`, so field-rename metadata was dropped.
+            - when a struct field is renamed due method/field collision (for example `element` field + `element()` method), `self.element` correctly lowered to `this->element_field`, but `other.element` degraded to `other.element` (method reference) and failed Stage D.
+          - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+            - hardened `lookup_field_type_from_type` and `lookup_field_cpp_name_from_type` to peel reference/paren/group wrappers before resolving struct-field metadata, so renamed-field recovery works for reference-typed non-`self` receivers.
+          - Added focused fixture-agnostic regression:
+            - `test_leaf10530_nonself_field_access_uses_renamed_member_for_ref_typed_receiver`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf10530_nonself_field_access_uses_renamed_member_for_ref_typed_receiver -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41542_field_name_collision_with_method_is_renamed -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-30-1775891702 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `arrayvec` Stage D (`runner.cpp:803/806/810` non-called member-function reference from `other.element`) is removed.
+            - new first hard-error family is declaration-order/local-type-order fallout in the same crate (`runner.cpp:823` `CAPERROR` undeclared in inline `fmt` body and `runner.cpp:1050` `BackshiftOnDrop` unknown type in local callable signature), followed by downstream iterator/return-shape errors.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in core field-name recovery paths, with no crate-specific rewrites/scripts and no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

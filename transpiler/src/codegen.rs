@@ -15316,6 +15316,7 @@ impl CodeGen {
     }
 
     fn lookup_field_type_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
             return None;
         };
@@ -15353,6 +15354,7 @@ impl CodeGen {
     }
 
     fn lookup_field_cpp_name_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<String> {
+        let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
             return None;
         };
@@ -34564,6 +34566,27 @@ mod tests {
         assert!(out.contains("size_t len() const"));
         assert!(out.contains("return this->len_field;"));
         assert!(!out.contains("size_t len;"));
+    }
+
+    #[test]
+    fn test_leaf10530_nonself_field_access_uses_renamed_member_for_ref_typed_receiver() {
+        let out = transpile_str(
+            r#"
+            struct CapacityError<T> {
+                element: T,
+            }
+            impl<T: Copy + PartialEq> CapacityError<T> {
+                fn element(&self) -> T { self.element }
+                fn eq_with(&self, other: &CapacityError<T>) -> bool {
+                    self.element == other.element
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("T element_field;"));
+        assert!(out.contains("T element() const"));
+        assert!(out.contains("return this->element_field == other.element_field;"));
+        assert!(!out.contains("other.element;"));
     }
 
     #[test]
