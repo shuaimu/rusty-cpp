@@ -13041,6 +13041,17 @@ impl CodeGen {
             }
             return syn::parse_str::<syn::Type>("&[u8]").ok();
         }
+        if method == "split_at" && mc.args.len() == 1 {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                if !self.is_known_string_like_type(&receiver_ty) {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+            // Rust `str::split_at` returns a pair of `&str`.
+            return syn::parse_str::<syn::Type>("(&str, &str)").ok();
+        }
 
         if method == "all" && mc.args.len() == 1 && self.is_iterator_like_receiver_expr(&mc.receiver)
         {
@@ -15496,6 +15507,21 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::str_runtime::strip_prefix({}, {})", receiver, args[0]);
+        }
+        if method_name == "split_at" && args.len() == 1 {
+            if self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.is_known_string_like_type(ty))
+            {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("rusty::split_at({}, {})", receiver, args[0]);
+            }
         }
         if method_name == "split" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -34183,6 +34209,52 @@ mod tests {
             "checked_add RHS should be normalized to receiver type, got: {}", out);
         assert!(out.contains("static_cast<uint64_t>"),
             "source cast shape should be preserved under RHS normalization, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf10517_str_split_at_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(input: &str, n: usize) -> (&str, &str) {
+                input.split_at(n)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::split_at(input,"),
+            "split_at on string-like receiver should lower to runtime helper, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("input.split_at("),
+            "split_at should not remain a member call on std::string_view, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10517_non_string_split_at_method_is_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct SpanWrap;
+            impl SpanWrap {
+                fn split_at(&self, idx: usize) -> usize { idx }
+            }
+            fn f(v: SpanWrap) -> usize {
+                v.split_at(3)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("v.split_at(3)"),
+            "non-string receiver split_at should stay as member call, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("rusty::split_at(v,"),
+            "non-string receiver split_at should not lower to string helper, got: {}",
+            out
+        );
     }
 
     #[test]

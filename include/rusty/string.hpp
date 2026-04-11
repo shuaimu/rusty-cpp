@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <iterator>
 #include <ostream>
+#include <cstdint>
 #include <string_view>
+#include <tuple>
 #include <vector>
 #include <cctype>
 #include <span>
@@ -647,6 +649,23 @@ public:
 // @lifetime: (&'a) -> &'a
 inline std::span<const uint8_t> as_bytes(std::string_view sv) {
     return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
+}
+
+// Helper function: Rust str::split_at() equivalent.
+// Splits a string_view into (left, right) at the provided byte offset.
+// Rust requires UTF-8 character boundaries for `str::split_at`; enforce the
+// same boundary check for borrowed UTF-8 string views.
+inline std::tuple<std::string_view, std::string_view> split_at(std::string_view sv, size_t mid) {
+    if (mid > sv.size()) {
+        throw std::out_of_range("split_at index out of bounds");
+    }
+    if (mid < sv.size()) {
+        const auto byte = static_cast<unsigned char>(sv[mid]);
+        if ((byte & 0xC0u) == 0x80u) {
+            throw std::out_of_range("split_at index is not a UTF-8 character boundary");
+        }
+    }
+    return std::make_tuple(sv.substr(0, mid), sv.substr(mid));
 }
 
 // Symmetric comparison: allow `"str" == rusty::String` and `"str" == rusty::str`

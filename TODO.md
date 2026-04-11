@@ -2968,6 +2968,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Canonical artifacts:
               - `/tmp/rusty-parity-matrix-10-5-16-1775877400/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow-shape-gated in core match lowering, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.17: Collapse the post-10.5.16 deterministic semver Stage D string-slice split helper family generically (starting with `runner.cpp:2094` `std::string_view` missing `split_at` in `parse::identifier`), add fixture-agnostic regressions, then re-run semver parity.
+          - [x] *done* Leaf 10.5.17.1: Implement shared transpiler/runtime support for `str::split_at` lowering (no crate-specific scripts): add shape-gated lowering from string-like method-call receivers to shared runtime helper and provide shared helper surface for tuple split return semantics.
+            - Plan/scope check: transpiler/runtime helper updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+            - Implemented shared transpiler/runtime fixes:
+              - `transpiler/src/codegen.rs`:
+                - added shape-gated lowering for `split_at` on known string-like receivers (`rusty::String`/`std::string`/`std::string_view` family) to emit `rusty::split_at(receiver, idx)` instead of invalid C++ member-call emission on `std::string_view`.
+                - added method-result type inference for `split_at` to `(&str, &str)` in local-binding inference paths so downstream typed lowering remains stable when split results are destructured.
+              - `include/rusty/string.hpp`:
+                - added shared `rusty::split_at(std::string_view, size_t)` helper returning `std::tuple<std::string_view, std::string_view>`.
+                - helper enforces Rust-like bounds and UTF-8 boundary checks (reject continuation-byte split offsets), and this header now includes `<cstdint>` explicitly for `uint8_t`-based helper surfaces.
+            - Added focused fixture-agnostic regressions:
+              - `transpiler/src/codegen.rs`:
+                - `test_leaf10517_str_split_at_lowers_to_runtime_helper`
+                - `test_leaf10517_non_string_split_at_method_is_not_rewritten`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf10517 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-17-1775870140 --keep-work-dirs`
+          - [x] *done* Leaf 10.5.17.2: Re-run semver parity after 10.5.17.1, record deterministic first-head movement with canonical artifacts, and update active-frontier docs/TODO status.
+            - Re-ran semver parity:
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-17-1775870140 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:2094` (`std::string_view` missing `split_at` method in `parse::identifier`) is removed.
+              - new deterministic Stage D head starts at `runner.cpp:2129` (`parse::comparator` emits `use of 'op' before deduction of 'auto'` in destructuring/call-order surface), with adjacent downstream structured-binding/void-deduction fallback errors at `runner.cpp:2133+`.
+            - Canonical artifacts:
+              - `/tmp/rusty-parity-matrix-10-5-17-1775870140/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and receiver-shape/type-gated in core method lowering/runtime helpers, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

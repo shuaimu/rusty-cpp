@@ -4209,7 +4209,29 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2094` (`std::string_view` has no `split_at` in `parse::identifier` boundary return path), with adjacent comparator/local-deduction fallback errors later at `runner.cpp:2129+`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-16-1775877400/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow-shape-gated in core match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-170. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.16` (`runner.cpp:2094` `std::string_view` missing `split_at` in `parse::identifier`, with adjacent downstream comparator/local-deduction fallback at `runner.cpp:2129+`).
+170. `Leaf 10.5.17` is complete.
+   - plan/scope check: shared transpiler/runtime helper updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler/runtime fixes:
+     - `transpiler/src/codegen.rs`:
+       - added shape-gated lowering for `split_at` on known string-like receivers to `rusty::split_at(receiver, idx)` so `std::string_view` call sites no longer emit invalid `.split_at(...)` member calls.
+       - added method-result type inference for `split_at` to `(&str, &str)` in local-binding inference paths to keep destructuring/type-context lowering stable.
+     - `include/rusty/string.hpp`:
+       - added shared `rusty::split_at(std::string_view, size_t)` helper returning `std::tuple<std::string_view, std::string_view>`.
+       - helper enforces Rust-like bounds and UTF-8 boundary checks (continuation-byte split offsets are rejected) and the header now includes `<cstdint>` explicitly for `uint8_t` helper surfaces.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10517_str_split_at_lowers_to_runtime_helper`
+       - `test_leaf10517_non_string_split_at_method_is_not_rewritten`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10517 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-17-1775870140 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:2094` (`std::string_view` missing `split_at` in `parse::identifier`) is removed.
+     - new deterministic head starts at `runner.cpp:2129` (`parse::comparator` emits `use of 'op' before deduction of 'auto'`), with adjacent structured-binding/void-deduction fallout at `runner.cpp:2133+`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-17-1775870140/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and receiver-shape/type-gated in core method lowering/runtime helpers, with no crate-specific rewrites/scripts and no generated-text patching.
+171. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.17` (`runner.cpp:2129` `parse::comparator` destructuring/call-order `use of 'op' before deduction of 'auto'`, with adjacent structured-binding/void-deduction fallout at `runner.cpp:2133+`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
