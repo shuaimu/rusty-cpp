@@ -3803,6 +3803,143 @@ impl CodeGen {
         None
     }
 
+    fn substitute_type_params_in_type(
+        &self,
+        ty: &syn::Type,
+        substitutions: &HashMap<String, syn::Type>,
+    ) -> syn::Type {
+        fn recurse(ty: &mut syn::Type, substitutions: &HashMap<String, syn::Type>) {
+            match ty {
+                syn::Type::Path(tp) => {
+                    if tp.qself.is_none() {
+                        if tp.path.segments.len() == 1 {
+                            let name = tp.path.segments[0].ident.to_string();
+                            if let Some(replacement) = substitutions.get(&name) {
+                                *ty = replacement.clone();
+                                return;
+                            }
+                        } else if let Some(first_seg) = tp.path.segments.first() {
+                            let name = first_seg.ident.to_string();
+                            if let Some(syn::Type::Path(replacement_path)) =
+                                substitutions.get(&name)
+                            {
+                                if replacement_path.qself.is_none() {
+                                    let mut merged = syn::punctuated::Punctuated::new();
+                                    for seg in replacement_path.path.segments.iter() {
+                                        merged.push(seg.clone());
+                                    }
+                                    for seg in tp.path.segments.iter().skip(1) {
+                                        merged.push(seg.clone());
+                                    }
+                                    tp.path.leading_colon =
+                                        replacement_path.path.leading_colon.or(tp.path.leading_colon);
+                                    tp.path.segments = merged;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(qself) = &mut tp.qself {
+                        recurse(&mut qself.ty, substitutions);
+                    }
+                    for seg in tp.path.segments.iter_mut() {
+                        if let syn::PathArguments::AngleBracketed(args) = &mut seg.arguments {
+                            for arg in args.args.iter_mut() {
+                                match arg {
+                                    syn::GenericArgument::Type(inner) => {
+                                        recurse(inner, substitutions);
+                                    }
+                                    syn::GenericArgument::AssocType(assoc) => {
+                                        recurse(&mut assoc.ty, substitutions);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Type::Reference(r) => recurse(&mut r.elem, substitutions),
+                syn::Type::Ptr(p) => recurse(&mut p.elem, substitutions),
+                syn::Type::Slice(s) => recurse(&mut s.elem, substitutions),
+                syn::Type::Array(a) => recurse(&mut a.elem, substitutions),
+                syn::Type::Paren(p) => recurse(&mut p.elem, substitutions),
+                syn::Type::Group(g) => recurse(&mut g.elem, substitutions),
+                syn::Type::Tuple(t) => {
+                    for elem in t.elems.iter_mut() {
+                        recurse(elem, substitutions);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut out = ty.clone();
+        recurse(&mut out, substitutions);
+        out
+    }
+
+    fn function_call_type_arg_substitutions(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
+        if type_params.is_empty() {
+            return None;
+        }
+
+        let mut provided_type_args: Vec<syn::Type> = Vec::new();
+        if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+            if let Some(last_seg) = path_expr.path.segments.last() {
+                if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                    provided_type_args.extend(args.args.iter().filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
+                            Some(ty.clone())
+                        }
+                        _ => None,
+                    }));
+                }
+            }
+        }
+
+        if provided_type_args.is_empty() {
+            if let Some(inferred) = self.infer_template_args_from_fn_path_return_type(call) {
+                for inferred_arg in inferred {
+                    if let Ok(parsed_ty) = syn::parse_str::<syn::Type>(&inferred_arg) {
+                        provided_type_args.push(parsed_ty);
+                    }
+                }
+            }
+        }
+
+        if provided_type_args.is_empty() {
+            return None;
+        }
+
+        let mut substitutions = HashMap::new();
+        for (param, concrete_ty) in type_params.iter().zip(provided_type_args.into_iter()) {
+            substitutions.insert(param.clone(), concrete_ty);
+        }
+        if substitutions.is_empty() {
+            None
+        } else {
+            Some(substitutions)
+        }
+    }
+
+    fn lookup_function_arg_expected_type_for_call(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+        substitutions: Option<&HashMap<String, syn::Type>>,
+    ) -> Option<syn::Type> {
+        let expected = self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx)?;
+        match substitutions {
+            Some(substitutions) if !substitutions.is_empty() => {
+                Some(self.substitute_type_params_in_type(expected, substitutions))
+            }
+            _ => Some(expected.clone()),
+        }
+    }
+
     fn lookup_function_type_param_names<'a>(&'a self, func: &syn::Expr) -> Option<&'a Vec<String>> {
         let syn::Expr::Path(path_expr) = func else {
             return None;
@@ -8305,6 +8442,7 @@ impl CodeGen {
         let syn::Expr::Path(_) = call.func.as_ref() else {
             return;
         };
+        let substitutions = self.function_call_type_arg_substitutions(call);
         for (idx, arg) in call.args.iter().enumerate() {
             let Some(name) = extract_simple_local_ident(arg) else {
                 continue;
@@ -8315,12 +8453,13 @@ impl CodeGen {
             let Some(owner_target) = candidate_owner_targets.get(&name) else {
                 continue;
             };
-            let Some(expected_ty) = self.lookup_function_arg_expected_type(call.func.as_ref(), idx)
+            let Some(expected_ty) =
+                self.lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
             else {
                 continue;
             };
             let Some(hint_ty) = self
-                .placeholder_hint_from_expected_argument_type(owner_target, expected_ty)
+                .placeholder_hint_from_expected_argument_type(owner_target, &expected_ty)
             else {
                 continue;
             };
@@ -17615,6 +17754,24 @@ impl CodeGen {
             }
             syn::Expr::Group(g) => self.emit_expr_to_string_with_expected(&g.expr, expected_ty),
             syn::Expr::Tuple(tup) => {
+                if let Some(expected_tuple_ty) = self.expected_tuple_type(expected_ty)
+                    && self.tuple_expected_needs_typed_constructor(expected_tuple_ty)
+                {
+                    let elems: Vec<String> = tup
+                        .elems
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, e)| {
+                            self.emit_expr_to_string_with_expected_and_move_if_needed(
+                                e,
+                                expected_tuple_ty.elems.iter().nth(idx),
+                            )
+                        })
+                        .collect();
+                    let expected_tuple_cpp =
+                        self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+                    return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
+                }
                 let elems: Vec<String> = tup
                     .elems
                     .iter()
@@ -17888,6 +18045,80 @@ impl CodeGen {
             syn::Type::Paren(p) => self.expected_reference_inner_type(Some(&p.elem)),
             syn::Type::Group(g) => self.expected_reference_inner_type(Some(&g.elem)),
             _ => None,
+        }
+    }
+
+    fn expected_tuple_type<'a>(
+        &self,
+        expected_ty: Option<&'a syn::Type>,
+    ) -> Option<&'a syn::TypeTuple> {
+        let ty = expected_ty?;
+        match ty {
+            syn::Type::Tuple(tuple) => Some(tuple),
+            syn::Type::Paren(p) => self.expected_tuple_type(Some(&p.elem)),
+            syn::Type::Group(g) => self.expected_tuple_type(Some(&g.elem)),
+            _ => None,
+        }
+    }
+
+    fn tuple_expected_needs_typed_constructor(&self, tuple_ty: &syn::TypeTuple) -> bool {
+        tuple_ty
+            .elems
+            .iter()
+            .any(|elem| self.type_needs_typed_tuple_ctor(elem))
+    }
+
+    fn type_needs_typed_tuple_ctor(&self, ty: &syn::Type) -> bool {
+        if self.should_soften_dependent_assoc_mode()
+            && (self.type_contains_dependent_assoc(ty)
+                || self.type_references_current_struct_assoc(ty))
+        {
+            return false;
+        }
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_some() {
+                    return true;
+                }
+                if tp.path.segments.len() >= 2
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| {
+                            seg.ident
+                                .to_string()
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_uppercase())
+                        })
+                {
+                    return true;
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner) => {
+                                self.type_needs_typed_tuple_ctor(inner)
+                            }
+                            _ => false,
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_needs_typed_tuple_ctor(&r.elem),
+            syn::Type::Ptr(p) => self.type_needs_typed_tuple_ctor(&p.elem),
+            syn::Type::Array(a) => self.type_needs_typed_tuple_ctor(&a.elem),
+            syn::Type::Slice(s) => self.type_needs_typed_tuple_ctor(&s.elem),
+            syn::Type::Paren(p) => self.type_needs_typed_tuple_ctor(&p.elem),
+            syn::Type::Group(g) => self.type_needs_typed_tuple_ctor(&g.elem),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_needs_typed_tuple_ctor(elem)),
+            _ => false,
         }
     }
 
@@ -18519,6 +18750,64 @@ impl CodeGen {
             syn::Type::Paren(p) => self.expected_result_type_arg(Some(&p.elem), index),
             syn::Type::Group(g) => self.expected_result_type_arg(Some(&g.elem), index),
             _ => None,
+        }
+    }
+
+    fn expected_option_type_arg<'a>(
+        &self,
+        expected_ty: Option<&'a syn::Type>,
+    ) -> Option<&'a syn::Type> {
+        let ty = expected_ty?;
+        match ty {
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                let last_ident = last.ident.to_string();
+                if last.ident != "Option" && !self.option_type_aliases.contains(&last_ident) {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
+            }
+            syn::Type::Reference(r) => self.expected_option_type_arg(Some(&r.elem)),
+            syn::Type::Paren(p) => self.expected_option_type_arg(Some(&p.elem)),
+            syn::Type::Group(g) => self.expected_option_type_arg(Some(&g.elem)),
+            _ => None,
+        }
+    }
+
+    fn option_inner_needs_typed_make_optional(&self, inner_ty: &syn::Type) -> bool {
+        if self.should_soften_dependent_assoc_mode()
+            && (self.type_contains_dependent_assoc(inner_ty)
+                || self.type_references_current_struct_assoc(inner_ty))
+        {
+            return false;
+        }
+        match inner_ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_some() {
+                    return true;
+                }
+                if tp.path.segments.len() >= 2 {
+                    if let Some(first) = tp.path.segments.first() {
+                        return first
+                            .ident
+                            .to_string()
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_uppercase());
+                    }
+                }
+                false
+            }
+            syn::Type::Reference(r) => self.option_inner_needs_typed_make_optional(&r.elem),
+            syn::Type::Paren(p) => self.option_inner_needs_typed_make_optional(&p.elem),
+            syn::Type::Group(g) => self.option_inner_needs_typed_make_optional(&g.elem),
+            _ => false,
         }
     }
 
@@ -19729,14 +20018,20 @@ impl CodeGen {
 
         // Map Rust Option::Some(x) → std::optional{x}
         if func == "Some" && call.args.len() == 1 {
+            let expected_inner_ty = self.expected_option_type_arg(expected_ty);
             if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
-                let arg = self.emit_expr_to_string(&call.args[0]);
+                let arg = self.emit_expr_to_string_with_expected(&call.args[0], expected_inner_ty);
                 return format!("rusty::Option<{}>({})", inner_cpp, arg);
             }
             if let Some(ref_arg) = self.emit_some_ref_constructor_arg(&call.args[0]) {
                 return format!("rusty::SomeRef({})", ref_arg);
             }
-            let arg = self.emit_expr_to_string(&call.args[0]);
+            let arg = self.emit_expr_to_string_with_expected(&call.args[0], expected_inner_ty);
+            if let Some(inner_ty) = expected_inner_ty
+                && self.option_inner_needs_typed_make_optional(inner_ty)
+            {
+                return format!("std::make_optional<{}>({})", self.map_type(inner_ty), arg);
+            }
             return format!("std::make_optional({})", arg);
         }
         // Map Rust conversion shim in expanded output.
@@ -19807,19 +20102,24 @@ impl CodeGen {
         }
 
         let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
+        let call_type_substitutions = self.function_call_type_arg_substitutions(call);
         let call_args: Vec<String> = call
             .args
             .iter()
             .enumerate()
             .map(|(idx, arg)| {
                 let style = self.lookup_function_arg_pass_style(&call.func, idx);
-                let expected_ty = self.lookup_function_arg_expected_type(&call.func, idx);
+                let expected_ty = self.lookup_function_arg_expected_type_for_call(
+                    call,
+                    idx,
+                    call_type_substitutions.as_ref(),
+                );
                 let callable_bound_arg_intent =
                     self.lookup_callable_param_bound_arg_intent(&call.func, idx);
                 self.emit_call_arg_with_pass_style(
                     arg,
                     style,
-                    expected_ty,
+                    expected_ty.as_ref(),
                     callable_type_param_fallback,
                     callable_bound_arg_intent,
                 )
@@ -19828,9 +20128,20 @@ impl CodeGen {
         let mut args = call_args.clone();
         let recovered_function_template_args =
             self.infer_function_type_template_args_from_pointer_call(call, &call_args);
+        let call_has_explicit_type_args = matches!(
+            call.func.as_ref(),
+            syn::Expr::Path(path_expr)
+                if path_expr
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::AngleBracketed(_)))
+        );
         // Also try to infer template args from a function-path last argument like `TypeName::all`
         // This handles cases where C++ template deduction cannot infer T from `typename T::Bits`
-        let fn_path_template_args = if recovered_function_template_args.is_some() {
+        let fn_path_template_args = if recovered_function_template_args.is_some()
+            || call_has_explicit_type_args
+        {
             None
         } else {
             self.infer_template_args_from_fn_path_return_type(call)
@@ -32492,6 +32803,127 @@ mod tests {
         assert!(
             out.contains("case_<TestFlags>"),
             "Generic call with fn path arg should emit explicit template args, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10536_call_arg_expected_types_specialize_from_explicit_turbofish() {
+        let expr: syn::Expr =
+            syn::parse_str("case_::<TestFlags>(Some(1 << 1), None, TestFlags::from_bits)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let mut cg = CodeGen::new();
+        cg.function_type_param_names
+            .insert("case_".to_string(), vec!["T".to_string()]);
+        cg.function_arg_expected_types.insert(
+            "case_".to_string(),
+            vec![
+                Some(parse_quote!(Option<T::Bits>)),
+                Some(parse_quote!(Option<T::Bits>)),
+                Some(parse_quote!(fn(T::Bits) -> Option<T>)),
+            ],
+        );
+        cg.local_declared_types.insert("TestFlags".to_string());
+
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert!(
+            out.contains("std::make_optional<TestFlags::Bits>("),
+            "expected Some payload specialization, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::Option<TestFlags::Bits>(rusty::None)"),
+            "expected None specialization, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Option<T::Bits>"),
+            "specialization should remove unresolved T::Bits, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::make_optional<T::Bits>("),
+            "Some path should not emit unresolved T::Bits, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10536_call_arg_expected_types_specialize_from_fn_path_inference() {
+        let expr: syn::Expr = syn::parse_str("case_(Some(1), None, TestFlags::from_bits)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let mut cg = CodeGen::new();
+        cg.function_type_param_names
+            .insert("case_".to_string(), vec!["T".to_string()]);
+        cg.function_arg_expected_types.insert(
+            "case_".to_string(),
+            vec![
+                Some(parse_quote!(Option<T::Bits>)),
+                Some(parse_quote!(Option<T::Bits>)),
+                Some(parse_quote!(fn(T::Bits) -> Option<T>)),
+            ],
+        );
+        cg.local_declared_types.insert("TestFlags".to_string());
+
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert!(
+            out.contains("case_<TestFlags>("),
+            "expected inferred template specialization on call, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::make_optional<TestFlags::Bits>("),
+            "expected Some payload specialization, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::Option<TestFlags::Bits>(rusty::None)"),
+            "expected None specialization, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Option<T::Bits>"),
+            "specialization should remove unresolved T::Bits, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10536_tuple_expected_context_uses_typed_tuple_constructor() {
+        let expr: syn::Expr =
+            syn::parse_str("case_(value, &[(value, 1 << 1)], TestFlags::bits)").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let mut cg = CodeGen::new();
+        cg.function_type_param_names
+            .insert("case_".to_string(), vec!["T".to_string()]);
+        cg.function_arg_expected_types.insert(
+            "case_".to_string(),
+            vec![
+                Some(parse_quote!(T)),
+                Some(parse_quote!(&[(T, T::Bits)])),
+                Some(parse_quote!(impl Fn(&T) -> T::Bits)),
+            ],
+        );
+        cg.local_declared_types.insert("TestFlags".to_string());
+
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert!(
+            out.contains("std::tuple<TestFlags, TestFlags::Bits>{"),
+            "expected typed tuple constructor under tuple expected context, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::make_tuple(value, 1 << 1)"),
+            "tuple element context should not degrade to untyped make_tuple, got:\n{}",
             out
         );
     }

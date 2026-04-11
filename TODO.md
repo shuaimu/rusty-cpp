@@ -3403,6 +3403,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-34d-1775893665/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-35b-1775894980/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in import/runtime helper lowering; no crate-specific scripts and no generated-text patching were introduced.
+        - [x] *done* Leaf 10.5.36: Collapse the post-10.5.35 deterministic full-matrix `bitflags` Stage D call-argument specialization and tuple/option constructor coercion family generically (starting with `runner.cpp:2714` `case_` span-tuple mismatch and adjacent bitflags tuple/option inference fallout through `runner.cpp:3334`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only call-arg expected-type specialization and targeted tuple/option constructor shaping updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - generic function call argument expected-type recovery did not specialize declared argument types with call-site template arguments (explicit turbofish or inferred fn-path substitutions), so associated-type payload contexts (`T::Bits`) were dropped before coercion.
+            - call-path generic fallback could append inferred template args even when explicit turbofish was already present, producing duplicated template argument emission.
+            - `Some(...)` and tuple literal lowering relied too broadly on untyped `std::make_optional(...)` / `std::make_tuple(...)`; associated-type coercion sites in bitflags needed selective typed constructor emission to preserve expected payload shape.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - added call-site type-parameter substitution for function arg expected-type lookup (`substitute_type_params_in_type`, `function_call_type_arg_substitutions`, `lookup_function_arg_expected_type_for_call`) and reused it in both call-arg emission and local placeholder hint recovery.
+            - gated fn-path inferred template-arg append behind explicit turbofish detection to avoid duplicate template argument emission on already-specialized calls.
+            - added expected-option inner-type analysis with targeted typed `std::make_optional<...>(...)` emission only for associated-type coercion sites that require it.
+            - added expected-tuple analysis with targeted `std::tuple<...>{...}` emission for associated-type tuple coercion contexts while preserving existing `std::make_tuple(...)` behavior elsewhere.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10536_call_arg_expected_types_specialize_from_explicit_turbofish`
+            - `test_leaf10536_call_arg_expected_types_specialize_from_fn_path_inference`
+            - `test_leaf10536_tuple_expected_context_uses_typed_tuple_constructor`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-36c-1775896673 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `bitflags` Stage D rooted at `runner.cpp:2714` (`case_` span tuple element coercion mismatch) and adjacent tuple/option inference fallout through `runner.cpp:3334` is removed.
+            - full-matrix frontier remains at `bitflags` Stage D and advances to the next deterministic compile family rooted at `runner.cpp:2833` (self-shadowed `auto value = value` initializer in assertion lowering), with adjacent iterator adapter/type-shape fallout at `runner.cpp:3121+` (`Vec<auto>` emission plus missing `.map()`/`.count()` member surfaces on `rusty::iter(...)` results).
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-35b-1775894980/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-36c-1775896673/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in generic call/constructor lowering paths, with no crate-specific scripts and no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
