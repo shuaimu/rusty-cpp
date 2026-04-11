@@ -16,13 +16,15 @@ namespace mem {
 
 namespace detail {
 inline std::unordered_map<const void*, std::size_t>& forgotten_addresses() {
-    static std::unordered_map<const void*, std::size_t> addresses;
-    return addresses;
+    // Keep storage alive for the entire process lifetime to avoid teardown-order
+    // crashes when global/static destructors still call forgotten-address APIs.
+    static auto* addresses = new std::unordered_map<const void*, std::size_t>();
+    return *addresses;
 }
 
 inline std::mutex& forgotten_addresses_mutex() {
-    static std::mutex mutex;
-    return mutex;
+    static auto* mutex = new std::mutex();
+    return *mutex;
 }
 
 template<typename T, typename = void>

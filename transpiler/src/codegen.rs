@@ -794,6 +794,7 @@ impl CodeGen {
         self.emit_expanded_test_wrappers();
 
         let mut prologue_text = self.emit_cpp_module_import_prologue();
+        prologue_text.push_str(&self.emit_merged_impl_namespace_forward_decls());
         if !self.unsupported_by_value_cycle_diagnostics.is_empty() {
             let mut diagnostics = self.unsupported_by_value_cycle_diagnostics.clone();
             diagnostics.sort();
@@ -852,6 +853,32 @@ impl CodeGen {
             out.push_str("import ");
             out.push_str(&import_path);
             out.push_str(";\n");
+        }
+        out.push('\n');
+        out
+    }
+
+    fn emit_merged_impl_namespace_forward_decls(&self) -> String {
+        let mut namespaces: Vec<String> = self
+            .impl_source_modules
+            .values()
+            .flat_map(|modules| modules.iter())
+            .map(|module| module.trim())
+            .filter(|module| !module.is_empty())
+            .map(|module| self.escape_and_rename_qualified_name(module))
+            .collect();
+        namespaces.sort();
+        namespaces.dedup();
+
+        if namespaces.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::new();
+        for ns in namespaces {
+            out.push_str("namespace ");
+            out.push_str(&ns);
+            out.push_str(" {}\n");
         }
         out.push('\n');
         out
@@ -2634,6 +2661,7 @@ impl CodeGen {
                         &raw_type_name,
                         module_path,
                         &self.declared_item_names,
+                        &self.local_declared_types,
                     );
 
                     let trait_name = impl_block
@@ -2773,6 +2801,7 @@ impl CodeGen {
                                     &raw_type_name,
                                     module_path,
                                     &self.declared_item_names,
+                                    &self.local_declared_types,
                                 );
                                 let entry = self.impl_blocks.entry(type_name.clone()).or_default();
                                 // Check if this is an operator trait impl (BitOr, BitAnd, etc.)
@@ -3880,7 +3909,12 @@ impl CodeGen {
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        qualify_impl_type_name(&raw, module_path, &self.declared_item_names)
+        qualify_impl_type_name(
+            &raw,
+            module_path,
+            &self.declared_item_names,
+            &self.local_declared_types,
+        )
     }
 
     fn collect_extension_trait_impl_methods(
@@ -3913,6 +3947,7 @@ impl CodeGen {
                         &raw_self_name,
                         module_path,
                         &self.declared_item_names,
+                        &self.local_declared_types,
                     );
                     if self.local_declared_types.contains(&raw_self_name)
                         || self.local_declared_types.contains(&scoped_self_name)
@@ -5822,11 +5857,17 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("};");
 
-            // Emit associated constants from impl blocks for C-like enums.
+            // Emit associated constants and display helpers from impl blocks for C-like enums.
             // C++ enum class can't have static members, so emit as standalone
             // inline constexpr with a namespaced name.
             let name_str = name.to_string();
-            if let Some(items) = self.impl_blocks.get(&name_str) {
+            let scoped_name = self.scoped_type_key(&name_str);
+            let enum_impl_items = self
+                .impl_blocks
+                .get(&scoped_name)
+                .or_else(|| self.impl_blocks.get(&name_str))
+                .cloned();
+            if let Some(items) = enum_impl_items {
                 for item in items.clone() {
                     if let syn::ImplItem::Const(c) = &item {
                         let const_name = escape_cpp_keyword(&c.ident.to_string());
@@ -5844,10 +5885,92 @@ impl CodeGen {
                             ty, name, const_name, expr
                         ));
                     }
+                    if let syn::ImplItem::Fn(method) = &item {
+                        self.emit_c_like_enum_fmt_helper(&name_str, method);
+                    }
                 }
             }
         }
         self.pop_type_param_scope();
+    }
+
+    fn emit_c_like_enum_fmt_helper(
+        &mut self,
+        enum_name: &str,
+        method: &syn::ImplItemFn,
+    ) {
+        if method.sig.ident != "fmt" {
+            return;
+        }
+        if method
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("automatically_derived"))
+        {
+            return;
+        }
+        let body_compact = method
+            .block
+            .to_token_stream()
+            .to_string()
+            .split_whitespace()
+            .collect::<String>();
+        if body_compact.contains("Formatter::write_str") {
+            return;
+        }
+        let Some(syn::FnArg::Receiver(recv)) = method.sig.inputs.first() else {
+            return;
+        };
+
+        let mut params = Vec::new();
+        let self_param = if recv.reference.is_some() {
+            if recv.mutability.is_some() {
+                format!("{}& self", enum_name)
+            } else {
+                format!("const {}& self", enum_name)
+            }
+        } else {
+            format!("{} self", enum_name)
+        };
+        params.push(self_param);
+
+        for arg in method.sig.inputs.iter().skip(1) {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            let ty = self.map_type(&pat_type.ty);
+            let param_name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                _ => "_".to_string(),
+            };
+            params.push(format!("{} {}", ty, param_name));
+        }
+
+        let return_type = self.map_return_type(&method.sig.output);
+        self.writeln(&format!(
+            "inline {} rusty_fmt({}) {{",
+            return_type,
+            params.join(", ")
+        ));
+        self.indent += 1;
+
+        let prev_struct = self.current_struct.clone();
+        self.current_struct = None;
+        self.push_return_value_scope(&return_type);
+        self.push_return_type_hint(&method.sig.output);
+        self.push_param_bindings(&method.sig.inputs);
+        self.push_self_receiver_ref_scope(&method.sig.inputs);
+        self.push_self_path_override(Some("self".to_string()));
+        self.emit_block(&method.block);
+        self.pop_self_path_override();
+        self.pop_self_receiver_ref_scope();
+        self.pop_param_bindings();
+        self.pop_return_type_hint();
+        self.pop_return_value_scope();
+        self.current_struct = prev_struct;
+
+        self.indent -= 1;
+        self.writeln("}");
     }
 
     /// Check if a variant's fields reference a given type name (for recursion detection).
@@ -8195,7 +8318,10 @@ impl CodeGen {
                         return false;
                     }
                     let matched_value = format!("_mv{}", idx);
-                    arm_binding_lines.push(format!("auto {} = _m.{}();", matched_value, unwrap_method));
+                    arm_binding_lines.push(format!(
+                        "auto {} = std::as_const(_m).{}();",
+                        matched_value, unwrap_method
+                    ));
                     let mut binding_stmts = Vec::new();
                     if !self.collect_pattern_binding_stmts(&ts.elems[0], &matched_value, &mut binding_stmts) {
                         let Some(payload_condition) =
@@ -8221,10 +8347,16 @@ impl CodeGen {
                 }
                 syn::Pat::Wild(_) => "true".to_string(),
                 syn::Pat::Ident(pi) => {
+                    if let Some(cond_method) =
+                        self.runtime_ident_match_condition_method(pi, variant_ctx)
+                    {
+                        format!("_m.{}()", cond_method)
+                    } else {
                     if pi.ident != "_" {
                         arm_binding_lines.push(format!("const auto& {} = _m;", pi.ident));
                     }
                     "true".to_string()
+                    }
                 }
                 syn::Pat::Or(or_pat) => {
                     let mut has_wild = false;
@@ -8290,6 +8422,14 @@ impl CodeGen {
                             syn::Pat::Ident(pi) if pi.ident == "_" => {
                                 has_wild = true;
                             }
+                            syn::Pat::Ident(pi) => {
+                                let Some(cond_method) =
+                                    self.runtime_ident_match_condition_method(pi, variant_ctx)
+                                else {
+                                    return false;
+                                };
+                                path_conditions.push(format!("_m.{}()", cond_method));
+                            }
                             _ => return false,
                         }
                     }
@@ -8311,7 +8451,7 @@ impl CodeGen {
                                     .join(" || ")
                             };
                             arm_pre_lines.push(format!(
-                                "if (_m.{}()) {{ auto {} = _m.{}(); {} = ({}); }}",
+                                "if (_m.{}()) {{ auto {} = std::as_const(_m).{}(); {} = ({}); }}",
                                 cond_method,
                                 tuple_matched_value,
                                 unwrap_method,
@@ -9507,8 +9647,15 @@ impl CodeGen {
                     "std::string{}".to_string()
                 } else {
                     let fmt_expr = parts[0].trim();
+                    let mut debug_arg_positions = HashSet::new();
                     let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
-                        let rewritten = self.rewrite_rust_format_literal_for_cpp(&lit.value());
+                        let fmt_literal = lit.value();
+                        debug_arg_positions = self
+                            .format_literal_debug_arg_positions(
+                                &fmt_literal,
+                                parts.len().saturating_sub(1),
+                            );
+                        let rewritten = self.rewrite_rust_format_literal_for_cpp(&fmt_literal);
                         let escaped = escape_cpp_string_literal_content(&rewritten);
                         format!("\"{}\"", escaped)
                     } else {
@@ -9520,9 +9667,16 @@ impl CodeGen {
                         let wrapped_args: Vec<String> = parts
                             .iter()
                             .skip(1)
-                            .map(|arg| {
+                            .enumerate()
+                            .map(|(arg_idx, arg)| {
+                                let formatter = if debug_arg_positions.contains(&arg_idx) {
+                                    "rusty::to_debug_string"
+                                } else {
+                                    "rusty::to_string"
+                                };
                                 format!(
-                                    "rusty::to_string({})",
+                                    "{}({})",
+                                    formatter,
                                     self.convert_format_arg_expr(arg.trim())
                                 )
                             })
@@ -9717,6 +9871,59 @@ impl CodeGen {
         out
     }
 
+    fn format_literal_debug_arg_positions(&self, fmt: &str, arg_count: usize) -> HashSet<usize> {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut positions = HashSet::new();
+        let mut next_implicit_idx = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    break;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let (arg_part_raw, is_debug) = if let Some(prefix) = inner.strip_suffix(":#?") {
+                    (prefix, true)
+                } else if let Some(prefix) = inner.strip_suffix(":?") {
+                    (prefix, true)
+                } else {
+                    (inner.as_str(), false)
+                };
+                let arg_part = arg_part_raw.split(':').next().unwrap_or("").trim();
+                let arg_idx = if arg_part.is_empty() {
+                    let idx = next_implicit_idx;
+                    next_implicit_idx += 1;
+                    Some(idx)
+                } else if arg_part.chars().all(|c| c.is_ascii_digit()) {
+                    arg_part.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if is_debug
+                    && arg_idx.is_some_and(|idx| idx < arg_count)
+                {
+                    positions.insert(arg_idx.expect("checked is_some"));
+                }
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        positions
+    }
+
     /// Convert raw macro tokens to a C++ expression string.
     /// Applies basic Rust→C++ token transformations.
     fn convert_macro_tokens(&self, tokens: &str) -> String {
@@ -9746,25 +9953,107 @@ impl CodeGen {
 
     /// Split macro arguments by top-level commas (respecting nesting).
     fn split_macro_args(&self, tokens: &str) -> Vec<String> {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum MacroSplitMode {
+            Normal,
+            String { escaped: bool },
+            Char { escaped: bool },
+            RawString { hashes: usize },
+        }
+
+        let chars: Vec<char> = tokens.chars().collect();
         let mut result = Vec::new();
         let mut current = String::new();
         let mut depth = 0i32;
+        let mut mode = MacroSplitMode::Normal;
+        let mut i = 0usize;
 
-        for ch in tokens.chars() {
-            match ch {
-                '(' | '[' | '{' => {
-                    depth += 1;
+        while i < chars.len() {
+            let ch = chars[i];
+            match mode {
+                MacroSplitMode::Normal => {
+                    // Rust raw string literal start: r".." / r#".."# / r##".."## ...
+                    if ch == 'r' {
+                        let mut j = i + 1;
+                        let mut hashes = 0usize;
+                        while j < chars.len() && chars[j] == '#' {
+                            hashes += 1;
+                            j += 1;
+                        }
+                        if j < chars.len() && chars[j] == '"' {
+                            for c in &chars[i..=j] {
+                                current.push(*c);
+                            }
+                            mode = MacroSplitMode::RawString { hashes };
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                    match ch {
+                        '"' => {
+                            mode = MacroSplitMode::String { escaped: false };
+                            current.push(ch);
+                        }
+                        '\'' => {
+                            mode = MacroSplitMode::Char { escaped: false };
+                            current.push(ch);
+                        }
+                        '(' | '[' | '{' => {
+                            depth += 1;
+                            current.push(ch);
+                        }
+                        ')' | ']' | '}' => {
+                            depth -= 1;
+                            current.push(ch);
+                        }
+                        ',' if depth == 0 => {
+                            result.push(current.clone());
+                            current.clear();
+                        }
+                        _ => current.push(ch),
+                    }
+                    i += 1;
+                }
+                MacroSplitMode::String { escaped } => {
                     current.push(ch);
+                    if escaped {
+                        mode = MacroSplitMode::String { escaped: false };
+                    } else if ch == '\\' {
+                        mode = MacroSplitMode::String { escaped: true };
+                    } else if ch == '"' {
+                        mode = MacroSplitMode::Normal;
+                    }
+                    i += 1;
                 }
-                ')' | ']' | '}' => {
-                    depth -= 1;
+                MacroSplitMode::Char { escaped } => {
                     current.push(ch);
+                    if escaped {
+                        mode = MacroSplitMode::Char { escaped: false };
+                    } else if ch == '\\' {
+                        mode = MacroSplitMode::Char { escaped: true };
+                    } else if ch == '\'' {
+                        mode = MacroSplitMode::Normal;
+                    }
+                    i += 1;
                 }
-                ',' if depth == 0 => {
-                    result.push(current.clone());
-                    current.clear();
+                MacroSplitMode::RawString { hashes } => {
+                    current.push(ch);
+                    if ch == '"' {
+                        let mut j = i + 1;
+                        let mut seen = 0usize;
+                        while seen < hashes && j < chars.len() && chars[j] == '#' {
+                            current.push(chars[j]);
+                            seen += 1;
+                            j += 1;
+                        }
+                        if seen == hashes {
+                            mode = MacroSplitMode::Normal;
+                            i = j;
+                            continue;
+                        }
+                    }
+                    i += 1;
                 }
-                _ => current.push(ch),
             }
         }
         if !current.is_empty() {
@@ -9817,6 +10106,20 @@ impl CodeGen {
                             syn::Pat::Path(pp) => {
                                 conds.push(format!("_m == {}", self.emit_path_to_string(&pp.path)))
                             }
+                            syn::Pat::Range(_range_pat) => {
+                                let Some(cond) =
+                                    self.tuple_pattern_elem_value_condition(case, "_m")
+                                else {
+                                    continue;
+                                };
+                                if let Some(cond) = cond {
+                                    conds.push(cond);
+                                } else {
+                                    conds.clear();
+                                    conds.push("true".to_string());
+                                    break;
+                                }
+                            }
                             syn::Pat::Wild(_) => {
                                 conds.clear();
                                 conds.push("true".to_string());
@@ -9839,9 +10142,15 @@ impl CodeGen {
                     ));
                 }
                 syn::Pat::Range(_) => {
-                    // Range patterns in switch expression context: emit as if-else
-                    // TODO: proper range pattern emission
-                    parts.push(format!("{}{};", ret_prefix, body));
+                    if let Some(cond) = self.tuple_pattern_elem_value_condition(&arm.pat, "_m") {
+                        if let Some(cond) = cond {
+                            parts.push(format!("if ({}) {}{};", cond, ret_prefix, body));
+                        } else {
+                            parts.push(format!("{}{};", ret_prefix, body));
+                        }
+                    } else {
+                        parts.push(format!("{}{};", ret_prefix, body));
+                    }
                 }
                 _ => parts.push(format!("{}{};", ret_prefix, body)),
             }
@@ -9943,11 +10252,16 @@ impl CodeGen {
         variant_ctx: Option<&VariantTypeContext>,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // Expression-form match arms may dereference payload bindings (e.g. `*ch`) that
+        // are references due match ergonomics. Evaluate each arm body with a temporary
+        // pattern-ref scope so unary deref lowering can collapse reference layers.
+        let mut scoped = self.clone();
         let mut parts = Vec::new();
         for arm in arms {
+            scoped.push_pattern_ref_binding_scope(&arm.pat);
             let body = {
-                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
-                self.maybe_wrap_variant_constructor_with_expected_enum(
+                let emitted = scoped.emit_expr_to_string_with_expected(&arm.body, expected_ty);
+                scoped.maybe_wrap_variant_constructor_with_expected_enum(
                     &arm.body,
                     emitted,
                     expected_ty,
@@ -9955,20 +10269,21 @@ impl CodeGen {
             };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
-                    let cpp_type = self.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
-                    let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v")
+                    let cpp_type = scoped.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
+                    let Some(binding_stmts) = scoped.tuple_struct_binding_stmts(&ts.elems, "_v")
                     else {
                         parts.push(format!(
                             "[&](const auto&) {{ return {}; }}",
-                            self.match_expr_unreachable_fallback_with_expected(expected_ty)
+                            scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
                         ));
+                        scoped.pop_pattern_ref_binding_scope();
                         continue;
                     };
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str = self.emit_expr_to_string(guard);
+                        let guard_str = scoped.emit_expr_to_string(guard);
                         let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "));
                         let visit_param =
-                            if needs_mut_param || self.pattern_requires_mut_ref_binding(&arm.pat) {
+                            if needs_mut_param || scoped.pattern_requires_mut_ref_binding(&arm.pat) {
                                 format!("{}& _v", cpp_type)
                             } else {
                                 format!("const {}& _v", cpp_type)
@@ -9979,12 +10294,12 @@ impl CodeGen {
                             binding_stmts.join(" "),
                             guard_str,
                             body,
-                            self.match_expr_unreachable_fallback_with_expected(expected_ty),
+                            scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
                         let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "));
                         let visit_param =
-                            if needs_mut_param || self.pattern_requires_mut_ref_binding(&arm.pat) {
+                            if needs_mut_param || scoped.pattern_requires_mut_ref_binding(&arm.pat) {
                                 format!("{}& _v", cpp_type)
                             } else {
                                 format!("const {}& _v", cpp_type)
@@ -9998,15 +10313,15 @@ impl CodeGen {
                     }
                 }
                 syn::Pat::Path(pp) => {
-                    let cpp_type = self.visit_pattern_cpp_type(&pp.path, variant_ctx, Some("_m"));
+                    let cpp_type = scoped.visit_pattern_cpp_type(&pp.path, variant_ctx, Some("_m"));
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str = self.emit_expr_to_string(guard);
+                        let guard_str = scoped.emit_expr_to_string(guard);
                         parts.push(format!(
                             "[&](const {}& _v) {{ if ({}) return {}; return {}; }}",
                             cpp_type,
                             guard_str,
                             body,
-                            self.match_expr_unreachable_fallback_with_expected(expected_ty),
+                            scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
                         parts.push(format!("[&](const {}&) {{ return {}; }}", cpp_type, body));
@@ -10024,10 +10339,11 @@ impl CodeGen {
                 _ => {
                     parts.push(format!(
                         "[&](const auto&) {{ return {}; }}",
-                        self.match_expr_unreachable_fallback_with_expected(expected_ty)
+                        scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
                     ));
                 }
             }
+            scoped.pop_pattern_ref_binding_scope();
         }
         parts.join(", ")
     }
@@ -10107,6 +10423,27 @@ impl CodeGen {
         }
     }
 
+    fn runtime_ident_match_condition_method(
+        &self,
+        ident: &syn::PatIdent,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Option<&'static str> {
+        if ident.by_ref.is_some() || ident.mutability.is_some() || ident.subpat.is_some() {
+            return None;
+        }
+        let variant_name = ident.ident.to_string();
+        let kind = variant_ctx
+            .and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
+            .or_else(|| self.runtime_match_enum_kind_by_variant_name(&variant_name))?;
+        match (kind, variant_name.as_str()) {
+            (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+            (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
+            (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
+            (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
+            _ => None,
+        }
+    }
+
     fn emit_runtime_match_expr(
         &self,
         match_expr: &syn::ExprMatch,
@@ -10149,7 +10486,7 @@ impl CodeGen {
                     saw_runtime_pattern = true;
                     if direct_binding_passthrough {
                         out.push_str(&format!(
-                            "if (_m.{}()) {{ return _m.{}(); }} ",
+                            "if (_m.{}()) {{ return std::as_const(_m).{}(); }} ",
                             cond_method, unwrap_method
                         ));
                         continue;
@@ -10157,7 +10494,7 @@ impl CodeGen {
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     let matched_value = format!("_mv{}", idx);
                     out.push_str(&format!(
-                        "auto {} = _m.{}(); ",
+                        "auto {} = std::as_const(_m).{}(); ",
                         matched_value, unwrap_method
                     ));
 
@@ -10222,8 +10559,15 @@ impl CodeGen {
                     out.push_str("} ");
                 }
                 syn::Pat::Ident(pi) => {
-                    out.push_str("if (true) { ");
-                    out.push_str(&format!("const auto& {} = _m; ", pi.ident));
+                    if let Some(cond_method) =
+                        self.runtime_ident_match_condition_method(pi, variant_ctx)
+                    {
+                        saw_runtime_pattern = true;
+                        out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
+                    } else {
+                        out.push_str("if (true) { ");
+                        out.push_str(&format!("const auto& {} = _m; ", pi.ident));
+                    }
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
                         out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
@@ -13205,7 +13549,10 @@ impl CodeGen {
             }
             syn::Expr::Unsafe(unsafe_expr) => self
                 .extract_single_expr_from_block(&unsafe_expr.block)
-                .and_then(|inner| self.infer_local_binding_type_from_initializer(inner)),
+                .and_then(|inner| {
+                    self.infer_local_binding_type_from_initializer(inner)
+                        .or_else(|| self.infer_simple_expr_type(inner))
+                }),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
             _ => None,
@@ -13485,6 +13832,32 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
 
+        // std/core allocator entrypoints return raw byte pointers.
+        if (matches!(
+            joined.as_str(),
+            "alloc"
+                | "rusty::alloc::alloc"
+                | "std::alloc::alloc"
+                | "core::alloc::alloc"
+                | "alloc::alloc"
+                | "alloc_zeroed"
+                | "rusty::alloc::alloc_zeroed"
+                | "std::alloc::alloc_zeroed"
+                | "core::alloc::alloc_zeroed"
+                | "alloc::alloc_zeroed"
+        ) && call.args.len() == 1)
+            || (matches!(
+                joined.as_str(),
+                "realloc"
+                    | "rusty::alloc::realloc"
+                    | "std::alloc::realloc"
+                    | "core::alloc::realloc"
+                    | "alloc::realloc"
+            ) && call.args.len() == 3)
+        {
+            return Some(parse_quote!(*mut u8));
+        }
+
         if matches!(
             joined.as_str(),
             "as_mut_ptr" | "rusty::as_mut_ptr" | "as_ptr" | "rusty::as_ptr"
@@ -13701,7 +14074,10 @@ impl CodeGen {
             }
             syn::Expr::Unsafe(unsafe_expr) => self
                 .extract_single_expr_from_block(&unsafe_expr.block)
-                .and_then(|inner| self.infer_simple_expr_type(inner)),
+                .and_then(|inner| {
+                    self.infer_local_binding_type_from_initializer(inner)
+                        .or_else(|| self.infer_simple_expr_type(inner))
+                }),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Field(field) => {
                 let member = match &field.member {
@@ -15085,7 +15461,7 @@ impl CodeGen {
     fn collect_pattern_ref_binding_names(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
         match pat {
             syn::Pat::Ident(pi) => {
-                if pi.by_ref.is_some() {
+                if pi.ident != "_" {
                     out.insert(pi.ident.to_string());
                 }
                 if let Some((_, subpat)) = &pi.subpat {
@@ -19402,7 +19778,16 @@ impl CodeGen {
         match expr {
             syn::Expr::Reference(r) => {
                 let inner = self.emit_expr_to_string_with_variant_ctx(&r.expr, variant_ctx);
-                format!("&{}", inner)
+                // Variant match scrutinees should feed the variant value/reference directly
+                // into `std::visit`; emitting `&inner` here turns the scrutinee into a
+                // pointer and breaks overload resolution.
+                if variant_ctx.is_some() && !self.is_expr_raw_pointer_like(&r.expr) {
+                    inner
+                } else if inner.starts_with('&') {
+                    format!("&({})", inner)
+                } else {
+                    format!("&{}", inner)
+                }
             }
             syn::Expr::Paren(p) => {
                 let inner = self.emit_expr_to_string_with_variant_ctx(&p.expr, variant_ctx);
@@ -20233,7 +20618,6 @@ impl CodeGen {
 
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
-            let binding = self.extract_if_let_binding_name(&let_expr.pat);
             let (some_check, _none, unwrap, _neg) =
                 self.option_like_pattern_surface_for_expr(&let_expr.expr);
             self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
@@ -20243,10 +20627,12 @@ impl CodeGen {
             if let Some(used) = self.local_cpp_names_used.last_mut() {
                 used.insert(cpp_name.to_string());
             }
-            if let Some(name) = binding {
-                let cpp_binding = self.allocate_local_cpp_name(&name);
-                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", cpp_binding, unwrap));
-            }
+            self.emit_if_let_statement_scope_bindings(
+                &let_expr.pat,
+                "_iflet_scrutinee",
+                unwrap,
+                scrutinee.ends_with(".as_mut()"),
+            );
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("if ({}) {{", cond));
@@ -20329,17 +20715,21 @@ impl CodeGen {
     ) {
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
-            let binding = self.extract_if_let_binding_name(&let_expr.pat);
             let (some_check, _none, unwrap, _neg) =
                 self.option_like_pattern_surface_for_expr(&let_expr.expr);
             self.writeln(&format!("{{ auto&& _iflet_s = {};", scrutinee));
             self.writeln(&format!("if (_iflet_s.{}()) {{", some_check));
             self.indent += 1;
             self.push_transient_statement_scope();
-            if let Some(name) = binding {
-                let cpp_binding = self.allocate_local_cpp_name(&name);
-                self.writeln(&format!("auto {} = _iflet_s.{}();", cpp_binding, unwrap));
+            if let Some(used) = self.local_cpp_names_used.last_mut() {
+                used.insert(result_var.to_string());
             }
+            self.emit_if_let_statement_scope_bindings(
+                &let_expr.pat,
+                "_iflet_s",
+                unwrap,
+                scrutinee.ends_with(".as_mut()"),
+            );
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("{{ if ({}) {{", cond));
@@ -20444,6 +20834,104 @@ impl CodeGen {
         }
     }
 
+    fn register_statement_scope_binding_map(&mut self, binding_map: &HashMap<String, String>) {
+        if binding_map.is_empty() {
+            return;
+        }
+        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+            for (rust_name, cpp_name) in binding_map {
+                scope.insert(rust_name.clone(), cpp_name.clone());
+            }
+        }
+        if let Some(scope) = self.local_bindings.last_mut() {
+            for rust_name in binding_map.keys() {
+                scope.insert(rust_name.clone(), None);
+            }
+        }
+        if let Some(scope) = self.local_const_bindings.last_mut() {
+            for rust_name in binding_map.keys() {
+                scope.insert(rust_name.clone(), false);
+            }
+        }
+    }
+
+    fn emit_if_let_statement_scope_bindings(
+        &mut self,
+        let_pat: &syn::Pat,
+        scrutinee_var: &str,
+        unwrap_method: &str,
+        scrutinee_is_as_mut: bool,
+    ) {
+        let binding_pat = match let_pat {
+            syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => ts.elems.first(),
+            syn::Pat::Ident(_) => Some(let_pat),
+            _ => None,
+        };
+
+        let Some(binding_pat) = binding_pat else {
+            return;
+        };
+
+        let simple_ident = match binding_pat {
+            syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none() => {
+                Some(pi.ident.to_string())
+            }
+            _ => None,
+        };
+
+        if let Some(rust_name) = simple_ident {
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                self.writeln(&format!("auto&& _iflet_take = {};", scrutinee_var));
+                self.writeln(&format!(
+                    "auto {} = rusty::detail::option_take_value(_iflet_take);",
+                    cpp_name
+                ));
+            } else {
+                let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee_var, unwrap_method);
+                if scrutinee_is_as_mut {
+                    self.writeln(&format!("auto& {} = *{};", cpp_name, unwrap_expr));
+                } else {
+                    self.writeln(&format!("auto {} = {};", cpp_name, unwrap_expr));
+                }
+            }
+            let mut binding_map = HashMap::new();
+            binding_map.insert(rust_name, cpp_name);
+            self.register_statement_scope_binding_map(&binding_map);
+            return;
+        }
+
+        let payload_var = "_iflet_payload";
+        if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+            self.writeln(&format!("auto&& _iflet_take = {};", scrutinee_var));
+            self.writeln(&format!(
+                "auto&& {} = rusty::detail::option_take_value(_iflet_take);",
+                payload_var
+            ));
+        } else {
+            let unwrap_expr = self.emit_if_let_unwrap_expr(scrutinee_var, unwrap_method);
+            if scrutinee_is_as_mut {
+                self.writeln(&format!("auto&& {} = *{};", payload_var, unwrap_expr));
+            } else {
+                self.writeln(&format!("auto&& {} = {};", payload_var, unwrap_expr));
+            }
+        }
+
+        let mut binding_stmts = Vec::new();
+        let mut binding_map = HashMap::new();
+        if self.collect_pattern_binding_stmts_with_cpp_name_map(
+            binding_pat,
+            payload_var,
+            &mut binding_stmts,
+            &mut binding_map,
+        ) {
+            for stmt in binding_stmts {
+                self.writeln(&stmt);
+            }
+            self.register_statement_scope_binding_map(&binding_map);
+        }
+    }
+
     fn emit_if_let_as_statement_block(
         &mut self,
         tuple: &syn::PatTuple,
@@ -20508,17 +20996,18 @@ impl CodeGen {
 
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
-            let binding = self.extract_if_let_binding_name(&let_expr.pat);
             let (some_check, _none, unwrap, _neg) =
                 self.option_like_pattern_surface_for_expr(&let_expr.expr);
             self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
             self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
             self.indent += 1;
             self.push_transient_statement_scope();
-            if let Some(name) = binding {
-                let cpp_binding = self.allocate_local_cpp_name(&name);
-                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", cpp_binding, unwrap));
-            }
+            self.emit_if_let_statement_scope_bindings(
+                &let_expr.pat,
+                "_iflet_scrutinee",
+                unwrap,
+                scrutinee.ends_with(".as_mut()"),
+            );
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("if ({}) {{", cond));
@@ -21518,7 +22007,10 @@ impl CodeGen {
                     return None;
                 }
                 let mut binding_map = HashMap::new();
-                let mut stmts = vec![format!("auto {} = _m.{}();", matched_var, unwrap_method)];
+                let mut stmts = vec![format!(
+                    "auto {} = std::as_const(_m).{}();",
+                    matched_var, unwrap_method
+                )];
                 if !self.collect_pattern_binding_stmts_with_cpp_name_map(
                     &ts.elems[0],
                     matched_var,
@@ -21547,6 +22039,15 @@ impl CodeGen {
             syn::Pat::Ident(pi) => {
                 if pi.ident == "_" {
                     return Some(("true".to_string(), Vec::new(), HashMap::new(), None));
+                }
+                if let Some(cond_method) = self.runtime_ident_match_condition_method(pi, variant_ctx)
+                {
+                    return Some((
+                        format!("_m.{}()", cond_method),
+                        Vec::new(),
+                        HashMap::new(),
+                        None,
+                    ));
                 }
                 let rust_name = pi.ident.to_string();
                 let cpp_name = self
@@ -24036,19 +24537,32 @@ impl CodeGen {
             return Some(self.match_expr_unreachable_fallback().to_string());
         }
 
+        let mut inner = self.clone();
         let mut stmts = Vec::new();
         let last_idx = block.stmts.len() - 1;
 
         for (idx, stmt) in block.stmts.iter().enumerate() {
             let is_last = idx == last_idx;
             match stmt {
-                syn::Stmt::Local(local) => match &local.pat {
+                syn::Stmt::Local(local) => {
+                    inner.register_local_binding_pattern(&local.pat);
+                    match &local.pat {
                     syn::Pat::Ident(pi) => {
                         let ty = if let Some(ty) = get_local_type(local) {
                             self.map_type(ty)
                         } else {
                             "auto".to_string()
                         };
+                        let mut inferred_local_ty = get_local_type(local).cloned();
+                        if inferred_local_ty.is_none() {
+                            inferred_local_ty = local
+                                .init
+                                .as_ref()
+                                .and_then(|init| inner.infer_local_binding_type_from_initializer(&init.expr));
+                        }
+                        if let Some(inferred_ty) = inferred_local_ty {
+                            inner.update_local_binding_type(pi.ident.to_string(), inferred_ty);
+                        }
                         let qualifier =
                             if pi.mutability.is_some() || ty.trim_start().starts_with("const ") {
                                 ""
@@ -24056,7 +24570,7 @@ impl CodeGen {
                                 "const "
                             };
                         if let Some(init) = &local.init {
-                            let init_str = self.emit_expr_to_string(&init.expr);
+                            let init_str = inner.emit_expr_to_string(&init.expr);
                             stmts.push(format!("{}{} {} = {};", qualifier, ty, pi.ident, init_str));
                         } else {
                             stmts.push(format!("{}{} {};", qualifier, ty, pi.ident));
@@ -24065,6 +24579,7 @@ impl CodeGen {
                     syn::Pat::Type(pt) => {
                         if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
                             let ty = self.map_type(&pt.ty);
+                            inner.update_local_binding_type(pi.ident.to_string(), (*pt.ty).clone());
                             let qualifier = if pi.mutability.is_some()
                                 || ty.trim_start().starts_with("const ")
                             {
@@ -24073,7 +24588,7 @@ impl CodeGen {
                                 "const "
                             };
                             if let Some(init) = &local.init {
-                                let init_str = self.emit_expr_to_string(&init.expr);
+                                let init_str = inner.emit_expr_to_string(&init.expr);
                                 stmts.push(format!(
                                     "{}{} {} = {};",
                                     qualifier, ty, pi.ident, init_str
@@ -24086,32 +24601,48 @@ impl CodeGen {
                         }
                     }
                     _ => return None,
-                },
+                }
+                }
                 syn::Stmt::Expr(expr, semi) => {
                     let force_diverging_tail_return = is_last
                         && semi.is_some()
                         && expected_ty.is_some()
-                        && self.expr_is_noreturn_panic_like(expr);
+                        && inner.expr_is_noreturn_panic_like(expr);
                     if (is_last && semi.is_none()) || force_diverging_tail_return {
                         stmts.push(format!(
                             "return {};",
-                            self.emit_expr_to_string_with_expected(expr, expected_ty)
+                            inner.emit_expr_to_string_with_expected(expr, expected_ty)
                         ));
                     } else {
-                        stmts.push(format!("{};", self.emit_expr_to_string(expr)));
+                        if let Some(control_stmt) = inner.control_flow_stmt_to_string(expr) {
+                            stmts.push(control_stmt);
+                        } else {
+                            stmts.push(format!("{};", inner.emit_expr_to_string(expr)));
+                        }
                     }
                 }
                 syn::Stmt::Macro(stmt_macro) => {
                     if is_last {
                         return None;
                     }
-                    stmts.push(format!("{};", self.emit_macro_expr(&stmt_macro.mac)));
+                    stmts.push(format!("{};", inner.emit_macro_expr(&stmt_macro.mac)));
                 }
                 syn::Stmt::Item(_) => return None,
             }
         }
 
         Some(format!("[&]() {{ {} }}()", stmts.join(" ")))
+    }
+
+    fn control_flow_stmt_to_string(&self, expr: &syn::Expr) -> Option<String> {
+        let mut inner = self.clone();
+        inner.output.clear();
+        inner.indent = 0;
+        if inner.try_emit_control_flow(expr, false) {
+            Some(inner.output.trim().to_string())
+        } else {
+            None
+        }
     }
 
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
@@ -25019,6 +25550,27 @@ private:\n\
     void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }\n\
 };\n\
 }\n\
+namespace detail {\n\
+inline std::string utf8_from_char32(char32_t ch) {\n\
+    std::string out;\n\
+    if (ch <= 0x7F) {\n\
+        out.push_back(static_cast<char>(ch));\n\
+    } else if (ch <= 0x7FF) {\n\
+        out.push_back(static_cast<char>(0xC0 | ((ch >> 6) & 0x1F)));\n\
+        out.push_back(static_cast<char>(0x80 | (ch & 0x3F)));\n\
+    } else if (ch <= 0xFFFF) {\n\
+        out.push_back(static_cast<char>(0xE0 | ((ch >> 12) & 0x0F)));\n\
+        out.push_back(static_cast<char>(0x80 | ((ch >> 6) & 0x3F)));\n\
+        out.push_back(static_cast<char>(0x80 | (ch & 0x3F)));\n\
+    } else {\n\
+        out.push_back(static_cast<char>(0xF0 | ((ch >> 18) & 0x07)));\n\
+        out.push_back(static_cast<char>(0x80 | ((ch >> 12) & 0x3F)));\n\
+        out.push_back(static_cast<char>(0x80 | ((ch >> 6) & 0x3F)));\n\
+        out.push_back(static_cast<char>(0x80 | (ch & 0x3F)));\n\
+    }\n\
+    return out;\n\
+}\n\
+}\n\
 template<typename T>\n\
 std::string to_string(const T& value) {\n\
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
@@ -25026,12 +25578,31 @@ std::string to_string(const T& value) {\n\
         return value.to_string();\n\
     } else if constexpr (std::is_same_v<Value, bool>) {\n\
         return value ? \"true\" : \"false\";\n\
+    } else if constexpr (std::is_same_v<Value, char>\n\
+        || std::is_same_v<Value, signed char>\n\
+        || std::is_same_v<Value, unsigned char>\n\
+        || std::is_same_v<Value, wchar_t>\n\
+        || std::is_same_v<Value, char16_t>\n\
+        || std::is_same_v<Value, char32_t>) {\n\
+        return rusty::detail::utf8_from_char32(static_cast<char32_t>(value));\n\
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {\n\
         return std::string(std::string_view(value));\n\
     } else if constexpr (requires { value.as_str(); }) {\n\
         return std::string(value.as_str());\n\
     } else if constexpr (requires { std::string_view(*value); }) {\n\
         return std::string(std::string_view(*value));\n\
+    } else if constexpr (std::is_pointer_v<Value>) {\n\
+        if (value == nullptr) {\n\
+            return \"<null>\";\n\
+        }\n\
+        return rusty::to_string(*value);\n\
+    } else if constexpr (requires(rusty::fmt::Formatter& f) { rusty_fmt(value, f); }) {\n\
+        rusty::fmt::Formatter formatter{};\n\
+        auto result = rusty_fmt(value, formatter);\n\
+        if (result.is_ok()) {\n\
+            return formatter.str();\n\
+        }\n\
+        return \"<fmt-error>\";\n\
     } else if constexpr (requires { std::to_string(value); }) {\n\
         return std::to_string(value);\n\
     } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {\n\
@@ -25044,6 +25615,23 @@ std::string to_string(const T& value) {\n\
     } else {\n\
         return \"<unprintable>\";\n\
     }\n\
+}\n\
+template<typename T>\n\
+std::string to_debug_string(const T& value) {\n\
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (std::is_same_v<Value, char>\n\
+        || std::is_same_v<Value, signed char>\n\
+        || std::is_same_v<Value, unsigned char>\n\
+        || std::is_same_v<Value, wchar_t>\n\
+        || std::is_same_v<Value, char16_t>\n\
+        || std::is_same_v<Value, char32_t>) {\n\
+        const auto ch = static_cast<char32_t>(value);\n\
+        if (ch == U'\\0') {\n\
+            return \"'\\\\0'\";\n\
+        }\n\
+        return std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\";\n\
+    }\n\
+    return rusty::to_string(value);\n\
 }\n\
 namespace path {\n\
 using Path = std::string;\n\
@@ -25470,6 +26058,7 @@ fn qualify_impl_type_name(
     raw: &str,
     module_path: &[String],
     top_level_declared_item_names: &HashSet<String>,
+    local_declared_types: &HashSet<String>,
 ) -> String {
     let parts: Vec<&str> = raw.split("::").collect();
     if parts.is_empty() {
@@ -25480,13 +26069,26 @@ fn qualify_impl_type_name(
         if module_path.is_empty() {
             return raw.to_string();
         }
+        let module_scoped = format!("{}::{}", module_path.join("::"), raw);
+        if local_declared_types.contains(&module_scoped) {
+            return module_scoped;
+        }
         // If a nested module `impl` targets a top-level type imported from
         // `super`/`crate` (for example `use super::Either; impl Iterator for Either`),
         // keep the top-level name so methods merge into the real type definition.
         if top_level_declared_item_names.contains(raw) {
             return raw.to_string();
         }
-        return format!("{}::{}", module_path.join("::"), raw);
+        let mut local_candidates: Vec<&String> = local_declared_types
+            .iter()
+            .filter(|name| name.ends_with(&format!("::{}", raw)))
+            .collect();
+        local_candidates.sort();
+        local_candidates.dedup();
+        if local_candidates.len() == 1 {
+            return local_candidates[0].clone();
+        }
+        return module_scoped;
     }
 
     let mut resolved_prefix = module_path.to_vec();
@@ -27621,6 +28223,13 @@ fn collect_consuming_method_receivers_in_expr(
                         result.insert(name);
                     }
                 }
+                if call_path_is_value_constructor(path_expr) {
+                    for arg in &call.args {
+                        if let Some(name) = extract_simple_local_ident(arg) {
+                            result.insert(name);
+                        }
+                    }
+                }
             }
             collect_consuming_method_receivers_in_expr(&call.func, result);
             for arg in &call.args {
@@ -27691,6 +28300,9 @@ fn collect_consuming_method_receivers_in_expr(
         }
         syn::Expr::Struct(struct_expr) => {
             for field in &struct_expr.fields {
+                if let Some(name) = extract_direct_local_ident(&field.expr) {
+                    result.insert(name);
+                }
                 collect_consuming_method_receivers_in_expr(&field.expr, result);
             }
             if let Some(rest) = &struct_expr.rest {
@@ -27751,6 +28363,32 @@ fn extract_simple_local_ident(expr: &syn::Expr) -> Option<String> {
             _ => return None,
         }
     }
+}
+
+fn extract_direct_local_ident(expr: &syn::Expr) -> Option<String> {
+    let current = peel_paren_group_expr(expr);
+    let syn::Expr::Path(path) = current else {
+        return None;
+    };
+    if path.path.segments.len() == 1 {
+        Some(path.path.segments[0].ident.to_string())
+    } else {
+        None
+    }
+}
+
+fn call_path_is_value_constructor(path_expr: &syn::ExprPath) -> bool {
+    // Tuple-struct / enum-variant constructors are value-consuming call sites.
+    // Rust names for these constructors are UpperCamelCase; function-style
+    // helpers are snake_case and are intentionally excluded.
+    let Some(last) = path_expr.path.segments.last() else {
+        return false;
+    };
+    last.ident
+        .to_string()
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 fn is_consuming_method_name(method: &str) -> bool {
@@ -29625,6 +30263,158 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10527_runtime_option_none_ident_in_statement_match_uses_is_none_condition() {
+        let out = transpile_str(
+            r#"
+            fn f(opt: Option<i32>) -> bool {
+                match opt {
+                    None => return false,
+                    Some(v) => {
+                        if v > 0 {
+                            return true;
+                        }
+                    }
+                }
+                true
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_none())"),
+            "runtime Option `None` ident pattern should lower to is_none condition in statement match, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("if (_m.is_some())"),
+            "runtime Option `Some(...)` pattern should keep runtime is_some dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto& None = _m;"),
+            "runtime Option `None` ident pattern must not be lowered as identifier binding, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_option_none_ident_or_pattern_uses_is_none_in_runtime_stmt() {
+        let out = transpile_str(
+            r#"
+            fn f(opt: Option<i32>) -> i32 {
+                let mut out = -1;
+                match opt {
+                    None | Some(0) => {
+                        out = 0;
+                    }
+                    Some(v) => {
+                        out = v;
+                    }
+                }
+                out
+            }
+            "#,
+        );
+        assert!(
+            out.contains("bool _m_or_match0 = false;"),
+            "runtime OR lowering should synthesize matcher state for OR pattern, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_m.is_none()"),
+            "runtime OR lowering should include is_none() check for `None` ident arm case, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto& None = _m;"),
+            "runtime OR lowering must not bind `None` as an identifier, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10527_match_expr_range_arm_emits_value_condition() {
+        let out = transpile_str(
+            r#"
+            fn f(len: u64) -> i32 {
+                match len {
+                    0 => 0,
+                    1..=3 => 1,
+                    _ => 2,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("_m >= 1") && out.contains("_m <= 3"),
+            "range arm in match-expression lowering should emit explicit range condition, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("if (_m == 0) return 0; return 1;"),
+            "range arm must not degrade to unconditional fallback after previous arm, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10527_match_expr_or_with_range_emits_combined_condition() {
+        let out = transpile_str(
+            r#"
+            fn f(len: u64) -> i32 {
+                match len {
+                    0 | 2..=4 => 1,
+                    _ => 0,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("_m == 0") && out.contains("_m >= 2") && out.contains("_m <= 4"),
+            "OR arm containing range should emit combined equality/range condition, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10527_match_expr_block_arm_preserves_if_and_while_statements() {
+        let out = transpile_str(
+            r#"
+            fn f(len: u64) -> u64 {
+                match len {
+                    0 => 0,
+                    1..=8 => 1,
+                    _ => {
+                        let mut n = len;
+                        if n > 10 {
+                            n = 10;
+                        }
+                        while n > 0 {
+                            n -= 1;
+                        }
+                        n
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (n > 10)"),
+            "block-arm if statement should be preserved in expression-lowered IIFE, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("while (n > 0)"),
+            "block-arm while statement should be preserved in expression-lowered IIFE, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "block-arm control flow should not degrade to TODO if-expression placeholders, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10516_runtime_option_payload_range_pattern_uses_runtime_match_not_visit() {
         let out = transpile_str(
             r#"
@@ -30501,6 +31291,58 @@ mod tests {
         assert!(out.contains("[&](const E_A& _v)"));
         assert!(out.contains("auto&& x = _v._0;"));
         assert!(out.contains("[&](const E_B&)"));
+    }
+
+    #[test]
+    fn test_match_variant_reference_scrutinee_uses_variant_value_for_visit() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            struct Holder { kind: E }
+            impl Holder {
+                fn is_a(&self) -> bool {
+                    match &self.kind {
+                        E::A(_) => true,
+                        E::B => false,
+                    }
+                }
+            }
+            "#,
+        );
+
+        assert!(out.contains("auto&& _m = this->kind;"));
+        assert!(!out.contains("auto&& _m = &this->kind;"));
+        assert!(out.contains("std::visit(overloaded {"));
+    }
+
+    #[test]
+    fn test_match_ref_binding_deref_collapses_reference_layer() {
+        let out = transpile_str(
+            r#"
+            enum E { C(char) }
+            fn f(e: &E) -> char {
+                match e {
+                    E::C(ch) => *ch,
+                }
+            }
+        "#,
+        );
+
+        assert!(
+            out.contains("auto&& ch = _v._0;"),
+            "expected match payload binding to preserve reference payload shape:\n{}",
+            out
+        );
+        assert!(
+            out.contains("return ch;"),
+            "deref of reference-bound match payload should collapse to direct binding use:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return *ch;"),
+            "should not emit pointer-style deref for C++ reference binding:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -32211,6 +33053,43 @@ mod tests {
         let close_pos = out[struct_pos..].find("};").unwrap() + struct_pos;
         let method_pos = out.find("bool is_a() const {").unwrap();
         assert!(method_pos > struct_pos && method_pos < close_pos);
+    }
+
+    #[test]
+    fn test_merged_impl_namespace_is_forward_declared_before_struct_methods() {
+        let out = transpile_str(
+            r#"
+            struct Foo {
+                x: i32,
+            }
+
+            mod impls {
+                use super::Foo;
+                impl Foo {
+                    fn x(&self) -> i32 {
+                        self.x
+                    }
+                }
+            }
+        "#,
+        );
+
+        let forward_decl = out
+            .find("namespace impls {}")
+            .expect("expected forward declaration for merged impl namespace");
+        let struct_pos = out
+            .find("struct Foo {")
+            .expect("expected merged struct declaration");
+        assert!(
+            forward_decl < struct_pos,
+            "merged impl namespace forward declaration must precede struct methods using it:\n{}",
+            out
+        );
+        assert!(
+            out.contains("using namespace impls;"),
+            "expected merged method body to preserve source-module namespace import:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -34327,6 +35206,28 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10527_alloc_local_pointer_add_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            use std::alloc::{alloc, Layout};
+
+            fn f(len: usize) {
+                unsafe {
+                    let layout = Layout::from_size_align_unchecked(len + 1, 1);
+                    let ptr = alloc(layout);
+                    let mut write = ptr;
+                    write = write.add(1);
+                    write.write(0);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("write = rusty::ptr::add(write, 1);"));
+        assert!(out.contains("rusty::ptr::write("));
+        assert!(!out.contains("write = write.add(1);"));
+    }
+
+    #[test]
     fn test_leaf41543333333251_non_pointer_write_call_is_not_rewritten() {
         let out = transpile_str(
             r#"
@@ -34447,7 +35348,21 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("std::format(\"{0}\", rusty::to_string(v))"));
+        assert!(out.contains("std::format(\"{0}\", rusty::to_debug_string(v))"));
+    }
+
+    #[test]
+    fn test_leaf10527_format_args_literal_with_comma_is_split_correctly() {
+        let out = transpile_str(
+            r#"
+            fn f(pos: usize, ch: char) {
+                let _ = format_args!("expected comma after {0}, found {1:?}", pos, ch);
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::format(\"expected comma after {0}, found {1}\", rusty::to_string(pos), rusty::to_debug_string(ch))"
+        ));
     }
 
     #[test]
@@ -35398,6 +36313,43 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10527_if_let_tuple_payload_binding_is_preserved_in_statement_lowering() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(text: &str) -> Option<(char, &str)> { None }
+            fn numeric_identifier(text: &str) -> Result<(u64, &str), i32> {
+                Ok((1, text))
+            }
+            fn parse_patch(text: &str, has_wildcard: bool) -> Result<(Option<u64>, &str), i32> {
+                let (patch, rest) = if let Some(text) = text.strip_prefix('.') {
+                    if let Some((_, text)) = wildcard(text) {
+                        (None, text)
+                    } else if has_wildcard {
+                        return Err(7);
+                    } else {
+                        let (patch, text) = numeric_identifier(text)?;
+                        (Some(patch), text)
+                    }
+                } else {
+                    (None, text)
+                };
+                Ok((patch, rest))
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto&& _iflet_payload = _iflet_s.unwrap();"),
+            "statement-lowered nested if-let should unwrap payload into helper binding, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::get<1>(_iflet_payload)"),
+            "statement-lowered nested if-let should bind tuple payload elements for branch-local names, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10519_single_if_result_temp_is_mutable_in_statement_lowering() {
         let out = transpile_str(
             r#"
@@ -35979,6 +36931,99 @@ mod tests {
         assert!(helpers.contains("requires(rusty::fmt::Formatter& f) { value.fmt(f); }"));
         assert!(helpers.contains("auto result = value.fmt(formatter);"));
         assert!(helpers.contains("return formatter.str();"));
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_to_string_dereferences_non_string_pointers() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("else if constexpr (std::is_pointer_v<Value>)"));
+        assert!(helpers.contains("return rusty::to_string(*value);"));
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_to_string_handles_null_pointer_values() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("if (value == nullptr) {"));
+        assert!(helpers.contains("return \"<null>\";"));
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_to_string_supports_adl_rusty_fmt_fallback() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains(
+            "requires(rusty::fmt::Formatter& f) { rusty_fmt(value, f); }"
+        ));
+        assert!(helpers.contains("auto result = rusty_fmt(value, formatter);"));
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_to_string_char_uses_utf8_conversion() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("inline std::string utf8_from_char32(char32_t ch)"));
+        assert!(helpers.contains("return rusty::detail::utf8_from_char32(static_cast<char32_t>(value));"));
+    }
+
+    #[test]
+    fn test_leaf10527_runtime_to_debug_string_quotes_char_values() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("std::string to_debug_string(const T& value)"));
+        assert!(helpers.contains("return \"'\\\\0'\";"));
+        assert!(helpers.contains("std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\""));
+    }
+
+    #[test]
+    fn test_leaf10527_c_like_enum_display_impl_emits_rusty_fmt_helper() {
+        let out = transpile_str(
+            r#"
+            use core::fmt::{self, Display};
+
+            enum Position {
+                Major,
+                Pre,
+                Build,
+            }
+
+            impl Display for Position {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str(match self {
+                        Position::Major => "major version number",
+                        Position::Pre => "pre-release identifier",
+                        Position::Build => "build metadata",
+                    })
+                }
+            }
+
+            fn rendered() -> String {
+                Position::Pre.to_string()
+            }
+            "#,
+        );
+        assert!(out.contains("enum class Position {"));
+        assert!(out.contains(
+            "inline rusty::fmt::Result rusty_fmt(const Position& self, rusty::fmt::Formatter& f) {"
+        ));
+        assert!(out.contains("if (_m == Position::Pre) return \"pre-release identifier\";"));
+        assert!(out.contains("return rusty::to_string(Position::Pre);"));
+    }
+
+    #[test]
+    fn test_leaf10527_auto_derived_c_like_enum_fmt_does_not_emit_rusty_fmt_helper() {
+        let out = transpile_str(
+            r#"
+            enum Op {
+                Exact,
+                Greater,
+            }
+
+            #[automatically_derived]
+            impl core::fmt::Debug for Op {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    core::fmt::Formatter::write_str(f, "Exact")
+                }
+            }
+            "#,
+        );
+        assert!(!out.contains("rusty_fmt(const Op& self"));
     }
 
     #[test]
@@ -38773,6 +39818,46 @@ mod tests {
         );
         assert!(out.contains("const auto res = "));
         assert!(out.contains("const auto _is_err = res.is_err();"));
+    }
+
+    #[test]
+    fn test_leaf10527_tuple_constructor_argument_marks_local_binding_non_const() {
+        let out = transpile_str(
+            r#"
+            struct Owned {
+                value: rusty::String,
+            }
+
+            struct Wrapper(Owned);
+
+            fn build(value: rusty::String) -> Wrapper {
+                let owned = Owned { value };
+                Wrapper(owned)
+            }
+        "#,
+        );
+        assert!(out.contains("auto owned = Owned{.value = std::move(value)};"));
+        assert!(!out.contains("const auto owned = "));
+        assert!(out.contains("return Wrapper(std::move(owned));"));
+    }
+
+    #[test]
+    fn test_leaf10527_struct_literal_field_consumes_local_binding_non_const() {
+        let out = transpile_str(
+            r#"
+            struct Identifier(rusty::String);
+            struct Prerelease {
+                identifier: Identifier,
+            }
+
+            fn build(text: rusty::String) -> Prerelease {
+                let identifier = Identifier(text);
+                Prerelease { identifier }
+            }
+        "#,
+        );
+        assert!(!out.contains("const auto identifier = "));
+        assert!(out.contains("return Prerelease{.identifier = std::move(identifier)};"));
     }
 
     #[test]

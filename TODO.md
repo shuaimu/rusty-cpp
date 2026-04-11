@@ -3175,7 +3175,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-26-1775884100/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime lowering paths, with no crate-specific rewrite scripts and no generated-text patching.
-        - [ ] Leaf 10.5.27: Collapse the post-10.5.26 deterministic semver Stage E parser/comparator assertion+unwrap mismatch family generically (starting with `test_basic` and adjacent `test_cargo3202`/`test_comparator_parse` fallout), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.27: Collapse the post-10.5.26 deterministic semver Stage E parser/comparator assertion+unwrap mismatch family generically (starting with `test_basic` and adjacent `test_cargo3202`/`test_comparator_parse` fallout), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler/runtime updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared fixes:
+            - `transpiler/src/codegen.rs`: extended consuming-binding analysis so immutable locals used in value constructors are emitted non-const in two previously-missed generic shapes:
+              - tuple/variant constructor calls with UpperCamelCase call paths (for example `Wrapper(owned)`, `Some(v)`, `Enum::Variant(v)`).
+              - struct-literal by-value field payloads (for example `Prerelease { identifier }`).
+            - `include/rusty/mem.hpp`: hardened forgotten-address storage lifetime by backing `forgotten_addresses()` / `forgotten_addresses_mutex()` with process-lifetime heap singletons, preventing static-destruction-order use-after-free in global-destructor drop-guard paths.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`: `test_leaf10527_tuple_constructor_argument_marks_local_binding_non_const`
+            - `transpiler/src/codegen.rs`: `test_leaf10527_struct_literal_field_consumes_local_binding_non_const`
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_mem_forgotten_address_storage_survives_global_destructor_calls`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10527 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-27-1775885088 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous Stage E parser/comparator assertion+unwrap head family is removed; semver Stage E now reports `test_basic PASSED`, `test_cargo3202 PASSED`, and `test_comparator_parse PASSED`.
+            - previous early double-free at this family boundary (after `test_display`) is removed.
+            - new deterministic Stage E frontier is `test_eq_hash FAILED: panic` with follow-on abort (`free(): double free detected in tcache 2`) during teardown.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-27-1775885088/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes remained shared and shape-gated in AST-aware lowering/runtime storage, with no crate-specific rewrite scripts or generated-text patching.
+        - [ ] Leaf 10.5.28: Collapse the post-10.5.27 deterministic semver Stage E `test_eq_hash` panic+double-free family generically (starting with hash/equality assertion mismatch and follow-on ownership teardown abort), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

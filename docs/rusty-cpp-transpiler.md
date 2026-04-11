@@ -4403,7 +4403,29 @@ Active work items:
      - new deterministic Stage E frontier is parser/comparator assertion+unwrap mismatch family starting at `test_basic`, with adjacent `test_cargo3202`/`test_comparator_parse`/`test_parse`/`test_wildcard*` fallout; parity now reports 11 passed / 21 failed.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-26-1775884100/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in transpiler/runtime lowering paths, with no crate-specific rewrites/scripts and no generated-text patching.
-180. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.26` (starting with `test_basic` and adjacent `test_cargo3202`/`test_comparator_parse` assertion+unwrap fallout across parser/comparator tests).
+180. `Leaf 10.5.27` is complete.
+   - plan/scope check: shared transpiler/runtime hardening plus focused regressions stayed below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared fixes:
+     - `transpiler/src/codegen.rs`:
+       - extended consuming-binding detection for UpperCamelCase value constructors (tuple-struct/variant constructor paths) so immutable payload locals are emitted non-const when consumed by value.
+       - extended consuming-binding detection for struct-literal by-value field payloads so locals forwarded into returned/constructed owned fields are emitted non-const before move emission.
+     - `include/rusty/mem.hpp`:
+       - made forgotten-address state (`forgotten_addresses` map + mutex) process-lifetime to avoid static-destruction-order use-after-free when global destructors still execute drop-guard calls at exit.
+   - focused regressions:
+     - `test_leaf10527_tuple_constructor_argument_marks_local_binding_non_const`
+     - `test_leaf10527_struct_literal_field_consumes_local_binding_non_const`
+     - `test_mem_forgotten_address_storage_survives_global_destructor_calls`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10527 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-27-1775885088 --keep-work-dirs`
+   - deterministic semver frontier movement:
+     - previous Stage E parser/comparator assertion+unwrap head family is removed; `test_basic`, `test_cargo3202`, and `test_comparator_parse` now pass.
+     - previous early Stage E abort point after `test_display` is removed.
+     - new deterministic Stage E frontier is `test_eq_hash FAILED: panic` with follow-on `free(): double free detected in tcache 2` abort.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-27-1775885088/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in AST-aware lowering/runtime surfaces, with no crate-specific rewrites/scripts and no generated-text patching.
+181. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.27` (starting with `test_eq_hash` panic + follow-on ownership/teardown abort).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -4521,7 +4543,7 @@ Required approach:
 - for runtime pointer helpers on `MaybeUninit`-backed storage (`as_ptr`/`as_mut_ptr`), do not expose wrapper-element pointers to payload-facing slice/read APIs; normalize helper results to payload pointers (`T*`/`const T*`) via shared runtime adaptation instead of crate-local rewrites
 - for repeat/collection construction lowering, do not globally force fixed-array materialization from repeat helpers; gate array-vs-vector lowering on explicit expected-type/fixed-capacity context
 - for tuple/assertion constructor scaffolding, do not emit bare `Ok(...)` / `Err(...)` without result-type context; always qualify through expected type or peer-derived constructor context
-- for constructor payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings and emit those locals non-const so move construction remains valid where required
+- for constructor/owned-payload forwarding, do not "fix" invalid moves by stripping `std::move` while keeping payload locals const; track consuming constructor payload bindings (including tuple/variant constructor calls and struct-literal owned-field forwarding) and emit those locals non-const so move construction remains valid where required
 - for Result assertion parity, do not add one-off transpiler rewrites that bypass value comparison shape for specific call sites; maintain runtime `rusty::Result` equality surfaces (`operator==`/`operator!=`) so generated assertion scaffolding remains generic
 - for `Into` conversion lowering, do not emit Rust trait-style member calls directly on literals/primitives (for example `("a").into()` in C++); lower through valid helper/context conversion surfaces instead
 - for receiver-gated generic method args (`push(T)`/`insert(_, T)`/`set(T)`), do not block receiver-driven expected-type recovery just because the declared arg type placeholder is not in current scope; resolve concrete arg type from receiver context before conversion-lowering decisions

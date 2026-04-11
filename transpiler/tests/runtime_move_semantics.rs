@@ -141,6 +141,35 @@ fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
 }
 
 #[test]
+fn test_mem_forgotten_address_storage_survives_global_destructor_calls() {
+    let source = r#"
+        #include <cstdlib>
+        #include <rusty/mem.hpp>
+
+        struct ExitProbe {
+            ~ExitProbe() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+                if (!rusty::mem::consume_forgotten_address(this)) {
+                    std::abort();
+                }
+            }
+        };
+
+        static ExitProbe PROBE;
+
+        int main() {
+            int value = 0;
+            const void* addr = &value;
+            rusty::mem::mark_forgotten_address(addr);
+            rusty::mem::consume_forgotten_address(addr);
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "mem_forgotten_address_static_exit");
+}
+
+#[test]
 fn test_mem_drop_allows_unwind_catch_for_panicking_destructors() {
     let source = r#"
         #include <rusty/mem.hpp>
