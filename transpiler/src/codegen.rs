@@ -20347,7 +20347,9 @@ impl CodeGen {
                             return self.emit_expr_to_string(&un.expr);
                         }
                         // Original collapse guard for reference-like operands
-                        if self.should_collapse_reborrow_of_deref_operand(&un.expr) {
+                        if self.should_collapse_reborrow_of_deref_operand(&un.expr)
+                            && !self.method_receiver_is_manually_drop_expr(&un.expr)
+                        {
                             return self.emit_expr_to_string(ref_inner);
                         }
                     }
@@ -23903,7 +23905,16 @@ impl CodeGen {
                 let inner = self.map_type(&p.elem);
                 let needs_pointer_trait_hardening = inner.ends_with('&')
                     || self.type_references_in_scope_type_param(&p.elem);
+                let needs_assoc_pointer_hardening =
+                    self.type_contains_dependent_assoc(&p.elem)
+                        || self.type_references_current_struct_assoc(&p.elem);
                 if needs_pointer_trait_hardening {
+                    if p.mutability.is_some() {
+                        return format!("std::add_pointer_t<{}>", inner);
+                    }
+                    return format!("std::add_pointer_t<std::add_const_t<{}>>", inner);
+                }
+                if needs_assoc_pointer_hardening {
                     if p.mutability.is_some() {
                         return format!("std::add_pointer_t<{}>", inner);
                     }
@@ -32970,6 +32981,35 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10533_assoc_pointer_types_use_add_pointer_hardening() {
+        let out = transpile_str(
+            r#"
+            trait PtrLike {
+                type Item;
+                fn as_ptr(&self) -> *const Self::Item;
+                fn as_mut_ptr(&mut self) -> *mut Self::Item;
+            }
+            struct Buf<T> { xs: [T; 2] }
+            impl<T> PtrLike for Buf<T> {
+                type Item = T;
+                fn as_ptr(&self) -> *const Self::Item { self.xs.as_ptr() as _ }
+                fn as_mut_ptr(&mut self) -> *mut Self::Item { self.xs.as_mut_ptr() as _ }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::add_pointer_t<std::add_const_t<typename Buf::Item>> as_ptr() const"),
+            "associated pointer return type should be pointer-hardened via add_pointer_t, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::add_pointer_t<typename Buf::Item> as_mut_ptr()"),
+            "associated mutable pointer return type should be pointer-hardened via add_pointer_t, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf43_self_assoc_type_stripped_in_struct_scope() {
         let out = transpile_str(
             r#"
@@ -36000,6 +36040,27 @@ mod tests {
         );
         assert!(out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(&mut_ref))"));
         assert!(!out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(mut_ref))"));
+    }
+
+    #[test]
+    fn test_leaf10533_deref_ref_to_pointer_cast_preserves_address_of_expression() {
+        let out = transpile_str(
+            r#"
+            use std::mem::{self, MaybeUninit};
+            fn f<T, const N: usize>(array: [T; N], dst: *mut [MaybeUninit<T>; N]) {
+                let array = mem::ManuallyDrop::new(array);
+                unsafe {
+                    (&*array as *const [T; N] as *const [MaybeUninit<T>; N]).copy_to_nonoverlapping(dst, 1);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "static_cast<std::add_pointer_t<std::add_const_t<std::array<T, rusty::sanitize_array_capacity<N>()>>>>(&*array_shadow1)"
+        ));
+        assert!(!out.contains(
+            "static_cast<std::add_pointer_t<std::add_const_t<std::array<T, rusty::sanitize_array_capacity<N>()>>>>(*array_shadow1)"
+        ));
     }
 
     #[test]

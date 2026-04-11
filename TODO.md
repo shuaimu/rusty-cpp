@@ -3312,7 +3312,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
-        - [ ] Leaf 10.5.33: Collapse the post-10.5.32 deterministic full-matrix `arrayvec` Stage D reference-element pointer/storage-cast family generically (starting with `runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and adjacent `runner.cpp:1245` `ArrayVec::from` storage-cast failures), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+        - [x] *done* Leaf 10.5.33: Collapse the post-10.5.32 deterministic full-matrix `arrayvec` Stage D reference-element pointer/storage-cast family generically (starting with `runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and adjacent `runner.cpp:1245` `ArrayVec::from` storage-cast failures), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only pointer/reference lowering updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - raw-pointer type mapping for associated/dependent pointee shapes could still emit pointer-to-reference forms in concrete instantiations (`ArrayVec<const int&, 2>::Item`), because pointer hardening only covered in-scope type-param/reference tails and missed dependent-associated pointees.
+            - `&*expr` reborrow collapsing in expression lowering incorrectly collapsed `&*ManuallyDrop<_>` in cast chains, producing value-to-pointer cast shapes (`*array_shadow1`) where address-of semantics were required (`&*array_shadow1`).
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - strengthened raw-pointer `map_type` lowering to route dependent-associated/current-struct-associated pointees through `std::add_pointer_t<...>` hardening (with `std::add_const_t` for `*const`), preventing pointer-to-reference declaration emission.
+            - tightened `&*` reborrow collapse guard to preserve `ManuallyDrop` unwrap/cast address semantics instead of collapsing to a value expression in cast contexts.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10533_assoc_pointer_types_use_add_pointer_hardening`
+            - `test_leaf10533_deref_ref_to_pointer_cast_preserves_address_of_expression`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10533 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327241_nested_self_deref_reborrow_drops_address_of_artifact -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf426_deref_trait_match_uses_reference_aware_deref_lowering -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-33-1775891420 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `arrayvec` Stage D (`runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and `runner.cpp:1245` storage-cast failure) is removed.
+            - full-matrix frontier moved forward from Stage D compile failure to Stage E runtime mismatch: first failing tests are now `test_drop_in_insert` and `test_into_inner_1` assertion failures in transpiled `arrayvec` run.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-33-1775891420/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/AST-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
+        - [ ] Leaf 10.5.34: Collapse the post-10.5.33 deterministic full-matrix `arrayvec` Stage E runtime parity family generically (starting with transpiled-run assertion mismatches at `test_drop_in_insert` and `test_into_inner_1`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
