@@ -11661,7 +11661,14 @@ impl CodeGen {
                 // new mapping while emitting the init expression so that
                 // `let rhs = rhs.next()` references the OUTER `rhs`, not the
                 // newly allocated `rhs_shadow1`.
-                let shadows_outer = cpp_name != escape_cpp_keyword(&name_str);
+                let has_outer_same_rust_binding = self
+                    .local_cpp_bindings
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .any(|scope| scope.contains_key(&name_str));
+                let shadows_outer =
+                    cpp_name != escape_cpp_keyword(&name_str) || has_outer_same_rust_binding;
                 if shadows_outer {
                     // Temporarily remove the new mapping from the current scope.
                     // If there was a previous same-scope binding for this Rust name,
@@ -11777,6 +11784,12 @@ impl CodeGen {
                             if let Some(emitted) =
                                 self.emit_single_if_let_as_statement_block(&cpp_name, &decl_type, if_expr)
                             {
+                                if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                                    scope.insert(name_str.clone(), cpp_name.clone());
+                                }
+                                if let Some(used) = self.local_cpp_names_used.last_mut() {
+                                    used.insert(cpp_name.clone());
+                                }
                                 if track_in_progress_initializer {
                                     self.pop_in_progress_local_initializer();
                                 }
@@ -14179,16 +14192,62 @@ impl CodeGen {
         if_expr: &syn::ExprIf,
         env: &HashMap<String, syn::Type>,
     ) -> Option<Vec<IfTupleElemType>> {
-        let then_tail = self.extract_tail_expr_from_block(&if_expr.then_branch)?;
+        let then_tail = self.extract_tail_expr_from_block(&if_expr.then_branch);
+        let then_diverges = match then_tail {
+            Some(tail) => self.expr_definitely_diverges_for_if_tuple_inference(tail),
+            None => self.block_definitely_diverges_for_if_tuple_inference(&if_expr.then_branch),
+        };
         let mut then_env = env.clone();
         if let syn::Expr::Let(let_expr) = if_expr.cond.as_ref() {
             self.populate_inferred_env_from_if_let_condition(let_expr, &mut then_env);
         }
-        let then_types =
-            self.infer_tuple_result_elem_types_for_expr_with_env(then_tail, &then_env)?;
+        let then_types = then_tail
+            .and_then(|tail| self.infer_tuple_result_elem_types_for_expr_with_env(tail, &then_env));
         let (_, else_expr) = if_expr.else_branch.as_ref()?;
-        let else_types = self.infer_tuple_result_elem_types_for_expr_with_env(else_expr, env)?;
-        self.merge_if_tuple_elem_types(&then_types, &else_types)
+        let else_types = self.infer_tuple_result_elem_types_for_expr_with_env(else_expr, env);
+        let else_diverges = self.expr_definitely_diverges_for_if_tuple_inference(else_expr);
+        match (then_types, else_types) {
+            (Some(then_types), Some(else_types)) => {
+                self.merge_if_tuple_elem_types(&then_types, &else_types)
+            }
+            (Some(then_types), None) if else_diverges => Some(then_types),
+            (None, Some(else_types)) if then_diverges => Some(else_types),
+            _ => None,
+        }
+    }
+
+    fn block_definitely_diverges_for_if_tuple_inference(&self, block: &syn::Block) -> bool {
+        if let Some(tail) = self.extract_tail_expr_from_block(block) {
+            return self.expr_definitely_diverges_for_if_tuple_inference(tail);
+        }
+        match block.stmts.last() {
+            Some(syn::Stmt::Expr(expr, Some(_))) => {
+                self.expr_definitely_diverges_for_if_tuple_inference(expr)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_definitely_diverges_for_if_tuple_inference(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_) => true,
+            syn::Expr::Block(block_expr) => {
+                self.block_definitely_diverges_for_if_tuple_inference(&block_expr.block)
+            }
+            syn::Expr::If(if_expr) => {
+                let Some(then_tail) = self.extract_tail_expr_from_block(&if_expr.then_branch)
+                else {
+                    return false;
+                };
+                let Some((_, else_expr)) = &if_expr.else_branch else {
+                    return false;
+                };
+                self.expr_definitely_diverges_for_if_tuple_inference(then_tail)
+                    && self.expr_definitely_diverges_for_if_tuple_inference(else_expr)
+            }
+            _ => false,
+        }
     }
 
     fn infer_tuple_result_elem_types_for_expr_with_env(
@@ -19945,6 +20004,24 @@ impl CodeGen {
         }
     }
 
+    fn push_transient_statement_scope(&mut self) {
+        self.local_bindings.push(HashMap::new());
+        self.local_cpp_bindings.push(HashMap::new());
+        self.local_cpp_names_used.push(HashSet::new());
+        self.local_const_bindings.push(HashMap::new());
+        self.delayed_init_locals.push(HashSet::new());
+        self.local_manually_drop_bindings.push(HashSet::new());
+    }
+
+    fn pop_transient_statement_scope(&mut self) {
+        self.local_manually_drop_bindings.pop();
+        self.delayed_init_locals.pop();
+        self.local_const_bindings.pop();
+        self.local_cpp_names_used.pop();
+        self.local_cpp_bindings.pop();
+        self.local_bindings.pop();
+    }
+
     /// Lower `let x = if let Some(y) = expr { ...?...; val } else { default };`
     /// as a statement block with pre-declared result variable.
     fn emit_single_if_let_as_statement_block(
@@ -19996,13 +20073,22 @@ impl CodeGen {
             self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
             self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
             self.indent += 1;
+            self.push_transient_statement_scope();
+            if let Some(used) = self.local_cpp_names_used.last_mut() {
+                used.insert(cpp_name.to_string());
+            }
             if let Some(name) = binding {
-                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", name, unwrap));
+                let cpp_binding = self.allocate_local_cpp_name(&name);
+                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", cpp_binding, unwrap));
             }
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("if ({}) {{", cond));
             self.indent += 1;
+            self.push_transient_statement_scope();
+            if let Some(used) = self.local_cpp_names_used.last_mut() {
+                used.insert(cpp_name.to_string());
+            }
         }
 
         let stmts = &if_expr.then_branch.stmts;
@@ -20029,11 +20115,13 @@ impl CodeGen {
             self.emit_stmt(stmt, false);
         }
 
+        self.pop_transient_statement_scope();
         self.indent -= 1;
         // Emit else-branch statements if it has early returns
         if else_result.is_none() && else_has_early_return {
             self.writeln("} else {");
             self.indent += 1;
+            self.push_transient_statement_scope();
             if let Some((_, else_expr)) = &if_expr.else_branch {
                 if let syn::Expr::Block(b) = else_expr.as_ref() {
                     for stmt in &b.block.stmts {
@@ -20041,6 +20129,7 @@ impl CodeGen {
                     }
                 }
             }
+            self.pop_transient_statement_scope();
             self.indent -= 1;
             self.writeln("}");
         } else {
@@ -20080,13 +20169,16 @@ impl CodeGen {
             self.writeln(&format!("{{ auto&& _iflet_s = {};", scrutinee));
             self.writeln(&format!("if (_iflet_s.{}()) {{", some_check));
             self.indent += 1;
+            self.push_transient_statement_scope();
             if let Some(name) = binding {
-                self.writeln(&format!("auto {} = _iflet_s.{}();", name, unwrap));
+                let cpp_binding = self.allocate_local_cpp_name(&name);
+                self.writeln(&format!("auto {} = _iflet_s.{}();", cpp_binding, unwrap));
             }
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("{{ if ({}) {{", cond));
             self.indent += 1;
+            self.push_transient_statement_scope();
         }
 
         // Emit then-branch; tail assigns to result_var
@@ -20102,6 +20194,7 @@ impl CodeGen {
                             })
                         {
                             self.emit_if_assign_as_statement_block(result_var, inner_if, expected_ty);
+                            self.pop_transient_statement_scope();
                             self.indent -= 1;
                             self.writeln("}}");
                             return;
@@ -20115,6 +20208,7 @@ impl CodeGen {
             self.emit_stmt(stmt, false);
         }
 
+        self.pop_transient_statement_scope();
         self.indent -= 1;
         if let Some((_, else_expr)) = &if_expr.else_branch {
             match else_expr.as_ref() {
@@ -20125,6 +20219,7 @@ impl CodeGen {
                     } else {
                         self.writeln("} else {");
                         self.indent += 1;
+                        self.push_transient_statement_scope();
                         let stmts = &b.block.stmts;
                         for (i, stmt) in stmts.iter().enumerate() {
                             let is_last = i == stmts.len() - 1;
@@ -20152,6 +20247,7 @@ impl CodeGen {
                             }
                             self.emit_stmt(stmt, false);
                         }
+                        self.pop_transient_statement_scope();
                         self.indent -= 1;
                         self.writeln("}}");
                     }
@@ -20252,13 +20348,16 @@ impl CodeGen {
             self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
             self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
             self.indent += 1;
+            self.push_transient_statement_scope();
             if let Some(name) = binding {
-                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", name, unwrap));
+                let cpp_binding = self.allocate_local_cpp_name(&name);
+                self.writeln(&format!("auto {} = _iflet_scrutinee.{}();", cpp_binding, unwrap));
             }
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("if ({}) {{", cond));
             self.indent += 1;
+            self.push_transient_statement_scope();
         }
 
         // Emit then-branch statements; assign tail expression to _iflet_result
@@ -20293,6 +20392,7 @@ impl CodeGen {
             self.emit_stmt(stmt, false);
         }
 
+        self.pop_transient_statement_scope();
         self.indent -= 1;
         self.writeln("}");
         self.indent -= 1;
@@ -35007,6 +35107,77 @@ mod tests {
         assert!(
             !out.contains("auto _iflet_result0 = std::make_tuple(std::nullopt"),
             "if-let tuple result temp must not deduce nullopt_t tuple element type, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10520_if_let_tuple_result_with_else_if_return_is_option_typed() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(text: &str) -> Option<(char, &str)> { None }
+            fn numeric_identifier(text: &str, pos: u8) -> Result<(u64, &str), i32> {
+                Ok((u64::from(pos), text))
+            }
+            fn parse_patch(text: &str, has_wildcard: bool) -> Result<(Option<u64>, &str), i32> {
+                let mut pos = 0u8;
+                let (patch, rest) = if let Some(text) = text.strip_prefix('.') {
+                    pos = 1;
+                    if let Some((_, text)) = wildcard(text) {
+                        (None, text)
+                    } else if has_wildcard {
+                        return Err(7);
+                    } else {
+                        let (patch, text) = numeric_identifier(text, pos)?;
+                        (Some(patch), text)
+                    }
+                } else {
+                    (None, text)
+                };
+                Ok((patch, rest))
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::tuple<rusty::Option<uint64_t>, std::string_view> _iflet_result0 ="),
+            "if-let tuple result with diverging else-if branch should keep typed Option tuple seed, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("auto _iflet_result0 = std::make_tuple(std::nullopt"),
+            "if-let tuple result temp must not deduce nullopt_t when one branch returns early, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10520_statement_lowered_if_shadow_binding_does_not_leak() {
+        let out = transpile_str(
+            r#"
+            fn parse_text(text: &str) -> Result<&str, i32> {
+                let text = if text.starts_with('+') {
+                    let text = &text[1..];
+                    let (build, text) = Ok::<(u64, &str), i32>((1, text))?;
+                    if build == 0 {
+                        return Err(7);
+                    }
+                    text
+                } else {
+                    text
+                };
+                let text = text.trim_start_matches(' ');
+                Ok(text)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto text_shadow1 = text;"),
+            "statement-lowered if init should seed outer text temp, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("trim_start_matches(text_shadow1, U' ')"),
+            "post-if trim should use outer result binding, not inner branch shadow, got:\n{}",
             out
         );
     }

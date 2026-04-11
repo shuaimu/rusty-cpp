@@ -4272,7 +4272,27 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2172` (`_iflet_result3` in adjacent patch branch still deduces `std::nullopt_t`), with adjacent fallout at `runner.cpp:2180/2193` (`.is_some()` on nullopt_t), `runner.cpp:2203` (stale `text_shadow12` binding), and `runner.cpp:2209+` return-shape cascade.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-19b-1775873154/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/type-context-gated in core if-let/type-inference lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-173. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.19` (starting at `runner.cpp:2172` in `parse::comparator`, `_iflet_result3` tuple seed still deducing `std::nullopt_t` with downstream `.is_some()`/stale-binding return-shape fallout at `runner.cpp:2180+`).
+173. `Leaf 10.5.20` is complete.
+   - plan/scope check: shared transpiler-only control-flow/type-inference hardening + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - hardened tuple-result if-expression inference to tolerate diverging branch forms (for example `else if ... { return Err(...); }`) by merging non-diverging tuple evidence with explicit block-tail divergence checks, so statement-lowered if-let tuple temps keep typed `Option` payloads.
+     - added transient local-scope handling for statement-lowered if/if-let/if-assign branches to prevent branch-local binding leakage into outer post-if statements.
+     - fixed local-shadow initializer handling for same-Rust-name outer bindings in statement-lowering scopes so shadow initializers resolve to the outer binding (avoid `let text = &text[1..]` self-reference emission).
+     - ensured early-return statement-lowered local-init path records the finalized Rust-name → C++-name mapping for subsequent statements in the enclosing scope.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10520_if_let_tuple_result_with_else_if_return_is_option_typed`
+       - `test_leaf10520_statement_lowered_if_shadow_binding_does_not_leak`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10520 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-20c-1775874276 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:2172` (`_iflet_result3` nullopt tuple seed), plus adjacent fallout at `runner.cpp:2180/2193` (`.is_some()` on nullopt_t) and `runner.cpp:2203` (stale text binding), is removed.
+     - new deterministic head starts at `runner.cpp:2209` (`version_req` error-arm lambda still lowers through `/* TODO: if-expression */`, yielding tuple-vs-result return-shape mismatch), with adjacent fallout at `runner.cpp:2218/2223` (void placeholder propagation).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-20c-1775874276/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow/type-context-gated in core statement-lowering/inference paths, with no crate-specific rewrites/scripts and no generated-text patching.
+174. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.20` (starting at `runner.cpp:2209` in `parse::version_req`, where the comparator error-arm path still lowers through `/* TODO: if-expression */` and causes tuple-vs-result return-shape mismatch with downstream `runner.cpp:2218/2223` void propagation).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

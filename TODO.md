@@ -3039,6 +3039,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-19b-1775873154/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/type-context-gated in core if-let/type-inference lowering, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.20: Collapse the post-10.5.19 deterministic semver Stage D if/if-let statement-lowering shadow-scope and diverging-branch tuple-inference family generically (starting with `runner.cpp:2172` `_iflet_result3`/adjacent `text` self-shadow fallout), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only control-flow/type-inference hardening + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - hardened tuple-result if-expression inference to tolerate diverging branch forms (for example `else if ... { return Err(...); }`) by using non-diverging branch tuple evidence and block-tail divergence checks, so statement-lowered if-let tuple temps stay typed as `Option` surfaces instead of `std::nullopt_t` deduction traps.
+            - added transient local-scope handling for statement-lowered if/if-let/if-assign branches to prevent branch-local binding leakage into outer post-if statements while preserving outer-scope lookup.
+            - fixed local-shadow initializer handling for same-Rust-name outer bindings (including transient statement-lowering scopes) so shadow initializers resolve to the outer binding instead of self-referential `let text = &text[1..]` emission.
+            - ensured early-return statement-lowered local-init path records the finalized Rust-name → C++-name mapping for subsequent statements in the enclosing block.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10520_if_let_tuple_result_with_else_if_return_is_option_typed`
+            - `test_leaf10520_statement_lowered_if_shadow_binding_does_not_leak`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10520 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-20c-1775874276 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family at `runner.cpp:2172` (`_iflet_result3` nullopt tuple seed), plus adjacent fallout at `runner.cpp:2180/2193` (`.is_some()` on nullopt_t), `runner.cpp:2203` (stale `text_shadow12` binding), and temporary `runner.cpp:2182/2195` (`text` self-shadow use-before-deduction), is removed.
+            - new deterministic Stage D head starts at `runner.cpp:2209` (`version_req` error-arm lambda still lowers through `/* TODO: if-expression */`, causing tuple-vs-result return-shape mismatch), with adjacent downstream fallout at `runner.cpp:2218/2223` (void placeholder propagation).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-20c-1775874276/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow/type-context-gated in core statement-lowering/inference paths, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
