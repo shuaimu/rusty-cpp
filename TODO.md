@@ -4110,8 +4110,21 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-5-20260411b/semver/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is AST-shape-aware forward declaration emission; no generated-output text patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.6: Re-run full ten-crate parity matrix after `semver` collapse and record next deterministic frontier
-          - Re-run `tests/transpile_tests/run_parity_matrix.sh --work-root <new path> --keep-work-dirs`, capture updated first failing crate/head family, and update §10.6 + TODO status snapshot accordingly.
+        - [x] *done* Leaf 5.1.6: Re-run full ten-crate parity matrix after `semver` collapse and record next deterministic frontier
+          - Plan/scope check: verification-only leaf (matrix rerun + frontier capture) is <<1000 LOC and required no implementation decomposition.
+          - Re-ran full matrix:
+            - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-5-1-6-20260411a --keep-work-dirs`
+          - Outcome: deterministic first failing crate moved to `smallvec` (`total=8`, `pass=7`, `fail=1`; run stops at first failure by matrix contract).
+          - New deterministic Stage D first hard-error family:
+            - `runner.cpp:1065` incomplete-type/declaration-order fallout on `SmallVec<std::array<PanicOnDoubleDrop, 0>>` (`has initializer but incomplete type`, followed by nested-name-specifier incomplete-type errors and downstream `catch_unwind` call-shape fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-6-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-6-20260411a/smallvec/run.log`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf remained deterministic evidence capture only; no generated-output text patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.7: `smallvec` Stage D compile-head family collapse after full-matrix repro
+          - Collapse the new deterministic `smallvec` Stage D incomplete-type/declaration-order family (starting at `runner.cpp:1065`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
