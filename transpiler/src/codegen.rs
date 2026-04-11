@@ -10008,6 +10008,7 @@ impl CodeGen {
         };
         match last_stmt {
             syn::Stmt::Expr(expr, None) => self.expr_can_fallthrough_without_value(expr),
+            syn::Stmt::Expr(expr, Some(_)) => !self.is_expr_diverging(expr),
             _ => true,
         }
     }
@@ -12283,6 +12284,16 @@ impl CodeGen {
                     expected_ty,
                 )
             };
+            let diverging = scoped.is_expr_diverging(&arm.body);
+            let arm_value = if diverging {
+                format!(
+                    "(static_cast<void>({}), {})",
+                    body,
+                    scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
+                )
+            } else {
+                body.clone()
+            };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
@@ -12310,7 +12321,7 @@ impl CodeGen {
                             visit_param,
                             binding_stmts.join(" "),
                             guard_str,
-                            body,
+                            arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
@@ -12326,7 +12337,7 @@ impl CodeGen {
                             "[&]({}) {{ {} return {}; }}",
                             visit_param,
                             binding_stmts.join(" "),
-                            body
+                            arm_value
                         ));
                     }
                 }
@@ -12338,11 +12349,14 @@ impl CodeGen {
                             "[&](const {}& _v) {{ if ({}) return {}; return {}; }}",
                             cpp_type,
                             guard_str,
-                            body,
+                            arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
-                        parts.push(format!("[&](const {}&) {{ return {}; }}", cpp_type, body));
+                        parts.push(format!(
+                            "[&](const {}&) {{ return {}; }}",
+                            cpp_type, arm_value
+                        ));
                     }
                 }
                 syn::Pat::Struct(ps) => {
@@ -12375,7 +12389,7 @@ impl CodeGen {
                             visit_param,
                             binding_stmts.join(" "),
                             guard_str,
-                            body,
+                            arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
@@ -12383,17 +12397,17 @@ impl CodeGen {
                             "[&]({}) {{ {} return {}; }}",
                             visit_param,
                             binding_stmts.join(" "),
-                            body
+                            arm_value
                         ));
                     }
                 }
                 syn::Pat::Wild(_) => {
-                    parts.push(format!("[&](const auto&) {{ return {}; }}", body));
+                    parts.push(format!("[&](const auto&) {{ return {}; }}", arm_value));
                 }
                 syn::Pat::Ident(pi) => {
                     parts.push(format!(
                         "[&](const auto& {}) {{ return {}; }}",
-                        pi.ident, body
+                        pi.ident, arm_value
                     ));
                 }
                 _ => {
@@ -18020,6 +18034,27 @@ impl CodeGen {
                     false
                 }
             }
+            syn::Expr::If(if_expr) => {
+                let then_diverges = self
+                    .is_expr_diverging(&syn::Expr::Block(syn::ExprBlock {
+                        attrs: Vec::new(),
+                        label: None,
+                        block: if_expr.then_branch.clone(),
+                    }));
+                let else_diverges = if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.is_expr_diverging(else_expr)
+                } else {
+                    false
+                };
+                then_diverges && else_diverges
+            }
+            syn::Expr::Match(match_expr) => {
+                !match_expr.arms.is_empty()
+                    && match_expr
+                        .arms
+                        .iter()
+                        .all(|arm| self.is_expr_diverging(&arm.body))
+            }
             syn::Expr::Macro(m) => {
                 let macro_name = m
                     .mac
@@ -18064,10 +18099,14 @@ impl CodeGen {
                 | "core::panicking::panic_fmt"
                 | "core::panicking::unreachable_display"
                 | "core::intrinsics::unreachable"
+                | "core::hint::unreachable_unchecked"
+                | "std::hint::unreachable_unchecked"
                 | "panicking::panic"
                 | "panicking::panic_fmt"
                 | "panicking::unreachable_display"
                 | "intrinsics::unreachable"
+                | "hint::unreachable_unchecked"
+                | "unreachable_unchecked"
         )
     }
 
@@ -35662,6 +35701,57 @@ mod tests {
         assert!(out.contains("rusty::ptr::drop_in_place("));
         assert!(!out.contains("return rusty::ptr::drop_in_place("));
         assert!(out.contains("return false;"));
+    }
+
+    #[test]
+    fn test_leaf5119_unreachable_unchecked_paths_are_diverging() {
+        assert!(CodeGen::is_diverging_function_path("unreachable_unchecked"));
+        assert!(CodeGen::is_diverging_function_path("hint::unreachable_unchecked"));
+        assert!(CodeGen::is_diverging_function_path(
+            "core::hint::unreachable_unchecked"
+        ));
+        assert!(CodeGen::is_diverging_function_path("std::hint::unreachable_unchecked"));
+    }
+
+    #[test]
+    fn test_leaf5119_unsafe_tail_match_keeps_value_return_path() {
+        let out = transpile_str(
+            r#"
+            use core::hint::unreachable_unchecked;
+
+            enum Data {
+                Inline(i32),
+                Heap { ptr: i32, len: usize },
+            }
+
+            unsafe fn heap(d: &Data) -> (i32, usize) {
+                match d {
+                    Data::Heap { ptr, len } => (*ptr, *len),
+                    _ => {
+                        if true {
+                            ::core::panicking::panic("entered unreachable code");
+                        } else {
+                            unreachable_unchecked();
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return [&]() { auto&& _m = d; return std::visit(overloaded {"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "static_cast<void>([&]() { if (true) { rusty::panicking::panic(\"entered unreachable code\"); } else { rusty::intrinsics::unreachable(); } }())"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("[&]() -> std::tuple<int32_t, size_t> { rusty::intrinsics::unreachable(); }()"),
+            "{out}"
+        );
     }
 
     // ── Tuple and destructuring tests ───────────────────────────

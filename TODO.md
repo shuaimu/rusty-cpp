@@ -4398,8 +4398,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-18-20260411b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
             - `/tmp/rusty-parity-matrix-5-1-18-20260411c/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime surfaces, with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.19: `smallvec` Stage D structured-binding/void-return compile-head family collapse
-          - Collapse the new post-5.1.18 deterministic `smallvec` Stage D family beginning at `runner.cpp:1612`/`runner.cpp:1615` (`triple()` structured binding deduced as `void` and adjacent void-expression fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.19: `smallvec` Stage D structured-binding/void-return compile-head family collapse
+          - Plan/scope check: shared transpiler-side divergence/match-lowering hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - statement-fallthrough analysis now treats semicolon expression statements as non-fallthrough when their expressions diverge, preventing `void` return drift in value contexts.
+            - diverging-path detection now includes `core::hint::unreachable_unchecked`/`std::hint::unreachable_unchecked` (and short-path forms) and recognizes `if`/`match` expressions as diverging only when all live branches diverge.
+            - match-arm visit emission now type-stabilizes diverging arm values via `(static_cast<void>(...), typed-unreachable-fallback)` so wildcard diverging arms do not force `std::visit`/enclosing `auto` return deduction to `void`.
+          - Added focused regressions:
+            - `test_leaf5119_unreachable_unchecked_paths_are_diverging`
+            - `test_leaf5119_unsafe_tail_match_keeps_value_return_path`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5119 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-19-20260411b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.18 first-head family at `runner.cpp:1612`/`runner.cpp:1615` (`deduced type 'void' for structured bindings` / adjacent void-expression fallout in `triple()` path) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2379` (`taking address of rvalue`) and `runner.cpp:2387` (`ConstNonNull<rusty::String> == const char*` mismatch), followed by downstream unrelated compile families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-19-20260411b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering paths, with no generated-output patching and no crate-specific ad-hoc scripts.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
