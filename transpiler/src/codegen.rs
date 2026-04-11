@@ -25173,6 +25173,7 @@ impl CodeGen {
                     "iter"
                         | "iter_mut"
                         | "into_iter"
+                        | "drain"
                         | "iter_names"
                         | "bytes"
                         | "as_bytes"
@@ -25200,6 +25201,7 @@ impl CodeGen {
                         "iter"
                             | "iter_mut"
                             | "into_iter"
+                            | "drain"
                             | "iter_names"
                             | "bytes"
                             | "as_bytes"
@@ -25309,7 +25311,9 @@ impl CodeGen {
         if mc.method != "enumerate" || !mc.args.is_empty() {
             return None;
         }
-        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -25320,7 +25324,9 @@ impl CodeGen {
         if mc.method != "rev" || !mc.args.is_empty() {
             return None;
         }
-        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -45462,6 +45468,34 @@ mod tests {
         assert!(out.contains("rusty::rev(r)"));
         assert!(!out.contains(".enumerate()"));
         assert!(!out.contains(".rev()"));
+    }
+
+    #[test]
+    fn test_leaf5122_into_iter_rev_without_local_type_binding_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<u8>::new();
+                let _ = v.into_iter().rev();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::rev(v.into_iter())"), "{out}");
+        assert!(!out.contains("v.into_iter().rev()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5122_drain_rev_without_local_type_binding_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<u8>::new();
+                let _ = v.drain(0..0).rev();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::rev(v.drain(rusty::range(0, 0)))"), "{out}");
+        assert!(!out.contains(".drain(rusty::range(0, 0)).rev()"), "{out}");
     }
 
     #[test]

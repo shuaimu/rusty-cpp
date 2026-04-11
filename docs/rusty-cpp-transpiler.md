@@ -2329,6 +2329,9 @@ Current status snapshot:
 38. Focused `smallvec` repro after `Leaf 5.1.21` (`/tmp/rusty-parity-matrix-5-1-21-20260411a/smallvec/...`) collapses the prior post-5.1.20 reference-element array/`MaybeUninit` first-head family by lowering Rust reference-element fixed arrays to `std::array<std::reference_wrapper<...>, N>` (plus matching fixed-array materialization paths), removing the `std::array<T&, N>` instantiation surface.
 39. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2615` (`Drain<std::array<unsigned char, 2>>` has no member `rev`), with immediate adjacent same-family fallout at `runner.cpp:2636` and downstream `IntoIter<...>::rev` gaps at `runner.cpp:2727/2749`.
 40. Guardrail check against §11 remains satisfied for `Leaf 5.1.21`: fixes stayed shared and AST/type-shape-gated in core array lowering/materialization paths; no crate-specific ad-hoc scripts and no generated-output text patching were introduced.
+41. Focused `smallvec` repro after `Leaf 5.1.22` (`/tmp/rusty-parity-matrix-5-1-22-20260411a/smallvec/...`) collapses the prior post-5.1.21 iterator-reverse adapter first-head family by broadening iterator-adapter shape gating for `rev`/`enumerate` to include probable iterator-shaped receivers and by classifying `drain` chains as probable iterator receivers.
+42. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2656` (`cannot convert Vec<int> to Vec<unsigned char>` in `SmallVec::<[u8; N]>::from_vec(...)` boxed-array literal paths), with immediate adjacent same-family fallout at `runner.cpp:3227` and `runner.cpp:4364/4384/4404/4424`.
+43. Guardrail check against §11 remains satisfied for `Leaf 5.1.22`: fixes stayed shared and receiver-shape-gated in core iterator adapter lowering; no crate-specific ad-hoc scripts and no generated-output text patching were introduced.
 
 Historical active-work chain (retained for traceability):
 

@@ -4464,8 +4464,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-21-20260411a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core array lowering/materialization paths, with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.22: `smallvec` Stage D iterator-reverse adapter compile-head family collapse
-          - Collapse the new post-5.1.21 deterministic `smallvec` Stage D family beginning at `runner.cpp:2615`/`runner.cpp:2636` (`Drain<...>.rev()` missing member) with downstream `IntoIter<...>.rev()` gaps (`runner.cpp:2727/2749`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.22: `smallvec` Stage D iterator-reverse adapter compile-head family collapse
+          - Plan/scope check: shared transpiler iterator-adapter shape detection hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - iterator-shape fallback detection now recognizes `drain` receiver method chains in probable-iterator classification (alongside existing `iter`/`iter_mut`/`into_iter`/adapter surfaces).
+            - `enumerate` and `rev` call-lowering gates now accept either strongly inferred iterator receivers or probable iterator-shaped receivers, preserving non-iterator method-call behavior while collapsing weak-local-inference adapter chains.
+          - Added focused regressions:
+            - `test_leaf5122_into_iter_rev_without_local_type_binding_lowers_to_runtime_helper`
+            - `test_leaf5122_drain_rev_without_local_type_binding_lowers_to_runtime_helper`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5122 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333131_ -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-22-20260411a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.21 first-head family at `runner.cpp:2615/2636` (`Drain<...>.rev()` missing member) with downstream `runner.cpp:2727/2749` (`IntoIter<...>.rev()` missing member) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2656` (`cannot convert Vec<int> to Vec<unsigned char>` in `SmallVec<[u8; 1]>::from_vec(box_new(std::array{...}))` paths), with adjacent same-family fallout at `runner.cpp:3227` and `runner.cpp:4364/4384/4404/4424`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-22-20260411a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver-shape-gated in core iterator adapter lowering, with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.23: `smallvec` Stage D boxed-array literal numeric-element typing compile-head family collapse
+          - Collapse the new post-5.1.22 deterministic `smallvec` Stage D family beginning at `runner.cpp:2656` (`Vec<int>` to `Vec<uint8_t>` conversion failure in `SmallVec::<[u8; N]>::from_vec(...)` boxed-array literal paths), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
