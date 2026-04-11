@@ -3720,7 +3720,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-6c-1775905718/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-7a-1775906339/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared in runtime container/view equality surfaces; no crate-specific rewrites and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.8: Collapse the post-10.5.40.7 `bitflags` iterator-names adapter call-surface head (`runner.cpp:4460` direct `.map(...)` member call emitted on `IterNames`) with shared iterator-adapter receiver-shape lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.8: Collapse the post-10.5.40.7 `bitflags` iterator-names adapter call-surface head (`runner.cpp:4460` direct `.map(...)` member call emitted on `IterNames`) with shared iterator-adapter receiver-shape lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared iterator receiver-shape inference hardening + focused transpiler regression) and did not require additional decomposition.
+            - Root-cause findings:
+              - map-adapter lowering already normalized direct `value.iter_names().map(...)` to `rusty::map(...)`, but missed callable-return receiver shapes like `inherent(value).map(...)` when callable return type was an associated iterator surface (`T::IterNames`) without extractable concrete `Item` type.
+              - `is_probably_iterator_receiver_expr` only treated callable-return receivers as iterator-like when `extract_iter_item_type_from_type(return_ty)` succeeded; associated iterator surface types (for example `T::IterNames`) failed this gate and leaked raw member `.map(...)` calls into generated C++.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - added `type_has_iterator_surface(...)` iterator-surface heuristic for unresolved/associated iterator-shaped types (`Iter`, `IntoIter`, `IterNames`, `*Iterator`/`*Iter` tails, and iterator-like trait bounds).
+              - hardened iterator-probability gates to use this surface heuristic in addition to concrete item-type extraction for:
+                - callable-return receiver calls (`inherent(value)` shapes),
+                - local binding receiver paths.
+            - Added focused fixture-agnostic regression:
+              - `test_leaf105408_callable_returning_associated_iter_names_lowers_map_chain_to_runtime_map`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105408 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-8a-1775906952 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:4460` (`IterNames` missing `.map`) is removed and Stage D now passes for `bitflags`.
+              - full-matrix frontier remains `bitflags` and advances to Stage E runtime failure rooted at recursive synthetic bitflags helper emission (first deterministic wrapper crash: `rusty_test_tests_all_cases`; adjacent recursive helper warnings at `runner.cpp:1466/1469` for `bits()` / `from_bits_retain()` self-calls).
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-7a-1775906339/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-8a-1775906952/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-shape-gated in iterator adapter lowering; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.9: Collapse the post-10.5.40.8 `bitflags` Stage E recursive synthetic-helper runtime-crash head (starting with `rusty_test_tests_all_cases` segfault and adjacent `runner.cpp:1466/1469` recursive `bits()` / `from_bits_retain()` self-calls), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

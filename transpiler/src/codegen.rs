@@ -19479,6 +19479,53 @@ impl CodeGen {
         })
     }
 
+    fn type_has_iterator_surface(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::ImplTrait(it) => it.bounds.iter().any(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return false;
+                };
+                trait_bound.path.segments.last().is_some_and(|seg| {
+                    let name = seg.ident.to_string();
+                    matches!(name.as_str(), "Iter" | "IntoIter" | "IterNames")
+                        || name.ends_with("Iterator")
+                        || name.ends_with("Iter")
+                })
+            }),
+            syn::Type::TraitObject(obj) => obj.bounds.iter().any(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return false;
+                };
+                trait_bound.path.segments.last().is_some_and(|seg| {
+                    let name = seg.ident.to_string();
+                    matches!(name.as_str(), "Iter" | "IntoIter" | "IterNames")
+                        || name.ends_with("Iterator")
+                        || name.ends_with("Iter")
+                })
+            }),
+            syn::Type::Path(tp) => {
+                let Some(last) = tp.path.segments.last() else {
+                    return false;
+                };
+                let name = last.ident.to_string();
+                if matches!(name.as_str(), "Iter" | "IntoIter" | "IterNames")
+                    || name.ends_with("Iterator")
+                    || name.ends_with("Iter")
+                {
+                    return true;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return false;
+                };
+                args.args.iter().any(|arg| {
+                    matches!(arg, syn::GenericArgument::AssocType(assoc) if assoc.ident == "Item")
+                })
+            }
+            _ => false,
+        }
+    }
+
     fn infer_iter_item_type_from_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
         let expr = self.peel_paren_group_expr(expr);
         match expr {
@@ -22886,7 +22933,9 @@ impl CodeGen {
                     if let Some(callee_ty) = self.lookup_local_binding_type(&binding_name) {
                         if let Some(return_ty) = self.extract_callable_return_type_from_type(&callee_ty)
                         {
-                            if self.extract_iter_item_type_from_type(&return_ty).is_some() {
+                            if self.extract_iter_item_type_from_type(&return_ty).is_some()
+                                || self.type_has_iterator_surface(&return_ty)
+                            {
                                 return true;
                             }
                         }
@@ -22921,8 +22970,10 @@ impl CodeGen {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
                     .as_ref()
-                    .and_then(|ty| self.extract_iter_item_type_from_type(ty))
-                    .is_some()
+                    .is_some_and(|ty| {
+                        self.extract_iter_item_type_from_type(ty).is_some()
+                            || self.type_has_iterator_surface(ty)
+                    })
             }
             _ => false,
         }
@@ -32898,6 +32949,25 @@ mod tests {
         );
         assert!(out.contains("return it.next().map("), "expected Option::map shape, got:\n{out}");
         assert!(!out.contains("rusty::map(it.next(),"));
+    }
+
+    #[test]
+    fn test_leaf105408_callable_returning_associated_iter_names_lowers_map_chain_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            trait Flags {
+                type IterNames: Iterator<Item = i32>;
+            }
+            fn case_<T: Flags>(value: T, inherent: impl Fn(T) -> T::IterNames) -> Vec<i32> {
+                inherent(value).map(|x| x + 1).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::map(inherent("),
+            "expected callable-return associated iterator map lowering, got:\n{out}"
+        );
+        assert!(!out.contains("inherent(value).map("));
     }
 
     #[test]

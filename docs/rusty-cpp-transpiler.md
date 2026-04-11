@@ -4701,6 +4701,7 @@ Required approach:
 - when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
 - for iterator adapter lowering, do not rely on a single direct-receiver item-type inference path; include callable-return and receiver-shape evidence gates so adapter chains (for example call-return iterators and `iter_names()`-style surfaces) do not leak raw `.map()`/`.count()` member calls into C++
+- for callable-return iterator adapter lowering, do not require concrete `Item` extraction as the only evidence gate before rewriting adapters; associated iterator surfaces (for example `T::IterNames`) must still route through shared iterator helper lowering
 - for collect lowering, do not emit `Target::from_iter(...)` on non-owning C++ view targets (`std::span`, `std::string_view`, `std::basic_string_view`) that do not provide Rust-style constructor surfaces
 - for map adapter lowering, do not rewrite optional-like payload maps (`next()` / `next_back()` receivers) into iterator helper calls; keep `Option::map`/`Result::map` semantics when receiver shape indicates optional next-payload surfaces
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
