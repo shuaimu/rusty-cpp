@@ -3743,7 +3743,38 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-7a-1775906339/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-8a-1775906952/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-shape-gated in iterator adapter lowering; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.9: Collapse the post-10.5.40.8 `bitflags` Stage E recursive synthetic-helper runtime-crash head (starting with `rusty_test_tests_all_cases` segfault and adjacent `runner.cpp:1466/1469` recursive `bits()` / `from_bits_retain()` self-calls), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.9: Collapse the post-10.5.40.8 `bitflags` Stage E recursive synthetic-helper runtime-crash head (starting with `rusty_test_tests_all_cases` segfault and adjacent `runner.cpp:1466/1469` recursive `bits()` / `from_bits_retain()` self-calls), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared bitflags helper-emission hardening + focused regression + parity reruns) and did not require additional decomposition.
+            - Root-cause findings:
+              - merged bitflags trait/default methods could emit direct self-recursive helper forwarders (`bits` and `from_bits_retain`) that suppressed synthetic safe helpers and triggered deterministic Stage E crash recursion.
+              - after suppressing the recursive static helper, synthetic `from_bits_retain` still used `decltype(std::declval<T>()._0)` and synthetic `bits` used deduced `auto`, causing deterministic Stage D incomplete-type and use-before-definition fallout.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - added shape-gated skipping of direct recursive bitflags helper forwarders:
+                - `bits` recursion via both method-call (`self.bits()`) and UFCS call (`Self::bits(self)` / `Type::bits(self)`) shapes,
+                - `from_bits_retain` recursion via owner-qualified self-call shape.
+              - hardened synthetic bitflags helper signatures to use concrete field types (mapped from the newtype inner field) instead of `declval`/deduced-`auto` forms:
+                - `bits()` now emits explicit return type (`Bits`-concrete C++ type),
+                - `from_bits_retain(bits)` and `all()` use explicit mapped bits type without incomplete-type member probes.
+            - Added focused fixture-agnostic regression:
+              - `test_leaf105409_recursive_bitflags_forwarders_are_skipped`
+                - asserts recursive helper forwarders are not emitted,
+                - asserts synthetic helpers emit non-recursive concrete-type forms,
+                - asserts no incomplete-type `std::declval<Flags>()._0` signature remains.
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105409 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --crate bitflags --work-root /tmp/rusty-parity-matrix-10-5-40-9e-1775908533 --keep-work-dirs`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-9f-1775909379 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first-failure family at Stage E wrapper crash (`rusty_test_tests_all_cases` segfault from recursive helper self-calls) is removed; `bitflags` now completes build/run without crash.
+              - full-matrix frontier remains `bitflags` Stage E and advances to semantic parity failures rooted at:
+                - `tests_complement_cases` assertion mismatch,
+                - adjacent `difference`/`extend`/`flags`/`iter` assertion mismatches and parser failure surfaces (`from_str*`/`to_writer*`/`roundtrip`).
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-8a-1775906952/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-9f-1775909379/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core helper emission; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.10: Collapse the post-10.5.40.9 `bitflags` Stage E semantic helper/parsing parity family (starting with `tests_complement_cases` assertion mismatch and adjacent `difference`/`extend`/`iter`/parser failure surfaces), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

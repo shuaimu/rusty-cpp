@@ -5607,6 +5607,7 @@ impl CodeGen {
             if fields.unnamed.len() == 1 {
                 let name_str = name.to_string();
                 let scoped_key = self.scoped_type_key(&name_str);
+                let bits_cpp_type = self.map_type(&fields.unnamed[0].ty);
                 let has_operators = self
                     .operator_renames
                     .keys()
@@ -5618,7 +5619,7 @@ impl CodeGen {
                     self.newline();
                     self.writeln("// Synthetic bitwise trait methods (from const _ block impls)");
                     if !merged_methods.contains("bits") {
-                        self.writeln("auto bits() const { return this->_0; }");
+                        self.writeln(&format!("{} bits() const {{ return this->_0; }}", bits_cpp_type));
                     }
                     // from_bits_retain is typically already provided by
                     // trait static default method injection (Leaf 27).
@@ -5631,14 +5632,14 @@ impl CodeGen {
                     }
                     if !merged_methods.contains("all") {
                         self.writeln(&format!(
-                            "static {} all() {{ return {}{{static_cast<decltype(std::declval<{}>()._0)>(~0)}}; }}",
-                            n, n, n
+                            "static {} all() {{ return {}{{static_cast<{}>(~0)}}; }}",
+                            n, n, bits_cpp_type
                         ));
                     }
                     if !merged_methods.contains("from_bits_retain") {
                         self.writeln(&format!(
-                            "static {} from_bits_retain(decltype(std::declval<{}>()._0) bits) {{ return {}{{bits}}; }}",
-                            n, n, n
+                            "static {} from_bits_retain({} bits) {{ return {}{{bits}}; }}",
+                            n, bits_cpp_type, n
                         ));
                     }
                     if !merged_methods.contains("is_empty") {
@@ -7807,6 +7808,163 @@ impl CodeGen {
         normalized.to_string()
     }
 
+    fn extract_single_stmt_expr<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
+        if block.stmts.len() != 1 {
+            return None;
+        }
+        match &block.stmts[0] {
+            syn::Stmt::Expr(expr, _) => Some(expr),
+            _ => None,
+        }
+    }
+
+    fn strip_return_expr<'a>(&self, expr: &'a syn::Expr) -> &'a syn::Expr {
+        let mut current = expr;
+        loop {
+            let peeled = self.peel_paren_group_expr(current);
+            match peeled {
+                syn::Expr::Return(ret) => {
+                    let Some(inner) = &ret.expr else {
+                        return peeled;
+                    };
+                    current = inner;
+                }
+                _ => return peeled,
+            }
+        }
+    }
+
+    fn current_struct_is_bitflags_like(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let scoped_name = self.scoped_type_key(struct_name);
+        self.operator_renames
+            .keys()
+            .any(|(type_key, _)| *type_key == *struct_name || *type_key == scoped_name)
+    }
+
+    fn method_is_direct_recursive_bits_forwarder(&self, method: &syn::ImplItemFn) -> bool {
+        let Some(expr) = self.extract_single_stmt_expr(&method.block) else {
+            return false;
+        };
+        let expr = self.strip_return_expr(expr);
+        match expr {
+            syn::Expr::MethodCall(mc) => {
+                if mc.method != "bits" || !mc.args.is_empty() {
+                    return false;
+                }
+                matches!(
+                    self.peel_paren_group_expr(&mc.receiver),
+                    syn::Expr::Path(path) if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
+                )
+            }
+            syn::Expr::Call(call) => {
+                let func = self.peel_paren_group_expr(call.func.as_ref());
+                let syn::Expr::Path(path_expr) = func else {
+                    return false;
+                };
+                let segments: Vec<String> = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect();
+                if segments.is_empty()
+                    || segments.last().map_or(true, |s| s != "bits")
+                    || segments.len() < 2
+                {
+                    return false;
+                }
+                let Some(struct_name) = self.current_struct.as_ref() else {
+                    return false;
+                };
+                let owner = &segments[segments.len() - 2];
+                if owner != "Self" && owner != struct_name {
+                    return false;
+                }
+                if call.args.len() != 1 {
+                    return false;
+                }
+                matches!(
+                    self.peel_paren_group_expr(call.args.first().unwrap()),
+                    syn::Expr::Path(path) if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn method_is_direct_recursive_from_bits_retain_forwarder(
+        &self,
+        method: &syn::ImplItemFn,
+    ) -> bool {
+        let Some(expr) = self.extract_single_stmt_expr(&method.block) else {
+            return false;
+        };
+        let expr = self.strip_return_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        let func = self.peel_paren_group_expr(call.func.as_ref());
+        let syn::Expr::Path(path_expr) = func else {
+            return false;
+        };
+        let segments: Vec<String> = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        if segments.is_empty()
+            || segments.last().map_or(true, |s| s != "from_bits_retain")
+            || segments.len() < 2
+        {
+            return false;
+        }
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let owner = &segments[segments.len() - 2];
+        if owner != "Self" && owner != struct_name {
+            return false;
+        }
+        if call.args.len() != 1 {
+            return false;
+        }
+        let Some(param_ident) = method.sig.inputs.iter().find_map(|arg| match arg {
+            syn::FnArg::Typed(pt) => match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        }) else {
+            return false;
+        };
+        matches!(
+            self.peel_paren_group_expr(call.args.first().unwrap()),
+            syn::Expr::Path(path) if path.path.segments.len() == 1 && path.path.segments[0].ident == param_ident
+        )
+    }
+
+    fn should_skip_recursive_bitflags_forwarder(
+        &self,
+        emitted_name: &str,
+        method: &syn::ImplItemFn,
+        is_static: bool,
+    ) -> bool {
+        if !self.current_struct_is_bitflags_like() {
+            return false;
+        }
+        match emitted_name {
+            "bits" if !is_static => self.method_is_direct_recursive_bits_forwarder(method),
+            "from_bits_retain" if is_static => {
+                self.method_is_direct_recursive_from_bits_retain_forwarder(method)
+            }
+            _ => false,
+        }
+    }
+
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
         let emitted_template_key = self.emitted_template_signature_key(&method.sig.generics);
@@ -7938,6 +8096,11 @@ impl CodeGen {
                 }
             })
             .collect();
+
+        if self.should_skip_recursive_bitflags_forwarder(&name, method, is_static) {
+            self.pop_type_param_scope();
+            return;
+        }
 
         let static_prefix = if is_static { "static " } else { "" };
         let conflict_key = self.emitted_method_conflict_key(
@@ -43602,7 +43765,7 @@ mod tests {
             "#,
         );
         // Core accessors
-        assert!(out.contains("auto bits() const"), "missing bits()\nGot: {out}");
+        assert!(out.contains("bits() const"), "missing bits()\nGot: {out}");
         assert!(out.contains("static Flags empty()"), "missing empty()\nGot: {out}");
         assert!(out.contains("static Flags all()"), "missing all()\nGot: {out}");
         assert!(out.contains("static Flags from_bits_retain("), "missing from_bits_retain()\nGot: {out}");
@@ -43677,6 +43840,51 @@ mod tests {
         // is_empty should also not be duplicated
         let is_empty_count = out.matches("is_empty()").count();
         assert!(is_empty_count >= 1, "is_empty() should appear at least once\nGot: {out}");
+    }
+
+    #[test]
+    fn test_leaf105409_recursive_bitflags_forwarders_are_skipped() {
+        let out = transpile_str(
+            r#"
+            trait FlagLike {
+                fn bits(&self) -> u8;
+                fn from_bits_retain(bits: u8) -> Self where Self: Sized;
+            }
+
+            struct Flags(u8);
+
+            impl FlagLike for Flags {
+                fn bits(&self) -> u8 { Flags::bits(self) }
+                fn from_bits_retain(bits: u8) -> Self { Flags::from_bits_retain(bits) }
+            }
+
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("uint8_t bits() const { return this->_0; }"),
+            "synthetic non-recursive bits() helper should be emitted\nGot: {out}"
+        );
+        assert!(
+            out.contains("static Flags from_bits_retain(uint8_t bits) { return Flags{bits}; }"),
+            "synthetic non-recursive from_bits_retain() helper should be emitted with concrete bits type\nGot: {out}"
+        );
+        assert!(
+            !out.contains("return (*this).bits();"),
+            "recursive bits forwarder should be skipped\nGot: {out}"
+        );
+        assert!(
+            !out.contains("return Flags::from_bits_retain("),
+            "recursive from_bits_retain forwarder should be skipped\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::declval<Flags>()._0"),
+            "synthetic from_bits_retain should not use incomplete-type declval member access\nGot: {out}"
+        );
     }
 
     #[test]
