@@ -174,6 +174,9 @@ pub struct CodeGen {
     /// Tracks unit variant names of data enums (e.g., "ErrorKind_Empty").
     /// Used to distinguish unit variant path values from constructor references.
     data_enum_unit_variants: HashSet<String>,
+    /// Known variant identifiers for each data enum (Rust names, unescaped).
+    /// Used to avoid rewriting associated-method calls as enum variant constructors.
+    data_enum_variants_by_enum: HashMap<String, HashSet<String>>,
     /// Tracks associated constants on C-like enums (e.g., "Op_DEFAULT").
     /// These are emitted as standalone constants since enum class can't
     /// have static members; path references are rewritten accordingly.
@@ -475,6 +478,7 @@ impl CodeGen {
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
+            data_enum_variants_by_enum: HashMap::new(),
             c_like_enum_consts: HashSet::new(),
             type_arg_nesting: std::cell::Cell::new(0),
             iflet_result_counter: 0,
@@ -645,6 +649,7 @@ impl CodeGen {
         self.extension_method_names.clear();
         self.data_enum_types.clear();
         self.data_enum_unit_variants.clear();
+        self.data_enum_variants_by_enum.clear();
         self.struct_field_types.clear();
         self.struct_field_order.clear();
         self.struct_field_cpp_names.clear();
@@ -6033,6 +6038,13 @@ impl CodeGen {
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
         if has_data {
             self.data_enum_types.insert(name.to_string());
+            self.data_enum_variants_by_enum.insert(
+                name.to_string(),
+                e.variants
+                    .iter()
+                    .map(|variant| variant.ident.to_string())
+                    .collect(),
+            );
             // Track which variants are unit variants (no fields)
             for variant in &e.variants {
                 if variant.fields.is_empty() {
@@ -6042,6 +6054,7 @@ impl CodeGen {
             }
         } else {
             self.data_enum_types.remove(&name.to_string());
+            self.data_enum_variants_by_enum.remove(&name.to_string());
         }
         self.push_type_param_scope(&e.generics);
 
@@ -8094,6 +8107,27 @@ impl CodeGen {
         }
         let struct_name = self.current_struct.as_ref()?;
         self.resolve_assoc_type_from_impl_blocks(struct_name, assoc_name)
+    }
+
+    fn path_is_current_struct_assoc_projection(&self, path: &syn::Path) -> bool {
+        if path.segments.len() < 2 {
+            return false;
+        }
+        let Some(current_struct) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let Some(owner_seg) = path.segments.first() else {
+            return false;
+        };
+        let owner = owner_seg.ident.to_string();
+        if owner != "Self" && owner != *current_struct {
+            return false;
+        }
+        let Some(assoc_seg) = path.segments.iter().nth(1) else {
+            return false;
+        };
+        self.resolve_current_struct_assoc_cpp_type(&assoc_seg.ident.to_string())
+            .is_some()
     }
 
     fn is_view_like_cpp_type(ty: &str) -> bool {
@@ -19201,10 +19235,16 @@ impl CodeGen {
             return None;
         }
         let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
+        let rust_method_name = func_path.segments.last()?.ident.to_string();
         let args: Vec<String> = call
             .args
             .iter()
-            .map(|arg| self.emit_expr_maybe_move(arg))
+            .enumerate()
+            .map(|(idx, arg)| {
+                let style = self.lookup_method_arg_pass_style(&rust_method_name, idx);
+                let expected_ty = self.lookup_method_arg_expected_type(&rust_method_name, idx);
+                self.emit_call_arg_with_pass_style(arg, style, expected_ty, false, None)
+            })
             .collect();
         if owner_cpp.starts_with("rusty::HashMap")
             && matches!(method.as_str(), "new" | "new_")
@@ -20480,6 +20520,25 @@ impl CodeGen {
                     None
                 }
             }
+            "NonNull" => {
+                if matches!(method_name, "new" | "new_") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                            _ => None,
+                        });
+                    if inferred.is_some() {
+                        Some(vec![inferred])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -20516,11 +20575,24 @@ impl CodeGen {
         let owner_args_omitted = matches!(owner_seg.arguments, syn::PathArguments::None);
         let owner_is_supported_explicit_recovery_target = matches!(
             owner_name.as_str(),
-            "ArrayVec" | "ArrayString" | "HashMap" | "SmallVec"
+            "ArrayVec"
+                | "ArrayString"
+                | "HashMap"
+                | "MaybeUninit"
+                | "NonNull"
+                | "SmallVec"
+                | "SmallVecData"
         );
         let owner_is_supported_omitted_recovery_target = matches!(
             owner_name.as_str(),
-            "ArrayVec" | "Cell" | "ArrayString" | "HashMap" | "SmallVec"
+            "ArrayVec"
+                | "Cell"
+                | "ArrayString"
+                | "HashMap"
+                | "MaybeUninit"
+                | "NonNull"
+                | "SmallVec"
+                | "SmallVecData"
         );
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
@@ -21343,6 +21415,36 @@ impl CodeGen {
                     idx,
                     call_type_substitutions.as_ref(),
                 );
+                let expected_ty = expected_ty.or_else(|| {
+                    let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+                        return None;
+                    };
+                    if path_expr.path.segments.len() < 2 {
+                        return None;
+                    }
+                    let owner = path_expr
+                        .path
+                        .segments
+                        .iter()
+                        .nth_back(1)
+                        .map(|seg| seg.ident.to_string())
+                        .unwrap_or_default();
+                    let method = path_expr
+                        .path
+                        .segments
+                        .last()
+                        .map(|seg| seg.ident.to_string())
+                        .unwrap_or_default();
+                    let owner_looks_like_type = owner == "Self"
+                        || owner
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| ch.is_ascii_uppercase());
+                    if owner_looks_like_type && method == "from_inline" {
+                        return self.lookup_method_arg_expected_type(&method, idx).cloned();
+                    }
+                    None
+                });
                 let callable_bound_arg_intent =
                     self.lookup_callable_param_bound_arg_intent(&call.func, idx);
                 self.emit_call_arg_with_pass_style(
@@ -21495,6 +21597,15 @@ impl CodeGen {
 
         // Check if enum_name is a known data enum
         if !self.data_enum_types.contains(enum_name) {
+            return None;
+        }
+        // Only rewrite real variants; associated methods like
+        // `Enum::from_inline(...)` must remain method calls.
+        if !self
+            .data_enum_variants_by_enum
+            .get(enum_name)
+            .is_some_and(|variants| variants.contains(variant_name))
+        {
             return None;
         }
 
@@ -26142,6 +26253,8 @@ impl CodeGen {
                 }
 
                 let mut path_str = self.emit_path_to_string(&tp.path);
+                let path_is_current_struct_assoc_projection =
+                    self.path_is_current_struct_assoc_projection(&tp.path);
                 if self.current_struct.is_some() && path_str.starts_with("Self::") {
                     path_str = path_str.trim_start_matches("Self::").to_string();
                 }
@@ -26279,7 +26392,7 @@ impl CodeGen {
                     }
                 }
 
-                if !path_str.contains('<') {
+                if !path_str.contains('<') && !path_is_current_struct_assoc_projection {
                     if let Some(recovered) =
                         self.recover_omitted_local_generic_type_args(&tp.path, &path_str)
                     {
@@ -33907,6 +34020,60 @@ mod tests {
         assert!(out.contains("return inline_;"));
         assert!(!out.contains("int32_t f(int32_t inline)"));
         assert!(!out.contains("int32_t g(int32_t inline) const"));
+    }
+
+    #[test]
+    fn test_leaf5110_data_enum_assoc_method_call_is_not_rewritten_as_variant_ctor() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            impl E {
+                fn from_inline(v: i32) -> E { E::A(v) }
+            }
+            fn f() -> E { E::from_inline(1) }
+            "#,
+        );
+        assert!(out.contains("E::from_inline(1)"));
+        assert!(!out.contains("E_from_inline{1}"));
+    }
+
+    #[test]
+    fn test_leaf5110_self_assoc_projection_return_avoids_spurious_owner_template_args() {
+        let out = transpile_str(
+            r#"
+            trait IntoIterLike { type IntoIter; fn into_iter(self) -> Self::IntoIter; }
+            struct Iter<A> { v: A }
+            struct S<A> { v: A }
+            impl<A> IntoIterLike for S<A> {
+                type IntoIter = Iter<A>;
+                fn into_iter(self) -> Self::IntoIter { Iter { v: self.v } }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("using IntoIter = Iter<A>;") || out.contains("using IntoIter = ::Iter<A>;")
+        );
+        assert!(out.contains("into_iter("));
+        assert!(!out.contains("IntoIter<A> into_iter("));
+    }
+
+    #[test]
+    fn test_leaf5110_maybeuninit_uninit_assoc_call_uses_expected_owner_template_arg() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+            enum E<T> { A(MaybeUninit<T>) }
+            impl<T> E<T> {
+                fn from_inline(v: MaybeUninit<T>) -> E<T> { E::A(v) }
+            }
+            fn make<T>() -> E<T> {
+                E::<T>::from_inline(MaybeUninit::uninit())
+            }
+            "#,
+        );
+        assert!(out.contains("MaybeUninit<T>::uninit()"));
+        assert!(!out.contains("MaybeUninit::uninit()"));
+        assert!(!out.contains("E_from_inline{"));
     }
 
     #[test]

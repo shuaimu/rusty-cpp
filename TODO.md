@@ -4197,8 +4197,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-9-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-9-20260411a/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/context-gated, with no crate-specific scripts and no generated-output text patching.
-        - [ ] Leaf 5.1.10: `smallvec` Stage D associated-type/constructor-surface compile-head family collapse
-          - Collapse the post-5.1.9 deterministic `smallvec` Stage D family (starting at `runner.cpp:2128` with `SmallVec::IntoIter<A>` associated-type projection surface, then `MaybeUninit`/`SmallVecData::from_inline` constructor-shape fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.10: `smallvec` Stage D associated-type/constructor-surface compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope; no additional decomposition was required.
+          - Deterministic failure family addressed (shared transpiler fix, no crate-specific scripts):
+            - data-enum constructor-call rewriting now verifies the callee is a real variant of the enum, preventing associated methods like `SmallVecData::from_inline(...)` from being rewritten as fake variant constructors.
+            - current-struct associated-type projection lowering now avoids omitted-local-generic recovery for resolved `Self::Assoc` projections, preventing spurious owner template args (for example `Self::IntoIter` becoming `IntoIter<A>` in signatures).
+            - associated-call expected-owner argument lowering now reuses method-argument pass-style/expected-type metadata; this fixes owner-template specialization surfaces such as `MaybeUninit::uninit()` in associated-call argument position.
+            - owner-template recovery/inference now includes `MaybeUninit`, `NonNull`, and `SmallVecData` surfaces (including `NonNull::new/new_` pointee inference from pointer arguments).
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5110_data_enum_assoc_method_call_is_not_rewritten_as_variant_ctor`
+            - `test_leaf5110_self_assoc_projection_return_avoids_spurious_owner_template_args`
+            - `test_leaf5110_maybeuninit_uninit_assoc_call_uses_expected_owner_template_arg`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5110 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-10-20260411b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.9 first head at `runner.cpp:2128` (`SmallVec::IntoIter<A>` associated-type projection and immediate constructor/template-shape fallout) is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1474` with unspecialized `NonNull::new_` owner-template surfaces, followed by range-bound associated-variant/type fallout (`Included`/`Excluded` unresolved and downstream `SmallVec<T>` unresolved-`T` sites).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-10-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-10-20260411b/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated and shared; no crate-specific scripts and no generated-output text patching.
+        - [ ] Leaf 5.1.11: `smallvec` Stage D owner-template/bound-type specialization compile-head family collapse
+          - Collapse the post-5.1.10 deterministic `smallvec` Stage D family (starting at `runner.cpp:1474` with unspecialized `NonNull::new_`, followed by unresolved bound-associated variant/type surfaces such as `Included`/`Excluded` and downstream `SmallVec<T>` unresolved-`T` fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
