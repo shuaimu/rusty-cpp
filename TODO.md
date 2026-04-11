@@ -4372,8 +4372,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-17-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-17-20260411a/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in core codegen/runtime helper paths with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.18: `smallvec` Stage D equality/literal-surface compile-head family collapse
-          - Collapse the new post-5.1.17 deterministic `smallvec` Stage D family beginning at `runner.cpp:2418` (`SmallVec<std::array<size_t,0>> == std::array<int,1>` mismatch), harden shared equality/literal lowering surfaces, add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.18: `smallvec` Stage D equality/literal-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime-surface fixes plus focused regressions remained under the <1000 LOC target; no additional decomposition was required.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - transpiler method-call lowering now recognizes string-like `"literal".to_owned()` and emits `rusty::String::from(...)` through shared `to_owned` lowering (with no raw Rust method-call carry-through in C++).
+            - local placeholder hint inference now treats string-literal `.to_owned()` as string-like ownership evidence (same class as `.into()`), allowing omitted-owner recovery to retain concrete `SmallVec<std::array<rusty::String, N>>` owner args in nested `push(...)` flows.
+            - runtime shared equality surfaces were hardened for assertion scaffolding: added generic `rusty::Vec <-> std::array` equality and generic `.as_slice()`-capable container equality against `std::array` and `std::span` (both directions).
+          - Added focused regressions:
+            - `test_leaf5118_to_owned_string_literal_lowers_to_rusty_string_from`
+            - `test_leaf5118_smallvec_nested_infer_recovers_from_to_owned_push_hint`
+            - `test_array_eq_supports_as_slice_containers_and_vec`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5118 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf512 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics test_array_eq_supports_as_slice_containers_and_vec -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-18-20260411a --keep-work-dirs`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-18-20260411b --keep-work-dirs`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-18-20260411c --keep-work-dirs` (re-validation: same deterministic `runner.cpp:1612/1615` first-head family)
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.17 first-head family at `runner.cpp:2418` (`SmallVec<std::array<size_t,0>> == std::array<int,1>` mismatch) and immediate adjacent equality/literal fallout (`runner.cpp:2442` `SmallVec<std::array<rusty::String,16>> == std::span<...>` mismatch) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1612` (`deduced type 'void' for structured bindings is incomplete`) with adjacent `runner.cpp:1615` invalid use of void-expression fallout (`triple()/tuple` structured-binding path family).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-18-20260411a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+            - `/tmp/rusty-parity-matrix-5-1-18-20260411b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+            - `/tmp/rusty-parity-matrix-5-1-18-20260411c/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime surfaces, with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.19: `smallvec` Stage D structured-binding/void-return compile-head family collapse
+          - Collapse the new post-5.1.18 deterministic `smallvec` Stage D family beginning at `runner.cpp:1612`/`runner.cpp:1615` (`triple()` structured binding deduced as `void` and adjacent void-expression fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -110,6 +110,41 @@ constexpr bool operator==(const rusty::Vec<L>& lhs, std::span<R, RExtent> rhs) {
     return rhs == lhs;
 }
 
+template<typename L, typename R, std::size_t N>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(const rusty::Vec<L>& lhs, const std::array<R, N>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    if constexpr (requires(const L& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    } else {
+        return true;
+    }
+}
+
+template<typename L, std::size_t N, typename R>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(const std::array<L, N>& lhs, const rusty::Vec<R>& rhs) {
+    return rhs == lhs;
+}
+
 // Mixed-element std::array equality for transpiled assertion scaffolding.
 // Keep this narrow: only for different element types and only when one-sided
 // element equality is well-formed.
@@ -132,6 +167,60 @@ constexpr bool operator==(const std::array<L, N>& lhs, const std::array<R, N>& r
             rhs.begin(),
             [](const L& l, const R& r) { return static_cast<bool>(r == l); });
     }
+}
+
+template<typename T, typename = void>
+struct has_member_as_slice : std::false_type {};
+
+template<typename T>
+struct has_member_as_slice<T, std::void_t<decltype(std::declval<const T&>().as_slice())>>
+    : std::true_type {};
+
+// Mixed equality between std::array and container-like types that expose
+// `.as_slice()` (for example transpiled SmallVec and rusty::Vec surfaces).
+template<typename L, typename R, std::size_t N>
+requires has_member_as_slice<L>::value
+constexpr bool operator==(const L& lhs, const std::array<R, N>& rhs) {
+    const auto lhs_slice = lhs.as_slice();
+    if (lhs_slice.size() != rhs.size()) {
+        return false;
+    }
+    using LElem = std::remove_cv_t<std::remove_reference_t<decltype(*lhs_slice.begin())>>;
+    if constexpr (requires(const LElem& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs_slice.begin(),
+            lhs_slice.end(),
+            rhs.begin(),
+            [](const LElem& l, const R& r) { return static_cast<bool>(l == r); });
+    } else if constexpr (requires(const LElem& l, const R& r) { r == l; }) {
+        return std::equal(
+            lhs_slice.begin(),
+            lhs_slice.end(),
+            rhs.begin(),
+            [](const LElem& l, const R& r) { return static_cast<bool>(r == l); });
+    } else if constexpr (std::is_empty_v<LElem> && std::is_empty_v<std::remove_cv_t<R>>) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+template<typename L, typename R, std::size_t RExtent>
+requires has_member_as_slice<L>::value
+constexpr bool operator==(const L& lhs, std::span<R, RExtent> rhs) {
+    return lhs.as_slice() == rhs;
+}
+
+template<typename L, std::size_t LExtent, typename R>
+requires has_member_as_slice<R>::value
+constexpr bool operator==(std::span<L, LExtent> lhs, const R& rhs) {
+    return rhs == lhs;
+}
+
+template<typename L, std::size_t N, typename R>
+requires has_member_as_slice<R>::value
+constexpr bool operator==(const std::array<L, N>& lhs, const R& rhs) {
+    return rhs == lhs;
 }
 
 namespace rusty {

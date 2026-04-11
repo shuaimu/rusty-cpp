@@ -53,7 +53,9 @@ fn compile_and_run_cpp(source: &str, test_name: &str) {
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let run = Command::new(&bin_path).output().expect("run compiled binary");
+    let run = Command::new(&bin_path)
+        .output()
+        .expect("run compiled binary");
     assert!(
         run.status.success(),
         "C++ binary failed for {test_name}\nstdout:\n{}\nstderr:\n{}",
@@ -110,6 +112,53 @@ fn test_mem_replace_supports_non_assignable_move_only_payloads() {
     "#;
 
     compile_and_run_cpp(source, "mem_replace_non_assignable");
+}
+
+#[test]
+fn test_array_eq_supports_as_slice_containers_and_vec() {
+    let source = r#"
+        #include <array>
+        #include <cstddef>
+        #include <span>
+        #include <rusty/array.hpp>
+        #include <rusty/vec.hpp>
+
+        struct SliceLike {
+            std::array<std::size_t, 1> data{0};
+            auto as_slice() const {
+                return std::span<const std::size_t>(data.data(), data.size());
+            }
+        };
+
+        int main() {
+            const SliceLike s{};
+            if (!(s == std::array{0})) {
+                return 1;
+            }
+            if (!(std::array{0} == s)) {
+                return 2;
+            }
+            const auto expected_span = std::span<const std::size_t>(s.data.data(), s.data.size());
+            if (!(s == expected_span)) {
+                return 3;
+            }
+            if (!(expected_span == s)) {
+                return 4;
+            }
+
+            auto v = rusty::Vec<unsigned char>::new_();
+            v.push(static_cast<unsigned char>(3));
+            if (!(v == std::array{3})) {
+                return 5;
+            }
+            if (!(std::array{3} == v)) {
+                return 6;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "array_eq_as_slice_and_vec");
 }
 
 #[test]

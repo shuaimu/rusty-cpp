@@ -18602,6 +18602,9 @@ impl CodeGen {
         if let Some(into_call) = self.try_emit_into_method_call(mc, expected_ty) {
             return into_call;
         }
+        if let Some(to_owned_call) = self.try_emit_to_owned_method_call(mc) {
+            return to_owned_call;
+        }
         if let Some(then_with_call) = self.try_emit_ordering_then_with_call(mc) {
             return then_with_call;
         }
@@ -21920,6 +21923,18 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn try_emit_to_owned_method_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "to_owned" || !mc.args.is_empty() {
+            return None;
+        }
+        let receiver_kind = self.classify_into_receiver_expr(&mc.receiver)?;
+        if receiver_kind != IntoReceiverKind::StringLike {
+            return None;
+        }
+        let receiver = self.emit_expr_maybe_move(&mc.receiver);
+        Some(format!("rusty::String::from({})", receiver))
     }
 
     fn resolve_expected_type_with_iter_hint(
@@ -32234,7 +32249,7 @@ fn infer_hint_type_for_local_placeholder(
             None
         }
         syn::Expr::MethodCall(mc) => {
-            if mc.method == "into" && mc.args.is_empty() {
+            if matches!(mc.method.to_string().as_str(), "into" | "to_owned") && mc.args.is_empty() {
                 if matches!(
                     peel_paren_group_expr(&mc.receiver),
                     syn::Expr::Lit(syn::ExprLit {
@@ -44236,6 +44251,39 @@ mod tests {
         );
         assert!(out.contains("w.into()"));
         assert!(!out.contains("static_cast<int32_t>(w)"));
+    }
+
+    #[test]
+    fn test_leaf5118_to_owned_string_literal_lowers_to_rusty_string_from() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let s = "hello".to_owned();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::String::from(\"hello\")"), "{out}");
+        assert!(!out.contains("\"hello\".to_owned()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5118_smallvec_nested_infer_recovers_from_to_owned_push_hint() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec<A>;
+            impl<A> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+                fn push(&mut self, _v: String) {}
+            }
+            fn f() {
+                let mut v = SmallVec::<[_; 2]>::new();
+                v.push("hello".to_owned());
+            }
+        "#,
+        );
+        assert!(out.contains("auto v = SmallVec<std::array<rusty::String, 2>>::new_();"), "{out}");
+        assert!(out.contains("v.push(rusty::String::from(\"hello\"));"), "{out}");
+        assert!(!out.contains("SmallVec<std::array<auto, 2>>::new_()"), "{out}");
     }
 
     #[test]
