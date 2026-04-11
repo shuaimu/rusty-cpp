@@ -221,6 +221,10 @@ pub struct CodeGen {
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
+    /// Names of locals currently being initialized.
+    /// Used to keep initializer expression/type lookup resolving the outer
+    /// binding when a local shadows an existing name (`let x = x.next()`).
+    in_progress_local_initializers: Vec<String>,
     /// Scoped Rust-local to emitted-C++ local name mappings.
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
@@ -463,6 +467,7 @@ impl CodeGen {
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
             local_bindings: Vec::new(),
+            in_progress_local_initializers: Vec::new(),
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
             pending_loop_var_bindings: Vec::new(),
@@ -618,6 +623,7 @@ impl CodeGen {
         self.method_arg_expected_types.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
+        self.in_progress_local_initializers.clear();
         self.repeat_elem_type_hints.clear();
         self.local_placeholder_type_hints.clear();
         self.param_bindings.clear();
@@ -11293,6 +11299,10 @@ impl CodeGen {
                     .param_bindings
                     .last()
                     .is_some_and(|params| params.contains_key(&name_str));
+                let track_in_progress_initializer = local.init.is_some();
+                if track_in_progress_initializer {
+                    self.push_in_progress_local_initializer(&name_str);
+                }
                 let is_mut = pat_ident.mutability.is_some();
                 if local
                     .init
@@ -11388,6 +11398,9 @@ impl CodeGen {
                             if let Some(emitted) =
                                 self.emit_single_if_let_as_statement_block(&cpp_name, &decl_type, if_expr)
                             {
+                                if track_in_progress_initializer {
+                                    self.pop_in_progress_local_initializer();
+                                }
                                 return;
                             }
                         }
@@ -11465,7 +11478,10 @@ impl CodeGen {
                                 {
                                     self.emit_expr_maybe_move(&init.expr)
                                 } else {
-                                    self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                    self.emit_expr_to_string_with_expected_and_move_if_needed(
+                                        &init.expr,
+                                        Some(ty),
+                                    )
                                 }
                             } else {
                                 self.emit_expr_maybe_move(&init.expr)
@@ -11496,6 +11512,9 @@ impl CodeGen {
                     if let Some(scope) = self.local_cpp_bindings.last_mut() {
                         scope.insert(name_str, cpp_name);
                     }
+                }
+                if track_in_progress_initializer {
+                    self.pop_in_progress_local_initializer();
                 }
             }
             syn::Pat::Tuple(tuple) => {
@@ -11575,6 +11594,10 @@ impl CodeGen {
                         .param_bindings
                         .last()
                         .is_some_and(|params| params.contains_key(&name_str));
+                    let track_in_progress_initializer = local.init.is_some();
+                    if track_in_progress_initializer {
+                        self.push_in_progress_local_initializer(&name_str);
+                    }
                     let is_mut = pi.mutability.is_some();
                     if local
                         .init
@@ -11680,6 +11703,9 @@ impl CodeGen {
                         if let Some(scope) = self.local_cpp_bindings.last_mut() {
                             scope.insert(name_str, cpp_name);
                         }
+                    }
+                    if track_in_progress_initializer {
+                        self.pop_in_progress_local_initializer();
                     }
                 } else if matches!(pat_type.pat.as_ref(), syn::Pat::Wild(_)) {
                     if let Some(init) = &local.init {
@@ -13682,8 +13708,16 @@ impl CodeGen {
 
     /// Look up the nearest in-scope local binding type for a variable name.
     fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
-        for scope in self.local_bindings.iter().rev() {
+        let skip_current_scope_binding = self
+            .in_progress_local_initializers
+            .iter()
+            .rev()
+            .any(|current| current == name);
+        for (scope_idx, scope) in self.local_bindings.iter().rev().enumerate() {
             if let Some(maybe_ty) = scope.get(name) {
+                if skip_current_scope_binding && scope_idx == 0 {
+                    continue;
+                }
                 return maybe_ty.clone();
             }
         }
@@ -13700,6 +13734,14 @@ impl CodeGen {
             .iter()
             .rev()
             .any(|scope| scope.contains_key(name))
+    }
+
+    fn push_in_progress_local_initializer(&mut self, name: &str) {
+        self.in_progress_local_initializers.push(name.to_string());
+    }
+
+    fn pop_in_progress_local_initializer(&mut self) {
+        self.in_progress_local_initializers.pop();
     }
 
     fn lookup_field_type_for_expr_base(
@@ -33234,6 +33276,35 @@ mod tests {
         );
         assert!(out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(&mut_ref))"));
         assert!(!out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(mut_ref))"));
+    }
+
+    #[test]
+    fn test_leaf10512_shadowed_param_pointer_cast_uses_outer_reference_binding_in_initializer() {
+        let out = transpile_str(
+            r#"
+            struct Identifier {
+                bytes: [u8; 8],
+            }
+            fn f(repr: &Identifier) {
+                let repr = unsafe {
+                    std::ptr::read(repr as *const Identifier as *const usize)
+                };
+                let _ = repr;
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "rusty::ptr::read(reinterpret_cast<const size_t*>(static_cast<const Identifier*>(&repr)))"
+            ),
+            "shadowed param cast-chain should use outer reference address in initializer, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("static_cast<std::uintptr_t>(repr)"),
+            "shadowed param cast-chain should not integer-cast non-scalar reference binding, got:\n{}",
+            out
+        );
     }
 
     #[test]

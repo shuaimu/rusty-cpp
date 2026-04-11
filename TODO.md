@@ -2858,6 +2858,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-11-1775866015/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed AST-shape-gated in core try-style/runtime-match lowering and avoided generated-text patching or crate-specific rewrites.
+        - [x] *done* Leaf 10.5.12: Collapse the post-10.5.11 deterministic semver Stage D shadowed-parameter pointer-cast family generically (starting with `runner.cpp:1907` invalid `static_cast<std::uintptr_t>(repr)` in `identifier::inline_len`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only local-shadow/cast-lowering hardening + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+            - Added scoped in-progress local-initializer tracking so local type/reference lookup skips the just-declared shadow binding while emitting its initializer (`let repr = ... repr ...` now resolves `repr` to the outer binding in initializer context).
+            - Hardened local binding lookup (`lookup_local_binding_type`) to bypass the innermost same-name local entry only during that binding's initializer emission, restoring outer/parameter reference type visibility for cast lowering.
+            - Preserved move semantics for inferred-typed unannotated local initializers by using expected-type emission + move insertion (`emit_expr_to_string_with_expected_and_move_if_needed`) so shadowed parameter moves remain correct.
+          - Added focused fixture-agnostic regression:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf10512_shadowed_param_pointer_cast_uses_outer_reference_binding_in_initializer`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10512 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333332_local_binding_shadowing_param_is_renamed -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-12-1775866809 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - Previous first hard-error family at `runner.cpp:1907` (`identifier::inline_len` cast-chain lowering from shadowed `repr` parameter to pointer) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1930` (`identifier::decode_len` `/* TODO: complex pattern binding */` fallout causing missing `first`/`second` bindings and `decode_len_cold` call-shape breakage), with adjacent downstream runtime Option `std::visit` fallback still present later at `runner.cpp:2056`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-12-1775866809/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/context-gated in local-shadow + cast lowering, with no generated-text patching or crate-specific rewrites.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

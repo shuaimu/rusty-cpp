@@ -4115,7 +4115,26 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1907` (invalid `static_cast` from `identifier::Identifier` to `uintptr_t` in `identifier::inline_len`), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-11-1775866015/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in try-style/runtime-match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-165. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.11` (`runner.cpp:1907` invalid `static_cast` from `identifier::Identifier` to `uintptr_t` in `identifier::inline_len`, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
+165. `Leaf 10.5.12` is complete.
+   - plan/scope check: shared transpiler-only local-shadow/cast-lowering hardening + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - added scoped in-progress local-initializer tracking so local type/reference lookup skips the just-declared shadow binding while emitting its initializer (`let repr = ... repr ...` resolves `repr` to the outer binding in initializer context).
+     - hardened `lookup_local_binding_type` to bypass only the innermost same-name local entry during that initializer emission, restoring outer/parameter reference type visibility for cast lowering.
+     - preserved move semantics for inferred-typed unannotated local initializers by using expected-type emission + move insertion (`emit_expr_to_string_with_expected_and_move_if_needed`) so shadowed parameter move semantics remain correct.
+   - focused regression:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10512_shadowed_param_pointer_cast_uses_outer_reference_binding_in_initializer`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10512 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler test_leaf41543333332_local_binding_shadowing_param_is_renamed -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-12-1775866809 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1907` (`identifier::inline_len` invalid cast-chain lowering from shadowed `repr` parameter to pointer) is removed.
+     - new deterministic head starts at `runner.cpp:1930` (`identifier::decode_len` `/* TODO: complex pattern binding */` fallout causing missing `first`/`second` bindings and `decode_len_cold` call-shape breakage), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-12-1775866809/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/context-gated in local-shadow + cast lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+166. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.12` (`runner.cpp:1930` `identifier::decode_len` `/* TODO: complex pattern binding */` fallout with missing `first`/`second` bindings and `decode_len_cold` call-shape breakage, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
