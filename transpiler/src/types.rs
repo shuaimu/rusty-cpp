@@ -67,9 +67,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
         "std::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
         "Any" | "std::any::Any" | "core::any::Any" => Some(("std::any", false)),
-        "TypeId" | "std::any::TypeId" | "core::any::TypeId" => {
-            Some(("std::type_index", false))
-        }
+        "TypeId" | "std::any::TypeId" | "core::any::TypeId" => Some(("std::type_index", false)),
         "slice::Iter" | "core::slice::Iter" | "std::slice::Iter" => {
             Some(("rusty::slice_iter::Iter", true))
         }
@@ -80,9 +78,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
         "core::fmt::Alignment" | "fmt::Alignment" => Some(("rusty::fmt::Alignment", false)),
-        "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => {
-            Some(("rusty::fmt::Error", false))
-        }
+        "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => Some(("rusty::fmt::Error", false)),
         "NonNull" | "std::ptr::NonNull" | "core::ptr::NonNull" => {
             Some(("rusty::ptr::NonNull", true))
         }
@@ -93,6 +89,10 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
             Some(("rusty::num::NonZeroU64", false))
         }
         "std::alloc::Layout" | "core::alloc::Layout" => Some(("rusty::alloc::Layout", false)),
+        "std::alloc::LayoutErr"
+        | "core::alloc::LayoutErr"
+        | "std::alloc::LayoutError"
+        | "core::alloc::LayoutError" => Some(("rusty::alloc::LayoutErr", false)),
         "std::str::Utf8Error" | "core::str::Utf8Error" => {
             Some(("rusty::str_runtime::Utf8Error", false))
         }
@@ -143,6 +143,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
             Some("rusty::array_repeat")
         }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
+        "Vec::extend_from_slice"
+        | "std::vec::Vec::extend_from_slice"
+        | "alloc::vec::Vec::extend_from_slice" => Some("rusty::vec_extend_from_slice"),
         // thread::spawn
         "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
         // I/O functions
@@ -185,8 +188,15 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         | "slice::from_raw_parts_mut" => Some("rusty::from_raw_parts_mut"),
         "drop" | "std::mem::drop" | "mem::drop" => Some("rusty::mem::drop"),
         "std::mem::size_of" | "mem::size_of" => Some("rusty::mem::size_of"),
+        "std::mem::align_of" | "core::mem::align_of" | "mem::align_of" => {
+            Some("rusty::mem::align_of")
+        }
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
+        "unreachable_unchecked"
+        | "hint::unreachable_unchecked"
+        | "std::hint::unreachable_unchecked"
+        | "core::hint::unreachable_unchecked" => Some("rusty::intrinsics::unreachable"),
         "alloc::alloc" | "std::alloc::alloc" | "core::alloc::alloc" => Some("rusty::alloc::alloc"),
         "alloc::dealloc" | "std::alloc::dealloc" | "core::alloc::dealloc" => {
             Some("rusty::alloc::dealloc")
@@ -383,7 +393,10 @@ mod tests {
             map_std_type("fmt::Arguments"),
             Some(("rusty::fmt::Arguments", false))
         );
-        assert_eq!(map_std_type("fmt::Error"), Some(("rusty::fmt::Error", false)));
+        assert_eq!(
+            map_std_type("fmt::Error"),
+            Some(("rusty::fmt::Error", false))
+        );
         assert_eq!(map_std_type("Pin"), Some(("rusty::pin::Pin", true)));
         assert_eq!(
             map_std_type("std::path::Path"),
@@ -416,6 +429,14 @@ mod tests {
         assert_eq!(
             map_std_type("core::alloc::Layout"),
             Some(("rusty::alloc::Layout", false))
+        );
+        assert_eq!(
+            map_std_type("std::alloc::LayoutErr"),
+            Some(("rusty::alloc::LayoutErr", false))
+        );
+        assert_eq!(
+            map_std_type("core::alloc::LayoutError"),
+            Some(("rusty::alloc::LayoutErr", false))
         );
     }
 
@@ -510,6 +531,10 @@ mod tests {
         assert_eq!(
             map_function_path("alloc::vec::Vec::new"),
             Some("rusty::Vec::new_")
+        );
+        assert_eq!(
+            map_function_path("Vec::extend_from_slice"),
+            Some("rusty::vec_extend_from_slice")
         );
         assert_eq!(
             map_function_path("thread::spawn"),
@@ -622,6 +647,10 @@ mod tests {
             Some("rusty::mem::size_of")
         );
         assert_eq!(
+            map_function_path("core::mem::align_of"),
+            Some("rusty::mem::align_of")
+        );
+        assert_eq!(
             map_function_path("mem::replace"),
             Some("rusty::mem::replace")
         );
@@ -679,6 +708,14 @@ mod tests {
             Some("rusty::boxed::into_vec")
         );
         assert_eq!(map_function_path("Add::add"), Some("rusty::ops::add_fn"));
+        assert_eq!(
+            map_function_path("std::hint::unreachable_unchecked"),
+            Some("rusty::intrinsics::unreachable")
+        );
+        assert_eq!(
+            map_function_path("unreachable_unchecked"),
+            Some("rusty::intrinsics::unreachable")
+        );
         assert_eq!(
             map_function_path("core::ops::Add::add"),
             Some("rusty::ops::add_fn")

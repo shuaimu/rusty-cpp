@@ -4144,8 +4144,39 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is emitter-structure-aware and generic; no generated-output text patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.8: `smallvec` Stage D namespace/import/runtime-surface compile-head family collapse
-          - Collapse the post-5.1.7 deterministic `smallvec` Stage D family (starting at `runner.cpp:1209` with `std::hint::unreachable_unchecked` / `std::ops` / `LayoutErr` fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.8: `smallvec` Stage D namespace/import/runtime-surface compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC scope; no further decomposition was required.
+          - Deterministic failure family addressed (shared transpiler/runtime fixes, no crate-specific scripts):
+            - `use`-import rewrite coverage now treats `std/core::hint::*` and `std/core::ops::*` as Rust-only imports, preventing invalid C++ `using std::hint::...` and `using std::ops;` emission.
+            - `std/core::mem::align_of` and `std/core::alloc::{LayoutErr, LayoutError, realloc}` import/function-path lowering now maps to shared `rusty::*` surfaces.
+            - unqualified `Vec::extend_from_slice(...)` UFCS lowering now targets a dedicated shared runtime helper (`rusty::vec_extend_from_slice(...)`) instead of emitting invalid unspecialized `rusty::Vec::...` static paths.
+            - runtime headers now provide the missing shared surfaces used by expanded `smallvec`: `rusty::mem::align_of<T>()`, `rusty::alloc::LayoutErr` + `Layout::from_size_align(...)`, `rusty::alloc::realloc(...)`, and `rusty::vec_extend_from_slice(...)`.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+            - `transpiler/src/types.rs`
+            - `include/rusty/mem.hpp`
+            - `include/rusty/alloc.hpp`
+            - `include/rusty/vec.hpp`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf518_std_hint_and_ops_imports_are_rust_only`
+            - `codegen::tests::test_leaf518_core_mem_align_of_import_remapped`
+            - `codegen::tests::test_leaf518_alloc_layout_error_imports_remapped`
+            - `codegen::tests::test_leaf518_vec_extend_from_slice_ufcs_uses_runtime_helper`
+            - `types::tests::test_function_path_mapping` now asserts `Vec::extend_from_slice -> rusty::vec_extend_from_slice`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf518 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf42_runtime_function_path_mappings -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-8-20260411b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.7 head at `runner.cpp:1209` (`std::hint::unreachable_unchecked` / `std::ops` / `LayoutErr` / `mem::align_of` / `Layout::from_size_align` / `rusty::Vec::extend_from_slice(...)`) is collapsed.
+            - new first hard-error family starts at `runner.cpp:1253` (`CollectionAllocErr::CapacityOverflow` enum-surface mismatch), followed by downstream `inline` identifier emission and associated-type/name-resolution fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stay shared and AST/runtime-surface-gated; no crate-specific ad-hoc scripts and no generated-output text patching.
+        - [ ] Leaf 5.1.9: `smallvec` Stage D enum-surface/identifier compile-head family collapse
+          - Collapse the post-5.1.8 deterministic `smallvec` Stage D family (starting at `runner.cpp:1253` with `CollectionAllocErr::CapacityOverflow` enum-surface mismatch, then `inline` identifier emission fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

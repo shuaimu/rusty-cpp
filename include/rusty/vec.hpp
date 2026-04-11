@@ -8,6 +8,7 @@
 #include <utility>  // for std::move, std::forward
 #include <cstddef>  // for size_t
 #include <cstring>  // for memcpy
+#include <span>
 #include <rusty/function.hpp>
 
 // Vec<T> - A growable array with owned elements
@@ -319,6 +320,18 @@ template<typename T>
 // @lifetime: owned
 Vec<T> vec_of(std::initializer_list<T> init) {
     return Vec<T>(init);
+}
+
+template<typename T>
+void vec_extend_from_slice(Vec<T>& self, std::span<const T> other) {
+    self.reserve(self.size() + other.size());
+    for (const auto& item : other) {
+        if constexpr (requires { item.clone(); }) {
+            self.push(item.clone());
+        } else {
+            self.push(item);
+        }
+    }
 }
 
 } // namespace rusty

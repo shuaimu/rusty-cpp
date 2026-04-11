@@ -25374,6 +25374,11 @@ impl CodeGen {
                     .last()
                     .map(|s| s.ident.to_string())
                     .unwrap_or_default();
+                if method == "extend_from_slice" {
+                    // Preserve UFCS calls like `Vec::extend_from_slice(&mut v, s)` without
+                    // emitting invalid `rusty::Vec::...` static paths.
+                    return "rusty::vec_extend_from_slice".to_string();
+                }
                 // Skip constructor methods - they are handled specially elsewhere
                 let is_constructor = matches!(
                     method.as_str(),
@@ -29072,6 +29077,12 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_panic_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_hint_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_ops_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_ptr_import(normalized) {
         return action;
     }
@@ -29301,6 +29312,26 @@ fn rewrite_std_panic_import(path: &str) -> Option<UseImportAction> {
     Some(action)
 }
 
+fn rewrite_std_hint_import(path: &str) -> Option<UseImportAction> {
+    if matches!(path, "std::hint" | "core::hint") {
+        return Some(UseImportAction::RustOnly);
+    }
+    if path.starts_with("std::hint::") || path.starts_with("core::hint::") {
+        return Some(UseImportAction::RustOnly);
+    }
+    None
+}
+
+fn rewrite_std_ops_import(path: &str) -> Option<UseImportAction> {
+    if matches!(path, "std::ops" | "core::ops") {
+        return Some(UseImportAction::RustOnly);
+    }
+    if path.starts_with("std::ops::") || path.starts_with("core::ops::") {
+        return Some(UseImportAction::RustOnly);
+    }
+    None
+}
+
 fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
     if path == "std::ptr" {
         return Some(UseImportAction::Raw(
@@ -29320,17 +29351,20 @@ fn rewrite_std_ptr_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_mem_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::mem" {
+    if path == "std::mem" || path == "core::mem" {
         return Some(UseImportAction::Raw(
             "namespace mem = rusty::mem;".to_string(),
         ));
     }
 
-    let item = path.strip_prefix("std::mem::")?;
+    let item = path
+        .strip_prefix("std::mem::")
+        .or_else(|| path.strip_prefix("core::mem::"))?;
     let action = match item {
         "drop" => UseImportAction::Using("rusty::mem::drop".to_string()),
         "forget" => UseImportAction::Using("rusty::mem::forget".to_string()),
         "size_of" => UseImportAction::Using("rusty::mem::size_of".to_string()),
+        "align_of" => UseImportAction::Using("rusty::mem::align_of".to_string()),
         "replace" => UseImportAction::Using("rusty::mem::replace".to_string()),
         "MaybeUninit" => UseImportAction::Using("rusty::MaybeUninit".to_string()),
         "ManuallyDrop" => UseImportAction::Using("rusty::mem::ManuallyDrop".to_string()),
@@ -29413,20 +29447,26 @@ fn rewrite_std_path_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_alloc_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::alloc" {
+    if path == "std::alloc" || path == "core::alloc" {
         return Some(UseImportAction::Raw(
             "namespace alloc = rusty::alloc;".to_string(),
         ));
     }
 
-    let item = path.strip_prefix("std::alloc::")?;
+    let item = path
+        .strip_prefix("std::alloc::")
+        .or_else(|| path.strip_prefix("core::alloc::"))?;
     let action = match item {
         "alloc" => UseImportAction::Using("rusty::alloc::alloc".to_string()),
         "dealloc" => UseImportAction::Using("rusty::alloc::dealloc".to_string()),
+        "realloc" => UseImportAction::Using("rusty::alloc::realloc".to_string()),
         "handle_alloc_error" => {
             UseImportAction::Using("rusty::alloc::handle_alloc_error".to_string())
         }
         "Layout" => UseImportAction::Using("rusty::alloc::Layout".to_string()),
+        "LayoutErr" | "LayoutError" => {
+            UseImportAction::Using("rusty::alloc::LayoutErr".to_string())
+        }
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -41859,6 +41899,68 @@ mod tests {
         let out = transpile_str("use std::mem::ManuallyDrop;");
         assert!(out.contains("using rusty::mem::ManuallyDrop;"));
         assert!(!out.contains("using std::mem::ManuallyDrop;"));
+    }
+
+    #[test]
+    fn test_leaf518_std_hint_and_ops_imports_are_rust_only() {
+        let out = transpile_str(
+            r#"
+            use std::hint::unreachable_unchecked;
+            use core::ops;
+            fn f() {
+                unsafe {
+                    unreachable_unchecked();
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("// Rust-only: using std::hint::unreachable_unchecked;"));
+        assert!(out.contains("// Rust-only: using std::ops;"));
+        assert!(out.contains("rusty::intrinsics::unreachable();"));
+        assert!(!out.contains("\nusing std::hint::unreachable_unchecked;"));
+        assert!(!out.contains("\nusing std::ops;"));
+    }
+
+    #[test]
+    fn test_leaf518_core_mem_align_of_import_remapped() {
+        let out = transpile_str(
+            r#"
+            use core::mem::align_of;
+            fn f() -> usize {
+                align_of::<u32>()
+            }
+            "#,
+        );
+        assert!(out.contains("using rusty::mem::align_of;"));
+        assert!(out.contains("return align_of<uint32_t>();"));
+        assert!(!out.contains("\nusing std::mem::align_of;"));
+    }
+
+    #[test]
+    fn test_leaf518_alloc_layout_error_imports_remapped() {
+        let out = transpile_str(
+            r#"
+            use core::alloc::{LayoutErr, LayoutError};
+            use std::alloc::LayoutErr as LE;
+            "#,
+        );
+        assert!(out.contains("using rusty::alloc::LayoutErr;"));
+        assert!(out.contains("using LE = rusty::alloc::LayoutErr;"));
+        assert!(!out.contains("\nusing std::alloc::LayoutErr;"));
+        assert!(!out.contains("\nusing core::alloc::LayoutError;"));
+    }
+
+    #[test]
+    fn test_leaf518_vec_extend_from_slice_ufcs_uses_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn extend<T: Copy>(v: &mut Vec<T>, other: &[T]) {
+                Vec::extend_from_slice(v, other);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::vec_extend_from_slice(v, other);"));
+        assert!(!out.contains("rusty::Vec::extend_from_slice"));
     }
 
     #[test]

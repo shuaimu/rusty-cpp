@@ -125,6 +125,12 @@ constexpr std::size_t size_of() noexcept {
     return detail::rust_layout_size<Value>::value;
 }
 
+template<typename T>
+constexpr std::size_t align_of() noexcept {
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    return alignof(Value);
+}
+
 template<typename From, typename To>
 inline To transmute(From from) {
     using FromValue = std::remove_reference_t<From>;

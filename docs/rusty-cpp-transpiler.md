@@ -2134,6 +2134,8 @@ Integrated outcomes:
 - `std::io` import family is lowered to runtime-safe aliases/mappings.
 - `core::` / `alloc::` paths are normalized with C++-valid mappings.
 - `std/alloc::boxed` and `std/alloc::rc` use-import families are lowered to valid runtime/type surfaces (`rusty::Box`, `rusty::boxed::*`, `rusty::Rc`, `rusty::Weak`) or explicit Rust-only import markers where no concrete C++ symbol should be emitted.
+- `std/core::hint::*` and `std/core::ops::*` use-import families are now consistently marked Rust-only so expanded outputs do not emit invalid C++ namespace imports (`std::hint`, `std::ops`).
+- `std/core::alloc::{LayoutErr, LayoutError}` and `std/core::mem::align_of` import families now lower to concrete `rusty::*` runtime surfaces.
 - fragile unresolved `using ::Type` patterns were replaced with guarded lowering.
 - module-scope import ordering and alias-safety constraints were added to avoid declaration-order fallout.
 
@@ -2221,6 +2223,7 @@ Integrated outcomes:
 - `MaybeUninit` reference-typed storage access is hardened to avoid pointer-to-reference emission shapes (pointer aliases via `std::add_pointer_t` and laundered storage access).
 - mixed optional-like surfaces in iterator/test-shape lowering now normalize `std::optional` receiver methods (`is_some`/`is_none`/`unwrap` → `has_value`/`!has_value`/`value`) while preserving runtime `Option` surfaces.
 - pointer-helper cast lowering now preserves reference payload address semantics even when pointer target types are emitted as alias forms (`std::add_pointer_t<...>`): reference-like cast sources are emitted as `&expr` before pointer-typed adaptation in generic cast/read paths.
+- runtime compatibility surfaces now include `rusty::mem::align_of<T>()`, `rusty::alloc::LayoutErr`, `Layout::from_size_align(...)`, `rusty::alloc::realloc(...)`, and `rusty::vec_extend_from_slice(...)` so expanded crate code no longer relies on missing memory/allocation/vector helper APIs.
 
 Directly supports:
 
@@ -2298,8 +2301,9 @@ Current status snapshot:
 10. Full ten-crate matrix repro after `Leaf 5.1.6` (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-5-1-6-20260411a --keep-work-dirs`) advances deterministic first failure to `smallvec` (`total=8`, `pass=7`, `fail=1` before remaining crates), with canonical artifacts at `/tmp/rusty-parity-matrix-5-1-6-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`.
 11. New deterministic Stage D head begins at `runner.cpp:1065` in `smallvec`: incomplete-type/declaration-order fallout on `SmallVec<std::array<PanicOnDoubleDrop, 0>>` (`has initializer but incomplete type` and immediate nested-name-specifier incomplete-type errors), followed by downstream `catch_unwind` call-shape fallout.
 12. Focused `smallvec` repro after `Leaf 5.1.7` (`/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/...`) collapses the prior `runner.cpp:1065` incomplete-type/declaration-order family from the first deterministic slot.
-13. New first deterministic Stage D head in `smallvec` now starts at namespace/import/runtime-surface fallout beginning with `runner.cpp:1209` (`using std::hint::unreachable_unchecked;` unresolved), followed by `std::ops`, `LayoutErr`, and related downstream diagnostics.
-14. Next active item is `Leaf 5.1.8` to collapse this post-5.1.7 `smallvec` Stage D family; guardrail check against §11 remains satisfied (emitter-structure-aware generic lowering only, no crate-specific ad-hoc scripts or generated-output text patching).
+13. Focused `smallvec` repro after `Leaf 5.1.8` (`/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/...`) collapses the prior post-5.1.7 namespace/import/runtime-surface head (`std::hint`, `std::ops`, `LayoutErr`, `mem::align_of`, `Layout::from_size_align`, invalid `rusty::Vec::extend_from_slice` static path) from the first deterministic slot.
+14. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1253` (`CollectionAllocErr::CapacityOverflow` enum-surface mismatch), followed by downstream `inline` identifier emission and associated-type/name-resolution fallout.
+15. Next active item is `Leaf 5.1.9` to collapse this post-5.1.8 `smallvec` Stage D family; guardrail check against §11 remains satisfied (shared AST/runtime-surface-aware fixes only, no crate-specific ad-hoc scripts or generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
