@@ -4056,9 +4056,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Deterministic Stage D frontier movement:
             - prior `std::boxed`/`std::rc` unresolved-import and `SmallVec` owner-template-arity head family is collapsed.
             - new first hard error family is incomplete-type/order fallout (`invalid use of incomplete type 'SmallVec<...>'`) with canonical artifacts at `/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/{baseline.txt,build.log,run.log,matrix.log}`.
-        - [ ] Leaf 5.1.3: `itertools` Stage D compile-head family collapse
-          - Deterministic failure head: missing adapter type surfaces and namespace/type-order collisions (`Coalesce`, `DedupBy`, `MapOk`, `namespace free` collision, related unresolved iter namespace forms)
-          - Implement generic type-surface/import-order lowering fixes (no crate-specific scripts), add focused regressions, then re-probe `--crate itertools`
+        - [x] *done* Leaf 5.1.3: `itertools` Stage D compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope; no additional decomposition was required.
+          - Deterministic failure head addressed (shared transpiler fixes, no crate-specific scripts):
+            - generic type-alias emission/forwarding now supports templated aliases (`template<...> using ...`) with scoped de-duplication and forward-decl-safe ordering.
+            - iterator/adapter type-surface lowering now recognizes `alloc/core/std/crate` rooted path variants and imported single-segment adapter aliases, mapping to valid `decltype(...)` surfaces (`iter::*`, `intersperse::*`, `ziptuple::Zip`, `alloc::vec::IntoIter`, `alloc::collections::vec_deque::IntoIter`).
+            - namespace collision hardening now reserves known global C symbol collisions (`free` -> `free_mod`) with qualified-path rename propagation.
+            - forward declaration ordering now uses dependency-aware module order (without delayable-function namespace deferral) and emits non-C-like enum forward declarations as `struct` wrappers, reducing cross-module type-order fallout.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf513_generic_type_alias_emits_template_and_precedes_forward_decl_signature`
+            - `test_leaf513_module_name_free_is_renamed_to_avoid_global_symbol_collision`
+            - `test_leaf513_iter_adapter_return_types_lower_to_decltype_forms`
+            - `test_leaf513_non_c_like_enum_forward_declares_struct_before_function_signature`
+            - `test_leaf513_nested_private_module_forward_decls_precede_aliases`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf513 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-matrix-5-1-3-20260411g --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior first-head family (early unresolved adapter/type-order cluster beginning with `VecDequeIntoIter`/`VecIntoIter`, `::intersperse::Intersperse`, and related namespace/type-order fallout) is removed from the first deterministic slot.
+            - new first hard error family begins at `merge_join` associated-type alias lowering (`MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>` with unbound `T`) at `runner.cpp:1170`, followed by downstream `ziptuple::Zip` and `EitherOrBoth`/format/runtime surface fallout; canonical artifacts at `/tmp/rusty-parity-matrix-5-1-3-20260411g/itertools/{baseline.txt,build.log,run.log,matrix.log}`.
         - [ ] Leaf 5.1.4: Re-run full ten-crate parity matrix and record closure status
           - Run `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-<timestamp> --keep-work-dirs`
           - If all ten pass, mark Leaf 5.1 complete; otherwise record first deterministic failure head and canonical artifact paths for next leaf

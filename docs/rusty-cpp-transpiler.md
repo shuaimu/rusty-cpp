@@ -2215,6 +2215,7 @@ Integrated outcomes:
 
 - `.iter()` / `.iter_mut()` lowering is mapped to shared runtime iterator helpers.
 - `slice::Iter` / `slice::IterMut` type paths map to runtime iterator wrappers.
+- iterator adapter type-path surfaces now normalize rooted/imported variants (`alloc`/`core`/`std`/`crate` and imported single-segment aliases) to shared `decltype(...)` forms for `iter::*`, `intersperse::*`, `ziptuple::Zip`, and vec/deque `IntoIter` families.
 - range/slice/index shapes (`range*`, collect, buffer arg lowering, `map/fold` frontier) are handled incrementally with parity checks.
 - io and string/char path families (`from_utf8*`, `encode_utf8`, boundary checks, formatter/debug chains) are lowered to runtime-safe targets.
 - `MaybeUninit` reference-typed storage access is hardened to avoid pointer-to-reference emission shapes (pointer aliases via `std::add_pointer_t` and laundered storage access).
@@ -2234,6 +2235,7 @@ Integrated outcomes:
 - inline module impl collection/merge is scoped and deterministic.
 - duplicate methods are resolved by emitted C++ signature shape.
 - forward declarations are emitted with guards to avoid alias-dependent type-order failures.
+- forward declaration passes now emit non-C-like enums as `struct` wrappers and apply dependency-aware module ordering without delayable-namespace deferral, so sibling/nested namespace type surfaces are available before dependent alias/function signatures.
 - `#[cfg(test)]` filtering and wrapper discovery were hardened for parity-test paths.
 - deterministic module naming and work-dir artifact isolation are enforced for matrix reruns.
 
@@ -2289,7 +2291,8 @@ Current status snapshot:
 4. Next active work should follow the top unfinished TODO leaf after 10.5.40.11 closure.
 5. Expanded ten-crate matrix snapshot (2026-04-11) is `pass=7`, `fail=3` with deterministic failing set `{smallvec, itertools, once_cell}`; canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`.
 6. `smallvec` focused repro after `Leaf 5.1.2` (`/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/...`) collapses the prior unresolved `std::boxed`/`std::rc` and omitted-owner `SmallVec` template-arity family; first deterministic Stage D head now moves to incomplete-type/type-ordering fallout (`invalid use of incomplete type 'SmallVec<...>'`).
-7. Guardrail check against §11 (`No Blanket Rewrites`, `No Rust-Only Namespace Emission as C++ Symbols`, `No Crate-Specific Ad-Hoc Scripts`): all fixes were context-gated, AST-aware, and shared transpiler lowering (no fixture-specific output patching).
+7. `itertools` focused repro after `Leaf 5.1.3` (`/tmp/rusty-parity-matrix-5-1-3-20260411g/itertools/...`) collapses the prior early adapter/type-order compile-head cluster (`VecDequeIntoIter`/`VecIntoIter`, early `::intersperse::Intersperse`, related namespace ordering fallout) from the first deterministic slot; new first Stage D head now starts at `merge_join` associated-type alias lowering (`MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>` with unbound `T`, `runner.cpp:1170`), followed by downstream `ziptuple::Zip`/`EitherOrBoth` runtime-surface fallout.
+8. Guardrail check against §11 (`No Blanket Rewrites`, `No Rust-Only Namespace Emission as C++ Symbols`, `No Crate-Specific Ad-Hoc Scripts`): all fixes were context-gated, AST-aware, and shared transpiler lowering (no fixture-specific output patching).
 
 Historical active-work chain (retained for traceability):
 
@@ -4743,6 +4746,7 @@ Required approach:
 - for QSelf associated helper-call lowering (for example `<T>::parse_hex(x)`), do not drop owner-qualified shape into bare `parse_hex(x)` free-function calls; preserve resolved owner type and emit explicit runtime helper template calls (`rusty::parse_hex<T>(x)`) when the mapped surface is runtime-scoped
 - for borrowed `for`-loop lowering, do not rely only on syntactic `for ... in &expr` detection; include iterable type-shape evidence (reference-typed path bindings) so tuple/ref payload bindings keep reference semantics and unary deref lowering does not leak invalid `*input` forms on value-shaped C++ bindings
 - for forward-declaration signatures, do not rely on later in-namespace `use` alias emission for single-segment imported type names; emit explicitly qualified paths when a unique declared crate type is known
+- for forward-declaration module ordering, do not reuse delayable-function-namespace deferral that is intended for full definition emission; forward passes must keep dependency-first module order so sibling namespace type surfaces exist before dependent alias/function signatures
 - for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies
 - for method-call lowering on reference-wrapped receivers, do not emit fixed member-access operators from surface syntax (`expr.method(...)`) without post-lowering receiver-shape validation; select `.`/`->` from the lowered receiver type so `(&v)`-style forms remain type-correct
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking

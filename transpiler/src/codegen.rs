@@ -146,6 +146,10 @@ pub struct CodeGen {
     /// Local type aliases that resolve to numeric scalar types.
     /// Used to lower `Alias::MAX` to `std::numeric_limits<Alias>::max()`.
     numeric_type_aliases: HashMap<String, String>,
+    /// Scoped type aliases already emitted in this file.
+    /// Used so alias forward declarations can be emitted once and later
+    /// item emission does not duplicate them.
+    emitted_scoped_type_aliases: HashSet<String>,
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     local_declared_types: HashSet<String>,
@@ -459,6 +463,7 @@ impl CodeGen {
             declared_type_param_kinds: HashMap::new(),
             declared_type_param_defaults: HashMap::new(),
             numeric_type_aliases: HashMap::new(),
+            emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
@@ -618,6 +623,7 @@ impl CodeGen {
         self.declared_item_names.clear();
         self.declared_module_names.clear();
         self.required_top_level_module_aliases.clear();
+        self.emitted_scoped_type_aliases.clear();
         self.emitted_method_conflict_keys.clear();
         self.emitted_non_method_member_names.clear();
         self.current_struct_assoc_cpp_types.clear();
@@ -770,7 +776,7 @@ impl CodeGen {
         // This ensures the parity runner's prelude-skip logic doesn't
         // accidentally skip forward declarations.
         // Note: Use items stay AFTER forward decls (they may depend on them).
-        let ordered_items = self.order_items_for_emission(&file.items);
+        let ordered_items = self.order_items_for_emission(&file.items, true);
         let mut deferred_items: Vec<&syn::Item> = Vec::new();
         for item in &ordered_items {
             if matches!(item, syn::Item::ExternCrate(_)) {
@@ -932,7 +938,11 @@ impl CodeGen {
         out
     }
 
-    fn order_items_for_emission<'a>(&self, items: &'a [syn::Item]) -> Vec<&'a syn::Item> {
+    fn order_items_for_emission<'a>(
+        &self,
+        items: &'a [syn::Item],
+        delay_function_namespaces: bool,
+    ) -> Vec<&'a syn::Item> {
         let inline_modules: Vec<(usize, &syn::Item)> = items
             .iter()
             .enumerate()
@@ -1015,17 +1025,21 @@ impl CodeGen {
             sorted_positions = (0..inline_modules.len()).collect();
         }
 
-        let delayable_module_positions: HashSet<usize> = (0..inline_modules.len())
-            .filter(|module_pos| {
-                matches!(
-                    inline_modules[*module_pos].1,
-                    syn::Item::Mod(m)
-                        if m.content.as_ref().is_some_and(|(_, nested_items)| {
-                            Self::module_is_delayable_function_namespace(nested_items)
-                        })
-                )
-            })
-            .collect();
+        let delayable_module_positions: HashSet<usize> = if delay_function_namespaces {
+            (0..inline_modules.len())
+                .filter(|module_pos| {
+                    matches!(
+                        inline_modules[*module_pos].1,
+                        syn::Item::Mod(m)
+                            if m.content.as_ref().is_some_and(|(_, nested_items)| {
+                                Self::module_is_delayable_function_namespace(nested_items)
+                            })
+                    )
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
 
         let sorted_inline_items: Vec<(usize, &syn::Item)> = sorted_positions
             .into_iter()
@@ -2350,12 +2364,17 @@ impl CodeGen {
                     continue;
                 }
                 let mod_name = m.ident.to_string();
-                if visible_fn_names.contains(&mod_name) {
-                    let qualified = if module_path.is_empty() {
-                        mod_name.clone()
-                    } else {
-                        format!("{}::{}", module_path.join("::"), mod_name)
-                    };
+                let qualified = if module_path.is_empty() {
+                    mod_name.clone()
+                } else {
+                    format!("{}::{}", module_path.join("::"), mod_name)
+                };
+                if Self::module_name_conflicts_with_global_symbol(&mod_name) {
+                    let renamed = format!("{}_mod", escape_cpp_keyword(&mod_name));
+                    self.module_namespace_renames
+                        .entry(qualified.clone())
+                        .or_insert(renamed);
+                } else if visible_fn_names.contains(&mod_name) {
                     let renamed = format!("{}_tests", escape_cpp_keyword(&mod_name));
                     self.module_namespace_renames.insert(qualified, renamed);
                 }
@@ -2371,6 +2390,12 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn module_name_conflicts_with_global_symbol(name: &str) -> bool {
+        // C global symbols that routinely conflict with namespace names in
+        // generated translation units once system headers are included.
+        matches!(name, "free")
     }
 
     fn collect_scope_module_dependencies(
@@ -2457,13 +2482,15 @@ impl CodeGen {
     }
 
     fn emit_item_forward_decls(&mut self, items: &[syn::Item], module_depth: usize) -> bool {
+        let ordered_items = self.order_items_for_emission(items, false);
         let mut emitted_names = HashSet::new();
         let mut emitted_consts = HashSet::new();
+        let mut emitted_aliases = HashSet::new();
         let mut emitted_modules = HashSet::new();
         let mut emitted_any = false;
         // Emit type declarations first so function declarations can safely reference
         // local types regardless source order.
-        for item in items {
+        for item in ordered_items.iter().copied() {
             match item {
                 syn::Item::Struct(s) => {
                     let name = s.ident.to_string();
@@ -2474,12 +2501,17 @@ impl CodeGen {
                     self.writeln(&format!("struct {};", name));
                     emitted_any = true;
                 }
-                syn::Item::Enum(e) if enum_is_c_like(e) => {
+                syn::Item::Enum(e) => {
                     let name = e.ident.to_string();
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    self.writeln(&format!("enum class {};", name));
+                    self.emit_template_prefix(&e.generics);
+                    if enum_is_c_like(e) {
+                        self.writeln(&format!("enum class {};", name));
+                    } else {
+                        self.writeln(&format!("struct {};", name));
+                    }
                     emitted_any = true;
                 }
                 _ => continue,
@@ -2488,7 +2520,7 @@ impl CodeGen {
 
         // Emit const declarations so inline methods can reference constants even
         // when their definitions appear later in source order.
-        for item in items {
+        for item in ordered_items.iter().copied() {
             let syn::Item::Const(c) = item else {
                 continue;
             };
@@ -2510,19 +2542,7 @@ impl CodeGen {
             emitted_any = true;
         }
 
-        for item in items {
-            let syn::Item::Fn(f) = item else {
-                continue;
-            };
-            if Self::has_cfg_test(&f.attrs) {
-                continue;
-            }
-            if self.emit_function_forward_decl(f, module_depth > 0) {
-                emitted_any = true;
-            }
-        }
-
-        for item in items {
+        for item in ordered_items.iter().copied() {
             let syn::Item::Mod(m) = item else {
                 continue;
             };
@@ -2582,6 +2602,43 @@ impl CodeGen {
             self.indent -= 1;
             self.writeln("}");
             emitted_any = true;
+        }
+
+        // Emit type aliases after nested module declarations so aliases can
+        // reference nested namespace types (e.g. `private_::Foo`) safely.
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Type(t) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&t.attrs) {
+                continue;
+            }
+            let alias_name = escape_cpp_keyword(&t.ident.to_string());
+            if !emitted_aliases.insert(alias_name) {
+                continue;
+            }
+            if self.type_tokens_contain_import_alias(&t.ty) {
+                continue;
+            }
+            let prev_forward_decl_signature = self.in_forward_decl_signature;
+            self.in_forward_decl_signature = true;
+            let emitted_alias = self.emit_type_alias_once(t);
+            self.in_forward_decl_signature = prev_forward_decl_signature;
+            if emitted_alias {
+                emitted_any = true;
+            }
+        }
+
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Fn(f) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&f.attrs) {
+                continue;
+            }
+            if self.emit_function_forward_decl(f, module_depth > 0) {
+                emitted_any = true;
+            }
         }
         emitted_any
     }
@@ -2681,7 +2738,8 @@ impl CodeGen {
     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
         items.iter().any(|item| match item {
             syn::Item::Struct(_) => true,
-            syn::Item::Enum(e) => enum_is_c_like(e),
+            syn::Item::Enum(_) => true,
+            syn::Item::Type(_) => true,
             syn::Item::Fn(_) => true,
             syn::Item::Mod(m) => m
                 .content
@@ -6392,17 +6450,86 @@ impl CodeGen {
         }
     }
 
-    fn emit_type_alias(&mut self, t: &syn::ItemType) {
-        let name = &t.ident;
+    fn type_contains_unbound_single_letter_generic(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                    let ident = tp.path.segments[0].ident.to_string();
+                    let is_unbound_generic_like = ident.len() == 1
+                        && ident
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_uppercase())
+                        && !self.is_type_param_in_scope(&ident)
+                        && !self.is_local_type_name_in_scope(&ident)
+                        && !self.declared_item_names.contains(&ident)
+                        && types::map_primitive_type(&ident).is_none();
+                    if is_unbound_generic_like {
+                        return true;
+                    }
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| {
+                            if let syn::GenericArgument::Type(inner_ty) = arg {
+                                self.type_contains_unbound_single_letter_generic(inner_ty)
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_contains_unbound_single_letter_generic(&r.elem),
+            syn::Type::Ptr(p) => self.type_contains_unbound_single_letter_generic(&p.elem),
+            syn::Type::Slice(s) => self.type_contains_unbound_single_letter_generic(&s.elem),
+            syn::Type::Array(a) => self.type_contains_unbound_single_letter_generic(&a.elem),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_contains_unbound_single_letter_generic(elem)),
+            syn::Type::Paren(p) => self.type_contains_unbound_single_letter_generic(&p.elem),
+            syn::Type::Group(g) => self.type_contains_unbound_single_letter_generic(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn scoped_alias_key(&self, alias_name: &str) -> String {
+        if self.module_stack.is_empty() {
+            alias_name.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), alias_name)
+        }
+    }
+
+    fn emit_type_alias_once(&mut self, t: &syn::ItemType) -> bool {
+        let name = escape_cpp_keyword(&t.ident.to_string());
+        let scoped_key = self.scoped_alias_key(&name);
+        if !self.emitted_scoped_type_aliases.insert(scoped_key) {
+            return false;
+        }
+
+        self.emit_template_prefix(&t.generics);
+        self.push_type_param_scope(&t.generics);
         let target = self.map_type(&t.ty);
+        self.pop_type_param_scope();
         self.writeln(&format!("using {} = {};", name, target));
-        if is_numeric_cpp_scalar_type(&target) {
+
+        // Numeric alias tracking only applies to concrete (non-generic) aliases.
+        if t.generics.params.is_empty() && is_numeric_cpp_scalar_type(&target) {
             let alias = name.to_string();
             self.numeric_type_aliases
                 .insert(alias.clone(), target.clone());
             self.numeric_type_aliases
                 .insert(self.scoped_type_key(&alias), target);
         }
+        true
+    }
+
+    fn emit_type_alias(&mut self, t: &syn::ItemType) {
+        let _ = self.emit_type_alias_once(t);
     }
 
     fn is_local_new_const_constructor_call(&self, expr: &syn::Expr) -> bool {
@@ -7087,7 +7214,7 @@ impl CodeGen {
                 self.writeln(&format!("namespace {} {{", mod_cpp_name));
                 self.indent += 1;
                 self.module_stack.push(mod_name.to_string());
-                let ordered_items = self.order_items_for_emission(items);
+                let ordered_items = self.order_items_for_emission(items, true);
                 for item in ordered_items {
                     match item {
                         syn::Item::Fn(_) | syn::Item::Mod(_) => {
@@ -7112,7 +7239,7 @@ impl CodeGen {
                 if self.emit_item_forward_decls(items, self.module_stack.len()) {
                     self.newline();
                 }
-                let ordered_items = self.order_items_for_emission(items);
+                let ordered_items = self.order_items_for_emission(items, true);
                 for item in ordered_items {
                     if matches!(item, syn::Item::Impl(_)) {
                         continue;
@@ -7703,6 +7830,15 @@ impl CodeGen {
                 {
                     self.writeln(&format!(
                         "// Rust-only dependent associated type alias skipped in constrained mode: {}",
+                        t.ident
+                    ));
+                    return;
+                }
+                if self.should_soften_dependent_assoc_mode()
+                    && self.type_contains_unbound_single_letter_generic(&t.ty)
+                {
+                    self.writeln(&format!(
+                        "// Rust-only associated type alias with unbound generic skipped in constrained mode: {}",
                         t.ident
                     ));
                     return;
@@ -24961,11 +25097,7 @@ impl CodeGen {
 
         // Escape C++ keywords across all path segments.
         if segments.len() > 1 {
-            let mut escaped = segments.clone();
-            for seg in &mut escaped {
-                *seg = escape_cpp_keyword(seg);
-            }
-            return escaped.join("::");
+            return self.escape_and_rename_qualified_name(&joined);
         }
 
         // Single segment — escape if keyword
@@ -25674,6 +25806,189 @@ impl CodeGen {
         }
     }
 
+    fn map_angle_bracketed_type_args(
+        &self,
+        args: &syn::AngleBracketedGenericArguments,
+    ) -> Vec<String> {
+        self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);
+        let mapped: Vec<String> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                _ => None,
+            })
+            .collect();
+        self.type_arg_nesting.set(self.type_arg_nesting.get() - 1);
+        mapped
+    }
+
+    fn try_map_iterator_adapter_type(&self, tp: &syn::TypePath) -> Option<String> {
+        if tp.qself.is_some() {
+            return None;
+        }
+        let mut path_idents: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        while matches!(
+            path_idents.first().map(|s| s.as_str()),
+            Some("crate" | "self" | "super")
+        ) {
+            path_idents.remove(0);
+        }
+        let normalized_idents: &[String] =
+            if matches!(path_idents.first().map(|s| s.as_str()), Some("std" | "core" | "alloc")) {
+                &path_idents[1..]
+            } else {
+                &path_idents
+            };
+        let first = normalized_idents.first()?.as_str();
+        let last = tp.path.segments.last()?;
+        let last_ident = last.ident.to_string();
+
+        if normalized_idents.len() == 2 && first == "iter" {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let mapped_args = self.map_angle_bracketed_type_args(args);
+            return match (last_ident.as_str(), mapped_args.as_slice()) {
+                ("Enumerate", [iter_ty]) => {
+                    Some(format!("decltype(std::declval<{}>().enumerate())", iter_ty))
+                }
+                ("Rev", [iter_ty]) => Some(format!("decltype(std::declval<{}>().rev())", iter_ty)),
+                ("Cloned", [iter_ty]) => {
+                    Some(format!("decltype(std::declval<{}>().cloned())", iter_ty))
+                }
+                ("Peekable", [iter_ty]) => {
+                    Some(format!("decltype(std::declval<{}>().peekable())", iter_ty))
+                }
+                ("Chain", [left_ty, right_ty]) => Some(format!(
+                    "decltype(std::declval<{}>().chain(std::declval<{}>()))",
+                    left_ty, right_ty
+                )),
+                _ => None,
+            };
+        }
+
+        if normalized_idents.len() == 2 && first == "intersperse" {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let mapped_args = self.map_angle_bracketed_type_args(args);
+            return match (last_ident.as_str(), mapped_args.as_slice()) {
+                ("Intersperse", [iter_ty]) => Some(format!(
+                    "decltype(std::declval<{}>().intersperse(std::declval<typename {}::Item>()))",
+                    iter_ty, iter_ty
+                )),
+                ("IntersperseWith", [iter_ty, f_ty]) => Some(format!(
+                    "decltype(std::declval<{}>().intersperse_with(std::declval<{}>()))",
+                    iter_ty, f_ty
+                )),
+                _ => None,
+            };
+        }
+
+        if normalized_idents.len() == 2 && first == "ziptuple" && last_ident == "Zip" {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let mapped_args = self.map_angle_bracketed_type_args(args);
+            if mapped_args.len() == 2 {
+                return Some(format!(
+                    "decltype(rusty::zip(std::declval<{}>(), std::declval<{}>()))",
+                    mapped_args[0], mapped_args[1]
+                ));
+            }
+        }
+
+        if last_ident == "IntoIter" {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let mapped_args = self.map_angle_bracketed_type_args(args);
+            if mapped_args.len() == 1 {
+                if normalized_idents
+                    == ["vec".to_string(), "IntoIter".to_string()]
+                    || normalized_idents
+                        == ["rusty".to_string(), "vec".to_string(), "IntoIter".to_string()]
+                {
+                    return Some(format!(
+                        "decltype(std::declval<rusty::Vec<{}>>().into_iter())",
+                        mapped_args[0]
+                    ));
+                }
+                if normalized_idents
+                    == [
+                        "collections".to_string(),
+                        "vec_deque".to_string(),
+                        "IntoIter".to_string(),
+                    ]
+                    || normalized_idents
+                    == [
+                        "rusty".to_string(),
+                        "collections".to_string(),
+                        "vec_deque".to_string(),
+                        "IntoIter".to_string(),
+                    ]
+                {
+                    return Some(format!(
+                        "decltype(std::declval<rusty::VecDeque<{}>>().into_iter())",
+                        mapped_args[0]
+                    ));
+                }
+            }
+        }
+
+        if tp.path.segments.len() == 1 {
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let mapped_args = self.map_angle_bracketed_type_args(args);
+            if last_ident == "Intersperse"
+                && mapped_args.len() == 1
+                && !self.local_declared_types.contains("Intersperse")
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().intersperse(std::declval<typename {}::Item>()))",
+                    mapped_args[0], mapped_args[0]
+                ));
+            }
+            if last_ident == "IntersperseWith"
+                && mapped_args.len() == 2
+                && !self.local_declared_types.contains("IntersperseWith")
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().intersperse_with(std::declval<{}>()))",
+                    mapped_args[0], mapped_args[1]
+                ));
+            }
+            if last_ident == "Zip"
+                && mapped_args.len() == 2
+                && !self.local_declared_types.contains("Zip")
+            {
+                return Some(format!(
+                    "decltype(rusty::zip(std::declval<{}>(), std::declval<{}>()))",
+                    mapped_args[0], mapped_args[1]
+                ));
+            }
+            if last_ident == "VecIntoIter"
+                && mapped_args.len() == 1
+                && !self.local_declared_types.contains("VecIntoIter")
+            {
+                return Some(format!(
+                    "decltype(std::declval<rusty::Vec<{}>>().into_iter())",
+                    mapped_args[0]
+                ));
+            }
+        }
+
+        None
+    }
+
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
@@ -25735,6 +26050,10 @@ impl CodeGen {
                 {
                     path_str = "rusty::Bound".to_string();
                 }
+                if let Some(mapped_iter_adapter) = self.try_map_iterator_adapter_type(tp) {
+                    return mapped_iter_adapter;
+                }
+
                 if tp.path.segments.len() == 1 {
                     let local_name = tp.path.segments[0].ident.to_string();
                     if self.is_local_type_name_in_scope(&local_name) {
@@ -40198,6 +40517,283 @@ mod tests {
         assert!(
             out.contains("numeric_identifier(std::string_view input, ::error::Position pos);"),
             "forward declaration should use explicit crate path for imported type"
+        );
+    }
+
+    #[test]
+    fn test_leaf513_generic_type_alias_emits_template_and_precedes_forward_decl_signature() {
+        let out = transpile_str(
+            r#"
+            mod coalesce {
+                pub struct NoCount;
+                pub struct CoalesceBy<I, F, C>(I, F, C);
+                pub type Coalesce<I, F> = CoalesceBy<I, F, NoCount>;
+                pub fn coalesce<I, F>(iter: I, f: F) -> Coalesce<I, F> {
+                    CoalesceBy(iter, f, NoCount)
+                }
+            }
+            "#,
+        );
+
+        let alias = "using Coalesce = CoalesceBy<I, F, NoCount>;";
+        let decl = "Coalesce<I, F> coalesce(I iter, F f);";
+        assert!(
+            out.contains(alias),
+            "expected generic alias emission, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains(decl),
+            "expected forward declaration using alias, got:\n{}",
+            out
+        );
+        let alias_pos = out.find(alias).expect("missing alias declaration");
+        let decl_pos = out
+            .find(decl)
+            .expect("missing function forward declaration");
+        assert!(
+            alias_pos < decl_pos,
+            "alias declaration must precede forward declaration:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf513_module_name_free_is_renamed_to_avoid_global_symbol_collision() {
+        let out = transpile_str(
+            r#"
+            mod free {
+                pub fn enumerate() {}
+            }
+            fn use_it() {
+                free::enumerate();
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("namespace free_mod {"),
+            "expected free namespace rename, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("free_mod::enumerate"),
+            "expected rewritten path through renamed namespace, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
+        let out = transpile_str(
+            r#"
+            mod free {
+                use crate::intersperse::{Intersperse, IntersperseWith};
+                pub fn enumerate_it<I>(iterable: I) -> iter::Enumerate<I> {
+                    iterable.enumerate()
+                }
+                pub fn rev_it<I>(iterable: I) -> iter::Rev<I> {
+                    iterable.rev()
+                }
+                pub fn chain_it<I, J>(left: I, right: J) -> iter::Chain<I, J> {
+                    left.chain(right)
+                }
+                pub fn cloned_it<I>(iterable: I) -> iter::Cloned<I> {
+                    iterable.cloned()
+                }
+                pub fn zip_it<I, J>(left: I, right: J) -> Zip<I, J> {
+                    rusty::zip(left, right)
+                }
+                pub fn intersperse_ty<I>(iterable: I) -> intersperse::Intersperse<I> {
+                    let _ = iterable;
+                    todo!()
+                }
+                pub fn crate_intersperse_ty<I>(iterable: I) -> crate::intersperse::Intersperse<I> {
+                    let _ = iterable;
+                    todo!()
+                }
+                pub fn vec_into_iter_ty<T>() -> rusty::vec::IntoIter<T> {
+                    todo!()
+                }
+                pub fn alloc_vec_into_iter_ty<T>() -> alloc::vec::IntoIter<T> {
+                    todo!()
+                }
+                pub fn alloc_vec_deque_into_iter_ty<T>() -> alloc::collections::vec_deque::IntoIter<T> {
+                    todo!()
+                }
+                pub fn core_rev_ty<I>(iterable: I) -> core::iter::Rev<I> {
+                    iterable.rev()
+                }
+                pub fn crate_zip_ty<I, J>(left: I, right: J) -> crate::ziptuple::Zip<I, J> {
+                    rusty::zip(left, right)
+                }
+                pub fn imported_intersperse_ty<I>(iterable: I) -> Intersperse<I> {
+                    let _ = iterable;
+                    todo!()
+                }
+                pub fn imported_intersperse_into_iter_ty<I>(iterable: I) -> Intersperse<I::IntoIter> {
+                    let _ = iterable;
+                    todo!()
+                }
+                pub fn imported_intersperse_with_ty<I, F>(iterable: I, f: F) -> IntersperseWith<I, F> {
+                    let _ = (iterable, f);
+                    todo!()
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("decltype(std::declval<I>().enumerate()) enumerate_it(I iterable)"),
+            "expected iter::Enumerate lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().rev()) rev_it(I iterable)"),
+            "expected iter::Rev lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().chain(std::declval<J>())) chain_it(I left, J right)"),
+            "expected iter::Chain lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().cloned()) cloned_it(I iterable)"),
+            "expected iter::Cloned lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(rusty::zip(std::declval<I>(), std::declval<J>())) zip_it(I left, J right)"),
+            "expected Zip lowering through rusty::zip decltype, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().intersperse(std::declval<typename I::Item>())) intersperse_ty(I iterable)"),
+            "expected intersperse::Intersperse lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().intersperse(std::declval<typename I::Item>())) crate_intersperse_ty(I iterable)"),
+            "expected crate::intersperse::Intersperse lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<rusty::Vec<T>>().into_iter()) vec_into_iter_ty()"),
+            "expected rusty::vec::IntoIter lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<rusty::Vec<T>>().into_iter()) alloc_vec_into_iter_ty()"),
+            "expected alloc::vec::IntoIter lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<rusty::VecDeque<T>>().into_iter()) alloc_vec_deque_into_iter_ty()"),
+            "expected alloc::collections::vec_deque::IntoIter lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().rev()) core_rev_ty(I iterable)"),
+            "expected core::iter::Rev lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(rusty::zip(std::declval<I>(), std::declval<J>())) crate_zip_ty(I left, J right)"),
+            "expected crate::ziptuple::Zip lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().intersperse(std::declval<typename I::Item>())) imported_intersperse_ty(I iterable)"),
+            "expected imported Intersperse lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<typename I::IntoIter>().intersperse(std::declval<typename typename I::IntoIter::Item>())) imported_intersperse_into_iter_ty(I iterable)"),
+            "expected imported Intersperse<I::IntoIter> lowering, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("decltype(std::declval<I>().intersperse_with(std::declval<F>())) imported_intersperse_with_ty(I iterable, F f)"),
+            "expected imported IntersperseWith lowering, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf513_non_c_like_enum_forward_declares_struct_before_function_signature() {
+        let out = transpile_str(
+            r#"
+            mod diff {
+                pub enum Diff<I, J> {
+                    Left(I),
+                    Right(J),
+                }
+                pub fn make<I, J>(left: I, right: J) -> Diff<I, J> {
+                    let _ = right;
+                    Diff::Left(left)
+                }
+            }
+            "#,
+        );
+
+        let decl = "struct Diff;";
+        let sig = "Diff<I, J> make(I left, J right);";
+        assert!(
+            out.contains(decl),
+            "expected non-C-like enum forward struct declaration, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains(sig),
+            "expected forward declaration using enum wrapper type, got:\n{}",
+            out
+        );
+        let decl_pos = out.find(decl).expect("missing Diff forward declaration");
+        let sig_pos = out.find(sig).expect("missing make forward declaration");
+        assert!(
+            decl_pos < sig_pos,
+            "non-C-like enum forward declaration must precede function signature:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf513_nested_private_module_forward_decls_precede_aliases() {
+        let out = transpile_str(
+            r#"
+            mod duplicates_impl {
+                pub type DuplicatesBy<I, V, F> = private_::DuplicatesBy<I, V, private_::ByFn<F>>;
+                pub fn duplicates_by<I, V, F>(iter: I, f: F) -> DuplicatesBy<I, V, F> {
+                    let _ = (iter, f);
+                    todo!()
+                }
+                mod private_ {
+                    pub struct DuplicatesBy<I, V, F>(I, V, F);
+                    pub struct ByFn<F>(F);
+                }
+            }
+            "#,
+        );
+
+        let nested_ns = "namespace private_ {";
+        let alias = "using DuplicatesBy = private_::DuplicatesBy<I, V, private_::ByFn<F>>;";
+        assert!(
+            out.contains(nested_ns),
+            "expected nested private_ namespace forward declarations, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains(alias),
+            "expected alias to nested private_ type, got:\n{}",
+            out
+        );
+        let ns_pos = out.find(nested_ns).expect("missing private_ namespace forward declarations");
+        let alias_pos = out.find(alias).expect("missing DuplicatesBy alias");
+        assert!(
+            ns_pos < alias_pos,
+            "nested module forward declarations must precede alias use:\n{}",
+            out
         );
     }
 
