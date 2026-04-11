@@ -18859,12 +18859,16 @@ impl CodeGen {
             return format!("rusty::iter_mut({})", receiver);
         }
         if mc.method == "collect" && mc.args.is_empty() {
-            // When receiver is `.into_iter()`, replace with `rusty::iter()`
-            // since C++ containers don't have `.into_iter()`.
+            // For unresolved generic receivers, bridge `.into_iter()` through
+            // `rusty::iter(...)` since concrete C++ method surfaces may not exist.
             let receiver = if let syn::Expr::MethodCall(inner_mc) = &*mc.receiver {
                 if inner_mc.method == "into_iter" && inner_mc.args.is_empty() {
-                    let inner = self.emit_expr_to_string(&inner_mc.receiver);
-                    format!("rusty::iter({})", inner)
+                    if self.should_bridge_into_iter_receiver_to_iter(&inner_mc.receiver) {
+                        let inner = self.emit_expr_to_string(&inner_mc.receiver);
+                        format!("rusty::iter({})", inner)
+                    } else {
+                        self.emit_expr_to_string(&mc.receiver)
+                    }
                 } else {
                     self.emit_expr_to_string(&mc.receiver)
                 }
@@ -25425,6 +25429,26 @@ impl CodeGen {
             }
             _ => false,
         }
+    }
+
+    fn should_bridge_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
+        if self.is_iterator_like_receiver_expr(receiver)
+            || self.is_probably_iterator_receiver_expr(receiver)
+        {
+            return false;
+        }
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            // Preserve historical fallback behavior for unresolved receiver shapes.
+            return true;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
     }
 
     fn try_emit_iter_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -45774,6 +45798,42 @@ mod tests {
         );
         assert!(out.contains("rusty::rev(v.drain(rusty::range(0, 0)))"), "{out}");
         assert!(!out.contains(".drain(rusty::range(0, 0)).rev()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5124_smallvec_into_iter_collect_preserves_value_iterator_receiver() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec<A>;
+            impl<A> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+                fn push(&mut self, _v: u8) {}
+                fn into_iter(self) -> std::ops::Range<u8> { 0..0 }
+            }
+            fn f() {
+                let mut v: SmallVec<[u8; 2]> = SmallVec::new();
+                v.push(3);
+                let _ = v.into_iter().collect::<Vec<_>>();
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::collect_range(v.into_iter())"),
+            "{out}"
+        );
+        assert!(!out.contains("rusty::collect_range(rusty::iter(v))"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5124_generic_into_iter_collect_uses_iter_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f<T>(value: T) -> Vec<i32> {
+                value.into_iter().collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(out.contains("::from_iter(rusty::iter(value))"), "{out}");
     }
 
     #[test]

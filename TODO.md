@@ -4505,8 +4505,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-23-20260411c/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core associated-call and `into_vec` lowering paths, with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.24: `smallvec` Stage D `into_iter` assertion element-shape parity compile-head family collapse
-          - Collapse the new post-5.1.23 deterministic `smallvec` Stage D family beginning at `runner.cpp:2691`/`2713` (`rusty::Vec<const unsigned char*>` compared against integer `std::array{...}` literals in `into_iter` assertion paths), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.24: `smallvec` Stage D `into_iter` assertion element-shape parity compile-head family collapse
+          - Plan/scope check: shared `collect` receiver-shape gating plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - `collect` lowering now conditionally bridges `x.into_iter().collect()` through `rusty::iter(x)` only when the `into_iter` receiver is unresolved/type-parameter-like.
+            - concrete value-iterator receivers now preserve `.into_iter()` at collect call-sites, preventing pointer-shaped element drift in `smallvec` `into_iter` assertion paths.
+          - Added focused regressions:
+            - `test_leaf5124_smallvec_into_iter_collect_preserves_value_iterator_receiver`
+            - `test_leaf5124_generic_into_iter_collect_uses_iter_bridge`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5124 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf5122 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-24-20260411d --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.23 first-head family at `runner.cpp:2691/2713` (`rusty::Vec<const unsigned char*>` vs integer `std::array{...}` assertion mismatch in `into_iter` paths) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1966` (`std::tuple<...>` has no member `._0` in `triple()/triple_mut()` field projection paths), with adjacent option-surface deduction fallout at `runner.cpp:2285/2300` (`std::nullopt_t` vs `std::optional<...>` return-shape mismatch) and downstream iterator-adapter static assertions.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-24-20260411d/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core collect lowering; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
+        - [ ] Leaf 5.1.25: `smallvec` Stage D tuple-field projection / option-return-shape compile-head family collapse
+          - Collapse the new post-5.1.24 deterministic `smallvec` Stage D family beginning at `runner.cpp:1966` (`std::tuple<...>` projected with `._0`/`._1` in `triple()` and `triple_mut()` paths), including adjacent `runner.cpp:2285/2300` option-like return-shape drift (`std::nullopt_t` vs `std::optional<...>` in iterator `next`/`next_back`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

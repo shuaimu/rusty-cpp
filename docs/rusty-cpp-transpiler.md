@@ -2335,6 +2335,9 @@ Current status snapshot:
 44. Focused `smallvec` repro after `Leaf 5.1.23` (`/tmp/rusty-parity-matrix-5-1-23-20260411c/smallvec/...`) collapses the prior post-5.1.22 boxed-array numeric-typing first-head family by hardening expected-owner associated-call argument typing (owner-substitution-aware expected arg recovery in `try_emit_associated_call_with_expected_type`) and broadening `into_vec` boxed-array specialization path-shape matching.
 45. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2691` (`operator==` mismatch between `rusty::Vec<const unsigned char*>` and `std::array<int, 1>` in `into_iter` assertion shape), with adjacent same-family fallout at `runner.cpp:2713` (`std::array<int, 3>`).
 46. Guardrail check against §11 remains satisfied for `Leaf 5.1.23`: fixes stayed shared and AST/type-context-gated in core associated-call and `into_vec` lowering paths; no crate-specific ad-hoc scripts and no generated-output text patching were introduced.
+47. Focused `smallvec` repro after `Leaf 5.1.24` (`/tmp/rusty-parity-matrix-5-1-24-20260411d/smallvec/...`) collapses the prior post-5.1.23 `into_iter` assertion element-shape first-head family (`runner.cpp:2691/2713`) by making collect-lowering bridge of `.into_iter()` receivers conditional on unresolved/type-parameter receiver shape.
+48. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1966` (`std::tuple<...>` projected via `._0` in `triple()`/`triple_mut()` paths), with adjacent option-return-shape fallout at `runner.cpp:2285/2300` (`std::nullopt_t` vs `std::optional<...>` deduction in iterator `next`/`next_back`).
+49. Guardrail check against §11 remains satisfied for `Leaf 5.1.24`: fix stayed shared and receiver/type-shape-gated in core collect lowering, with no crate-specific ad-hoc scripts and no generated-output text patching.
 
 Historical active-work chain (retained for traceability):
 
