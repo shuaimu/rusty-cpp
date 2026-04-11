@@ -2897,6 +2897,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-13-1775867215/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/context-gated in local pattern + block emission lowering, with no generated-text patching or crate-specific rewrites.
+        - [x] *done* Leaf 10.5.14: Collapse the post-10.5.13 deterministic semver Stage D `while let Some(&digit)` lowering family generically (starting with `runner.cpp:1977` emitting `while (rusty::intrinsics::unreachable())` and missing `digit` binding), add fixture-agnostic regressions, then re-run semver parity.
+          - [x] *done* Leaf 10.5.14.1: Implement shared transpiler fixes for `while let` reference-payload bindings (no crate-specific scripts): preserve optional-surface condition lowering and emit payload binding statements for non-simple patterns (for example `Some(&digit)`), then verify the old `unreachable()` while-condition shape is removed.
+            - Plan/scope check: shared transpiler-only `while let` pattern-lowering updates plus focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - added `while_let_condition_parts(...)` and switched `emit_while_let(...)` to condition+binding planning that supports reference payload patterns (for example `Some(&digit)`) instead of falling back to boolean `ExprLet` lowering.
+              - preserved existing optional-surface lowering for ambiguous/optional-like scrutinees (`rusty::detail::option_has_value`/`option_take_value`) and existing `Some(v)` shape (`auto v = option_take_value(_whilelet)`).
+              - added mapped local binding-scope emission for `while let` payload bindings so non-simple patterns can emit stable C++ bindings in loop bodies.
+            - Added focused fixture-agnostic regression:
+              - `transpiler/src/codegen.rs`:
+                - `test_leaf10514_while_let_option_ref_payload_binds_without_unreachable_condition`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf10514 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler leaf41543333333327291 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+          - [x] *done* Leaf 10.5.14.2: Re-run semver parity after 10.5.14.1, record deterministic first-head movement with canonical artifacts, and update active-frontier docs/TODO status.
+            - Re-ran semver parity:
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-14-1775869000 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:1977` (`while let Some(&digit)` lowering emitted `while (rusty::intrinsics::unreachable())` with missing `digit` binding) is removed.
+              - new deterministic Stage D head starts at `runner.cpp:1989` in `parse::numeric_identifier` (`checked_add(int&, uint64_t)` type-shape mismatch in chained arithmetic), with adjacent downstream runtime Option `std::visit` fallback still present later at `runner.cpp:2060`.
+            - Canonical artifacts:
+              - `/tmp/rusty-parity-matrix-10-5-14-1775869000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/type-context-gated in `while let` lowering, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

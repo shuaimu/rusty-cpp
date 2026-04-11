@@ -11118,36 +11118,180 @@ impl CodeGen {
     }
 
     fn emit_while_let(&mut self, let_expr: &syn::ExprLet, body: &syn::Block) -> bool {
-        let Some((cond_expr_raw, binding_name, unwrap_method)) =
-            self.if_let_expr_condition_parts(let_expr)
-        else {
+        let Some((cond_expr_raw, unwrap_method)) = self.while_let_condition_parts(let_expr) else {
             return false;
         };
         let cond_expr = cond_expr_raw.replace("_iflet", "_whilelet");
         let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+        let scrutinee_is_as_mut =
+            scrutinee.ends_with(".as_mut()") && unwrap_method != Some(IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER);
+
+        let mut binding_lines = Vec::new();
+        let mut binding_map = HashMap::new();
+        match &*let_expr.pat {
+            syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
+                let Some(unwrap) = unwrap_method else {
+                    return false;
+                };
+                let binding_pat = ts.elems.first().expect("checked len() above");
+                let simple_ident = match binding_pat {
+                    syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none() => {
+                        Some(pi.ident.to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(rust_name) = simple_ident {
+                    let cpp_name = self
+                        .lookup_local_binding_cpp_name(&rust_name)
+                        .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                    binding_map.insert(rust_name, cpp_name.clone());
+                    if unwrap == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                        binding_lines.push(format!(
+                            "auto {} = rusty::detail::option_take_value(_whilelet);",
+                            cpp_name
+                        ));
+                    } else {
+                        let unwrap_expr = self.emit_if_let_unwrap_expr("_whilelet", unwrap);
+                        if scrutinee_is_as_mut {
+                            binding_lines.push(format!("auto& {} = *{};", cpp_name, unwrap_expr));
+                        } else {
+                            binding_lines.push(format!("auto {} = {};", cpp_name, unwrap_expr));
+                        }
+                    }
+                } else {
+                    let payload_var = "_whilelet_payload";
+                    let mut pattern_binding_stmts = Vec::new();
+                    if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                        binding_pat,
+                        payload_var,
+                        &mut pattern_binding_stmts,
+                        &mut binding_map,
+                    ) {
+                        return false;
+                    }
+                    if !pattern_binding_stmts.is_empty() {
+                        if unwrap == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
+                            binding_lines.push("auto&& _whilelet_take = _whilelet;".to_string());
+                            binding_lines.push(format!(
+                                "auto&& {} = rusty::detail::option_take_value(_whilelet_take);",
+                                payload_var
+                            ));
+                        } else {
+                            let unwrap_expr = self.emit_if_let_unwrap_expr("_whilelet", unwrap);
+                            if scrutinee_is_as_mut {
+                                binding_lines.push(format!("auto&& {} = *{};", payload_var, unwrap_expr));
+                            } else {
+                                binding_lines.push(format!("auto&& {} = {};", payload_var, unwrap_expr));
+                            }
+                        }
+                        binding_lines.extend(pattern_binding_stmts);
+                    }
+                }
+            }
+            syn::Pat::Ident(pi) if pi.ident != "_" => {
+                let rust_name = pi.ident.to_string();
+                let cpp_name = self
+                    .lookup_local_binding_cpp_name(&rust_name)
+                    .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                binding_map.insert(rust_name, cpp_name.clone());
+                binding_lines.push(format!("auto {} = _whilelet;", cpp_name));
+            }
+            syn::Pat::Path(_) | syn::Pat::Wild(_) => {}
+            _ => return false,
+        }
 
         self.writeln("while (true) {");
         self.indent += 1;
         self.writeln(&format!("auto&& _whilelet = {};", scrutinee));
         self.writeln(&format!("if (!({})) {{ break; }}", cond_expr));
-        if let Some(binding) = binding_name {
-            if let Some(unwrap) = unwrap_method {
-                let unwrap_expr = self.emit_if_let_unwrap_expr("_whilelet", unwrap);
-                if scrutinee.ends_with(".as_mut()")
-                    && unwrap != IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER
-                {
-                    self.writeln(&format!("auto& {} = *{};", binding, unwrap_expr));
-                } else {
-                    self.writeln(&format!("auto {} = {};", binding, unwrap_expr));
-                }
-            } else {
-                self.writeln(&format!("auto {} = _whilelet;", binding));
-            }
+        for binding_line in binding_lines {
+            self.writeln(&binding_line);
         }
-        self.emit_block(body);
+
+        if binding_map.is_empty() {
+            self.emit_block(body);
+        } else {
+            self.local_cpp_bindings.push(binding_map.clone());
+            let mut local_types = HashMap::new();
+            let mut local_consts = HashMap::new();
+            for rust_name in binding_map.keys() {
+                local_types.insert(rust_name.clone(), None);
+                local_consts.insert(rust_name.clone(), false);
+            }
+            self.local_bindings.push(local_types);
+            self.local_const_bindings.push(local_consts);
+            self.emit_block(body);
+            self.local_const_bindings.pop();
+            self.local_bindings.pop();
+            self.local_cpp_bindings.pop();
+        }
         self.indent -= 1;
         self.writeln("}");
         true
+    }
+
+    fn while_let_condition_parts(
+        &self,
+        let_expr: &syn::ExprLet,
+    ) -> Option<(String, Option<&'static str>)> {
+        let (option_some_check, option_none_check, option_unwrap, option_none_negated) =
+            self.option_like_pattern_surface_for_expr(&let_expr.expr);
+        match &*let_expr.pat {
+            syn::Pat::TupleStruct(ts) => {
+                if ts.elems.len() != 1 {
+                    return None;
+                }
+                let path_str = ts
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                match path_str.as_str() {
+                    "Some" | "Option::Some" => {
+                        if option_some_check == IF_LET_OPTION_HAS_VALUE_HELPER_MARKER {
+                            Some((
+                                "rusty::detail::option_has_value(_iflet)".to_string(),
+                                Some(option_unwrap),
+                            ))
+                        } else {
+                            Some((format!("_iflet.{}()", option_some_check), Some(option_unwrap)))
+                        }
+                    }
+                    "Ok" | "Result::Ok" => Some(("_iflet.is_ok()".to_string(), Some("unwrap"))),
+                    "Err" | "Result::Err" => {
+                        Some(("_iflet.is_err()".to_string(), Some("unwrap_err")))
+                    }
+                    _ => None,
+                }
+            }
+            syn::Pat::Path(pp) => {
+                let path_str = pp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if matches!(path_str.as_str(), "None" | "Option::None") {
+                    let call = if option_none_check == IF_LET_OPTION_HAS_VALUE_HELPER_MARKER {
+                        "rusty::detail::option_has_value(_iflet)".to_string()
+                    } else {
+                        format!("_iflet.{}()", option_none_check)
+                    };
+                    if option_none_negated {
+                        Some((format!("!{}", call), None))
+                    } else {
+                        Some((call, None))
+                    }
+                } else {
+                    None
+                }
+            }
+            syn::Pat::Ident(_) => Some(("true".to_string(), None)),
+            _ => None,
+        }
     }
 
     fn emit_loop(&mut self, loop_expr: &syn::ExprLoop) {
@@ -34171,6 +34315,37 @@ mod tests {
         assert!(out.contains("if (!(_whilelet.is_some())) { break; }"));
         assert!(out.contains("auto v = _whilelet.unwrap();"));
         assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
+    }
+
+    #[test]
+    fn test_leaf10514_while_let_option_ref_payload_binds_without_unreachable_condition() {
+        let out = transpile_str(
+            r#"
+            fn f(input: &str) {
+                let mut len = 0;
+                while let Some(&digit) = input.as_bytes().get(len) {
+                    len += 1;
+                    if !digit.is_ascii_digit() {
+                        break;
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("while (true) {"));
+        assert!(out.contains("auto&& _whilelet = "));
+        assert!(
+            out.contains("if (!(_whilelet.is_some())) { break; }")
+                || out.contains("if (!(_whilelet.has_value())) { break; }")
+                || out.contains("if (!(rusty::detail::option_has_value(_whilelet))) { break; }")
+        );
+        assert!(out.contains("auto&& digit = _whilelet_payload;"));
+        assert!(
+            out.contains("auto&& _whilelet_payload = rusty::detail::option_take_value(_whilelet_take);")
+                || out.contains("auto&& _whilelet_payload = _whilelet.unwrap();")
+        );
+        assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
+        assert!(!out.contains("if (!(rusty::intrinsics::unreachable()))"));
     }
 
     #[test]

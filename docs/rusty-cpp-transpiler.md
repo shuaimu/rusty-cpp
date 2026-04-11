@@ -4152,7 +4152,26 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1977` in `parse::numeric_identifier` (`while let Some(&digit)` lowering fallout emitting `while (rusty::intrinsics::unreachable())` with missing `digit` binding), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-13-1775867215/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/context-gated in local pattern + block emission lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-167. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.13` (`runner.cpp:1977` `parse::numeric_identifier` `while let Some(&digit)` lowering fallout with missing `digit` binding and `while (rusty::intrinsics::unreachable())` emission, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
+167. `Leaf 10.5.14` is complete.
+   - plan/scope check: shared transpiler-only `while let` lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - added `while_let_condition_parts(...)` and switched `emit_while_let(...)` to condition+binding planning that supports reference payload patterns (`while let Some(&digit) = ...`) instead of falling back to boolean `ExprLet` lowering.
+     - preserved optional-surface behavior for iterator/optional-like scrutinees and existing `while let Some(v) = iter.next()` lowering (`option_has_value`/`option_take_value` helper path when needed).
+     - added mapped local binding-scope emission for `while let` payload bindings so non-simple patterns emit stable C++ bindings in loop bodies.
+   - focused regression:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10514_while_let_option_ref_payload_binds_without_unreachable_condition`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10514 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333327291 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-14-1775869000 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1977` (`while let Some(&digit)` lowering emitted `while (rusty::intrinsics::unreachable())` with missing `digit` binding) is removed.
+     - new deterministic head starts at `runner.cpp:1989` in `parse::numeric_identifier` (`checked_add(int&, uint64_t)` type-shape mismatch), with adjacent downstream runtime Option `std::visit` fallback still present later at `runner.cpp:2060`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-14-1775869000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-context-gated in core `while let` lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+168. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.14` (`runner.cpp:1989` in `parse::numeric_identifier` `checked_add(int&, uint64_t)` type-shape mismatch, with adjacent downstream runtime Option `std::visit` fallback at `runner.cpp:2060`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
