@@ -4326,8 +4326,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-15-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-15-20260411a/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stay shared and AST/runtime-surface-gated with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.16: `smallvec` Stage D len-guard/callable-shape compile-head family collapse
-          - Collapse the post-5.1.15 deterministic `smallvec` Stage D family (starting at `runner.cpp:1345` with `SetLenOnDrop` destructor pointer/reference lowering mismatch and adjacent `ConstNonNull::new_`/`move(for_each)` callable-shape fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.16: `smallvec` Stage D len-guard/callable-shape compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC target; no further decomposition was required.
+          - Deterministic failure family addressed (shared transpiler/runtime-surface fixes only, no crate-specific scripts):
+            - unary deref lowering now recognizes `self` reference-typed fields and collapses `*self.field` to direct reference expression emission, avoiding invalid pointer-style dereference on `&T`-lowered storage.
+            - tuple-struct constructor callable lowering for path arguments now covers both explicit tuple-struct names and `Self` paths (`opt.map(Self)`), including omitted-generic recovery where available.
+            - self-method calls in impl/template contexts now emit `this->...` qualification to avoid dependent-name lookup fallout.
+            - single-segment function-item path arguments now lower to forwarding callable wrappers in call-arg contexts, avoiding `std::move(...)` over unresolved overloaded function items (for example imported `drop` callables).
+          - Added focused regressions:
+            - `test_leaf5116_reference_field_deref_collapses_without_pointer_star`
+            - `test_leaf5116_tuple_struct_constructor_path_arg_lowers_to_callable_lambda`
+            - `test_leaf5116_tuple_struct_self_constructor_path_arg_lowers_to_callable_lambda`
+            - `test_leaf5116_self_method_call_emits_this_qualification`
+            - `test_leaf5116_imported_drop_path_callable_arg_avoids_move_of_function_item`
+            - updated `test_leaf4154333333333_drop_while_let_lowers_without_unreachable_bool_condition` for `this->next()` qualification
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5116 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-16-20260411-171943 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.15 first-head family at `runner.cpp:1345` (`*this->len` reference-deref mismatch), `runner.cpp:1354` (`map(ConstNonNull)` callable-shape), and `runner.cpp:2288` (`move(for_each)` unresolved callable overload) is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1371` (`no type named 'Item' in 'std::array<size_t, 0>'`) with adjacent `A::Item` surface fallout across `SmallVec<std::array<size_t,0>>` API members and downstream test-shape mismatches.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-16-20260411-171943/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact: `/tmp/rusty-parity-matrix-5-1-16-20260411-171943/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes remain shared AST/runtime-surface-aware lowering with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.17: `smallvec` Stage D `A::Item` associated-type shape collapse for `std::array` owner instantiations
+          - Collapse the new post-5.1.16 deterministic `smallvec` Stage D family beginning at `runner.cpp:1371` (`no type named 'Item' in 'std::array<size_t, 0>'`) by hardening associated-type owner-shape lowering for array-like owners, add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

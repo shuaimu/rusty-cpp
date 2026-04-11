@@ -238,6 +238,12 @@ pub struct CodeGen {
     /// Named struct field emitted C++ member names keyed by Rust field name.
     /// Needed when field names are rewritten to avoid collisions with merged impl items.
     struct_field_cpp_names: HashMap<String, HashMap<String, String>>,
+    /// Named struct fields that are Rust references (`&T` / `&mut T`), keyed by
+    /// struct name (scoped + unscoped). Used for reference-aware unary-deref lowering.
+    struct_reference_fields: HashMap<String, HashSet<String>>,
+    /// Tuple-struct arity metadata keyed by local type name (scoped and unscoped).
+    /// Used for constructor-callable lowering (for example `opt.map(TupleStruct)`).
+    tuple_struct_arities: HashMap<String, usize>,
     /// Collected free-function parameter passing styles keyed by scoped function path.
     /// Used to lower `&x`/`&mut x` arguments to C++ reference arguments without
     /// turning them into raw pointers at call sites.
@@ -529,6 +535,8 @@ impl CodeGen {
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
             struct_field_cpp_names: HashMap::new(),
+            struct_reference_fields: HashMap::new(),
+            tuple_struct_arities: HashMap::new(),
             function_arg_pass_styles: HashMap::new(),
             function_arg_expected_types: HashMap::new(),
             function_type_param_names: HashMap::new(),
@@ -697,6 +705,8 @@ impl CodeGen {
         self.struct_field_types.clear();
         self.struct_field_order.clear();
         self.struct_field_cpp_names.clear();
+        self.struct_reference_fields.clear();
+        self.tuple_struct_arities.clear();
         self.function_arg_pass_styles.clear();
         self.function_arg_expected_types.clear();
         self.function_type_param_names.clear();
@@ -3708,6 +3718,16 @@ impl CodeGen {
                             ));
                         }
                     }
+                    if let syn::Fields::Unnamed(fields) = &s.fields {
+                        let arity = fields.unnamed.len();
+                        self.tuple_struct_arities.insert(struct_name.clone(), arity);
+                        if !module_path.is_empty() {
+                            self.tuple_struct_arities.insert(
+                                format!("{}::{}", module_path.join("::"), struct_name),
+                                arity,
+                            );
+                        }
+                    }
 
                     if let syn::Fields::Named(fields) = &s.fields {
                         let named_field_types: HashMap<String, syn::Type> = fields
@@ -3735,6 +3755,18 @@ impl CodeGen {
                                 })
                             })
                             .collect();
+                        let reference_fields: HashSet<String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                let ident = field.ident.as_ref()?;
+                                if matches!(field.ty, syn::Type::Reference(_)) {
+                                    Some(ident.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
                         if !named_field_types.is_empty() {
                             self.struct_field_types
                                 .insert(struct_name.clone(), named_field_types.clone());
@@ -3742,6 +3774,10 @@ impl CodeGen {
                                 .insert(struct_name.clone(), named_field_order.clone());
                             self.struct_field_cpp_names
                                 .insert(struct_name.clone(), named_field_cpp_names.clone());
+                            if !reference_fields.is_empty() {
+                                self.struct_reference_fields
+                                    .insert(struct_name.clone(), reference_fields.clone());
+                            }
                             if !module_path.is_empty() {
                                 self.struct_field_types.insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
@@ -3755,6 +3791,12 @@ impl CodeGen {
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     named_field_cpp_names,
                                 );
+                                if !reference_fields.is_empty() {
+                                    self.struct_reference_fields.insert(
+                                        format!("{}::{}", module_path.join("::"), struct_name),
+                                        reference_fields,
+                                    );
+                                }
                             }
                         }
                     }
@@ -4506,8 +4548,81 @@ impl CodeGen {
             if let Some(lambda) = self.try_emit_method_reference_lambda(&path_expr.path) {
                 return lambda;
             }
+            if let Some(lambda) = self.try_emit_tuple_struct_constructor_callable(&path_expr.path) {
+                return lambda;
+            }
+            if path_expr.path.segments.len() == 1 {
+                if let Some(lambda) = self.emit_callable_path_item_expr(arg) {
+                    return lambda;
+                }
+            }
         }
         self.emit_expr_to_string_with_expected_and_move_if_needed(arg, expected_ty)
+    }
+
+    fn try_emit_tuple_struct_constructor_callable(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+
+        let raw_ident = path.segments.first()?.ident.to_string();
+        let type_name = if raw_ident == "Self" {
+            self.current_struct.clone()?
+        } else {
+            raw_ident.clone()
+        };
+        if raw_ident != "Self" && self.lookup_local_binding_type(&raw_ident).is_some() {
+            return None;
+        }
+
+        let scoped_type_name = self.scoped_type_key(&type_name);
+        let arity = self
+            .tuple_struct_arities
+            .get(&type_name)
+            .copied()
+            .or_else(|| self.tuple_struct_arities.get(&scoped_type_name).copied())?;
+        if arity != 1 {
+            return None;
+        }
+
+        let mut ctor_type = self.emit_path_to_string(path);
+        if raw_ident == "Self" {
+            if ctor_type == "Self" {
+                ctor_type = type_name.clone();
+            }
+            if !ctor_type.contains('<') {
+                if let Ok(owner_path) = syn::parse_str::<syn::Path>(&type_name) {
+                    if let Some(recovered) =
+                        self.recover_omitted_local_generic_type_args(&owner_path, &type_name)
+                    {
+                        ctor_type = recovered;
+                    }
+                }
+            }
+        }
+        if let Some(recovered) = self.recover_omitted_local_generic_type_args(path, &ctor_type) {
+            ctor_type = recovered;
+        } else if let Some(last_seg) = path.segments.last()
+            && let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
+        {
+            let mapped_args: Vec<String> = args
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                    syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                    _ => None,
+                })
+                .collect();
+            if !mapped_args.is_empty() {
+                ctor_type = format!("{}<{}>", ctor_type, mapped_args.join(", "));
+            }
+        }
+
+        Some(format!(
+            "[](auto&& _v) {{ return {}(std::forward<decltype(_v)>(_v)); }}",
+            ctor_type
+        ))
     }
 
     /// If `path` is `Type::method` where `Type` is a known local type and
@@ -5736,6 +5851,7 @@ impl CodeGen {
         let mut named_field_types: HashMap<String, syn::Type> = HashMap::new();
         let mut named_field_order: Vec<String> = Vec::new();
         let mut named_field_cpp_names: HashMap<String, String> = HashMap::new();
+        let mut named_reference_fields: HashSet<String> = HashSet::new();
         match &s.fields {
             syn::Fields::Named(fields) => {
                 let mut used_member_names: HashSet<String> = HashSet::new();
@@ -5767,6 +5883,9 @@ impl CodeGen {
                     self.writeln(&format!("{} {};", field_type, emitted_field_name));
                     used_member_names.insert(emitted_field_name.clone());
                     named_field_types.insert(field_name.clone(), field.ty.clone());
+                    if matches!(field.ty, syn::Type::Reference(_)) {
+                        named_reference_fields.insert(field_name.clone());
+                    }
                     named_field_order.push(field_name.clone());
                     named_field_cpp_names.insert(field_name, emitted_field_name);
                 }
@@ -5793,6 +5912,13 @@ impl CodeGen {
             let scoped_name = self.scoped_type_key(&name_str);
             self.struct_field_types
                 .insert(scoped_name, named_field_types);
+            if !named_reference_fields.is_empty() {
+                self.struct_reference_fields
+                    .insert(name_str.clone(), named_reference_fields.clone());
+                let scoped_name = self.scoped_type_key(&name_str);
+                self.struct_reference_fields
+                    .insert(scoped_name, named_reference_fields.clone());
+            }
             self.struct_field_order
                 .insert(name_str.clone(), named_field_order.clone());
             let scoped_name = self.scoped_type_key(&name_str);
@@ -17833,8 +17959,48 @@ impl CodeGen {
             syn::Expr::Paren(p) => self.is_expr_reference_like(&p.expr),
             syn::Expr::Group(g) => self.is_expr_reference_like(&g.expr),
             syn::Expr::Reference(_) => true,
+            syn::Expr::Field(field_expr) => {
+                let member_name = match &field_expr.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(_) => return false,
+                };
+                self.lookup_field_type_for_expr_base(&field_expr.base, &member_name)
+                    .is_some_and(|ty| {
+                        matches!(
+                            self.peel_reference_paren_group_type(&ty),
+                            syn::Type::Reference(_)
+                        )
+                    })
+            }
             _ => false,
         }
+    }
+
+    fn is_self_reference_field_access(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Field(field_expr) = expr else {
+            return false;
+        };
+        let syn::Expr::Path(base_path) = self.peel_paren_group_expr(&field_expr.base) else {
+            return false;
+        };
+        if base_path.path.segments.len() != 1 || base_path.path.segments[0].ident != "self" {
+            return false;
+        }
+        let field_name = match &field_expr.member {
+            syn::Member::Named(ident) => ident.to_string(),
+            syn::Member::Unnamed(_) => return false,
+        };
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        self.struct_reference_fields
+            .get(struct_name)
+            .is_some_and(|fields| fields.contains(&field_name))
+            || self
+                .struct_reference_fields
+                .get(&self.scoped_type_key(struct_name))
+                .is_some_and(|fields| fields.contains(&field_name))
     }
 
     /// Detect whether a Rust expression is diverging (never returns), e.g. calls
@@ -19250,7 +19416,7 @@ impl CodeGen {
                         args.join(", ")
                     )
                 } else {
-                    format!("{}({})", escaped_method, args.join(", "))
+                    format!("this->{}({})", escaped_method, args.join(", "))
                 }
             }
         } else {
@@ -22639,9 +22805,6 @@ impl CodeGen {
             return None;
         };
         let path = &path_expr.path;
-        if path.segments.len() < 2 {
-            return None;
-        }
         let joined = path
             .segments
             .iter()
@@ -22649,15 +22812,24 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
         let last = path.segments.last()?.ident.to_string();
-        let is_probably_callable = types::map_function_path(&joined).is_some()
-            || last
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+        let is_probably_callable = if path.segments.len() == 1 {
+            if self.lookup_local_binding_type(&last).is_some() || self.is_local_type_name_in_scope(&last) {
+                return None;
+            }
+            self.is_local_function_name_in_scope(&last)
+                || self.module_qualified_functions.contains_key(&last)
+                || types::map_function_path(&last).is_some()
+        } else {
+            types::map_function_path(&joined).is_some()
+                || last
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        };
         if !is_probably_callable {
             return None;
         }
-        let target = self.emit_path_to_string(path);
+        let target = self.emit_expr_path_to_string(path);
         Some(format!(
             "[&](auto&&... _args) -> decltype(auto) {{ return {}(std::forward<decltype(_args)>(_args)...); }}",
             target
@@ -23201,7 +23373,9 @@ impl CodeGen {
                     }
                 }
                 syn::UnOp::Deref(_) => {
-                    if self.is_expr_reference_like(&un.expr) {
+                    if self.is_expr_reference_like(&un.expr)
+                        || self.is_self_reference_field_access(&un.expr)
+                    {
                         self.emit_expr_to_string(&un.expr)
                     } else {
                         let operand = self.emit_expr_to_string(&un.expr);
@@ -43092,7 +43266,7 @@ mod tests {
             "#,
         );
         assert!(out.contains("while (true) {"));
-        assert!(out.contains("auto&& _whilelet = next();"));
+        assert!(out.contains("auto&& _whilelet = this->next();"));
         assert!(out.contains("if (!(_whilelet.is_some())) { break; }"));
         assert!(out.contains("auto v = _whilelet.unwrap();"));
         assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
@@ -46827,6 +47001,148 @@ mod tests {
             "types used via associated calls in merged impl bodies must be emitted first\nGot:\n{out}"
         );
         assert!(out.contains("SetLenOnDrop::new_("));
+    }
+
+    #[test]
+    fn test_leaf5116_reference_field_deref_collapses_without_pointer_star() {
+        let out = transpile_str(
+            r#"
+            struct SetLenOnDrop<'a> {
+                len: &'a mut usize,
+                local_len: usize,
+            }
+
+            impl<'a> SetLenOnDrop<'a> {
+                fn finish(&mut self) {
+                    *self.len = self.local_len;
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("this->len = this->local_len;"),
+            "reference field deref should collapse to direct assignment, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("*this->len ="),
+            "reference field should not emit pointer-style unary *, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5116_tuple_struct_constructor_path_arg_lowers_to_callable_lambda() {
+        let out = transpile_str(
+            r#"
+            struct Wrap<T>(T);
+
+            impl<T> Wrap<T> {
+                fn map_from(opt: Option<T>) -> Option<Wrap<T>> {
+                    opt.map(Wrap)
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("map([](auto&& _v) { return Wrap<T>(std::forward<decltype(_v)>(_v)); })"),
+            "tuple struct constructor path arg should lower to callable lambda, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".map(Wrap)"),
+            "tuple struct constructor callable should not remain as raw type path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5116_tuple_struct_self_constructor_path_arg_lowers_to_callable_lambda() {
+        let out = transpile_str(
+            r#"
+            struct Wrap<T>(T);
+
+            impl<T> Wrap<T> {
+                fn map_from(opt: Option<T>) -> Option<Self> {
+                    opt.map(Self)
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("map([](auto&& _v) { return Wrap"),
+            "tuple struct Self constructor path arg should lower to callable lambda, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(".map(Self)"),
+            "tuple struct Self constructor callable should not remain as raw path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5116_self_method_call_emits_this_qualification() {
+        let out = transpile_str(
+            r#"
+            struct Drain<T>;
+
+            impl<T> Drain<T> {
+                fn for_each<F>(&mut self, _f: F) {}
+            }
+
+            impl<T> Drop for Drain<T> {
+                fn drop(&mut self) {
+                    self.for_each(std::mem::drop);
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("this->for_each("),
+            "self method calls in template contexts should emit this-> qualification, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("\n        for_each("),
+            "unqualified self method calls should not be emitted in template contexts, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5116_imported_drop_path_callable_arg_avoids_move_of_function_item() {
+        let out = transpile_str(
+            r#"
+            struct Drain<T>;
+
+            impl<T> Drain<T> {
+                fn for_each<F>(&mut self, _f: F) {}
+            }
+
+            impl<T> Drop for Drain<T> {
+                fn drop(&mut self) {
+                    use std::mem::drop;
+                    self.for_each(drop);
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("this->for_each([&](auto&&... _args) -> decltype(auto)"),
+            "function-item callable args should lower to forwarding callable wrapper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::move(rusty::mem::drop)"),
+            "function item callables should not be moved, got:\n{}",
+            out
+        );
     }
 
     #[test]
