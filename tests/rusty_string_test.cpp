@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
+#include <limits>
+#include <stdexcept>
 
 using namespace rusty;
 
@@ -106,6 +108,33 @@ void test_string_operations() {
     assert(s6 == "Original");
     
     std::cout << "✓ String operation tests passed" << std::endl;
+}
+
+void test_string_repeat() {
+    std::cout << "Testing string repeat..." << std::endl;
+
+    String seed = String::from("ab");
+    String repeated = seed.repeat(3);
+    assert(repeated == "ababab");
+    assert(repeated.len() == 6);
+    assert(seed == "ab"); // Source remains unchanged
+
+    String zero = seed.repeat(0);
+    assert(zero.is_empty());
+
+    String empty = String::new_();
+    String empty_repeated = empty.repeat(10);
+    assert(empty_repeated.is_empty());
+
+    bool overflow_threw = false;
+    try {
+        (void)seed.repeat(std::numeric_limits<size_t>::max());
+    } catch (const std::length_error&) {
+        overflow_threw = true;
+    }
+    assert(overflow_threw);
+
+    std::cout << "✓ String repeat tests passed" << std::endl;
 }
 
 void test_string_manipulation() {
@@ -374,6 +403,7 @@ int main() {
     test_move_semantics();
     test_push_and_pop();
     test_string_operations();
+    test_string_repeat();
     test_string_manipulation();
     test_string_search();
     test_string_transform();

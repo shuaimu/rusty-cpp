@@ -12,6 +12,8 @@
 #include <vector>
 #include <cctype>
 #include <span>
+#include <limits>
+#include <stdexcept>
 #include "rusty/fmt.hpp"
 
 // @safe
@@ -404,6 +406,33 @@ public:
     String& operator+=(char ch) {
         push(ch);
         return *this;
+    }
+
+    // Repeat the string count times (Rust String/str repeat semantics).
+    // @lifetime: owned
+    String repeat(size_t count) const {
+        if (count == 0 || len_ == 0 || !data_) {
+            return String();
+        }
+
+        // Guard size computation before allocation/copy.
+        if (count > (std::numeric_limits<size_t>::max() - 1) / len_) {
+            throw std::length_error("String::repeat overflow");
+        }
+
+        const size_t total_len = len_ * count;
+        String result;
+        result.grow(total_len + 1);
+
+        char* dst = result.data_;
+        for (size_t i = 0; i < count; i++) {
+            std::memcpy(dst, data_, len_);
+            dst += len_;
+        }
+
+        result.len_ = total_len;
+        result.ensure_null_terminated();
+        return result;
     }
     
     // Check if string contains substring

@@ -504,3 +504,39 @@ fn test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage() {
 
     compile_and_run_cpp(source, "mem_size_of_rust_layout_override");
 }
+
+#[test]
+fn test_string_repeat_supports_zero_and_overflow_guard() {
+    let source = r#"
+        #include <limits>
+        #include <rusty/string.hpp>
+        #include <stdexcept>
+
+        int main() {
+            const auto seed = rusty::String::from("ab");
+
+            const auto repeated = seed.repeat(3);
+            if (!(repeated == "ababab")) {
+                return 1;
+            }
+            if (!(seed == "ab")) {
+                return 2;
+            }
+
+            const auto zero = seed.repeat(0);
+            if (!zero.is_empty()) {
+                return 3;
+            }
+
+            bool overflow_guard_triggered = false;
+            try {
+                (void)seed.repeat(std::numeric_limits<size_t>::max());
+            } catch (const std::length_error&) {
+                overflow_guard_triggered = true;
+            }
+            return overflow_guard_triggered ? 0 : 4;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "string_repeat_zero_and_overflow_guard");
+}

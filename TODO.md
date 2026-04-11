@@ -3081,6 +3081,23 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-21c-1775875758/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/control-flow/type-context-gated in core try-style runtime and statement-lowering paths, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.22: Collapse the post-10.5.21 deterministic semver Stage D runtime string-repeat API frontier generically (starting with `runner.cpp:2411` `rusty::String` missing `repeat` in `test_new`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared runtime-surface addition + focused runtime regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared runtime fixes:
+            - `include/rusty/string.hpp`: added `rusty::String::repeat(size_t)` with overflow guard (`std::length_error` on size multiplication overflow), pre-sized allocation, and deterministic repeated-copy construction while preserving source immutability.
+          - Added focused fixture-agnostic regressions:
+            - `tests/rusty_string_test.cpp`: `test_string_repeat` coverage for normal repeat shape, zero-count behavior, source non-mutation, and overflow guard.
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_string_repeat_supports_zero_and_overflow_guard` C++ integration harness coverage.
+          - Verification:
+            - `clang++ -std=c++20 -Iinclude tests/rusty_string_test.cpp -o /tmp/rusty_string_test && /tmp/rusty_string_test`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-22-1775876201 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family at `runner.cpp:2411` (`rusty::String` missing `repeat`) is removed.
+            - new deterministic Stage D head starts at `runner.cpp:3115` (`const auto version = version("1.2.3-rc1");` local/function name-collision use-before-deduction), with adjacent downstream call-shape fallout at `runner.cpp:3271/3282` (`util::req` resolved as function instead of value object).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-22-1775876201/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared in runtime headers, added no crate-specific rewrites/scripts, and performed no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

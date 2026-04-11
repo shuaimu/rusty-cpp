@@ -4314,7 +4314,23 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2411` (`rusty::String` missing `repeat`), with adjacent downstream families led by `runner.cpp:3115` (local/function-name collision) and `runner.cpp:3271/3282` (`util::req` function/member call-shape mismatch).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-21c-1775875758/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow/type-context-gated in core try-style runtime and statement-lowering paths, with no crate-specific rewrites/scripts and no generated-text patching.
-175. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.21` (starting at `runner.cpp:2411` in `test_new`, where `rusty::String` still lacks `repeat` and the first hard errors now move into runtime string-surface parity with adjacent downstream call-shape fallout at `runner.cpp:3115` and `runner.cpp:3271/3282`).
+175. `Leaf 10.5.22` is complete.
+   - plan/scope check: shared runtime-surface addition + focused runtime regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared runtime fixes:
+     - `include/rusty/string.hpp`: added `rusty::String::repeat(size_t)` with overflow guard (`std::length_error` on size multiplication overflow), pre-sized allocation, and deterministic repeated-copy construction while preserving source immutability.
+   - focused regressions:
+     - `tests/rusty_string_test.cpp`: `test_string_repeat` (normal repeat shape, zero-count behavior, source non-mutation, overflow guard).
+     - `transpiler/tests/runtime_move_semantics.rs`: `test_string_repeat_supports_zero_and_overflow_guard`.
+   - verification:
+     - `clang++ -std=c++20 -Iinclude tests/rusty_string_test.cpp -o /tmp/rusty_string_test && /tmp/rusty_string_test`
+     - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-22-1775876201 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:2411` (`rusty::String` missing `repeat`) is removed.
+     - new deterministic head starts at `runner.cpp:3115` (`const auto version = version("1.2.3-rc1");` local/function-name collision use-before-deduction), with adjacent downstream call-shape fallout at `runner.cpp:3271/3282` (`util::req` resolved as function instead of value object).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-22-1775876201/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared in runtime headers, added no crate-specific rewrites/scripts, and performed no generated-text patching.
+176. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.22` (starting at `runner.cpp:3115` in `test_align`, where local/function name collision still lowers as `const auto version = version(...)`, with adjacent downstream call-shape fallout at `runner.cpp:3271/3282` in `util::req`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
