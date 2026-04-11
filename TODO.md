@@ -4038,9 +4038,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `cargo test -p rusty-cpp-transpiler test_discover_targets_prefers_manifest_owner_package_when_workspace_member_precedes_it -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is generic manifest/path-driven package resolution with no crate-specific scripts or hardcoded crate-name special cases.
-        - [ ] Leaf 5.1.2: `smallvec` Stage D compile-head family collapse
-          - Deterministic failure head: unresolved Rust-path imports/surfaces in generated C++ (`std::boxed`, `std::rc`) with downstream incomplete/owner-template `SmallVec` shape fallout
-          - Implement generic path/surface lowering + template-owner recovery fixes (no crate-specific scripts), add focused regressions, then re-probe `--crate smallvec`
+        - [x] *done* Leaf 5.1.2: `smallvec` Stage D compile-head family collapse
+          - Plan/scope check: shared transpiler implementation + focused regressions stayed under the <1000 LOC feature scope (excluding unrelated pre-existing worktree changes), so no further decomposition was required.
+          - Deterministic failure head addressed (generic, no crate-specific scripts):
+            - expanded `use` import lowering for `std/alloc::boxed` and `std/alloc::rc` surfaces (`Box`, `Rc`, `Weak`, boxed helper paths), removing unresolved Rust-path namespace leakage in generated C++.
+            - hardened omitted/explicit owner-template recovery for `SmallVec` constructor/call shapes, including nested infer placeholders and expected-type/local-hint propagation.
+            - fixed expected-type propagation through expression-position `if`-IIFE block tails so branch-local `SmallVec::from_vec(...)` calls receive owner context.
+            - narrowed decltype-based omitted-assoc specialization to constructor methods (`new`/`new_`) to avoid poisoning non-constructor associated calls such as `SmallVec::from_vec(...)`.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf512_use_rewrites_cover_boxed_and_rc_imports`
+            - `test_leaf512_smallvec_explicit_owner_nested_infer_recovers_from_push_hint`
+            - `test_leaf512_smallvec_omitted_owner_recovers_from_typed_block_expected_type`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf512 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-2-20260411 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior `std::boxed`/`std::rc` unresolved-import and `SmallVec` owner-template-arity head family is collapsed.
+            - new first hard error family is incomplete-type/order fallout (`invalid use of incomplete type 'SmallVec<...>'`) with canonical artifacts at `/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/{baseline.txt,build.log,run.log,matrix.log}`.
         - [ ] Leaf 5.1.3: `itertools` Stage D compile-head family collapse
           - Deterministic failure head: missing adapter type surfaces and namespace/type-order collisions (`Coalesce`, `DedupBy`, `MapOk`, `namespace free` collision, related unresolved iter namespace forms)
           - Implement generic type-surface/import-order lowering fixes (no crate-specific scripts), add focused regressions, then re-probe `--crate itertools`

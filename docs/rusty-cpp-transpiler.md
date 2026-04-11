@@ -2133,6 +2133,7 @@ Integrated outcomes:
 - Rust-only imports are no longer emitted as hard C++ `using` declarations.
 - `std::io` import family is lowered to runtime-safe aliases/mappings.
 - `core::` / `alloc::` paths are normalized with C++-valid mappings.
+- `std/alloc::boxed` and `std/alloc::rc` use-import families are lowered to valid runtime/type surfaces (`rusty::Box`, `rusty::boxed::*`, `rusty::Rc`, `rusty::Weak`) or explicit Rust-only import markers where no concrete C++ symbol should be emitted.
 - fragile unresolved `using ::Type` patterns were replaced with guarded lowering.
 - module-scope import ordering and alias-safety constraints were added to avoid declaration-order fallout.
 
@@ -2152,6 +2153,7 @@ Integrated outcomes:
 - untyped local initialization/reassignment around variant constructors now avoids deducing wrong concrete variant struct types.
 - generic function-call argument expected-type recovery now specializes declared argument types with call-site template substitutions (explicit turbofish and inferred fn-path substitutions), preserving associated-type payload coercions.
 - tuple/option constructor coercion now uses typed constructor forms only in associated-type contexts that require it (`std::tuple<...>{...}` / `std::make_optional<...>(...)`); default emission remains `std::make_tuple(...)` / untyped `std::make_optional(...)` outside those contexts.
+- owner-template recovery now handles `SmallVec` explicit and omitted owner forms with nested infer placeholders (`[_; N]`-style), expected-type hints, and local usage hints so constructor/call lowering does not leak omitted-template C++ forms.
 
 Directly supports:
 
@@ -2199,6 +2201,7 @@ Integrated outcomes:
 - destructor-tail expression emission no longer produces invalid value-return statements in `Drop`/destructor-like contexts.
 - closure-body return-context handling was hardened to avoid regressions.
 - expression-block IIFE lowering now reuses shared statement/local emission paths (`emit_stmt`/`emit_local`) so local shadowing semantics in `{ let x = x; ... }` value-position blocks stay aligned with normal block lowering.
+- `if`-expression IIFE branch-tail lowering now propagates expected type through block-tail statement emission, so constructor/associated-call specialization remains context-correct inside typed branch expressions.
 
 Directly supports:
 
@@ -2284,6 +2287,9 @@ Current status snapshot:
 2. Full seven-crate matrix passes: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
 3. Full seven-crate matrix verification rerun also passes after Leaf 10.5.40.11 hardening: `/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
 4. Next active work should follow the top unfinished TODO leaf after 10.5.40.11 closure.
+5. Expanded ten-crate matrix snapshot (2026-04-11) is `pass=7`, `fail=3` with deterministic failing set `{smallvec, itertools, once_cell}`; canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`.
+6. `smallvec` focused repro after `Leaf 5.1.2` (`/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/...`) collapses the prior unresolved `std::boxed`/`std::rc` and omitted-owner `SmallVec` template-arity family; first deterministic Stage D head now moves to incomplete-type/type-ordering fallout (`invalid use of incomplete type 'SmallVec<...>'`).
+7. Guardrail check against §11 (`No Blanket Rewrites`, `No Rust-Only Namespace Emission as C++ Symbols`, `No Crate-Specific Ad-Hoc Scripts`): all fixes were context-gated, AST-aware, and shared transpiler lowering (no fixture-specific output patching).
 
 Historical active-work chain (retained for traceability):
 
