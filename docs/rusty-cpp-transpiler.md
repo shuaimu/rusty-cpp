@@ -2259,8 +2259,10 @@ Target matrix:
 Current observed matrix frontier:
 
 - latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-10o-1775915467`) now passes all seven crates (`pass=7`, `fail=0`).
+- latest verification rerun after lazy `if let` TRY-type-probe hardening (`/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200`) also passes all seven crates (`pass=7`, `fail=0`).
 - focused `bitflags` repro after Leaf 10.5.40.10 (`/tmp/rusty-parity-matrix-10-5-40-10n-1775915403`) passes (`pass=1`, `fail=0`).
 - the prior `bitflags` Stage E semantic/parsing/fmt frontier is removed by shared transpiler fixes in Leaf 10.5.40.10.
+- the prior `bitflags` Stage D `decltype((RUSTY_TRY_INTO(...)))` template-argument regression is removed by shared lazy if-let storage typing hardening (Leaf 10.5.40.11).
 
 Crate-focused progress integrated from former appendices:
 
@@ -2280,7 +2282,8 @@ Current status snapshot:
 
 1. Focused `bitflags` parity repro passes: `/tmp/rusty-parity-matrix-10-5-40-10n-1775915403/bitflags/{baseline.txt,build.log,run.log,matrix.log}`.
 2. Full seven-crate matrix passes: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
-3. Next active work should follow the top unfinished TODO leaf after 10.5.40.10 closure.
+3. Full seven-crate matrix verification rerun also passes after Leaf 10.5.40.11 hardening: `/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
+4. Next active work should follow the top unfinished TODO leaf after 10.5.40.11 closure.
 
 Historical active-work chain (retained for traceability):
 
