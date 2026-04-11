@@ -2481,6 +2481,84 @@ impl CodeGen {
         }
     }
 
+    fn enum_uses_struct_wrapper(&self, e: &syn::ItemEnum) -> bool {
+        if enum_is_c_like(e) {
+            return false;
+        }
+        if !e.variants.iter().any(|v| !v.fields.is_empty()) {
+            return false;
+        }
+        let enum_name = e.ident.to_string();
+        let is_recursive = e
+            .variants
+            .iter()
+            .any(|v| self.variant_references_type(v, &enum_name));
+        let has_impls = self.has_impls_for_type(&enum_name);
+        is_recursive || has_impls
+    }
+
+    fn emit_data_enum_alias_forward_decl(&mut self, e: &syn::ItemEnum) {
+        let name = &e.ident;
+        // Keep type-param handling aligned with `emit_enum` for data enums.
+        let type_params: Vec<String> = e
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let syn::GenericParam::Type(tp) = p {
+                    Some(tp.ident.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let has_generics = !type_params.is_empty();
+        let template_prefix = if has_generics {
+            format!(
+                "template<{}>",
+                type_params
+                    .iter()
+                    .map(|p| format!("typename {}", p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            String::new()
+        };
+        let template_args = if has_generics {
+            format!("<{}>", type_params.join(", "))
+        } else {
+            String::new()
+        };
+
+        for variant in &e.variants {
+            if has_generics {
+                self.writeln(&template_prefix);
+            }
+            self.writeln(&format!("struct {}_{};", name, variant.ident));
+        }
+
+        let variant_list: Vec<String> = e
+            .variants
+            .iter()
+            .map(|v| {
+                if has_generics {
+                    format!("{}_{}{}", name, v.ident, template_args)
+                } else {
+                    format!("{}_{}", name, v.ident)
+                }
+            })
+            .collect();
+        if has_generics {
+            self.writeln(&template_prefix);
+        }
+        self.writeln(&format!(
+            "using {} = std::variant<{}>;",
+            name,
+            variant_list.join(", ")
+        ));
+    }
+
     fn emit_item_forward_decls(&mut self, items: &[syn::Item], module_depth: usize) -> bool {
         let ordered_items = self.order_items_for_emission(items, false);
         let mut emitted_names = HashSet::new();
@@ -2506,11 +2584,14 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    self.emit_template_prefix(&e.generics);
                     if enum_is_c_like(e) {
+                        self.emit_template_prefix(&e.generics);
                         self.writeln(&format!("enum class {};", name));
-                    } else {
+                    } else if self.enum_uses_struct_wrapper(e) {
+                        self.emit_template_prefix(&e.generics);
                         self.writeln(&format!("struct {};", name));
+                    } else {
+                        self.emit_data_enum_alias_forward_decl(e);
                     }
                     emitted_any = true;
                 }
@@ -40729,6 +40810,11 @@ mod tests {
                     Left(I),
                     Right(J),
                 }
+                impl<I, J> Diff<I, J> {
+                    pub fn is_left(&self) -> bool {
+                        true
+                    }
+                }
                 pub fn make<I, J>(left: I, right: J) -> Diff<I, J> {
                     let _ = right;
                     Diff::Left(left)
@@ -40754,6 +40840,57 @@ mod tests {
         assert!(
             decl_pos < sig_pos,
             "non-C-like enum forward declaration must precede function signature:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf515_non_recursive_data_enum_forward_decl_uses_variant_alias_not_struct() {
+        let out = transpile_str(
+            r#"
+            mod error {
+                pub enum ErrorKind {
+                    Empty,
+                    Unexpected(char),
+                }
+            }
+            mod parse {
+                use crate::error::ErrorKind;
+                pub fn parse_kind() -> ErrorKind {
+                    ErrorKind::Empty
+                }
+            }
+            "#,
+        );
+
+        let alias = "using ErrorKind = std::variant<ErrorKind_Empty, ErrorKind_Unexpected>;";
+        assert!(
+            out.contains(alias),
+            "expected data-enum alias forward declaration for ErrorKind, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("struct ErrorKind_Empty;"),
+            "expected variant forward declaration for ErrorKind_Empty, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("struct ErrorKind_Unexpected;"),
+            "expected variant forward declaration for ErrorKind_Unexpected, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("struct ErrorKind;"),
+            "unexpected struct forward declaration conflicts with alias-based enum emission:\n{}",
+            out
+        );
+        let alias_pos = out.find(alias).expect("missing ErrorKind alias forward declaration");
+        let sig_pos = out
+            .find("::error::ErrorKind parse_kind();")
+            .expect("missing parse_kind forward declaration");
+        assert!(
+            alias_pos < sig_pos,
+            "ErrorKind alias forward declaration must precede parse_kind signature:\n{}",
             out
         );
     }

@@ -4087,8 +4087,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10x-20260411h/semver/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf remained deterministic-first evidence capture only; no crate-specific scripts or generated-output patching.
-        - [ ] Leaf 5.1.5: `semver` Stage D compile-head regression collapse
-          - Collapse the post-5.1.4 deterministic `semver` Stage D declaration-surface family generically (starting with `error::ErrorKind` forward-declaration/alias conflict at `runner.cpp:931`), add focused fixture-agnostic regressions, then re-run `--crate semver`.
+        - [x] *done* Leaf 5.1.5: `semver` Stage D compile-head regression collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope, so no additional decomposition was required.
+          - Deterministic failure head addressed (shared transpiler fix, no crate-specific scripts):
+            - non-recursive data enums that lower to alias form now emit alias-compatible forward declarations (`struct Enum_Variant;` plus `using Enum = std::variant<...>;`) instead of unconditional `struct Enum;`.
+            - recursive/impl-backed data enums retain wrapper-struct forward declarations, preserving prior working ordering behavior.
+          - Implemented in `transpiler/src/codegen.rs`:
+            - added `enum_uses_struct_wrapper(...)` to align forward-decl shape with final enum emission shape.
+            - added `emit_data_enum_alias_forward_decl(...)` for alias-emitted data enums.
+            - updated enum branch in `emit_item_forward_decls(...)` to choose `enum class` vs wrapper `struct` vs alias forward surface deterministically.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - updated `test_leaf513_non_c_like_enum_forward_declares_struct_before_function_signature` to assert wrapper-struct path with enum impls.
+            - added `test_leaf515_non_recursive_data_enum_forward_decl_uses_variant_alias_not_struct`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf513 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf515 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-5-1-5-20260411b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior `error::ErrorKind` declaration conflict family (`struct ErrorKind;` vs `using ErrorKind = std::variant<...>`) is collapsed.
+            - focused `semver` repro now passes (`total=1`, `pass=1`, `fail=0`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-5-20260411b/semver/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is AST-shape-aware forward declaration emission; no generated-output text patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.6: Re-run full ten-crate parity matrix after `semver` collapse and record next deterministic frontier
+          - Re-run `tests/transpile_tests/run_parity_matrix.sh --work-root <new path> --keep-work-dirs`, capture updated first failing crate/head family, and update §10.6 + TODO status snapshot accordingly.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

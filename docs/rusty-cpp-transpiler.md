@@ -2235,7 +2235,7 @@ Integrated outcomes:
 - inline module impl collection/merge is scoped and deterministic.
 - duplicate methods are resolved by emitted C++ signature shape.
 - forward declarations are emitted with guards to avoid alias-dependent type-order failures.
-- forward declaration passes now emit non-C-like enums as `struct` wrappers and apply dependency-aware module ordering without delayable-namespace deferral, so sibling/nested namespace type surfaces are available before dependent alias/function signatures.
+- forward declaration passes now select enum declaration surface by emitted shape (`enum class` for C-like enums, wrapper `struct` for recursive/impl-backed data enums, and alias-compatible variant forward declarations for alias-emitted data enums) and apply dependency-aware module ordering without delayable-namespace deferral, so sibling/nested namespace type surfaces are available before dependent alias/function signatures.
 - `#[cfg(test)]` filtering and wrapper discovery were hardened for parity-test paths.
 - deterministic module naming and work-dir artifact isolation are enforced for matrix reruns.
 
@@ -2292,9 +2292,9 @@ Current status snapshot:
 5. Expanded ten-crate matrix snapshot (2026-04-11) is `pass=7`, `fail=3` with deterministic failing set `{smallvec, itertools, once_cell}`; canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`.
 6. `smallvec` focused repro after `Leaf 5.1.2` (`/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/...`) collapses the prior unresolved `std::boxed`/`std::rc` and omitted-owner `SmallVec` template-arity family; first deterministic Stage D head now moves to incomplete-type/type-ordering fallout (`invalid use of incomplete type 'SmallVec<...>'`).
 7. `itertools` focused repro after `Leaf 5.1.3` (`/tmp/rusty-parity-matrix-5-1-3-20260411g/itertools/...`) collapses the prior early adapter/type-order compile-head cluster (`VecDequeIntoIter`/`VecIntoIter`, early `::intersperse::Intersperse`, related namespace ordering fallout) from the first deterministic slot; new first Stage D head now starts at `merge_join` associated-type alias lowering (`MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>` with unbound `T`, `runner.cpp:1170`), followed by downstream `ziptuple::Zip`/`EitherOrBoth` runtime-surface fallout.
-8. Full ten-crate matrix repro after `Leaf 5.1.4` (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-20260411h --keep-work-dirs`) is `total=6`, `pass=5`, `fail=1` with deterministic first failing crate `semver`; canonical artifacts: `/tmp/rusty-parity-matrix-10x-20260411h/semver/{baseline.txt,build.log,run.log,matrix.log}`.
-9. New first deterministic Stage D head in `semver` starts at declaration-surface conflict `runner.cpp:931` (`struct error::ErrorKind;` forward declaration colliding with `using error::ErrorKind = std::variant<...>`), with immediate downstream `PTR_BYTES`/`TAIL_BYTES` and `Identifier` declaration fallout.
-10. Guardrail check against §11 (`No Blanket Rewrites`, `No Rust-Only Namespace Emission as C++ Symbols`, `No Crate-Specific Ad-Hoc Scripts`): this leaf remained deterministic evidence capture only; no crate-specific scripts or generated-output patching were introduced.
+8. Full ten-crate matrix repro after `Leaf 5.1.4` (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-20260411h --keep-work-dirs`) recorded deterministic first failing crate `semver`; canonical artifacts: `/tmp/rusty-parity-matrix-10x-20260411h/semver/{baseline.txt,build.log,run.log,matrix.log}`.
+9. Focused `semver` repro after `Leaf 5.1.5` now passes (`total=1`, `pass=1`, `fail=0`): `/tmp/rusty-parity-matrix-5-1-5-20260411b/semver/{baseline.txt,build.log,run.log,matrix.log}`; the prior declaration-surface head (`struct ErrorKind;` colliding with `using ErrorKind = std::variant<...>`) is collapsed by enum-forward-declaration shape alignment.
+10. Next active item is full ten-crate matrix re-probe (`Leaf 5.1.6`) to capture the new first deterministic frontier after `semver` closure; guardrail check against §11 remains satisfied (AST-shape-aware lowering only, no crate-specific ad-hoc scripts or generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
