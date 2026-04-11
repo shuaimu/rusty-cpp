@@ -3451,6 +3451,45 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-36c-1775896673/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/state-gated in core expression-block lowering; no crate-specific scripts and no generated-text patching were introduced.
+        - [x] *done* Leaf 10.5.38: Collapse the post-10.5.37 deterministic full-matrix `bitflags` Stage D iterator-adapter/member-surface + `Vec<auto>` collect family generically (starting with `runner.cpp:3121+` missing `.map()`/`.count()` member calls on iterator adapters and placeholder `Vec<auto>::from_iter(...)` emission), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler/runtime helper-surface updates + focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - iterator adapter lowering for `.map(...)`/`.count()` depended too narrowly on iterator-item inference and missed call/method receiver families emitted in bitflags (`rusty::iter(...)`, `iter_names()`, callable-return iterator shapes), leaking invalid member calls to C++.
+            - `collect::<Vec<_>>()`/placeholder-aware collect lowering accepted unresolved placeholder-mapped types and could emit invalid `Vec<auto>::from_iter(...)` forms in generated code.
+            - shared runtime lacked a generic iterator/range `count` helper, so even correctly lowered `.count()` calls needed a shared surface.
+          - Implemented shared fixes:
+            - `transpiler/src/codegen.rs`:
+              - hardened collect lowering to reject placeholder-mapped `Vec` targets and avoid `Vec<auto>::from_iter` emissions.
+              - added iterator-adapter receiver-shape gating + Option/Result guard for `.map(...)` and introduced shared `.count()` lowering to `rusty::count(...)`.
+              - improved iterable/type inference for adapter chains by:
+                - recovering callable return types from local `Fn`/`FnMut`/`FnOnce`-typed bindings in call expressions,
+                - extracting iterator item types from `impl Iterator<Item=...>` trait bounds and Rust `Range*` type names,
+                - extending call-shape item inference for `rusty::iter`/`iter_mut`/`map`/`take`/`enumerate`/`rev`.
+            - `include/rusty/slice.hpp`: added shared `rusty::count(range)` helper over `for_in(...)`.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf10538_collect_vec_underscore_avoids_vec_auto_placeholder`
+              - `test_leaf10538_iter_map_after_iter_call_lowers_to_runtime_map`
+              - `test_leaf10538_iter_count_after_iter_call_lowers_to_runtime_count`
+              - `test_leaf10538_iter_names_map_lowers_to_runtime_map`
+              - `test_leaf10538_callable_return_iterator_map_lowers_to_runtime_map`
+            - `tests/rusty_array_test.cpp`:
+              - `test_count_iterator_helper_shape`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10538 -- --nocapture`
+            - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-38a-1775903800 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family at `runner.cpp:3121+` (`Vec<auto>::from_iter`, missing `.map()` on `rusty::iter(...)`, missing `.count()` on iterator adapters) is removed.
+            - full-matrix frontier remains `bitflags` Stage D and advances to the next deterministic compile family rooted at:
+              - `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:270` (`collect_range` deduced return-type recursion on mapped iterator adapters),
+              - adjacent `runner.cpp:3998` (`iter_names()` mapped range hitting `rusty::map` next-like static_assert),
+              - adjacent tuple literal element-type harmonization fallout at `runner.cpp:3123/3171`.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-38a-1775903800/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes stayed shared and shape-gated; no crate-specific scripts, no post-generation text patching, and no blanket method-call rewrites were introduced.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

@@ -2230,9 +2230,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-37a-1775897398`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-38a-1775903800`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
 - confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- current deterministic `bitflags` Stage D head starts at `runner.cpp:3121+` (iterator/type-shape fallout: `Vec<auto>` template placeholder emission plus missing `.map()`/`.count()` member surfaces on iterator adapters), with adjacent tuple element-type harmonization fallout.
+- current deterministic `bitflags` Stage D head starts at `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:270` / `runner.cpp:3121+` (shared runtime `collect_range` deduced-return recursion on mapped iterator adapters), with adjacent `runner.cpp:3998` `iter_names()` range-map adapter-shape fallout and tuple element-type harmonization at `runner.cpp:3123/3171`.
 
 Crate-focused progress integrated from former appendices:
 
@@ -2248,11 +2248,12 @@ Crate-focused progress integrated from former appendices:
 
 From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
 
-Current deterministic head (post-Leaf 10.5.37):
+Current deterministic head (post-Leaf 10.5.38):
 
-1. `runner.cpp:3121+`: iterator adapter/value-typing family on `rusty::iter(...)` receiver chains (`Vec<auto>`, missing `.map()`/`.count()` member surfaces).
-2. Adjacent head family includes tuple literal element-type harmonization fallout in the same bitflags compile region.
-3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:270` with `runner.cpp:3121+/3169+`: `collect_range(...)` auto-return recursion on mapped iterator adapter types (`rusty::detail::map_next_iter<...>`).
+2. `runner.cpp:3998`: `iter_names()` receiver map lowering now reaches shared runtime adapter but currently hits next-like requirement static assertion (`IterNames` begin/end range shape not normalized to a next-like iterator surface for `rusty::map`).
+3. Adjacent head family includes tuple literal element-type harmonization fallout at `runner.cpp:3123/3171`.
+4. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-38a-1775903800/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
 
 Historical active-work chain (retained for traceability):
 
@@ -4650,6 +4651,7 @@ Required approach:
 - keep generic literal emission stable; perform conversions only in targeted coercion sites
 - when omitted generic arguments have declared defaults, preserve defaults unless explicit type context requires otherwise (do not blindly capture in-scope generic names)
 - for iterator adapters, gate lowering on iterator-like receiver inference so non-iterator methods with the same name are preserved
+- for iterator adapter lowering, do not rely on a single direct-receiver item-type inference path; include callable-return and receiver-shape evidence gates so adapter chains (for example call-return iterators and `iter_names()`-style surfaces) do not leak raw `.map()`/`.count()` member calls into C++
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)

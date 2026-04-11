@@ -14658,12 +14658,17 @@ impl CodeGen {
                 Some(parse_quote!((#(#elems),*)))
             }
             syn::Expr::Call(call) => {
-                if call.args.is_empty() {
-                    if let syn::Expr::Path(path) = call.func.as_ref() {
-                        if path.path.segments.len() == 1 {
-                            let name = path.path.segments[0].ident.to_string();
-                            if let Some(ty) = self.lookup_local_binding_type(&name) {
-                                return Some(ty);
+                if let syn::Expr::Path(path) = call.func.as_ref() {
+                    if path.path.segments.len() == 1 {
+                        let name = path.path.segments[0].ident.to_string();
+                        if let Some(callee_ty) = self.lookup_local_binding_type(&name) {
+                            if call.args.is_empty() {
+                                return Some(callee_ty);
+                            }
+                            if let Some(return_ty) =
+                                self.extract_callable_return_type_from_type(&callee_ty)
+                            {
+                                return Some(return_ty);
                             }
                         }
                     }
@@ -14684,6 +14689,35 @@ impl CodeGen {
                 };
                 self.lookup_field_type_for_expr_base(&field.base, &member)
             }
+            _ => None,
+        }
+    }
+
+    fn extract_callable_return_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().find_map(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return None;
+                };
+                let seg = trait_bound.path.segments.last()?;
+                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
+                    return None;
+                }
+                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
+                    return None;
+                };
+                match &args.output {
+                    syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
+                    syn::ReturnType::Default => None,
+                }
+            }),
+            syn::Type::BareFn(bare_fn) => match &bare_fn.output {
+                syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
+                syn::ReturnType::Default => None,
+            },
+            syn::Type::Paren(paren) => self.extract_callable_return_type_from_type(&paren.elem),
+            syn::Type::Group(group) => self.extract_callable_return_type_from_type(&group.elem),
             _ => None,
         }
     }
@@ -16829,19 +16863,39 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
+            let mut unresolved_vec_placeholder_collect = false;
             // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
             if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
                 let collect_type = self.map_type(turbofish_ty);
-                if collect_type != "auto" && !collect_type.contains("/* TODO") {
+                if collect_type.starts_with("rusty::Vec<")
+                    && type_string_has_auto_placeholder(&collect_type)
+                {
+                    unresolved_vec_placeholder_collect = true;
+                }
+                if collect_type != "auto"
+                    && !collect_type.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&collect_type)
+                {
                     return format!("{}::from_iter({})", collect_type, receiver);
                 }
             }
             if let Some(expected) = expected_ty {
                 let resolved_expected = self.resolve_expected_type_with_iter_hint(expected, &mc.receiver);
                 let expected_cpp = self.map_type(&resolved_expected);
-                if expected_cpp != "auto" && !expected_cpp.contains("/* TODO") {
+                if expected_cpp.starts_with("rusty::Vec<")
+                    && type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    unresolved_vec_placeholder_collect = true;
+                }
+                if expected_cpp != "auto"
+                    && !expected_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
                     return format!("{}::from_iter({})", expected_cpp, receiver);
                 }
+            }
+            if unresolved_vec_placeholder_collect {
+                return format!("rusty::collect_range({})", receiver);
             }
             if Self::is_range_expression(&mc.receiver) {
                 return format!("rusty::collect_range({})", receiver);
@@ -16937,6 +16991,9 @@ impl CodeGen {
         }
         if let Some(all_call) = self.try_emit_iter_all_call(mc) {
             return all_call;
+        }
+        if let Some(count_call) = self.try_emit_iter_count_call(mc) {
+            return count_call;
         }
 
         let method_name = mc.method.to_string();
@@ -19050,6 +19107,8 @@ impl CodeGen {
             syn::Type::Reference(r) => self.extract_iter_item_type_from_type(&r.elem),
             syn::Type::Slice(s) => Some((*s.elem).clone()),
             syn::Type::Array(a) => Some((*a.elem).clone()),
+            syn::Type::ImplTrait(it) => self.extract_iter_item_type_from_trait_bounds(&it.bounds),
+            syn::Type::TraitObject(obj) => self.extract_iter_item_type_from_trait_bounds(&obj.bounds),
             syn::Type::Path(tp) => {
                 let last = tp.path.segments.last()?;
                 match last.ident.to_string().as_str() {
@@ -19060,7 +19119,12 @@ impl CodeGen {
                     | "range_inclusive"
                     | "range_from"
                     | "range_to"
-                    | "range_to_inclusive" => {
+                    | "range_to_inclusive"
+                    | "Range"
+                    | "RangeInclusive"
+                    | "RangeFrom"
+                    | "RangeTo"
+                    | "RangeToInclusive" => {
                         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
                             return None;
                         };
@@ -19074,6 +19138,30 @@ impl CodeGen {
             }
             _ => None,
         }
+    }
+
+    fn extract_iter_item_type_from_trait_bounds(
+        &self,
+        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::token::Plus>,
+    ) -> Option<syn::Type> {
+        bounds.iter().find_map(|bound| {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            let seg = trait_bound.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Iterator" | "IntoIterator") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::AssocType(assoc) if assoc.ident == "Item" => {
+                    Some(assoc.ty.clone())
+                }
+                _ => None,
+            })
+        })
     }
 
     fn infer_iter_item_type_from_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
@@ -19113,25 +19201,55 @@ impl CodeGen {
                 self.infer_iter_item_type_from_expr(&mc.receiver)
             }
             syn::Expr::Call(call) => {
-                if call.args.len() == 1 {
-                    if let syn::Expr::Path(path_expr) =
-                        self.peel_paren_group_expr(call.func.as_ref())
+                if let syn::Expr::Path(path_expr) =
+                    self.peel_paren_group_expr(call.func.as_ref())
+                {
+                    let joined = path_expr
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    if call.args.len() == 1
+                        && matches!(
+                            joined.as_str(),
+                            "slice_full"
+                                | "rusty::slice_full"
+                                | "iter"
+                                | "rusty::iter"
+                                | "iter_mut"
+                                | "rusty::iter_mut"
+                                | "rev"
+                                | "rusty::rev"
+                                | "enumerate"
+                                | "rusty::enumerate"
+                        )
                     {
-                        let joined = path_expr
-                            .path
-                            .segments
-                            .iter()
-                            .map(|s| s.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        if matches!(joined.as_str(), "slice_full" | "rusty::slice_full") {
-                            if let Some(source_ty) = self.infer_simple_expr_type(&call.args[0]) {
-                                if let Some(item_ty) = self.extract_iter_item_type_from_type(&source_ty)
-                                {
-                                    return Some(item_ty);
+                        if let Some(source_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            if let Some(item_ty) = self.extract_iter_item_type_from_type(&source_ty)
+                            {
+                                return Some(item_ty);
+                            }
+                        }
+                        return self.infer_iter_item_type_from_expr(&call.args[0]);
+                    }
+                    if joined == "map" || joined == "rusty::map" {
+                        if call.args.len() >= 2 {
+                            if let syn::Expr::Closure(closure) =
+                                self.peel_paren_group_expr(&call.args[1])
+                            {
+                                if let Some(ret) = self.infer_hint_type_from_expr(&closure.body) {
+                                    return Some(ret);
                                 }
                             }
                         }
+                        if let Some(source) = call.args.first() {
+                            return self.infer_iter_item_type_from_expr(source);
+                        }
+                    }
+                    if (joined == "take" || joined == "rusty::take") && !call.args.is_empty() {
+                        return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
                 }
                 self.infer_simple_expr_type(expr)
@@ -22362,11 +22480,83 @@ impl CodeGen {
         Some(format!("rusty::filter_map({}, {})", receiver, mapper))
     }
 
+    fn receiver_is_option_or_result_like_expr(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .as_ref()
+            .is_some_and(|ty| self.unwrap_option_or_result_value_type(ty).is_some())
+    }
+
+    fn is_probably_iterator_receiver_expr(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                matches!(
+                    method.as_str(),
+                    "iter"
+                        | "iter_mut"
+                        | "into_iter"
+                        | "iter_names"
+                        | "bytes"
+                        | "as_bytes"
+                        | "chars"
+                        | "map"
+                        | "filter_map"
+                        | "enumerate"
+                        | "rev"
+                        | "take"
+                ) || self.is_probably_iterator_receiver_expr(&mc.receiver)
+            }
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+                    return false;
+                };
+                let joined = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                matches!(
+                    joined.as_str(),
+                    "iter"
+                        | "rusty::iter"
+                        | "iter_mut"
+                        | "rusty::iter_mut"
+                        | "map"
+                        | "rusty::map"
+                        | "filter_map"
+                        | "rusty::filter_map"
+                        | "enumerate"
+                        | "rusty::enumerate"
+                        | "rev"
+                        | "rusty::rev"
+                        | "take"
+                        | "rusty::take"
+                )
+            }
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                self.lookup_local_binding_type(&name)
+                    .as_ref()
+                    .and_then(|ty| self.extract_iter_item_type_from_type(ty))
+                    .is_some()
+            }
+            _ => false,
+        }
+    }
+
     fn try_emit_iter_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         if mc.method != "map" || mc.args.len() != 1 {
             return None;
         }
-        if !self.is_iterator_like_receiver_expr(&mc.receiver) {
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
@@ -22416,6 +22606,22 @@ impl CodeGen {
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let predicate = self.emit_expr_maybe_move(mc.args.first()?);
         Some(format!("rusty::all({}, {})", receiver, predicate))
+    }
+
+    fn try_emit_iter_count_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "count" || !mc.args.is_empty() {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::count({})", receiver))
     }
 
     fn is_ordering_like_type(&self, ty: &syn::Type) -> bool {
@@ -31975,6 +32181,81 @@ mod tests {
         );
         assert!(out.contains("rusty::collect_range"));
         assert!(!out.contains("::from_iter("));
+    }
+
+    #[test]
+    fn test_leaf10538_collect_vec_underscore_avoids_vec_auto_placeholder() {
+        let out = transpile_str(
+            r#"
+            fn f(v: [i32; 3]) -> Vec<i32> {
+                v.into_iter().collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(!out.contains("Vec<auto>::from_iter"));
+    }
+
+    #[test]
+    fn test_leaf10538_iter_map_after_iter_call_lowers_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            fn f(v: [i32; 3]) -> Vec<i32> {
+                v.iter().map(|x| *x + 1).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::map(rusty::iter(v),"));
+        assert!(!out.contains("rusty::iter(v).map("));
+    }
+
+    #[test]
+    fn test_leaf10538_iter_count_after_iter_call_lowers_to_runtime_count() {
+        let out = transpile_str(
+            r#"
+            fn f(v: [i32; 3]) -> usize {
+                v.iter().count()
+            }
+            "#,
+        );
+        assert!(out.contains("return rusty::count(rusty::iter(v));"));
+        assert!(!out.contains("rusty::iter(v).count()"));
+    }
+
+    #[test]
+    fn test_leaf10538_iter_names_map_lowers_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            struct Flags;
+            impl Flags {
+                fn iter_names(&self) -> std::ops::Range<i32> {
+                    0..2
+                }
+            }
+            fn f(flags: &Flags) -> Vec<i32> {
+                flags.iter_names().map(|x| x + 1).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::map(flags.iter_names(),"));
+        assert!(!out.contains("flags.iter_names().map("));
+    }
+
+    #[test]
+    fn test_leaf10538_callable_return_iterator_map_lowers_to_runtime_map() {
+        let out = transpile_str(
+            r#"
+            fn case_<T>(value: T, inherent: impl Fn(T) -> std::ops::Range<i32>) -> Vec<i32> {
+                Vec::from_iter(inherent(value).map(|x| x + 1))
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::collect_range("));
+        assert!(
+            out.contains("rusty::map(inherent("),
+            "expected callable-return iterator map lowering, got:\n{}",
+            out
+        );
+        assert!(!out.contains("inherent(value).map("));
     }
 
     #[test]

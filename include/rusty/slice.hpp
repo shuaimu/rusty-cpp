@@ -568,6 +568,16 @@ bool all(Range&& range, Pred&& pred) {
     return true;
 }
 
+template<typename Range>
+size_t count(Range&& range) {
+    size_t n = 0;
+    for (auto&& _item : for_in(std::forward<Range>(range))) {
+        (void)_item;
+        ++n;
+    }
+    return n;
+}
+
 template<typename Range, typename Acc, typename Func>
 auto fold(Range&& range, Acc init, Func&& func) {
     auto acc = std::move(init);

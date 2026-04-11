@@ -451,6 +451,19 @@ void test_all_iterator_helper_shape() {
     printf("PASS\n");
 }
 
+void test_count_iterator_helper_shape() {
+    printf("test_count_iterator_helper_shape: ");
+    {
+        auto digits = rusty::as_bytes(std::string_view("1234"));
+        assert(rusty::count(rusty::iter(digits)) == 4);
+    }
+    {
+        auto mapped = rusty::map(rusty::range(1, 5), [](int value) { return value * 2; });
+        assert(rusty::count(std::move(mapped)) == 4);
+    }
+    printf("PASS\n");
+}
+
 void test_take_iterator_adapter_shape() {
     printf("test_take_iterator_adapter_shape: ");
     {
@@ -641,6 +654,7 @@ int main() {
     test_for_in_map_fold_optional_next_shape();
     test_for_in_map_fold_rusty_option_next_shape();
     test_all_iterator_helper_shape();
+    test_count_iterator_helper_shape();
     test_take_iterator_adapter_shape();
     test_collect_range_iterator_adapter_shape();
     test_rev_enumerate_iterator_adapter_shape();
