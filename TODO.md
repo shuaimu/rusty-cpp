@@ -3098,6 +3098,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-22-1775876201/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared in runtime headers, added no crate-specific rewrites/scripts, and performed no generated-text patching.
+        - [x] *done* Leaf 10.5.23: Collapse the post-10.5.22 deterministic semver Stage D local/function-name collision and parameter-path qualification family generically (starting with `runner.cpp:3115` `version` local/function collision and adjacent `runner.cpp:3271/3282` `util::req` receiver-call shape mismatch), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only name-resolution hardening + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - expanded local-binding function-name collision detection to include visible module-qualified function names tracked in `module_qualified_functions`, so locals avoid colliding with imported callable symbols (for example `let version = version(...)` now renames local binding).
+            - hardened single-segment expression-path lowering to prefer in-scope value bindings from local/parameter scopes before module-function qualification, so parameter receivers keep value-call shapes (`req.matches(...)`) instead of being rewritten to qualified function paths.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10523_local_binding_shadowing_module_qualified_function_is_renamed`
+            - `test_leaf10523_method_receiver_prefers_parameter_binding_over_qualified_function`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10523 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-23-1775876850 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family at `runner.cpp:3115` (`const auto version = version("...")`) is removed; generated output now emits renamed local binding (`version_shadow1 = util::version(...)`).
+            - adjacent downstream receiver-call family at `runner.cpp:3271/3282` is removed; generated output now preserves parameter receiver calls (`req.matches(parsed)`).
+            - new deterministic Stage D head starts at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` (`rusty::default_value<identifier::Identifier>()` requiring unavailable default constructor), with adjacent runtime-surface fallout at `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` (`rusty::len` instantiated on `Prerelease`/`BuildMetadata` lacking `size` surface).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-23-1775876850/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fixes stayed shared and AST/scope-gated in core name-resolution paths, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [ ] Leaf 10.5.24: Collapse the post-10.5.23 deterministic semver Stage D runtime default-value/container-len surface family generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` `default_value<identifier::Identifier>()` and adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` `len(Prerelease|BuildMetadata)`), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

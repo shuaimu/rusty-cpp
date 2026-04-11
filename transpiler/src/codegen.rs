@@ -12386,6 +12386,13 @@ impl CodeGen {
         if self.is_local_function_name_in_scope(name) {
             return true;
         }
+        if self
+            .module_qualified_functions
+            .get(name)
+            .is_some_and(|qualified| !qualified.is_empty())
+        {
+            return true;
+        }
         let scoped = if self.module_stack.is_empty() {
             name.to_string()
         } else {
@@ -22239,6 +22246,11 @@ impl CodeGen {
                     return format!("{}.value()", mapped);
                 }
                 return mapped;
+            }
+            // Parameters are not recorded in local C++ binding maps, so resolve them
+            // before single-segment function qualification logic.
+            if self.lookup_local_binding_type(&name).is_some() {
+                return escape_cpp_keyword(&name);
             }
         }
         if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
@@ -35044,6 +35056,70 @@ mod tests {
         assert!(
             out.contains("RUSTY_TRY_INTO(numeric_identifier"),
             "nested else branch with `?` should stay in outer function scope lowering, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10523_local_binding_shadowing_module_qualified_function_is_renamed() {
+        let out = transpile_str(
+            r#"
+            mod util {
+                pub fn version(input: &str) -> &str {
+                    input
+                }
+            }
+            use util::version;
+            fn parse() -> usize {
+                let version = version("1.2.3");
+                version.len()
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("const auto version = version(") && !out.contains("auto version = version("),
+            "local binding should not reuse imported function name directly, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("version_shadow1 = util::version(")
+                || out.contains("version_shadow1 = ::util::version("),
+            "local binding should be renamed and call should resolve to module-qualified function, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("rusty::len(version_shadow1)"),
+            "later uses should resolve to renamed local binding, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10523_method_receiver_prefers_parameter_binding_over_qualified_function() {
+        let out = transpile_str(
+            r#"
+            struct Req;
+            impl Req {
+                fn matches(&self, parsed: i32) -> bool {
+                    parsed > 0
+                }
+            }
+            mod util {
+                pub fn req() -> Req { Req }
+            }
+            fn assert_match(req: Req, parsed: i32) -> bool {
+                req.matches(parsed)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("req.matches("),
+            "method receiver should stay on the in-scope parameter binding, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("util::req.matches(") && !out.contains("::util::req.matches("),
+            "parameter receiver must not be rewritten to module-qualified function path, got:\n{}",
             out
         );
     }

@@ -4330,7 +4330,25 @@ Active work items:
      - new deterministic head starts at `runner.cpp:3115` (`const auto version = version("1.2.3-rc1");` local/function-name collision use-before-deduction), with adjacent downstream call-shape fallout at `runner.cpp:3271/3282` (`util::req` resolved as function instead of value object).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-22-1775876201/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared in runtime headers, added no crate-specific rewrites/scripts, and performed no generated-text patching.
-176. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.22` (starting at `runner.cpp:3115` in `test_align`, where local/function name collision still lowers as `const auto version = version(...)`, with adjacent downstream call-shape fallout at `runner.cpp:3271/3282` in `util::req`).
+176. `Leaf 10.5.23` is complete.
+   - plan/scope check: shared transpiler-only name-resolution hardening + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - expanded local-binding collision detection to include visible module-qualified functions from `module_qualified_functions` so locals no longer collide with imported callable names (`let version = version(...)` now renames local binding).
+     - hardened single-segment expression-path lowering to prefer in-scope local/parameter value bindings before function qualification, preserving receiver-call shapes on parameters (`req.matches(...)`) instead of rewriting through module function paths.
+   - focused regressions:
+     - `test_leaf10523_local_binding_shadowing_module_qualified_function_is_renamed`
+     - `test_leaf10523_method_receiver_prefers_parameter_binding_over_qualified_function`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10523 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-23-1775876850 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first-head family at `runner.cpp:3115` (`const auto version = version("...")`) is removed; generated output now emits renamed local binding (`version_shadow1 = util::version(...)`).
+     - adjacent receiver-shape family at `runner.cpp:3271/3282` is removed; generated output now preserves parameter receiver calls (`req.matches(parsed)`).
+     - new deterministic first head starts at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` (`rusty::default_value<identifier::Identifier>()` requiring unavailable default constructor), with adjacent fallout at `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` (`rusty::len` on `Prerelease`/`BuildMetadata` lacking `size` surface).
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-23-1775876850/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/scope-gated in core name-resolution paths, with no generated-text patching and no crate-specific rewrites/scripts.
+177. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.23` (starting at `/home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:136` `default_value<identifier::Identifier>()` constructor-surface mismatch, with adjacent `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:364` `len(Prerelease|BuildMetadata)` container-surface fallout).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
