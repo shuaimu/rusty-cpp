@@ -2230,9 +2230,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-2a-1775901231`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-3b-1775902336`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
 - confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- previous operator-surface family from Leaf 10.5.40.1 (`runner.cpp:4405` missing `|=`) is removed by Leaf 10.5.40.2; current deterministic `bitflags` Stage D head now starts at helper/pointer-call-shape fallout (`runner.cpp:6057/6084`, `2753+`).
+- previous helper-surface family from Leaf 10.5.40.2 (`runner.cpp:6057/6084` unresolved `rusty::write_hex` / `parse_hex`) is removed by Leaf 10.5.40.3; current deterministic `bitflags` Stage D head is pointer-deref call-shape fallout (`runner.cpp:2850/2868`, `2966+`).
 
 Crate-focused progress integrated from former appendices:
 
@@ -2248,11 +2248,11 @@ Crate-focused progress integrated from former appendices:
 
 From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
 
-Current deterministic head (post-Leaf 10.5.40.2):
+Current deterministic head (post-Leaf 10.5.40.3):
 
-1. `runner.cpp:6057/6084`: unresolved formatter/parser helper surfaces (`rusty::write_hex` and `parse_hex`) in expanded bitflags codepaths.
-2. `runner.cpp:2753+`: adjacent pointer-deref call-shape fallout (`*input` emitted where non-pointer tuple payload value is expected).
-3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. `runner.cpp:2850/2868`: pointer-deref call-shape fallout (`*input` emitted where non-pointer tuple payload value is expected) in `contains` call paths.
+2. `runner.cpp:2966/2984/3002/3020`: adjacent repeats of the same pointer-deref family in related test-call scaffolding.
+3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-3b-1775902336/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
 
 Historical active-work chain (retained for traceability):
 
@@ -4673,6 +4673,7 @@ Required approach:
 - for tuple/option constructor coercion, do not globally replace `std::make_tuple(...)` / `std::make_optional(...)` with typed constructor forms; emit typed forms only when expected associated-type context requires coercion
 - for expression-position block lowering (`[&]() { ... }()`), do not maintain ad-hoc local/statement emission paths that bypass shared shadow-allocation/state-tracking logic; route through shared statement/local lowering so `let x = x` shadow chains keep outer-binding resolution.
 - for expected-type associated-call specialization, do not reuse only the mapped function-tail when the mapped path is actually a free helper (for example `std::mem::ManuallyDrop::new` → `rusty::mem::manually_drop_new`); emit `Owner::method(...)` only when mapped owner path matches the expected owner base
+- for QSelf associated helper-call lowering (for example `<T>::parse_hex(x)`), do not drop owner-qualified shape into bare `parse_hex(x)` free-function calls; preserve resolved owner type and emit explicit runtime helper template calls (`rusty::parse_hex<T>(x)`) when the mapped surface is runtime-scoped
 - for forward-declaration signatures, do not rely on later in-namespace `use` alias emission for single-segment imported type names; emit explicitly qualified paths when a unique declared crate type is known
 - for local placeholder hint recovery via method-call receivers, do not require bare-identifier receiver shapes only; peel reference wrappers (`&` / `&mut`) before local-name resolution so typed-receiver inference still applies
 - for method-call lowering on reference-wrapped receivers, do not emit fixed member-access operators from surface syntax (`expr.method(...)`) without post-lowering receiver-shape validation; select `.`/`->` from the lowered receiver type so `(&v)`-style forms remain type-correct

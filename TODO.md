@@ -3572,8 +3572,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-1b-1775910400/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and trait/AST-shape-gated in core operator mapping; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.3: Collapse the post-10.5.40.2 formatter/parser helper-surface head (`runner.cpp:5967/5994` unresolved `rusty::write_hex` / `parse_hex`) with shared runtime/transpiler mapping fixes and targeted regressions.
-          - [ ] Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2663+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.3: Collapse the post-10.5.40.2 formatter/parser helper-surface head (`runner.cpp:5967/5994` unresolved `rusty::write_hex` / `parse_hex`) with shared runtime/transpiler mapping fixes and targeted regressions.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared transpiler/runtime helper-surface fixes + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - extension-method lowering already rewrote `value.write_hex(writer)` to `rusty::write_hex(value, writer)`, but runtime fallback helper text had no `write_hex` surface.
+              - QSelf associated parser calls like `<B::Bits>::parse_hex(flag)` were lowered to bare `parse_hex(flag)` in C++ rather than a qualified runtime helper call, leaving an unresolved symbol.
+            - Implemented shared transpiler/runtime fixes in `transpiler/src/codegen.rs`:
+              - added QSelf associated-call lowering for `<T>::parse_hex(arg)` to emit typed runtime helper calls (`rusty::parse_hex<T>(arg)`) when the target type resolves.
+              - added shared runtime fallback helper surfaces:
+                - `rusty::write_hex(const Value&, Writer&&)` for integral hex write formatting through `writer.write_str(...)`.
+                - `rusty::parse_hex<T>(const Input&) -> rusty::Result<T, std::tuple<>>` for integral hex parse behavior with sign/overflow checks.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf105403_qself_parse_hex_call_lowers_to_runtime_helper_template`
+              - `test_leaf105403_write_hex_extension_call_lowers_to_runtime_helper`
+              - `test_leaf105403_runtime_fallback_has_hex_helpers`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105403 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-3b-1775902336 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:6057/6084` (unresolved `rusty::write_hex` / `parse_hex`) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to pointer-deref call-shape fallout rooted at:
+                - `runner.cpp:2850/2868` invalid `*input` on non-pointer tuple payload values in `contains` call paths,
+                - adjacent repeats at `runner.cpp:2966/2984/3002/3020`.
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-3b-1775902336/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime helpers; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2850+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

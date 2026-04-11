@@ -20068,6 +20068,24 @@ impl CodeGen {
             }
         }
 
+        // QSelf associated parse helper: `<T>::parse_hex(x)` should lower to
+        // runtime helper form, because C++ primitive/storage types do not have
+        // static member parse surfaces.
+        if let syn::Expr::Path(func_path) = call.func.as_ref() {
+            if let Some(qself) = &func_path.qself {
+                if func_path.path.segments.len() == 1
+                    && func_path.path.segments[0].ident == "parse_hex"
+                    && call.args.len() == 1
+                {
+                    let target_cpp = self.map_type(self.peel_reference_paren_group_type(&qself.ty));
+                    if target_cpp != "auto" && !target_cpp.contains("/* TODO") {
+                        let input = self.emit_expr_maybe_move(&call.args[0]);
+                        return format!("rusty::parse_hex<{}>({})", target_cpp, input);
+                    }
+                }
+            }
+        }
+
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         if matches!(
             func.as_str(),
@@ -26859,6 +26877,103 @@ void hash(const T& value, State& state) {\n\
         combine(state, h);\n\
     }\n\
 }\n\
+}\n\
+template<typename Value, typename Writer>\n\
+rusty::fmt::Result write_hex(const Value& value, Writer&& writer) {\n\
+    using RawValue = std::remove_cv_t<std::remove_reference_t<Value>>;\n\
+    if constexpr (!std::is_integral_v<RawValue> || std::is_same_v<RawValue, bool>) {\n\
+        return rusty::fmt::Result::Err(rusty::fmt::Error{});\n\
+    } else {\n\
+        using Unsigned = std::make_unsigned_t<RawValue>;\n\
+        Unsigned bits = static_cast<Unsigned>(value);\n\
+        std::string text;\n\
+        do {\n\
+            const auto digit = static_cast<unsigned>(bits & static_cast<Unsigned>(0xF));\n\
+            text.push_back(\"0123456789abcdef\"[digit]);\n\
+            bits = static_cast<Unsigned>(bits >> 4);\n\
+        } while (bits != 0);\n\
+        std::reverse(text.begin(), text.end());\n\
+        const auto text_view = std::string_view(text);\n\
+        if constexpr (requires { std::forward<Writer>(writer).write_str(text_view); }) {\n\
+            return std::forward<Writer>(writer).write_str(text_view);\n\
+        } else if constexpr (requires { writer.write_str(text_view); }) {\n\
+            return writer.write_str(text_view);\n\
+        } else {\n\
+            return rusty::fmt::Result::Err(rusty::fmt::Error{});\n\
+        }\n\
+    }\n\
+}\n\
+template<typename T, typename Input>\n\
+rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {\n\
+    std::string_view text;\n\
+    if constexpr (std::is_convertible_v<Input, std::string_view>) {\n\
+        text = std::string_view(input);\n\
+    } else if constexpr (requires { input.as_str(); }) {\n\
+        text = std::string_view(input.as_str());\n\
+    } else {\n\
+        return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+    }\n\
+    if (text.empty()) {\n\
+        return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+    }\n\
+    bool negative = false;\n\
+    std::size_t start = 0;\n\
+    if (text[0] == '+' || text[0] == '-') {\n\
+        negative = text[0] == '-';\n\
+        start = 1;\n\
+    }\n\
+    if (start >= text.size()) {\n\
+        return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+    }\n\
+    using RawT = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (!std::is_integral_v<RawT> || std::is_same_v<RawT, bool>) {\n\
+        return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+    } else {\n\
+        using Unsigned = std::make_unsigned_t<RawT>;\n\
+        Unsigned value = 0;\n\
+        for (std::size_t i = start; i < text.size(); ++i) {\n\
+            const char ch = text[i];\n\
+            unsigned digit = 0;\n\
+            if (ch >= '0' && ch <= '9') {\n\
+                digit = static_cast<unsigned>(ch - '0');\n\
+            } else if (ch >= 'a' && ch <= 'f') {\n\
+                digit = static_cast<unsigned>(10 + (ch - 'a'));\n\
+            } else if (ch >= 'A' && ch <= 'F') {\n\
+                digit = static_cast<unsigned>(10 + (ch - 'A'));\n\
+            } else {\n\
+                return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+            }\n\
+            if (value > (std::numeric_limits<Unsigned>::max() - static_cast<Unsigned>(digit))\n\
+                    / static_cast<Unsigned>(16)) {\n\
+                return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+            }\n\
+            value = static_cast<Unsigned>(value * static_cast<Unsigned>(16)\n\
+                + static_cast<Unsigned>(digit));\n\
+        }\n\
+        if constexpr (std::is_signed_v<RawT>) {\n\
+            if (negative) {\n\
+                const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())\n\
+                    + static_cast<Unsigned>(1);\n\
+                if (value > max_mag) {\n\
+                    return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+                }\n\
+                if (value == max_mag) {\n\
+                    return rusty::Result<T, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());\n\
+                }\n\
+                const auto signed_value = static_cast<RawT>(value);\n\
+                return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));\n\
+            }\n\
+            if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {\n\
+                return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+            }\n\
+            return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));\n\
+        } else {\n\
+            if (negative) {\n\
+                return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());\n\
+            }\n\
+            return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));\n\
+        }\n\
+    }\n\
 }\n\
 namespace str_runtime {\n\
 using Utf8Error = rusty::String;\n\
@@ -43100,6 +43215,61 @@ mod tests {
         assert!(
             !out.contains("bitor_assign("),
             "BitOrAssign method name should be renamed to operator|=\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf105403_qself_parse_hex_call_lowers_to_runtime_helper_template() {
+        let out = transpile_str(
+            r#"
+            trait ParseHex {
+                fn parse_hex(input: &str) -> Result<Self, ()> where Self: Sized;
+            }
+            impl ParseHex for u8 {
+                fn parse_hex(input: &str) -> Result<Self, ()> { Ok(0) }
+            }
+            fn parse_one(flag: &str) {
+                let _ = <u8>::parse_hex(flag);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::parse_hex<uint8_t>("),
+            "qself parse_hex call should lower to rusty::parse_hex<T>(...)\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf105403_write_hex_extension_call_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            trait WriteHex {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result;
+            }
+            impl WriteHex for u8 {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result { Ok(()) }
+            }
+            fn write_one(value: u8, mut out: String) {
+                let _ = value.write_hex(&mut out);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::write_hex("),
+            "write_hex extension call should lower to rusty::write_hex(receiver, ...)\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf105403_runtime_fallback_has_hex_helpers() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("rusty::fmt::Result write_hex("),
+            "runtime fallback should expose write_hex helper"
+        );
+        assert!(
+            helpers.contains("rusty::Result<T, std::tuple<>> parse_hex("),
+            "runtime fallback should expose parse_hex helper"
         );
     }
 
