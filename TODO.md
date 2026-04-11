@@ -2821,6 +2821,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-9b-1775864919/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.3): fixes stayed AST-shape-gated and runtime-surface-gated, without crate-specific rewrites/scripts or generated-text patching.
+        - [x] *done* Leaf 10.5.10: Collapse the post-10.5.9 deterministic semver Stage D runtime Option/Result tuple-payload match family generically (starting with `runner.cpp:1656` invalid `std::visit` on `rusty::Option<rusty::cmp::Ordering>` in `Version::operator<=>`), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+            - Hardened `emit_runtime_match_expr` tuple-struct runtime lowering so payload value patterns that are not binding patterns (for example `Some(Ordering::Equal)`, `Err(0)`) no longer bail out to `std::visit`.
+            - Added payload value-condition reuse (`tuple_pattern_elem_value_condition`) when binding-statement collection is not applicable, and composed payload condition + guard condition in the runtime `is_some`/`is_err` dispatch path.
+          - Added focused fixture-agnostic regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf10510_runtime_option_payload_path_pattern_uses_runtime_match_not_visit`
+              - `test_leaf10510_runtime_result_payload_literal_pattern_uses_runtime_match_not_visit`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10510 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-10-1775865623 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - Previous first hard-error family at `runner.cpp:1656` (`std::visit` over runtime `Option<Ordering>` in `Version::operator<=>`) is removed.
+            - New deterministic Stage D head starts at `runner.cpp:1858` (`/* TODO: if-expression */` in `matches_caret` lambda return-shape path), with adjacent downstream `std::visit` on runtime Option still present later at `runner.cpp:2056`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-10-1775865623/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed AST-shape-gated in core runtime-match lowering and avoided global/post-generation text patching and crate-specific rewrites.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

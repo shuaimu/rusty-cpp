@@ -9848,21 +9848,34 @@ impl CodeGen {
                     ));
 
                     let mut binding_stmts = Vec::new();
-                    if !self.collect_pattern_binding_stmts(
+                    let payload_match_condition = if !self.collect_pattern_binding_stmts(
                         &ts.elems[0],
                         &matched_value,
                         &mut binding_stmts,
                     ) {
-                        return None;
-                    }
+                        self.tuple_pattern_elem_value_condition(&ts.elems[0], &matched_value)?
+                    } else {
+                        None
+                    };
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
                         out.push(' ');
                     }
 
+                    let mut arm_conditions = Vec::new();
+                    if let Some(cond) = payload_match_condition {
+                        arm_conditions.push(cond);
+                    }
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str = self.emit_expr_to_string(guard);
-                        out.push_str(&format!("if ({}) {{ {}{}; }} ", guard_str, ret_prefix, body));
+                        arm_conditions.push(self.emit_expr_to_string(guard));
+                    }
+                    if !arm_conditions.is_empty() {
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            arm_conditions.join(" && "),
+                            ret_prefix,
+                            body
+                        ));
                     } else {
                         out.push_str(&format!("{}{}; ", ret_prefix, body));
                     }
@@ -28100,6 +28113,65 @@ mod tests {
         assert!(
             !out.contains(".then_with("),
             "member .then_with(...) should not remain in emitted C++, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10510_runtime_option_payload_path_pattern_uses_runtime_match_not_visit() {
+        let out = transpile_str(
+            r#"
+            use core::cmp::Ordering;
+            fn f(lhs: usize, rhs: usize) -> Option<Ordering> {
+                match core::cmp::PartialOrd::partial_cmp(&lhs, &rhs) {
+                    Some(Ordering::Equal) => Some(Ordering::Equal),
+                    cmp => cmp,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_some())"),
+            "Option payload path-pattern match should use runtime is_some dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_mv0 == Ordering::Equal"),
+            "Option payload path-pattern should lower to value condition on unwrap payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "Option payload path-pattern match should not lower via std::visit, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10510_runtime_result_payload_literal_pattern_uses_runtime_match_not_visit() {
+        let out = transpile_str(
+            r#"
+            fn f(value: Result<i32, i32>) -> i32 {
+                match value {
+                    Err(0) => 10,
+                    other => 20,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_err())"),
+            "Result payload literal-pattern match should use runtime is_err dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("_mv0 == 0"),
+            "Result payload literal-pattern should lower to value condition on unwrap payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "Result payload literal-pattern match should not lower via std::visit, got:\n{}",
             out
         );
     }

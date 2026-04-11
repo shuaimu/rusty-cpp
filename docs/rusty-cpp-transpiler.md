@@ -4080,7 +4080,25 @@ Active work items:
      - new first deterministic head starts at `runner.cpp:1656` (`std::visit` applied to `rusty::Option<rusty::cmp::Ordering>` in `Version::operator<=>`), with adjacent dependent lambda-return fallout at `runner.cpp:1858`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-9b-1775864919/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/runtime-surface-gated, with no crate-specific scripts and no generated-text patching.
-163. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.9` (`runner.cpp:1656` `std::visit` on runtime `Option<Ordering>` + adjacent `runner.cpp:1858` lambda return-shape fallout).
+163. `Leaf 10.5.10` is complete.
+   - plan/scope check: shared transpiler-only lowering updates + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - hardened runtime Option/Result tuple-struct match lowering (`emit_runtime_match_expr`) to support payload value-pattern families (for example `Some(Ordering::Equal)`, `Err(0)`) without falling back to invalid `std::visit` on runtime `rusty::Option`/`rusty::Result`.
+     - when payload binding statement extraction is not applicable, runtime match lowering now reuses value-condition emission (`tuple_pattern_elem_value_condition`) and composes payload condition + guard condition in shared `is_some`/`is_err` dispatch blocks.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10510_runtime_option_payload_path_pattern_uses_runtime_match_not_visit`
+       - `test_leaf10510_runtime_result_payload_literal_pattern_uses_runtime_match_not_visit`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10510 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-10-1775865623 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1656` (`std::visit` on runtime `Option<Ordering>` in `Version::operator<=>`) is removed.
+     - new deterministic head starts at `runner.cpp:1858` (`/* TODO: if-expression */` in `matches_caret` lambda return-shape path), with adjacent later runtime Option `std::visit` fallout at `runner.cpp:2056`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-10-1775865623/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST-shape-gated in runtime-match lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+164. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.10` (`runner.cpp:1858` `/* TODO: if-expression */` lambda return-shape head in `matches_caret`, with adjacent downstream runtime Option `std::visit` fallout at `runner.cpp:2056`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
