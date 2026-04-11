@@ -4380,7 +4380,30 @@ Active work items:
      - new deterministic head is runtime assertion/panic mismatch family starting at `test_align` (`runner.cpp:3114-3169`) with adjacent widespread assertion/unwrap fallout (`test_basic`, `test_new`, `test_parse`, `test_spec_order`, etc.); parity now reports 8 passed / 24 failed.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared in runtime headers with type/shape-gated behavior, with no generated-text patching and no crate-specific rewrites/scripts.
-179. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.25` (starting with `test_align` assertion mismatch at `runner.cpp:3114-3169` and adjacent comparator/parse assertion fallout across Stage E runtime tests).
+179. `Leaf 10.5.26` is complete.
+   - plan/scope check: shared transpiler-side `format_args!` lowering hardening plus runtime fallback formatting/to_string support stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler/runtime fixes in `transpiler/src/codegen.rs`:
+     - hardened `format_args!` expression lowering to emit concrete `std::format(...)`/`std::string(...)` shapes with `rusty::to_string(...)` wrapping and Rust-debug-spec literal rewrites (`:?`/`:#?`).
+     - added expression-aware format-arg conversion fallback for expanded-token `self` member chains (including spaced forms like `self . major` and tuple members `self . 0`) so lowering reuses normal `this->...` field emission.
+     - extended runtime fallback helper surfaces: `rusty::fmt::Formatter` now accumulates output in `write_fmt`/`write_str`/`write_char`, and shared `rusty::to_string(...)` now dispatches through `.to_string()`, bool/string-like/as_str, deref-string-view, numeric `std::to_string`, and `fmt` fallback rendering.
+   - focused regressions:
+     - `test_leaf10526_format_args_non_literal_arg_uses_to_string_wrapper`
+     - `test_leaf10526_format_args_debug_spec_is_rewritten_for_std_format`
+     - `test_leaf10526_format_args_argument_uses_expression_lowering_for_tuple_field`
+     - `test_leaf10526_format_args_argument_with_spaced_self_member_tokens_lowers_to_this_members`
+     - `test_leaf10526_format_args_argument_with_spaced_self_tuple_tokens_lowers_to_this_members`
+     - `test_leaf10526_runtime_to_string_supports_fmt_display_fallback`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10526 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler -- --nocapture`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-26-1775884100 --keep-work-dirs`
+   - deterministic semver frontier movement:
+     - previous Stage E head at `test_align` (`runner.cpp:3114-3169`) is removed; `test_align` and `test_display` now pass.
+     - previous Stage D compile fallout from raw `self . field` format-arg tokens is removed (`runner.cpp`/target `.cppm` no longer emits `rusty::to_string(self . ...)` in this family).
+     - new deterministic Stage E frontier is parser/comparator assertion+unwrap mismatch family starting at `test_basic`, with adjacent `test_cargo3202`/`test_comparator_parse`/`test_parse`/`test_wildcard*` fallout; parity now reports 11 passed / 21 failed.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-26-1775884100/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and shape-gated in transpiler/runtime lowering paths, with no crate-specific rewrites/scripts and no generated-text patching.
+180. Current active next leaf is the next Phase 21 deterministic semver Stage E family after `10.5.26` (starting with `test_basic` and adjacent `test_cargo3202`/`test_comparator_parse` assertion+unwrap fallout across parser/comparator tests).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
@@ -4515,6 +4538,7 @@ Required approach:
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout
 - for struct-literal field lowering in consuming `self` scopes, do not bypass move insertion by using non-move field emission helpers; field payload emission must preserve receiver-aware move semantics
 - for nested local-shadow initializer lowering (for example `let rhs = match rhs.next() { ... }`), do not hide outer same-name bindings before initializer emission or reuse outer same-name C++ shadow identifiers in inner scopes; preserve prior binding visibility and allocate distinct shadow identifiers to avoid self-reference/use-before-deduction
+- for macro argument lowering (`format_args!`/friends), do not rely only on plain `syn::parse_str` over whitespace-expanded token text; keep shape-gated fallback lowering for method-context forms (for example `self . field`) so emission still routes through normal AST-aware field/receiver logic
 - for circular type-ordering fallback, do not silently reorder true by-value SCCs and proceed without explicit unsupported diagnostics; emit deterministic cycle diagnostics so unsupported architecture gaps are visible at generation time
 - for by-value SCC diagnostics, do not emit only unordered type sets; include deterministic cycle paths so failure fixtures can assert concrete cycle structure and avoid ambiguous diagnostics
 - for opt-in by-value cycle breaking, do not enable rewriting by default and do not choose feedback edges with non-deterministic traversal order; require explicit activation and deterministic edge selection with emitted rewrite diagnostics
@@ -4589,7 +4613,7 @@ The following Rust→C++ translation gaps remain and require fundamental transpi
 
 5. **Complex if-let patterns** — Some `if let` chain patterns (nested `if let Some(x) = expr.strip_prefix(...)`) emit `/* TODO: if-expression */` placeholders. Fix requires: comprehensive if-let chain lowering to C++ if-init statements.
 
-6. **`format_args!` with complex patterns** — `format_args!` with Rust-specific format specs (`:?`, `:#x`), non-formattable types (`char32_t` in some contexts), or variable references is limited to `std::string{}` fallback. Simple cases with `{}` or `{0}` with literal args work via `std::format()`.
+6. **`format_args!` with advanced formatting semantics** — core `format_args!` lowering now emits concrete `std::format(...)`/`std::string(...)` with `rusty::to_string(...)` wrapping (including debug-spec rewrite and `self . field` expanded-token fallback), but full Rust formatting parity is still incomplete for richer named/trait-driven formatting behavior in some crates.
 
 7. **Test namespace / function template name collision** — When expanded test code creates sub-modules with the same name as function templates in a sibling module (e.g., `mod parser { fn from_str<B>(...) }` alongside `mod parser { mod from_str { fn valid() } }`), the C++ `namespace from_str` shadows the function template `from_str<B>`. In C++, namespaces hide functions of the same name — no standard mechanism can override this. Attempted fixes: path qualification (fails because `parser::from_str` is ambiguous), namespace renaming (breaks all cross-references), using-declarations (can't disambiguate). Fix requires: comprehensive test-module path rewrite that prefixes test sub-modules with `_test` suffix and updates all references.
 

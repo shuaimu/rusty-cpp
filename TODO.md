@@ -3151,7 +3151,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-25-1775880200/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared in runtime headers, used shape-gated type traits (no blanket rewrites), and added no generated-text patching or crate-specific scripts.
-        - [ ] Leaf 10.5.26: Collapse the post-10.5.25 deterministic semver Stage E display/assertion mismatch family generically (starting with `test_align` failure surface at `runner.cpp:3114-3169` and adjacent comparator/parse assertion fallout), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.26: Collapse the post-10.5.25 deterministic semver Stage E display/assertion mismatch family generically (starting with `test_align` failure surface at `runner.cpp:3114-3169` and adjacent comparator/parse assertion fallout), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler-side `format_args!` lowering hardening plus runtime fallback formatting/to_string support stayed well below the <1000 LOC guardrail and required no additional decomposition.
+          - Implemented shared transpiler/runtime fixes in `transpiler/src/codegen.rs`:
+            - hardened `format_args!` expression lowering to always emit concrete `std::format(...)` or `std::string(...)` shapes with `rusty::to_string(...)` argument wrapping and Rust-debug-spec literal rewrites (`:?` / `:#?`).
+            - added expression-aware format-arg conversion path (`convert_format_arg_expr`) and fallback handling for expanded-token `self` member chains (including spaced forms like `self . major` and tuple members `self . 0`) so member access lowers through normal `this->...` field emission.
+            - extended runtime fallback helper surfaces: `rusty::fmt::Formatter` now accumulates text in `write_fmt`/`write_str`/`write_char`, and shared `rusty::to_string(...)` now dispatches through `.to_string()`, bool/string-like/as_str, deref-string-view, numeric `std::to_string`, and `fmt` fallback rendering.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10526_format_args_non_literal_arg_uses_to_string_wrapper`
+            - `test_leaf10526_format_args_debug_spec_is_rewritten_for_std_format`
+            - `test_leaf10526_format_args_argument_uses_expression_lowering_for_tuple_field`
+            - `test_leaf10526_format_args_argument_with_spaced_self_member_tokens_lowers_to_this_members`
+            - `test_leaf10526_format_args_argument_with_spaced_self_tuple_tokens_lowers_to_this_members`
+            - `test_leaf10526_runtime_to_string_supports_fmt_display_fallback`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10526 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-26-1775884100 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous Stage E `test_align` display/assertion mismatch head is removed; semver Stage D now builds and Stage E now reports `test_align PASSED` (plus `test_display PASSED`).
+            - previous Stage D compile fallout from raw `self . field` format-arg tokens is removed (`runner.cpp`/target `.cppm` no longer emit `rusty::to_string(self . ...)` in this family).
+            - new deterministic Stage E frontier is assertion/unwrap mismatch family starting at `test_basic`, with adjacent parser/comparator fallout (`test_cargo3202`, `test_comparator_parse`, `test_parse`, `test_wildcard*`, etc.); parity now reports 11 passed / 21 failed.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10-5-26-1775884100/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp,run-direct.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime lowering paths, with no crate-specific rewrite scripts and no generated-text patching.
+        - [ ] Leaf 10.5.27: Collapse the post-10.5.26 deterministic semver Stage E parser/comparator assertion+unwrap mismatch family generically (starting with `test_basic` and adjacent `test_cargo3202`/`test_comparator_parse` fallout), add fixture-agnostic regressions, then re-run semver parity.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

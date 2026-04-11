@@ -9502,35 +9502,33 @@ impl CodeGen {
                 format!("std::format({})", self.convert_format_args(&tokens))
             }
             "format_args" => {
-                let fmt_str = tokens.split(',').next().unwrap_or("").trim();
-                let has_rust_debug = fmt_str.contains(":?") || fmt_str.contains(":#");
-                let has_unicode_escape = fmt_str.contains("\\u{");
-                let has_placeholder = fmt_str.contains("{}") || fmt_str.contains("{0");
-                // Only convert to std::format when ALL args after the format string
-                // are numeric/string literals (not variable references that may be
-                // missing or have wrong types in the transpiled output).
-                let args_str = tokens.splitn(2, ',').nth(1).unwrap_or("").trim();
-                let args_are_literals = args_str.is_empty()
-                    || args_str.chars().all(|c| c.is_ascii_digit() || c == ',' || c == ' '
-                        || c == '-' || c == '"' || c == '.');
-                if has_placeholder && !has_rust_debug && !has_unicode_escape && args_are_literals {
-                    let mut converted = self.convert_format_args(&tokens);
-                    for i in 0..10 {
-                        converted = converted.replace(&format!("{{{}}}", i), "{}");
-                    }
-                    format!("std::format({})", converted)
-                } else if !has_placeholder && args_str.is_empty() {
-                    // No placeholders, no args — just a literal string.
-                    // Try to parse and emit as a proper C++ string literal.
-                    if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_str) {
-                        let value = lit.value();
-                        let escaped = escape_cpp_string_literal_content(&value);
-                        format!("std::string(\"{}\")", escaped)
-                    } else {
-                        "std::string{}".to_string()
-                    }
-                } else {
+                let parts = self.split_macro_args(&tokens);
+                if parts.is_empty() {
                     "std::string{}".to_string()
+                } else {
+                    let fmt_expr = parts[0].trim();
+                    let fmt_cpp = if let Ok(lit) = syn::parse_str::<syn::LitStr>(fmt_expr) {
+                        let rewritten = self.rewrite_rust_format_literal_for_cpp(&lit.value());
+                        let escaped = escape_cpp_string_literal_content(&rewritten);
+                        format!("\"{}\"", escaped)
+                    } else {
+                        self.convert_macro_tokens(fmt_expr)
+                    };
+                    if parts.len() == 1 {
+                        format!("std::string({})", fmt_cpp)
+                    } else {
+                        let wrapped_args: Vec<String> = parts
+                            .iter()
+                            .skip(1)
+                            .map(|arg| {
+                                format!(
+                                    "rusty::to_string({})",
+                                    self.convert_format_arg_expr(arg.trim())
+                                )
+                            })
+                            .collect();
+                        format!("std::format({}, {})", fmt_cpp, wrapped_args.join(", "))
+                    }
                 }
             }
             "vec" => {
@@ -9578,6 +9576,145 @@ impl CodeGen {
         // Rust's format!("...", args) is very close to C++23's std::format("...", args)
         // The {} placeholders are identical. Named args differ but basic usage is the same.
         self.convert_macro_tokens(tokens)
+    }
+
+    fn convert_format_arg_expr(&self, token_expr: &str) -> String {
+        let trimmed = token_expr.trim();
+        if let Ok(expr) = syn::parse_str::<syn::Expr>(trimmed) {
+            self.emit_expr_to_string(&expr)
+        } else if let Some(lowered_self) = self.try_lower_format_arg_self_member_chain(trimmed) {
+            lowered_self
+        } else {
+            let normalized = normalize_token_text(trimmed.to_string());
+            if normalized != trimmed {
+                if let Ok(expr) = syn::parse_str::<syn::Expr>(&normalized) {
+                    return self.emit_expr_to_string(&expr);
+                }
+                if let Some(lowered_self) = self.try_lower_format_arg_self_member_chain(&normalized)
+                {
+                    return lowered_self;
+                }
+            }
+            self.convert_macro_tokens(trimmed)
+        }
+    }
+
+    fn try_lower_format_arg_self_member_chain(&self, token_expr: &str) -> Option<String> {
+        let compact = token_expr.split_whitespace().collect::<String>();
+        if compact.is_empty() || !compact.starts_with("self") {
+            return None;
+        }
+        if compact == "self" {
+            if let Some(self_name) = self.current_self_path_override() {
+                return Some(self_name.to_string());
+            }
+            return Some("(*this)".to_string());
+        }
+        let rest = compact.strip_prefix("self.")?;
+        if rest.is_empty() {
+            return None;
+        }
+
+        let mut members: Vec<String> = Vec::new();
+        for part in rest.split('.') {
+            if part.is_empty() {
+                return None;
+            }
+            let lowered = if part.chars().all(|c| c.is_ascii_digit()) {
+                format!("_{}", part)
+            } else if Self::is_simple_ident(part) {
+                if members.is_empty() {
+                    self.current_struct
+                        .as_ref()
+                        .and_then(|s| self.lookup_struct_field_cpp_name(s, part))
+                        .unwrap_or_else(|| escape_cpp_keyword(part))
+                } else {
+                    escape_cpp_keyword(part)
+                }
+            } else {
+                return None;
+            };
+            members.push(lowered);
+        }
+        if members.is_empty() {
+            return None;
+        }
+
+        if let Some(self_name) = self.current_self_path_override() {
+            let mut out = self_name.to_string();
+            for member in members {
+                out = format!("{}.{}", out, member);
+            }
+            Some(out)
+        } else {
+            let mut iter = members.into_iter();
+            let first = iter.next()?;
+            let mut out = format!("this->{}", first);
+            for member in iter {
+                out = format!("{}.{}", out, member);
+            }
+            Some(out)
+        }
+    }
+
+    fn is_simple_ident(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// Normalize Rust-only debug spec suffixes inside a format literal so C++ std::format
+    /// can consume the same placeholder structure.
+    fn rewrite_rust_format_literal_for_cpp(&self, fmt: &str) -> String {
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut out = String::with_capacity(chars.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                if i + 1 < chars.len() && chars[i + 1] == '{' {
+                    out.push('{');
+                    out.push('{');
+                    i += 2;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    out.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                let rewritten_inner = if let Some(prefix) = inner.strip_suffix(":#?") {
+                    prefix.to_string()
+                } else if let Some(prefix) = inner.strip_suffix(":?") {
+                    prefix.to_string()
+                } else {
+                    inner
+                };
+                out.push('{');
+                out.push_str(&rewritten_inner);
+                out.push('}');
+                i = j + 1;
+                continue;
+            }
+            if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                out.push('}');
+                out.push('}');
+                i += 2;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
     }
 
     /// Convert raw macro tokens to a C++ expression string.
@@ -24818,18 +24955,9 @@ auto clone(const T& value) {\n\
         return value;\n\
     }\n\
 }\n\
-// to_string: dispatches to .to_string() if available, then std::to_string for\n\
-// arithmetic types, then falls back to \"<unprintable>\".\n\
+// Display-oriented conversion helper used by format_args lowering.\n\
 template<typename T>\n\
-std::string to_string(const T& value) {\n\
-    if constexpr (requires { value.to_string(); }) {\n\
-        return value.to_string();\n\
-    } else if constexpr (requires { std::to_string(value); }) {\n\
-        return std::to_string(value);\n\
-    } else {\n\
-        return \"<unprintable>\";\n\
-    }\n\
-}\n\
+std::string to_string(const T& value);\n\
 // Rust u8::is_ascii_digit() — check if byte is in '0'..='9'.\n\
 inline bool is_ascii_digit(uint8_t b) { return b >= '0' && b <= '9'; }\n\
 } // namespace rusty\n\
@@ -24870,21 +24998,52 @@ struct DebugList {\n\
     Result finish() { return Result::Ok(std::make_tuple()); }\n\
 };\n\
 struct Formatter {\n\
+    mutable std::string out_;\n\
+    std::string str() const { return out_; }\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
     static Result debug_struct_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
-    Result write_fmt(Args&&...) const { return Result::Ok(std::make_tuple()); }\n\
+    Result write_fmt(Args&&... args) const { (append_one(std::forward<Args>(args)), ...); return Result::Ok(std::make_tuple()); }\n\
     rusty::Option<size_t> width() const { return rusty::Option<size_t>(rusty::None); }\n\
     rusty::Option<Alignment> align() const { return rusty::Option<Alignment>(rusty::None); }\n\
     char fill() const { return ' '; }\n\
     template<typename Ch>\n\
-    Result write_char(Ch&&) const { return Result::Ok(std::make_tuple()); }\n\
+    Result write_char(Ch&& ch) const { out_.push_back(static_cast<char>(ch)); return Result::Ok(std::make_tuple()); }\n\
     template<typename Str>\n\
-    Result write_str(Str&&) const { return Result::Ok(std::make_tuple()); }\n\
+    Result write_str(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
+private:\n\
+    template<typename Arg>\n\
+    void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }\n\
 };\n\
+}\n\
+template<typename T>\n\
+std::string to_string(const T& value) {\n\
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (requires { value.to_string(); }) {\n\
+        return value.to_string();\n\
+    } else if constexpr (std::is_same_v<Value, bool>) {\n\
+        return value ? \"true\" : \"false\";\n\
+    } else if constexpr (std::is_convertible_v<T, std::string_view>) {\n\
+        return std::string(std::string_view(value));\n\
+    } else if constexpr (requires { value.as_str(); }) {\n\
+        return std::string(value.as_str());\n\
+    } else if constexpr (requires { std::string_view(*value); }) {\n\
+        return std::string(std::string_view(*value));\n\
+    } else if constexpr (requires { std::to_string(value); }) {\n\
+        return std::to_string(value);\n\
+    } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {\n\
+        rusty::fmt::Formatter formatter{};\n\
+        auto result = value.fmt(formatter);\n\
+        if (result.is_ok()) {\n\
+            return formatter.str();\n\
+        }\n\
+        return \"<fmt-error>\";\n\
+    } else {\n\
+        return \"<unprintable>\";\n\
+    }\n\
 }\n\
 namespace path {\n\
 using Path = std::string;\n\
@@ -34262,13 +34421,88 @@ mod tests {
     #[test]
     fn test_leaf4154333333352_format_args_macro_emits_concrete_expression() {
         let out = transpile_str(r#"fn f() { let _ = Some(format_args!("x{}", 1)); }"#);
-        // format_args! with simple {} placeholders now uses std::format
-        assert!(
-            out.contains("std::format(") || out.contains("std::string{}"),
-            "format_args should produce std::format or fallback, got: {}",
-            out
-        );
+        assert!(out.contains("std::format("));
         assert!(!out.contains("std::make_optional(/* format_args!"));
+    }
+
+    #[test]
+    fn test_leaf10526_format_args_non_literal_arg_uses_to_string_wrapper() {
+        let out = transpile_str(
+            r#"
+            fn f(v: usize) {
+                let _ = format_args!("{0:>4}", v);
+            }
+            "#,
+        );
+        assert!(out.contains("std::format(\"{0:>4}\", rusty::to_string(v))"));
+        assert!(!out.contains("std::string{}"));
+    }
+
+    #[test]
+    fn test_leaf10526_format_args_debug_spec_is_rewritten_for_std_format() {
+        let out = transpile_str(
+            r#"
+            fn f(v: usize) {
+                let _ = format_args!("{0:?}", v);
+            }
+            "#,
+        );
+        assert!(out.contains("std::format(\"{0}\", rusty::to_string(v))"));
+    }
+
+    #[test]
+    fn test_leaf10526_format_args_argument_uses_expression_lowering_for_tuple_field() {
+        let out = transpile_str(
+            r#"
+            struct Quoted(char);
+            impl Quoted {
+                fn f(&self) {
+                    let _ = format_args!("{0}", self.0);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::format(\"{0}\", rusty::to_string(this->_0))"));
+        assert!(!out.contains("self . 0"));
+    }
+
+    #[test]
+    fn test_leaf10526_format_args_argument_with_spaced_self_member_tokens_lowers_to_this_members() {
+        let out = transpile_str(
+            r#"
+            struct Version {
+                major: u64,
+                minor: u64,
+            }
+            impl Version {
+                fn f(&self) {
+                    let _ = format_args!("{0}.{1}", self . major, self . minor);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::format(\"{0}.{1}\", rusty::to_string(this->major), rusty::to_string(this->minor))"
+        ));
+        assert!(!out.contains("rusty::to_string(self . major)"));
+    }
+
+    #[test]
+    fn test_leaf10526_format_args_argument_with_spaced_self_tuple_tokens_lowers_to_this_members() {
+        let out = transpile_str(
+            r#"
+            struct Quoted(char, char);
+            impl Quoted {
+                fn f(&self) {
+                    let _ = format_args!("{0}{1}", self . 0, self . 1);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "std::format(\"{0}{1}\", rusty::to_string(this->_0), rusty::to_string(this->_1))"
+        ));
+        assert!(!out.contains("rusty::to_string(self . 0)"));
     }
 
     #[test]
@@ -35726,9 +35960,9 @@ mod tests {
     #[test]
     fn test_leaf4154333333361_runtime_fallback_formatter_supports_write_fmt() {
         let helpers = runtime_path_fallback_helpers_text();
-        assert!(helpers.contains(
-            "Result write_fmt(Args&&...) const { return Result::Ok(std::make_tuple()); }"
-        ));
+        assert!(helpers.contains("Result write_fmt(Args&&... args) const"));
+        assert!(helpers.contains("append_one(std::forward<Args>(args))"));
+        assert!(helpers.contains("std::string str() const { return out_; }"));
     }
 
     #[test]
@@ -35740,18 +35974,23 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10526_runtime_to_string_supports_fmt_display_fallback() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("requires(rusty::fmt::Formatter& f) { value.fmt(f); }"));
+        assert!(helpers.contains("auto result = value.fmt(formatter);"));
+        assert!(helpers.contains("return formatter.str();"));
+    }
+
+    #[test]
     fn test_leaf415441_runtime_fallback_formatter_supports_padding_surface() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("enum class Alignment { Left, Right, Center };"));
         assert!(helpers.contains("rusty::Option<size_t> width() const"));
         assert!(helpers.contains("rusty::Option<Alignment> align() const"));
         assert!(helpers.contains("char fill() const { return ' '; }"));
-        assert!(helpers.contains(
-            "Result write_char(Ch&&) const { return Result::Ok(std::make_tuple()); }"
-        ));
-        assert!(helpers.contains(
-            "Result write_str(Str&&) const { return Result::Ok(std::make_tuple()); }"
-        ));
+        assert!(helpers.contains("Result write_char(Ch&& ch) const"));
+        assert!(helpers.contains("Result write_str(Str&& s) const"));
+        assert!(helpers.contains("out_ += rusty::to_string(std::forward<Str>(s));"));
     }
 
     #[test]
