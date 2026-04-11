@@ -2397,6 +2397,7 @@ impl CodeGen {
 
     fn emit_item_forward_decls(&mut self, items: &[syn::Item], module_depth: usize) -> bool {
         let mut emitted_names = HashSet::new();
+        let mut emitted_consts = HashSet::new();
         let mut emitted_modules = HashSet::new();
         let mut emitted_any = false;
         // Emit type declarations first so function declarations can safely reference
@@ -2422,6 +2423,30 @@ impl CodeGen {
                 }
                 _ => continue,
             }
+        }
+
+        // Emit const declarations so inline methods can reference constants even
+        // when their definitions appear later in source order.
+        for item in items {
+            let syn::Item::Const(c) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&c.attrs) {
+                continue;
+            }
+            if c.ident == "_" || self.is_rust_libtest_metadata_type(&c.ty) {
+                continue;
+            }
+            let name = escape_cpp_keyword(&c.ident.to_string());
+            if !emitted_consts.insert(name.clone()) {
+                continue;
+            }
+            let ty = self.map_type(&c.ty);
+            if type_string_has_auto_placeholder(&ty) {
+                continue;
+            }
+            self.writeln(&format!("extern const {} {};", ty, name));
+            emitted_any = true;
         }
 
         for item in items {
@@ -8072,21 +8097,43 @@ impl CodeGen {
         }
 
         let stmts = &block.stmts;
-        // Rust block-scoped `fn` items are usable across the whole block regardless
-        // of lexical order. Emit nested local functions first so same-block call sites
-        // that appear earlier in source still resolve in C++.
+        // Rust block-scoped type items are usable across the whole block regardless
+        // of lexical order. Emit local types first so nested/local functions can
+        // reference them in signatures.
+        for stmt in stmts {
+            if matches!(
+                stmt,
+                syn::Stmt::Item(
+                    syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Type(_)
+                )
+            ) {
+                self.emit_stmt(stmt, false);
+            }
+        }
+        // Rust block-scoped `fn` items are also usable across the whole block.
+        // Emit them before non-item statements so earlier call sites still resolve.
         for stmt in stmts {
             if matches!(stmt, syn::Stmt::Item(syn::Item::Fn(_))) {
                 self.emit_stmt(stmt, false);
             }
         }
 
-        let non_fn_stmts: Vec<&syn::Stmt> = stmts
+        let non_hoisted_stmts: Vec<&syn::Stmt> = stmts
             .iter()
-            .filter(|stmt| !matches!(stmt, syn::Stmt::Item(syn::Item::Fn(_))))
+            .filter(|stmt| {
+                !matches!(
+                    stmt,
+                    syn::Stmt::Item(
+                        syn::Item::Fn(_)
+                            | syn::Item::Struct(_)
+                            | syn::Item::Enum(_)
+                            | syn::Item::Type(_)
+                    )
+                )
+            })
             .collect();
-        let len = non_fn_stmts.len();
-        for (i, stmt) in non_fn_stmts.iter().enumerate() {
+        let len = non_hoisted_stmts.len();
+        for (i, stmt) in non_hoisted_stmts.iter().enumerate() {
             let is_last = i == len - 1;
             self.emit_stmt(stmt, is_last);
         }
@@ -28586,6 +28633,33 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10531_top_level_const_is_forward_declared_before_inline_use() {
+        let out = transpile_str(
+            r#"
+            struct CapacityError;
+            impl CapacityError {
+                fn cap() -> usize { CAPERROR }
+            }
+            const CAPERROR: usize = 1;
+            "#,
+        );
+        let decl_pos = out
+            .find("extern const size_t CAPERROR;")
+            .expect("missing forward declaration for top-level const");
+        let use_pos = out
+            .find("return CAPERROR;")
+            .expect("missing inline const use site");
+        assert!(
+            decl_pos < use_pos,
+            "const forward declaration must appear before inline use sites\nGot: {out}"
+        );
+        assert!(
+            out.contains("constexpr size_t CAPERROR = 1;"),
+            "expected top-level const definition to remain present\nGot: {out}"
+        );
+    }
+
+    #[test]
     fn test_leaf41543333333327111_local_new_const_uses_factory_materialization() {
         let out = transpile_str(
             r#"
@@ -34743,6 +34817,29 @@ mod tests {
         let out = transpile_str("fn outer() { fn a() {} fn b() {} a(); b(); }");
         assert!(out.contains("const rusty::SafeFn<void()> a = +[]()"));
         assert!(out.contains("const rusty::SafeFn<void()> b = +[]()"));
+    }
+
+    #[test]
+    fn test_leaf10531_block_local_type_item_is_emitted_before_local_fn_signature_use() {
+        let out = transpile_str(
+            r#"
+            fn outer() {
+                fn use_local(_x: BackshiftOnDrop) {}
+                struct BackshiftOnDrop {}
+                use_local(BackshiftOnDrop {});
+            }
+            "#,
+        );
+        let type_pos = out
+            .find("struct BackshiftOnDrop {")
+            .expect("missing block-local type declaration");
+        let fn_pos = out
+            .find("const rusty::SafeFn<void(BackshiftOnDrop)> use_local")
+            .expect("missing block-local function declaration");
+        assert!(
+            type_pos < fn_pos,
+            "block-local type declarations must be emitted before local fn signatures that use them\nGot: {out}"
+        );
     }
 
     #[test]

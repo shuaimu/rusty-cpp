@@ -4485,7 +4485,29 @@ Active work items:
      - previous head capture: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
      - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-shape-gated in field-name recovery paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
-184. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D declaration-order/local-type-order family after `10.5.30` (starting with `CAPERROR`/`BackshiftOnDrop` at `runner.cpp:823/1050`).
+184. `Leaf 10.5.31` is complete.
+   - plan/scope check: shared transpiler-only declaration-order fixes plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - root-cause findings:
+     - top-level/module consts were not forward-declared, so inline methods could reference later const definitions before declaration (`CAPERROR`).
+     - block-local function hoisting did not hoist block-local type items first, so local function signatures could reference undeclared local types (`BackshiftOnDrop`).
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - extended `emit_item_forward_decls` to emit deduplicated `extern const <type> <name>;` declarations for supported top-level/module consts.
+     - hoisted block-local `struct`/`enum`/`type` items before block-local `fn` item lowering in block emission order.
+   - focused regressions:
+     - `test_leaf10531_top_level_const_is_forward_declared_before_inline_use`
+     - `test_leaf10531_block_local_type_item_is_emitted_before_local_fn_signature_use`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10531 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-31-1775888784 --keep-work-dirs`
+   - deterministic full-matrix frontier movement:
+     - previous first hard-error family at `runner.cpp:823/1050` (`CAPERROR` undeclared + `BackshiftOnDrop` unknown type) is removed.
+     - new first hard-error family is return-type deduction mismatch (`std::nullopt_t` vs `std::optional<T>`) at `runner.cpp:1440` with adjacent repeats at `runner.cpp:1456/737`.
+   - canonical artifacts:
+     - previous head capture: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and order/type-shape-gated in core codegen paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
+185. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D return-type deduction family after `10.5.31` (starting with `runner.cpp:1440` and adjacent `runner.cpp:1456/737` where `auto` return branches mix `std::nullopt_t` and `std::optional<T>`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

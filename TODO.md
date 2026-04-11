@@ -3265,6 +3265,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-29-1775890201/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in core field-name recovery paths, with no crate-specific rewrites/scripts and no generated-text patching.
+        - [x] *done* Leaf 10.5.31: Collapse the post-10.5.30 deterministic full-matrix `arrayvec` Stage D declaration-order/local-type-order family generically (starting with `runner.cpp:823/1050` `CAPERROR` undeclared and `BackshiftOnDrop` unknown type), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only declaration-order fixes plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - top-level/module `const` items were not forward-declared, so inline method bodies emitted before later `const` definitions could reference undeclared identifiers (`CAPERROR`).
+            - block-local function items were hoisted ahead of normal statements, but block-local type items (`struct`/`enum`/`type`) were not; local function signatures that referenced later block-local types failed name lookup (`BackshiftOnDrop`).
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - extended `emit_item_forward_decls` to emit deduplicated `extern const <type> <name>;` declarations for non-test, non-libtest-metadata top-level/module consts before inline method/function uses.
+            - updated block emission ordering to hoist block-local type items before hoisted block-local function items, then emit remaining non-hoisted statements.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10531_top_level_const_is_forward_declared_before_inline_use`
+            - `test_leaf10531_block_local_type_item_is_emitted_before_local_fn_signature_use`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10531 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-31-1775888784 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `arrayvec` Stage D (`runner.cpp:823/1050` `CAPERROR`/`BackshiftOnDrop` declaration-order fallout) is removed.
+            - new first hard-error family is return-type deduction fallout in iterator/pop paths (`runner.cpp:1440` and adjacent `runner.cpp:1456/737`) where `auto` return deduces `std::nullopt_t` on one branch and `std::optional<T>` on another.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/order-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
