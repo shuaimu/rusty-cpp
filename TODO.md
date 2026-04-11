@@ -3197,7 +3197,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-10-5-27-1775885088/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes remained shared and shape-gated in AST-aware lowering/runtime storage, with no crate-specific rewrite scripts or generated-text patching.
-        - [ ] Leaf 10.5.28: Collapse the post-10.5.27 deterministic semver Stage E `test_eq_hash` panic+double-free family generically (starting with hash/equality assertion mismatch and follow-on ownership teardown abort), add fixture-agnostic regressions, then re-run semver parity.
+        - [x] *done* Leaf 10.5.28: Collapse the post-10.5.27 deterministic semver Stage E `test_eq_hash` panic+double-free family generically (starting with hash/equality assertion mismatch and follow-on ownership teardown abort), add fixture-agnostic regressions, then re-run semver parity.
+          - Plan/scope check: shared transpiler/runtime parity fixes plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - `test_eq_hash` panic was caused by runtime hash fallback hashing range-like owners by object bytes/pointer state instead of element values.
+            - follow-on teardown abort family was caused by generated `Drop`-struct default move-assignment; tuple assignment in parser paths moved ownership without forgotten-address transfer, so temporary teardown freed live storage (`Version::from_str`/`test_parse` path).
+          - Implemented shared fixes:
+            - `transpiler/src/codegen.rs`: runtime hash fallback now hashes range-like values (`std::begin/std::end`) element-by-element before `std::hash`/byte fallback.
+            - `transpiler/src/codegen.rs`: `Drop`-struct Rule-of-Five emission now generates custom move-assignment reconstruction (`this->~T(); new (this) T(std::move(other));`) instead of defaulted move assignment, preserving forgotten-address transfer via move constructor.
+            - `transpiler/src/codegen.rs`: kept tuple payload consuming-local detection and runtime match move-emplacement lowering aligned with this ownership family.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10528_runtime_hash_helper_hashes_ranges_by_elements`
+            - `test_leaf10528_tuple_payload_consumes_local_binding_non_const`
+            - `test_leaf10528_drop_struct_move_assignment_reconstructs_via_move_ctor`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10528 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/semver/Cargo.toml --work-dir /tmp/rusty-parity-semver-10-5-28-full-1775886945 --keep-work-dir`
+          - Deterministic frontier movement:
+            - previous Stage E `test_eq_hash FAILED: panic` head is removed; `test_eq_hash PASSED`.
+            - previous follow-on ownership teardown abort (`free(): double free detected in tcache 2`, first reproducing at `test_parse`) is removed.
+            - semver parity now reaches full Stage E success (`32 passed, 0 failed`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-semver-10-5-28-full-1775886945/{baseline.txt,build.log,run.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.3): fixes remained shared and shape-gated in core codegen/runtime helper paths, with no crate-specific rewrites and no generated-text patching.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

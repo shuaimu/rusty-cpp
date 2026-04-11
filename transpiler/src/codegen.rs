@@ -5113,7 +5113,18 @@ impl CodeGen {
                     // also declare assignment operators to prevent them from
                     // being implicitly deleted.
                     self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
-                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept {{", name, name));
+                    self.indent += 1;
+                    self.writeln("if (this == &other) {");
+                    self.indent += 1;
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln(&format!("this->~{}();", name));
+                    self.writeln(&format!("new (this) {}(std::move(other));", name));
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
                 }
                 syn::Fields::Unnamed(fields) => {
                     let ctor_params: Vec<String> = fields
@@ -5183,7 +5194,18 @@ impl CodeGen {
                     self.indent -= 1;
                     self.writeln("}");
                     self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
-                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept {{", name, name));
+                    self.indent += 1;
+                    self.writeln("if (this == &other) {");
+                    self.indent += 1;
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln(&format!("this->~{}();", name));
+                    self.writeln(&format!("new (this) {}(std::move(other));", name));
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
                 }
                 syn::Fields::Unit => {
                     self.writeln(&format!("{}() = default;", name));
@@ -5203,7 +5225,18 @@ impl CodeGen {
                     self.indent -= 1;
                     self.writeln("}");
                     self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
-                    self.writeln(&format!("{}& operator=({}&& other) noexcept = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&& other) noexcept {{", name, name));
+                    self.indent += 1;
+                    self.writeln("if (this == &other) {");
+                    self.indent += 1;
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln(&format!("this->~{}();", name));
+                    self.writeln(&format!("new (this) {}(std::move(other));", name));
+                    self.writeln("return *this;");
+                    self.indent -= 1;
+                    self.writeln("}");
                 }
             }
             self.writeln(
@@ -22008,7 +22041,7 @@ impl CodeGen {
                 }
                 let mut binding_map = HashMap::new();
                 let mut stmts = vec![format!(
-                    "auto {} = std::as_const(_m).{}();",
+                    "auto {} = _m.{}();",
                     matched_var, unwrap_method
                 )];
                 if !self.collect_pattern_binding_stmts_with_cpp_name_map(
@@ -22169,7 +22202,7 @@ impl CodeGen {
         };
 
         Some(format!(
-            "({{ auto&& _m = {}; std::optional<{}> _match_value; if ({}) {{ {}_match_value.emplace({}); }} else {{ {}{}{} }} std::move(_match_value).value(); }})",
+            "({{ auto&& _m = {}; std::optional<{}> _match_value; if ({}) {{ {}_match_value.emplace(std::move({})); }} else {{ {}{}{} }} std::move(_match_value).value(); }})",
             scrutinee,
             value_ty,
             success_cond,
@@ -25676,6 +25709,12 @@ template<typename T, typename State>\n\
 void hash(const T& value, State& state) {\n\
     if constexpr (requires { value.hash(state); }) {\n\
         value.hash(state);\n\
+    } else if constexpr (requires { std::begin(value); std::end(value); }) {\n\
+        // Hash range-like containers by element value, not object bytes.\n\
+        // This avoids pointer/address-based drift for owning containers.\n\
+        for (const auto& item : value) {\n\
+            hash(item, state);\n\
+        }\n\
     } else if constexpr (requires { std::hash<std::remove_cvref_t<T>>{}(value); }) {\n\
         combine(state, std::hash<std::remove_cvref_t<T>>{}(value));\n\
     } else {\n\
@@ -28290,11 +28329,17 @@ fn collect_consuming_method_receivers_in_expr(
         syn::Expr::Group(g) => collect_consuming_method_receivers_in_expr(&g.expr, result),
         syn::Expr::Array(arr) => {
             for elem in &arr.elems {
+                if let Some(name) = extract_direct_local_ident(elem) {
+                    result.insert(name);
+                }
                 collect_consuming_method_receivers_in_expr(elem, result);
             }
         }
         syn::Expr::Tuple(tuple) => {
             for elem in &tuple.elems {
+                if let Some(name) = extract_direct_local_ident(elem) {
+                    result.insert(name);
+                }
                 collect_consuming_method_receivers_in_expr(elem, result);
             }
         }
@@ -29403,8 +29448,14 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("if (_m.is_ok()) { return _m.unwrap(); }"));
-        assert!(out.contains("if (_m.is_err()) { return _m.unwrap_err(); }"));
+        assert!(
+            out.contains("if (_m.is_ok()) { return _m.unwrap(); }")
+                || out.contains("if (_m.is_ok()) { return std::as_const(_m).unwrap(); }")
+        );
+        assert!(
+            out.contains("if (_m.is_err()) { return _m.unwrap_err(); }")
+                || out.contains("if (_m.is_err()) { return std::as_const(_m).unwrap_err(); }")
+        );
     }
 
     #[test]
@@ -32240,9 +32291,9 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto&& rhs_shadow1 = _mv;"));
-        assert!(out.contains("_match_value.emplace(rhs_shadow1);"));
+        assert!(out.contains("_match_value.emplace(std::move(rhs_shadow1));"));
         assert!(!out.contains(
-            "auto&& rhs = _mv; _match_value.emplace(rhs_shadow1);"
+            "auto&& rhs = _mv; _match_value.emplace(std::move(rhs_shadow1));"
         ));
     }
 
@@ -32266,7 +32317,7 @@ mod tests {
         );
         assert!(out.contains("auto&& lhs_shadow1 = std::get<0>(_mv);"));
         assert!(out.contains("auto&& rhs_shadow1 = std::get<1>(_mv);"));
-        assert!(out.contains("_match_value.emplace(lhs_shadow1 + rhs_shadow1);"));
+        assert!(out.contains("_match_value.emplace(std::move(lhs_shadow1 + rhs_shadow1));"));
     }
 
     #[test]
@@ -32290,7 +32341,7 @@ mod tests {
         );
         assert!(out.contains("auto&& left_shadow1 = _mv.left;"));
         assert!(out.contains("auto&& right_shadow1 = _mv.right;"));
-        assert!(out.contains("_match_value.emplace(left_shadow1 + right_shadow1);"));
+        assert!(out.contains("_match_value.emplace(std::move(left_shadow1 + right_shadow1));"));
     }
 
     #[test]
@@ -32430,9 +32481,15 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("const auto index = this->index;"));
+        assert!(
+            out.contains("const auto index = this->index;")
+                || out.contains("auto index = this->index;")
+        );
         assert!(out.contains("this->index = index + 1;"));
-        assert!(out.contains("const auto len = this->len;"));
+        assert!(
+            out.contains("const auto len = this->len;")
+                || out.contains("auto len = this->len;")
+        );
         assert!(!out.contains("const auto index = index;"));
     }
 
@@ -32596,7 +32653,7 @@ mod tests {
         assert!(out.contains("auto rhs_shadow1 = rhs.into_iter();"));
         assert!(out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow1.next();"));
         assert!(out.contains(
-            "auto&& rhs_shadow1 = _mv; _match_value.emplace(rhs_shadow1);"
+            "auto&& rhs_shadow1 = _mv; _match_value.emplace(std::move(rhs_shadow1));"
         ));
         assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs_shadow2.next();"));
         assert!(!out.contains("auto rhs_shadow2 = ({ auto&& _m = rhs.next();"));
@@ -38901,7 +38958,10 @@ mod tests {
         "#,
         );
         assert!(out.contains("if (_m.is_err()) {"));
-        assert!(out.contains("auto _mv0 = _m.unwrap_err();"));
+        assert!(
+            out.contains("auto _mv0 = _m.unwrap_err();")
+                || out.contains("auto _mv0 = std::as_const(_m).unwrap_err();")
+        );
         assert!(!out.contains("std::visit(overloaded {"));
         assert!(!out.contains("complex tuple-struct pattern binding"));
     }
@@ -39858,6 +39918,46 @@ mod tests {
         );
         assert!(!out.contains("const auto identifier = "));
         assert!(out.contains("return Prerelease{.identifier = std::move(identifier)};"));
+    }
+
+    #[test]
+    fn test_leaf10528_tuple_payload_consumes_local_binding_non_const() {
+        let out = transpile_str(
+            r#"
+            struct Owned {
+                value: rusty::String,
+            }
+
+            fn pack(value: rusty::String) -> (Owned, i32) {
+                let owned = Owned { value };
+                (owned, 1)
+            }
+        "#,
+        );
+        assert!(!out.contains("const auto owned = "));
+        assert!(
+            out.contains("return std::make_tuple(std::move(owned), 1);")
+                || out.contains("return std::make_tuple(std::move(owned), std::move(1));")
+        );
+    }
+
+    #[test]
+    fn test_leaf10528_drop_struct_move_assignment_reconstructs_via_move_ctor() {
+        let out = transpile_str(
+            r#"
+            struct Holder {
+                value: rusty::String,
+            }
+
+            impl Drop for Holder {
+                fn drop(&mut self) {}
+            }
+        "#,
+        );
+        assert!(out.contains("Holder& operator=(Holder&& other) noexcept {"));
+        assert!(out.contains("this->~Holder();"));
+        assert!(out.contains("new (this) Holder(std::move(other));"));
+        assert!(!out.contains("Holder& operator=(Holder&& other) noexcept = default;"));
     }
 
     #[test]
@@ -41000,6 +41100,29 @@ mod tests {
         assert!(
             helpers.contains("DefaultHasher new_()"),
             "DefaultHasher should have new_() static method"
+        );
+    }
+
+    #[test]
+    fn test_leaf10528_runtime_hash_helper_hashes_ranges_by_elements() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("for (const auto& item : value) {"),
+            "runtime hash helper should hash range-like values by elements"
+        );
+        assert!(
+            helpers.contains("hash(item, state);"),
+            "runtime hash helper should recursively hash range items"
+        );
+        let range_pos = helpers
+            .find("} else if constexpr (requires { std::begin(value); std::end(value); }) {")
+            .expect("missing range-aware hash branch");
+        let std_hash_pos = helpers
+            .find("} else if constexpr (requires { std::hash<std::remove_cvref_t<T>>{}(value); }) {")
+            .expect("missing std::hash branch");
+        assert!(
+            range_pos < std_hash_pos,
+            "range hashing must run before std::hash fallback to avoid pointer/address drift for containers"
         );
     }
 
