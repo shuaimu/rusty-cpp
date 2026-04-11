@@ -6972,7 +6972,7 @@ impl CodeGen {
                     continue;
                 };
                 let name = match pat_type.pat.as_ref() {
-                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                     _ => format!("_arg{}", idx),
                 };
                 params.push(format!("auto {}", name));
@@ -7132,7 +7132,7 @@ impl CodeGen {
             };
             let ty = self.map_type(&pat_type.ty);
             let param_name = match pat_type.pat.as_ref() {
-                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
             };
             params.push(format!("{} {}", ty, param_name));
@@ -8396,7 +8396,7 @@ impl CodeGen {
                 syn::FnArg::Typed(pat_type) => {
                     let ty = self.map_type(&pat_type.ty);
                     let param_name = match pat_type.pat.as_ref() {
-                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => "_".to_string(),
                     };
                     Some(format!("{} {}", ty, param_name))
@@ -11968,8 +11968,9 @@ impl CodeGen {
                 self.emit_lit(&lit_pat.lit)
             ))),
             syn::Pat::Path(path_pat) => {
-                let value = self.emit_path_to_string(&path_pat.path);
-                Some(Some(format!("{} == {}", value_expr, value)))
+                Some(Some(
+                    self.path_pattern_value_condition(&path_pat.path, value_expr),
+                ))
             }
             syn::Pat::Range(range_pat) => {
                 let mut range_conds = Vec::new();
@@ -12022,8 +12023,8 @@ impl CodeGen {
                             ));
                         }
                         syn::Pat::Path(path_pat) => {
-                            let value = self.emit_path_to_string(&path_pat.path);
-                            sub_conds.push(format!("{} == {}", value_expr, value));
+                            sub_conds
+                                .push(self.path_pattern_value_condition(&path_pat.path, value_expr));
                         }
                         syn::Pat::Range(range_pat) => {
                             let mut range_conds = Vec::new();
@@ -12061,6 +12062,21 @@ impl CodeGen {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn path_pattern_value_condition(&self, path: &syn::Path, value_expr: &str) -> String {
+        // Data-enum unit variants are represented as std::variant alternatives,
+        // not associated enum constants; match them by active alternative type.
+        let variant_cpp = self.variant_pattern_cpp_type(path, None);
+        let is_data_enum_variant = self
+            .extract_variant_pattern_enum_name(path, &variant_cpp)
+            .is_some_and(|name| self.data_enum_types.contains(&name));
+        if is_data_enum_variant {
+            format!("std::holds_alternative<{}>({})", variant_cpp, value_expr)
+        } else {
+            let value = self.emit_path_to_string(path);
+            format!("{} == {}", value_expr, value)
         }
     }
 
@@ -27804,7 +27820,7 @@ impl CodeGen {
                 syn::FnArg::Typed(pat_type) => {
                     let ty = self.map_type(&pat_type.ty);
                     let name = match pat_type.pat.as_ref() {
-                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => "_".to_string(),
                     };
                     format!("{} {}", ty, name)
@@ -33313,6 +33329,39 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_holds_alternative() {
+        let out = transpile_str(
+            r#"
+            enum E {
+                A,
+                B(i32),
+            }
+            fn f(value: Result<i32, E>) -> i32 {
+                match value {
+                    Err(E::A) => 1,
+                    other => 2,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_err())"),
+            "Result payload data-enum path pattern should use runtime is_err dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::holds_alternative<E_A>(_mv0)"),
+            "data-enum unit-variant payload pattern should lower via holds_alternative, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("_mv0 == E::A"),
+            "data-enum unit-variant payload pattern should not lower to enum-constant equality, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo() {
         let out = transpile_str(
             r#"
@@ -33840,6 +33889,24 @@ mod tests {
         // new → new_, delete → delete_
         assert!(out.contains("static Widget new_()"));
         assert!(out.contains("void delete_()"));
+    }
+
+    #[test]
+    fn test_leaf519_keyword_parameter_names_are_escaped_in_signatures() {
+        let out = transpile_str(
+            r#"
+            fn f(inline: i32) -> i32 { inline }
+            struct S {}
+            impl S {
+                fn g(&self, inline: i32) -> i32 { inline }
+            }
+            "#,
+        );
+        assert!(out.contains("int32_t f(int32_t inline_)"));
+        assert!(out.contains("int32_t g(int32_t inline_) const {"));
+        assert!(out.contains("return inline_;"));
+        assert!(!out.contains("int32_t f(int32_t inline)"));
+        assert!(!out.contains("int32_t g(int32_t inline) const"));
     }
 
     #[test]

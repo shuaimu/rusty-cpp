@@ -4175,8 +4175,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stay shared and AST/runtime-surface-gated; no crate-specific ad-hoc scripts and no generated-output text patching.
-        - [ ] Leaf 5.1.9: `smallvec` Stage D enum-surface/identifier compile-head family collapse
-          - Collapse the post-5.1.8 deterministic `smallvec` Stage D family (starting at `runner.cpp:1253` with `CollectionAllocErr::CapacityOverflow` enum-surface mismatch, then `inline` identifier emission fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.9: `smallvec` Stage D enum-surface/identifier compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope, so no additional decomposition was required.
+          - Deterministic failure family addressed (shared transpiler fix, no crate-specific scripts):
+            - runtime payload path-pattern lowering now distinguishes data-enum unit variants from C-like enum constants and emits `std::holds_alternative<...>(...)` checks for data-enum unit variant arms (instead of invalid equality against enum constants).
+            - function/method parameter identifier emission now consistently escapes C++ keywords across free functions, impl methods, trait default-method fallback emission, and extension-trait free-function signatures.
+          - Implemented in `transpiler/src/codegen.rs`:
+            - added `path_pattern_value_condition(...)` and wired tuple/runtime path-pattern condition lowering through it.
+            - escaped typed parameter identifiers in `map_fn_params(...)`, impl-method signature parameter emission, trait default-method fallback parameter emission, and extension-trait free-function parameter emission.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_holds_alternative`
+            - `test_leaf519_keyword_parameter_names_are_escaped_in_signatures`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf519 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-9-20260411a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.8 head at `runner.cpp:1253` (`CollectionAllocErr::CapacityOverflow` enum-surface mismatch) and downstream `inline` parameter-identifier fallout is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:2128` (`typename SmallVec::IntoIter<A> into_iter()` dependent associated-type surface), followed by `MaybeUninit::uninit()` template-arity surface fallout and `SmallVecData_from_inline` constructor-shape fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-9-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-9-20260411a/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/context-gated, with no crate-specific scripts and no generated-output text patching.
+        - [ ] Leaf 5.1.10: `smallvec` Stage D associated-type/constructor-surface compile-head family collapse
+          - Collapse the post-5.1.9 deterministic `smallvec` Stage D family (starting at `runner.cpp:2128` with `SmallVec::IntoIter<A>` associated-type projection surface, then `MaybeUninit`/`SmallVecData::from_inline` constructor-shape fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

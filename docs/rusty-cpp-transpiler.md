@@ -2303,7 +2303,9 @@ Current status snapshot:
 12. Focused `smallvec` repro after `Leaf 5.1.7` (`/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/...`) collapses the prior `runner.cpp:1065` incomplete-type/declaration-order family from the first deterministic slot.
 13. Focused `smallvec` repro after `Leaf 5.1.8` (`/tmp/rusty-parity-matrix-5-1-8-20260411b/smallvec/...`) collapses the prior post-5.1.7 namespace/import/runtime-surface head (`std::hint`, `std::ops`, `LayoutErr`, `mem::align_of`, `Layout::from_size_align`, invalid `rusty::Vec::extend_from_slice` static path) from the first deterministic slot.
 14. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1253` (`CollectionAllocErr::CapacityOverflow` enum-surface mismatch), followed by downstream `inline` identifier emission and associated-type/name-resolution fallout.
-15. Next active item is `Leaf 5.1.9` to collapse this post-5.1.8 `smallvec` Stage D family; guardrail check against §11 remains satisfied (shared AST/runtime-surface-aware fixes only, no crate-specific ad-hoc scripts or generated-output text patching).
+15. Focused `smallvec` repro after `Leaf 5.1.9` (`/tmp/rusty-parity-matrix-5-1-9-20260411a/smallvec/...`) collapses the prior post-5.1.8 enum-surface/identifier head (`CollectionAllocErr::CapacityOverflow` path-pattern mismatch at `runner.cpp:1253`, then `inline` keyword-identifier signature fallout) from the first deterministic slot.
+16. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2128` (`typename SmallVec::IntoIter<A> into_iter()` associated-type projection surface), followed by constructor/template-shape fallout (`MaybeUninit::uninit()` missing template argument surface and `SmallVecData_from_inline` symbol-shape fallout).
+17. Next active item is `Leaf 5.1.10` to collapse this post-5.1.9 `smallvec` Stage D associated-type/constructor-surface family; guardrail check against §11 remains satisfied (shared AST/runtime-surface-aware fixes only, no crate-specific ad-hoc scripts or generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
