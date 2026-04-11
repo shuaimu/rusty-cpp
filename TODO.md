@@ -2920,6 +2920,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - Canonical artifacts:
               - `/tmp/rusty-parity-matrix-10-5-14-1775869000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and AST/type-context-gated in `while let` lowering, with no generated-text patching and no crate-specific rewrites/scripts.
+        - [x] *done* Leaf 10.5.15: Collapse the post-10.5.14 deterministic semver Stage D checked-arithmetic type-shape family generically (starting with `runner.cpp:1989` `checked_add(int&, uint64_t)` mismatch in `parse::numeric_identifier` chained arithmetic), add fixture-agnostic regressions, then re-run semver parity.
+          - [x] *done* Leaf 10.5.15.1: Implement shared transpiler fix for checked arithmetic method lowering (no crate-specific scripts): normalize checked-op argument type to receiver numeric type in generated `rusty::checked_*` calls so mixed-width RHS literals/casts do not break template deduction (`T, T`) in shared runtime helpers.
+            - Plan/scope check: transpiler-only checked-arithmetic lowering update + focused regression stayed well below the <1000 LOC guardrail and required no additional decomposition.
+            - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+              - checked method-call lowering (`checked_add`/`checked_sub`/`checked_mul`/`checked_div`) now normalizes RHS to receiver value type (`std::remove_cvref_t<decltype((receiver))>`) before calling `rusty::checked_*`, preventing template deduction failures from mixed-width RHS expressions/casts.
+            - Added focused fixture-agnostic regression:
+              - `transpiler/src/codegen.rs`:
+                - `test_leaf10515_checked_add_rhs_is_normalized_to_receiver_type`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf10515 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler leaf4154412 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+          - [x] *done* Leaf 10.5.15.2: Re-run semver parity after 10.5.15.1, record deterministic first-head movement with canonical artifacts, and update active-frontier docs/TODO status.
+            - Re-ran semver parity:
+              - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-15-1775869800 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:1989` (`checked_add(int&, uint64_t)` mismatch in `parse::numeric_identifier`) is removed.
+              - new deterministic Stage D head starts at `runner.cpp:2060` (`std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`), with adjacent downstream comparator/local-deduction fallback errors later in `runner.cpp:2090+`.
+            - Canonical artifacts:
+              - `/tmp/rusty-parity-matrix-10-5-15-1775869800/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11.2/§11.3): fix stayed shared and type-context-gated in core checked-arithmetic lowering, with no generated-text patching and no crate-specific rewrites/scripts.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

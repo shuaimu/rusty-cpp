@@ -15551,7 +15551,11 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+            // `rusty::checked_*` helpers are `T, T` templates; normalize mixed-width
+            // RHS expressions to receiver type so template deduction stays stable.
+            let receiver_value_ty = format!("std::remove_cvref_t<decltype(({}))>", receiver);
+            let rhs = format!("static_cast<{}>({})", receiver_value_ty, args[0]);
+            return format!("rusty::{}({}, {})", method_name, receiver, rhs);
         }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
@@ -33875,6 +33879,21 @@ mod tests {
         );
         assert!(out.contains("rusty::checked_mul("),
             "checked_mul should emit rusty::checked_mul, got: {}", out);
+    }
+
+    #[test]
+    fn test_leaf10515_checked_add_rhs_is_normalized_to_receiver_type() {
+        let out = transpile_str(
+            r#"
+            fn f(value: i32, digit: u8) -> Option<i32> {
+                value.checked_add((digit - b'0') as u64)
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::checked_add(value, static_cast<std::remove_cvref_t<decltype((value))>>("),
+            "checked_add RHS should be normalized to receiver type, got: {}", out);
+        assert!(out.contains("static_cast<uint64_t>"),
+            "source cast shape should be preserved under RHS normalization, got: {}", out);
     }
 
     #[test]

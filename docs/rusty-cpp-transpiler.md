@@ -4171,7 +4171,24 @@ Active work items:
      - new deterministic head starts at `runner.cpp:1989` in `parse::numeric_identifier` (`checked_add(int&, uint64_t)` type-shape mismatch), with adjacent downstream runtime Option `std::visit` fallback still present later at `runner.cpp:2060`.
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-14-1775869000/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fix stayed shared and AST/type-context-gated in core `while let` lowering, with no crate-specific rewrites/scripts and no generated-text patching.
-168. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.14` (`runner.cpp:1989` in `parse::numeric_identifier` `checked_add(int&, uint64_t)` type-shape mismatch, with adjacent downstream runtime Option `std::visit` fallback at `runner.cpp:2060`).
+168. `Leaf 10.5.15` is complete.
+   - plan/scope check: shared transpiler-only checked-arithmetic lowering update + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+     - checked method-call lowering (`checked_add`/`checked_sub`/`checked_mul`/`checked_div`) now normalizes RHS argument type to receiver value type (`std::remove_cvref_t<decltype((receiver))>`) before calling shared runtime helpers (`rusty::checked_*`), preventing mixed-width RHS expressions from breaking template deduction.
+   - focused regression:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10515_checked_add_rhs_is_normalized_to_receiver_type`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10515 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf4154412 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-15-1775869800 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family at `runner.cpp:1989` (`checked_add(int&, uint64_t)` mismatch in `parse::numeric_identifier`) is removed.
+     - new deterministic head starts at `runner.cpp:2060` (`std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`), with adjacent comparator/local-deduction fallback errors later at `runner.cpp:2090+`.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-15-1775869800/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fix stayed shared and type-context-gated in core checked-arithmetic lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+169. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.15` (`runner.cpp:2060` `std::visit` emitted over runtime `rusty::Option<const uint8_t&>` in `parse::identifier`, with adjacent downstream comparator/local-deduction fallback at `runner.cpp:2090+`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 
