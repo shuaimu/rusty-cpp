@@ -27326,9 +27326,64 @@ impl CodeGen {
         None
     }
 
+    fn try_map_dependent_assoc_item_projection_type(&self, tp: &syn::TypePath) -> Option<String> {
+        if !self.should_soften_dependent_assoc_mode() {
+            return None;
+        }
+
+        let owner_ty = if let Some(qself) = &tp.qself {
+            let assoc_segments: Vec<String> = tp
+                .path
+                .segments
+                .iter()
+                .skip(qself.position)
+                .map(|seg| seg.ident.to_string())
+                .collect();
+            if assoc_segments.as_slice() != ["Item"] {
+                return None;
+            }
+            let syn::Type::Path(owner_tp) = qself.ty.as_ref() else {
+                return None;
+            };
+            if owner_tp.qself.is_some() || owner_tp.path.segments.len() != 1 {
+                return None;
+            }
+            let owner_name = owner_tp.path.segments[0].ident.to_string();
+            if !self.is_type_param_in_scope(&owner_name) {
+                return None;
+            }
+            (*qself.ty).clone()
+        } else {
+            if tp.path.segments.len() != 2 {
+                return None;
+            }
+            let owner_seg = tp.path.segments.first()?;
+            let assoc_seg = tp.path.segments.iter().nth(1)?;
+            if assoc_seg.ident != "Item" {
+                return None;
+            }
+            let owner_name = owner_seg.ident.to_string();
+            if !self.is_type_param_in_scope(&owner_name) {
+                return None;
+            }
+            syn::parse_str::<syn::Type>(&owner_name).ok()?
+        };
+        let owner_cpp = self.map_type(&owner_ty);
+        if owner_cpp == "auto" || owner_cpp.contains("auto") {
+            return None;
+        }
+        Some(format!("rusty::detail::associated_item_t<{}>", owner_cpp))
+    }
+
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
+                if let Some(mapped_assoc_item) =
+                    self.try_map_dependent_assoc_item_projection_type(tp)
+                {
+                    return mapped_assoc_item;
+                }
+
                 // Handle qualified self types: <T as Trait>::Assoc → T::Assoc
                 if let Some(qself) = &tp.qself {
                     let self_type = self.normalize_qself_base_for_assoc(&self.map_type(&qself.ty));
@@ -47141,6 +47196,87 @@ mod tests {
         assert!(
             !out.contains("std::move(rusty::mem::drop)"),
             "function item callables should not be moved, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5117_dependent_assoc_item_projection_uses_runtime_helper_alias() {
+        let out = transpile_str_module(
+            r#"
+            trait ArrayLike {
+                type Item;
+            }
+
+            fn pass_item<A: ArrayLike>(value: A::Item) -> A::Item {
+                value
+            }
+            "#,
+            "leaf5117",
+        );
+
+        assert!(
+            out.contains("rusty::detail::associated_item_t<A> pass_item("),
+            "dependent A::Item projection should lower through associated_item_t helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("typename A::Item"),
+            "dependent assoc Item projection should avoid raw typename A::Item surface, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5117_qself_assoc_item_projection_uses_runtime_helper_alias() {
+        let out = transpile_str_module(
+            r#"
+            trait ArrayLike {
+                type Item;
+            }
+
+            fn pass_item_qself<A: ArrayLike>(value: <A as ArrayLike>::Item) -> <A as ArrayLike>::Item {
+                value
+            }
+            "#,
+            "leaf5117_qself",
+        );
+
+        assert!(
+            out.contains("rusty::detail::associated_item_t<A> pass_item_qself("),
+            "dependent qself Item projection should lower through associated_item_t helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("typename A::Item"),
+            "qself-dependent Item projection should avoid raw typename A::Item surface, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5117_non_dependent_module_item_path_is_not_rewritten() {
+        let out = transpile_str_module(
+            r#"
+            mod m {
+                pub struct Item;
+            }
+
+            fn pass_item(value: m::Item) -> m::Item {
+                value
+            }
+            "#,
+            "leaf5117_module_item",
+        );
+
+        assert!(
+            out.contains("m::Item pass_item("),
+            "non-dependent module Item path should be preserved, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("associated_item_t<m"),
+            "module item paths must not be rewritten via associated_item_t helper, got:\n{}",
             out
         );
     }

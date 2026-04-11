@@ -4351,8 +4351,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-16-20260411-171943/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact: `/tmp/rusty-parity-matrix-5-1-16-20260411-171943/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes remain shared AST/runtime-surface-aware lowering with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.17: `smallvec` Stage D `A::Item` associated-type shape collapse for `std::array` owner instantiations
-          - Collapse the new post-5.1.16 deterministic `smallvec` Stage D family beginning at `runner.cpp:1371` (`no type named 'Item' in 'std::array<size_t, 0>'`) by hardening associated-type owner-shape lowering for array-like owners, add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.17: `smallvec` Stage D `A::Item` associated-type shape collapse for `std::array` owner instantiations
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC target; no further decomposition was required.
+          - Deterministic failure family addressed (shared transpiler/runtime-surface fixes only, no crate-specific scripts):
+            - dependent associated-type `Item` projections (`A::Item`, `<A as Trait>::Item`) now lower through a shared runtime helper alias in softened dependent-assoc mode (`rusty::detail::associated_item_t<...>`) when owner shape is an in-scope type parameter.
+            - qself/owner-shape hardening avoids rewriting non-dependent paths and avoids `Self`/`auto` owner fallback surfaces in contexts where explicit dependent aliasing should remain unchanged.
+            - runtime associated-item helper support now resolves `Container::Item` first and falls back to `Container::value_type` for array-like owners (`std::array<...>`), collapsing the previous `std::array` no-`Item` compile head.
+          - Added focused regressions:
+            - `test_leaf5117_dependent_assoc_item_projection_uses_runtime_helper_alias`
+            - `test_leaf5117_qself_assoc_item_projection_uses_runtime_helper_alias`
+            - `test_leaf5117_non_dependent_module_item_path_is_not_rewritten`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5117 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-17-20260411a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.16 first-head family at `runner.cpp:1371` (`no type named 'Item' in 'std::array<size_t, 0>'` / adjacent `A::Item` surfaces) is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:2418` (`no match for operator==` between `SmallVec<std::array<size_t,0>>` and `std::array<int,1>`), followed by downstream string-literal ownership/equality-shape fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-17-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-17-20260411a/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in core codegen/runtime helper paths with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.18: `smallvec` Stage D equality/literal-surface compile-head family collapse
+          - Collapse the new post-5.1.17 deterministic `smallvec` Stage D family beginning at `runner.cpp:2418` (`SmallVec<std::array<size_t,0>> == std::array<int,1>` mismatch), harden shared equality/literal lowering surfaces, add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

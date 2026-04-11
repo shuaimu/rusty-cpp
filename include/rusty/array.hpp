@@ -231,6 +231,35 @@ struct has_container_item : std::false_type {};
 template<typename Container>
 struct has_container_item<Container, std::void_t<container_item_t<Container>>> : std::true_type {};
 
+template<typename Container>
+using container_value_type_t = typename std::remove_reference_t<Container>::value_type;
+
+template<typename Container, typename = void>
+struct has_container_value_type : std::false_type {};
+
+template<typename Container>
+struct has_container_value_type<Container, std::void_t<container_value_type_t<Container>>>
+    : std::true_type {};
+
+template<
+    typename Container,
+    bool HasItem = has_container_item<Container>::value,
+    bool HasValueType = has_container_value_type<Container>::value>
+struct associated_item_impl;
+
+template<typename Container, bool HasValueType>
+struct associated_item_impl<Container, true, HasValueType> {
+    using type = std::remove_reference_t<container_item_t<Container>>;
+};
+
+template<typename Container>
+struct associated_item_impl<Container, false, true> {
+    using type = std::remove_reference_t<container_value_type_t<Container>>;
+};
+
+template<typename Container>
+using associated_item_t = typename associated_item_impl<Container>::type;
+
 template<typename Ptr>
 using raw_ptr_t = std::remove_cv_t<std::remove_reference_t<Ptr>>;
 
