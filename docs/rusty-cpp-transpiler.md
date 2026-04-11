@@ -2236,6 +2236,7 @@ Integrated outcomes:
 - duplicate methods are resolved by emitted C++ signature shape.
 - forward declarations are emitted with guards to avoid alias-dependent type-order failures.
 - forward declaration passes now select enum declaration surface by emitted shape (`enum class` for C-like enums, wrapper `struct` for recursive/impl-backed data enums, and alias-compatible variant forward declarations for alias-emitted data enums) and apply dependency-aware module ordering without delayable-namespace deferral, so sibling/nested namespace type surfaces are available before dependent alias/function signatures.
+- split-module deferred emission now suppresses nested function bodies recursively in first pass and emits those bodies once in deferred pass, preventing early incomplete-type uses and duplicate nested function definitions in split module trees.
 - `#[cfg(test)]` filtering and wrapper discovery were hardened for parity-test paths.
 - deterministic module naming and work-dir artifact isolation are enforced for matrix reruns.
 
@@ -2296,7 +2297,9 @@ Current status snapshot:
 9. Focused `semver` repro after `Leaf 5.1.5` now passes (`total=1`, `pass=1`, `fail=0`): `/tmp/rusty-parity-matrix-5-1-5-20260411b/semver/{baseline.txt,build.log,run.log,matrix.log}`; the prior declaration-surface head (`struct ErrorKind;` colliding with `using ErrorKind = std::variant<...>`) is collapsed by enum-forward-declaration shape alignment.
 10. Full ten-crate matrix repro after `Leaf 5.1.6` (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-5-1-6-20260411a --keep-work-dirs`) advances deterministic first failure to `smallvec` (`total=8`, `pass=7`, `fail=1` before remaining crates), with canonical artifacts at `/tmp/rusty-parity-matrix-5-1-6-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`.
 11. New deterministic Stage D head begins at `runner.cpp:1065` in `smallvec`: incomplete-type/declaration-order fallout on `SmallVec<std::array<PanicOnDoubleDrop, 0>>` (`has initializer but incomplete type` and immediate nested-name-specifier incomplete-type errors), followed by downstream `catch_unwind` call-shape fallout.
-12. Next active item is `Leaf 5.1.7` to collapse this `smallvec` Stage D family; guardrail check against §11 remains satisfied (deterministic evidence capture only in 5.1.6, with no crate-specific ad-hoc scripts or generated-output text patching).
+12. Focused `smallvec` repro after `Leaf 5.1.7` (`/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/...`) collapses the prior `runner.cpp:1065` incomplete-type/declaration-order family from the first deterministic slot.
+13. New first deterministic Stage D head in `smallvec` now starts at namespace/import/runtime-surface fallout beginning with `runner.cpp:1209` (`using std::hint::unreachable_unchecked;` unresolved), followed by `std::ops`, `LayoutErr`, and related downstream diagnostics.
+14. Next active item is `Leaf 5.1.8` to collapse this post-5.1.7 `smallvec` Stage D family; guardrail check against §11 remains satisfied (emitter-structure-aware generic lowering only, no crate-specific ad-hoc scripts or generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

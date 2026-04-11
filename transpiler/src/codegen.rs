@@ -107,6 +107,9 @@ pub struct CodeGen {
     merged_method_using_namespaces: Vec<String>,
     /// When true, emit_mod only emits function items (deferred second pass).
     deferred_module_function_pass: bool,
+    /// When true, first-pass module emission suppresses function definitions
+    /// recursively so nested modules in split roots do not emit early bodies.
+    defer_module_functions_recursively: bool,
     /// Self-referential const definitions deferred until after the struct closes.
     /// E.g., `static const Prerelease EMPTY;` declared inside, definition after.
     deferred_self_const_defs: Vec<String>,
@@ -450,6 +453,7 @@ impl CodeGen {
             impl_source_modules: HashMap::new(),
             merged_method_using_namespaces: Vec::new(),
             deferred_module_function_pass: false,
+            defer_module_functions_recursively: false,
             deferred_self_const_defs: Vec::new(),
             deferred_module_items: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
@@ -7313,6 +7317,12 @@ impl CodeGen {
                 let has_structs = items.iter().any(|i| matches!(i, syn::Item::Struct(_)));
                 let has_fns = items.iter().any(|i| matches!(i, syn::Item::Fn(_)));
                 let should_split = has_structs && has_fns && self.module_stack.is_empty();
+                let inherited_recursive_deferral = self.defer_module_functions_recursively;
+                if should_split {
+                    self.defer_module_functions_recursively = true;
+                }
+                let should_defer_functions_now =
+                    inherited_recursive_deferral || self.defer_module_functions_recursively;
 
                 self.writeln(&format!("namespace {} {{", mod_cpp_name));
                 self.indent += 1;
@@ -7325,7 +7335,7 @@ impl CodeGen {
                     if matches!(item, syn::Item::Impl(_)) {
                         continue;
                     }
-                    if should_split && matches!(item, syn::Item::Fn(_)) {
+                    if should_defer_functions_now && matches!(item, syn::Item::Fn(_)) {
                         // Skip functions — they'll be emitted in deferred pass
                         continue;
                     }
@@ -7339,6 +7349,7 @@ impl CodeGen {
                 if should_split {
                     self.deferred_module_items.push(m.clone());
                 }
+                self.defer_module_functions_recursively = inherited_recursive_deferral;
             }
         }
     }
@@ -40891,6 +40902,51 @@ mod tests {
         assert!(
             alias_pos < sig_pos,
             "ErrorKind alias forward declaration must precede parse_kind signature:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf517_split_parent_module_defers_nested_function_definitions_recursively() {
+        let out = transpile_str(
+            r#"
+            mod outer {
+                pub struct Local(pub i32);
+                pub mod inner {
+                    pub fn nested_uses_my_type() -> super::super::MyType {
+                        super::super::MyType::new()
+                    }
+                }
+                pub fn uses_my_type() -> super::super::MyType {
+                    super::super::MyType::new()
+                }
+            }
+            pub struct MyType {
+                pub value: i32,
+            }
+            impl MyType {
+                pub fn new() -> MyType {
+                    MyType { value: 1 }
+                }
+            }
+            "#,
+        );
+
+        let nested_def_count = out.matches("nested_uses_my_type() {").count();
+        assert_eq!(
+            nested_def_count, 1,
+            "nested function definition should be emitted exactly once:\n{}",
+            out
+        );
+        let my_type_def_pos = out
+            .find("struct MyType {")
+            .expect("missing MyType struct definition");
+        let nested_def_pos = out
+            .find("nested_uses_my_type() {")
+            .expect("missing nested_uses_my_type definition");
+        assert!(
+            my_type_def_pos < nested_def_pos,
+            "nested function definition should be deferred until after MyType definition:\n{}",
             out
         );
     }

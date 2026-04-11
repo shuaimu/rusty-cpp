@@ -4123,8 +4123,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Verification:
             - `cargo test -p rusty-cpp-transpiler --test parity_matrix_harness -- --nocapture`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf remained deterministic evidence capture only; no generated-output text patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.7: `smallvec` Stage D compile-head family collapse after full-matrix repro
-          - Collapse the new deterministic `smallvec` Stage D incomplete-type/declaration-order family (starting at `runner.cpp:1065`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.7: `smallvec` Stage D compile-head family collapse after full-matrix repro
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope, so no additional decomposition was required.
+          - Deterministic failure head addressed (shared transpiler fix, no crate-specific scripts):
+            - module split/deferred emission now suppresses function definitions recursively in first-pass emission for split top-level modules, so nested module functions are not emitted before required sibling type definitions.
+            - this also removes duplicate nested function-body emission (first pass + deferred pass) for split module trees.
+          - Implemented in `transpiler/src/codegen.rs`:
+            - added recursive function-deferral state (`defer_module_functions_recursively`) to `CodeGen`.
+            - updated `emit_mod(...)` split-module path to defer nested function bodies recursively in first pass, while keeping deferred second-pass function emission as the single source of function definitions.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf517_split_parent_module_defers_nested_function_definitions_recursively`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf517 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-7-20260411a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior `smallvec` compile head at `runner.cpp:1065` (`SmallVec<std::array<PanicOnDoubleDrop, 0>>` incomplete-type/declaration-order family) is collapsed.
+            - new first hard-error family now starts at namespace/import/runtime-surface fallout beginning with `runner.cpp:1209` (`using std::hint::unreachable_unchecked;` unresolved), followed by `std::ops`, `LayoutErr`, and related downstream errors.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-7-20260411a/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is emitter-structure-aware and generic; no generated-output text patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.8: `smallvec` Stage D namespace/import/runtime-surface compile-head family collapse
+          - Collapse the post-5.1.7 deterministic `smallvec` Stage D family (starting at `runner.cpp:1209` with `std::hint::unreachable_unchecked` / `std::ops` / `LayoutErr` fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
