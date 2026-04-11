@@ -86,6 +86,27 @@ Option<T> checked_div(T a, T b) {
     return Option<T>(a / b);
 }
 
+template<typename T>
+requires(std::is_integral_v<T> && std::is_unsigned_v<T>)
+Option<T> checked_next_power_of_two(T value) {
+    if (value <= static_cast<T>(1)) {
+        return Option<T>(static_cast<T>(1));
+    }
+    T current = static_cast<T>(1);
+    constexpr T two = static_cast<T>(2);
+    while (current < value) {
+        if (current > (std::numeric_limits<T>::max() / two)) {
+            return Option<T>(rusty::None);
+        }
+        current = static_cast<T>(current << 1);
+    }
+    return Option<T>(current);
+}
+
+inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
+    return checked_next_power_of_two<std::size_t>(value);
+}
+
 } // namespace rusty
 
 #endif // RUSTY_NUM_HPP

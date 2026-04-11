@@ -9080,6 +9080,316 @@ impl CodeGen {
         }
     }
 
+    fn augment_uninitialized_local_type_hints_from_usage(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let mut candidates: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() || local.init.is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            candidates.insert(name);
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        for stmt in stmts {
+            self.collect_uninitialized_local_type_hints_in_stmt(stmt, &candidates, hints);
+        }
+    }
+
+    fn collect_uninitialized_local_type_hints_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        candidates: &HashSet<String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_uninitialized_local_type_hints_in_expr(&init.expr, candidates, hints);
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_uninitialized_local_type_hints_in_expr(expr, candidates, hints);
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_uninitialized_local_type_hints_in_expr(
+        &self,
+        expr: &syn::Expr,
+        candidates: &HashSet<String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match expr {
+            syn::Expr::Call(call) => {
+                self.collect_uninitialized_local_type_hints_from_call(call, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(&call.func, candidates, hints);
+                for arg in &call.args {
+                    self.collect_uninitialized_local_type_hints_in_expr(arg, candidates, hints);
+                }
+            }
+            syn::Expr::MethodCall(method_call) => {
+                self.collect_uninitialized_local_type_hints_from_method_call(
+                    method_call,
+                    candidates,
+                    hints,
+                );
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &method_call.receiver,
+                    candidates,
+                    hints,
+                );
+                for arg in &method_call.args {
+                    self.collect_uninitialized_local_type_hints_in_expr(arg, candidates, hints);
+                }
+            }
+            syn::Expr::Assign(assign) => {
+                if let Some(name) = extract_simple_local_ident(&assign.left) {
+                    if candidates.contains(&name) && !hints.contains_key(&name) {
+                        if let Some(rhs_ty) = self
+                            .infer_local_binding_type_from_initializer(&assign.right)
+                            .or_else(|| self.infer_simple_expr_type(&assign.right))
+                        {
+                            if !self.type_contains_infer(&rhs_ty) {
+                                hints.insert(name, rhs_ty);
+                            }
+                        }
+                    }
+                }
+                self.collect_uninitialized_local_type_hints_in_expr(&assign.left, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &assign.right,
+                    candidates,
+                    hints,
+                );
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&if_expr.cond, candidates, hints);
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_uninitialized_local_type_hints_in_expr(else_expr, candidates, hints);
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &while_expr.cond,
+                    candidates,
+                    hints,
+                );
+                for stmt in &while_expr.body.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::ForLoop(for_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&for_expr.expr, candidates, hints);
+                for stmt in &for_expr.body.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &match_expr.expr,
+                    candidates,
+                    hints,
+                );
+                for arm in &match_expr.arms {
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_uninitialized_local_type_hints_in_expr(guard, candidates, hints);
+                    }
+                    self.collect_uninitialized_local_type_hints_in_expr(&arm.body, candidates, hints);
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_uninitialized_local_type_hints_in_expr(&field.expr, candidates, hints);
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_uninitialized_local_type_hints_in_expr(rest, candidates, hints);
+                }
+            }
+            syn::Expr::Array(array_expr) => {
+                for elem in &array_expr.elems {
+                    self.collect_uninitialized_local_type_hints_in_expr(elem, candidates, hints);
+                }
+            }
+            syn::Expr::Tuple(tuple_expr) => {
+                for elem in &tuple_expr.elems {
+                    self.collect_uninitialized_local_type_hints_in_expr(elem, candidates, hints);
+                }
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::Closure(closure_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &closure_expr.body,
+                    candidates,
+                    hints,
+                );
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &await_expr.base,
+                    candidates,
+                    hints,
+                );
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&try_expr.expr, candidates, hints);
+            }
+            syn::Expr::Return(return_expr) => {
+                if let Some(value) = &return_expr.expr {
+                    self.collect_uninitialized_local_type_hints_in_expr(value, candidates, hints);
+                }
+            }
+            syn::Expr::Break(break_expr) => {
+                if let Some(value) = &break_expr.expr {
+                    self.collect_uninitialized_local_type_hints_in_expr(value, candidates, hints);
+                }
+            }
+            syn::Expr::Reference(reference_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &reference_expr.expr,
+                    candidates,
+                    hints,
+                );
+            }
+            syn::Expr::Unary(unary_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&unary_expr.expr, candidates, hints);
+            }
+            syn::Expr::Paren(paren_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&paren_expr.expr, candidates, hints);
+            }
+            syn::Expr::Group(group_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&group_expr.expr, candidates, hints);
+            }
+            syn::Expr::Let(let_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(&let_expr.expr, candidates, hints);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_uninitialized_local_type_hints_from_call(
+        &self,
+        call: &syn::ExprCall,
+        candidates: &HashSet<String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let substitutions = self.function_call_type_arg_substitutions(call);
+        for (idx, arg) in call.args.iter().enumerate() {
+            let Some(name) = extract_simple_local_ident(arg) else {
+                continue;
+            };
+            if !candidates.contains(&name) {
+                continue;
+            }
+            let expected_ty = self
+                .lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
+                .or_else(|| self.lookup_associated_call_arg_expected_type_fallback(call, idx));
+            let Some(expected_ty) = expected_ty else {
+                continue;
+            };
+            if self.type_contains_infer(&expected_ty) {
+                continue;
+            }
+            hints.insert(name, expected_ty);
+        }
+    }
+
+    fn lookup_associated_call_arg_expected_type_fallback(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let owner = path_expr
+            .path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let method = path_expr
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let owner_looks_like_type = owner == "Self"
+            || owner
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase());
+        if !owner_looks_like_type {
+            return None;
+        }
+        self.lookup_method_arg_expected_type(&method, arg_idx).cloned()
+    }
+
+    fn collect_uninitialized_local_type_hints_from_method_call(
+        &self,
+        method_call: &syn::ExprMethodCall,
+        candidates: &HashSet<String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let method_name = method_call.method.to_string();
+        for (idx, arg) in method_call.args.iter().enumerate() {
+            let Some(name) = extract_simple_local_ident(arg) else {
+                continue;
+            };
+            if !candidates.contains(&name) {
+                continue;
+            }
+            let declared_expected = self.lookup_method_arg_expected_type(&method_name, idx);
+            let expected_ty = self
+                .infer_method_arg_expected_type_from_receiver(
+                    &method_call.receiver,
+                    &method_name,
+                    idx,
+                    declared_expected,
+                )
+                .or_else(|| declared_expected.cloned());
+            let Some(expected_ty) = expected_ty else {
+                continue;
+            };
+            if self.type_contains_infer(&expected_ty) {
+                continue;
+            }
+            hints.insert(name, expected_ty);
+        }
+    }
+
     fn placeholder_hint_from_expected_argument_type(
         &self,
         owner_target: &str,
@@ -9105,6 +9415,10 @@ impl CodeGen {
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
         self.augment_local_generic_placeholder_hints_from_function_calls(
+            &block.stmts,
+            &mut placeholder_hints,
+        );
+        self.augment_uninitialized_local_type_hints_from_usage(
             &block.stmts,
             &mut placeholder_hints,
         );
@@ -13671,12 +13985,33 @@ impl CodeGen {
                     inferred_binding_ty =
                         self.infer_local_binding_type_from_current_struct_field(local, &name_str);
                 }
+                if inferred_binding_ty.is_none() && local.init.is_none() {
+                    inferred_binding_ty = self.lookup_local_placeholder_type_hint(&name_str).cloned();
+                }
                 if let Some(ty) = inferred_binding_ty.clone() {
                     self.update_local_binding_type(name_str.clone(), ty);
                 }
+                let uninitialized_inferred_ty = if local.init.is_none() {
+                    inferred_binding_ty
+                        .as_ref()
+                        .filter(|ty| !self.type_contains_infer(ty))
+                        .cloned()
+                } else {
+                    None
+                };
 
                 let type_str = if let Some(ty) = get_local_type(local) {
                     self.map_type(ty)
+                } else if local.init.is_none()
+                    && uninitialized_inferred_ty
+                        .as_ref()
+                        .is_some_and(|ty| self.should_use_optional_delayed_init_storage(ty))
+                {
+                    self.map_type(
+                        uninitialized_inferred_ty
+                            .as_ref()
+                            .expect("checked Some in condition"),
+                    )
                 } else if self.should_emit_inferred_sum_type_for_local(
                     local,
                     &name_str,
@@ -13857,7 +14192,16 @@ impl CodeGen {
                     }
                 } else {
                     // `let x: T;` can be initialized later; emit mutable storage.
-                    self.writeln(&format!("{} {};", type_str, cpp_name));
+                    if let Some(inferred_ty) = uninitialized_inferred_ty.as_ref() {
+                        if self.should_use_optional_delayed_init_storage(inferred_ty) {
+                            self.mark_delayed_init_local(&name_str);
+                            self.writeln(&format!("std::optional<{}> {};", type_str, cpp_name));
+                        } else {
+                            self.writeln(&format!("{} {};", type_str, cpp_name));
+                        }
+                    } else {
+                        self.writeln(&format!("{} {};", type_str, cpp_name));
+                    }
                 }
                 if shadows_param {
                     if let Some(scope) = self.local_cpp_bindings.last_mut() {
@@ -18518,6 +18862,18 @@ impl CodeGen {
             let receiver_value_ty = format!("std::remove_cvref_t<decltype(({}))>", receiver);
             let rhs = format!("static_cast<{}>({})", receiver_value_ty, args[0]);
             return format!("rusty::{}({}, {})", method_name, receiver, rhs);
+        }
+        if method_name == "checked_next_power_of_two"
+            && args.is_empty()
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::checked_next_power_of_two({})", receiver);
         }
         if let Some(ext_call) = self.try_emit_extension_method_call(mc, &args, expected_ty) {
             return ext_call;
@@ -32680,6 +33036,61 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5112_uninitialized_untyped_local_uses_call_site_type_hint_and_optional_storage() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+
+            fn accept(v: NonNull<u8>) -> NonNull<u8> { v }
+
+            fn f(flag: bool, p: *mut u8) -> NonNull<u8> {
+                let new_alloc;
+                if flag {
+                    new_alloc = NonNull::new(p).unwrap().cast();
+                } else {
+                    new_alloc = NonNull::new(p).unwrap().cast();
+                }
+                accept(new_alloc)
+            }
+            "#,
+        );
+        assert!(out.contains("std::optional<rusty::ptr::NonNull<uint8_t>> new_alloc;"));
+        assert!(out.contains("new_alloc.emplace("));
+        assert!(out.contains("new_alloc.value()"));
+        assert!(!out.contains("auto new_alloc;"));
+    }
+
+    #[test]
+    fn test_leaf5112_uninitialized_untyped_local_uses_associated_call_arg_type_hint() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+
+            struct Buf<T> { ptr: NonNull<T> }
+
+            impl<T> Buf<T> {
+                fn from_heap(ptr: NonNull<T>) -> Self {
+                    Buf { ptr }
+                }
+                fn make(flag: bool, raw: *mut u8) -> Self {
+                    let new_alloc;
+                    if flag {
+                        new_alloc = NonNull::new(raw).unwrap().cast();
+                    } else {
+                        new_alloc = NonNull::new(raw).unwrap().cast();
+                    }
+                    Buf::from_heap(new_alloc)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::optional<rusty::ptr::NonNull<T>> new_alloc;"));
+        assert!(out.contains("new_alloc.emplace("));
+        assert!(out.contains("new_alloc.value()"));
+        assert!(!out.contains("auto new_alloc;"));
+    }
+
+    #[test]
     fn test_leaf4153_uninitialized_tuple_return_moves_optional_values() {
         let out = transpile_str(
             r#"
@@ -40315,6 +40726,43 @@ mod tests {
         assert!(
             out.contains("static_cast<uint64_t>"),
             "source cast shape should be preserved under RHS normalization, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5112_checked_next_power_of_two_method_maps_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(len: usize) -> Option<usize> {
+                len.checked_next_power_of_two()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::checked_next_power_of_two(len)"),
+            "checked_next_power_of_two method should lower to runtime helper, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5112_usize_checked_next_power_of_two_path_lowers_to_callable_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(len: usize) -> Option<usize> {
+                len.checked_add(1).and_then(usize::checked_next_power_of_two)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("and_then(rusty::checked_next_power_of_two_usize)"),
+            "usize::checked_next_power_of_two path should lower to callable runtime helper, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("usize::checked_next_power_of_two"),
+            "Rust primitive associated function path should not leak into C++ output, got: {}",
             out
         );
     }

@@ -4241,8 +4241,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-11-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-11-20260411b/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are shape-gated and context-aware; no crate-specific scripts and no generated-output text patching.
-        - [ ] Leaf 5.1.12: `smallvec` Stage D local-declaration/method-path compile-head family collapse
-          - Collapse the post-5.1.11 deterministic `smallvec` Stage D family (starting at `runner.cpp:1616` with uninitialized local declaration surface `auto new_alloc;`, followed by `usize::checked_next_power_of_two` method-path/type-resolution fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.12: `smallvec` Stage D local-declaration/method-path compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope; no additional decomposition was required.
+          - Deterministic failure family addressed (shared transpiler/runtime fix, no crate-specific scripts):
+            - block-level pre-scan now augments uninitialized untyped local placeholder hints from usage, including associated-call argument expected-type fallback, so delayed-init locals with no initializer stop emitting invalid `auto var;` declarations.
+            - uninitialized untyped locals with recoverable concrete hints now lower through delayed-init optional storage (`std::optional<T>`) and existing assignment/read lowering (`.emplace(...)` / `.value()`), collapsing the `auto new_alloc;` head in `smallvec::try_grow`.
+            - added shared `checked_next_power_of_two` runtime surface and `usize::checked_next_power_of_two` mapping so both method-call and associated-function call shapes lower to runtime helpers instead of unresolved method-path emissions.
+          - Added focused regressions:
+            - `test_leaf5112_uninitialized_untyped_local_uses_call_site_type_hint_and_optional_storage`
+            - `test_leaf5112_uninitialized_untyped_local_uses_associated_call_arg_type_hint`
+            - `test_leaf5112_checked_next_power_of_two_method_maps_to_runtime_helper`
+            - `test_leaf5112_usize_checked_next_power_of_two_path_lowers_to_callable_helper`
+            - `types::tests::test_leaf42_runtime_function_path_mappings` assertion for `usize::checked_next_power_of_two`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5112 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-12-20260411c --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.11 first head at `runner.cpp:1616` (`auto new_alloc;` with no initializer) and immediate `usize::checked_next_power_of_two` path fallout is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1761` (`template declaration cannot appear at block scope`), followed by malformed control-flow lowering around `runner.cpp:1827` (`return break ...` surface).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-12-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-12-20260411c/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated shared lowering/runtime improvements; no crate-specific script patching and no generated-output text rewriting.
+        - [ ] Leaf 5.1.13: `smallvec` Stage D block-scope template/control-flow compile-head family collapse
+          - Collapse the post-5.1.12 deterministic `smallvec` Stage D family (starting at `runner.cpp:1761` with block-scope template declaration emission and adjacent `return break` malformed control-flow lowering around `runner.cpp:1827`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
