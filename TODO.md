@@ -3693,7 +3693,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-6c-1775905718/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in iterator/collect lowering; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.7: Collapse the post-10.5.40.6 `bitflags` iterator-assertion collection-shape head (`runner.cpp:4386/4403/4420` span-vs-vec equality mismatch after iterator-chain lowering) with shared assertion/collection coercion fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.7: Collapse the post-10.5.40.6 `bitflags` iterator-assertion collection-shape head (`runner.cpp:4386/4403/4420` span-vs-vec equality mismatch after iterator-chain lowering) with shared assertion/collection coercion fixes and targeted regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared runtime equality surface + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - transpiled assertion scaffolding compares borrowed slice views (`std::span<const typename T::Bits>`) against collected owned buffers (`rusty::Vec<typename T::Bits>`).
+              - shared runtime equality helpers covered `std::span` mixed with `std::span`/`std::array`/`std::vector`, but lacked `std::span` mixed with `rusty::Vec`, so `*left_val == *right_val` in generated asserts failed overload resolution at `runner.cpp:4386/4403/4420`.
+            - Implemented shared runtime fixes:
+              - `include/rusty/array.hpp`:
+                - added shape-gated mixed equality overloads for `std::span` ↔ `rusty::Vec` (both directions),
+                - mirrored existing shared semantics used for `std::vector` mixed comparisons: size equality gate, one-sided element equality support (`l == r` or `r == l`), and empty-marker compatibility path.
+            - Added focused fixture-agnostic regressions:
+              - `tests/rusty_array_test.cpp`:
+                - `test_span_vec_equality_helper_shape` validating `std::span` ↔ `rusty::Vec` equality in both directions for:
+                  - primitive element payloads,
+                  - custom comparable payloads,
+                  - empty marker payloads (size-only compatibility path).
+            - Verification:
+              - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-7a-1775906339 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:4386/4403/4420` (span-vs-`rusty::Vec` equality mismatch) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to iterator-adapter member-surface fallout rooted at:
+                - `runner.cpp:4460` invalid direct `.map(...)` member call on `IterNames` (`no member named 'map' in 'IterNames'`) in iter-names assertion scaffolding.
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-6c-1775905718/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-7a-1775906339/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared in runtime container/view equality surfaces; no crate-specific rewrites and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.8: Collapse the post-10.5.40.7 `bitflags` iterator-names adapter call-surface head (`runner.cpp:4460` direct `.map(...)` member call emitted on `IterNames`) with shared iterator-adapter receiver-shape lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

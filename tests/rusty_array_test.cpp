@@ -273,6 +273,67 @@ void test_vector_span_equality_helper_shape() {
     printf("PASS\n");
 }
 
+void test_span_vec_equality_helper_shape() {
+    printf("test_span_vec_equality_helper_shape: ");
+    {
+        rusty::Vec<uint8_t> bytes = rusty::Vec<uint8_t>::new_();
+        bytes.push(1);
+        bytes.push(2);
+        bytes.push(3);
+        bytes.push(4);
+
+        const std::array<uint8_t, 4> full_data{1, 2, 3, 4};
+        const std::array<uint8_t, 3> short_data{1, 2, 3};
+        auto full = std::span<const uint8_t>(full_data);
+        auto short_span = std::span<const uint8_t>(short_data);
+
+        assert(bytes == full);
+        assert(full == bytes);
+        assert(!(bytes == short_span));
+        assert(!(short_span == bytes));
+    }
+    {
+        struct Z {
+            int value;
+            bool operator==(const Z& other) const { return value == other.value; }
+        };
+
+        rusty::Vec<Z> values = rusty::Vec<Z>::new_();
+        values.push(Z{1});
+        values.push(Z{2});
+        values.push(Z{3});
+
+        const std::array<Z, 3> same{{{1}, {2}, {3}}};
+        const std::array<Z, 2> shorter{{{1}, {2}}};
+        auto same_span = std::span<const Z>(same);
+        auto short_span = std::span<const Z>(shorter);
+
+        assert(values == same_span);
+        assert(same_span == values);
+        assert(!(values == short_span));
+        assert(!(short_span == values));
+    }
+    {
+        struct Marker {};
+
+        rusty::Vec<Marker> values = rusty::Vec<Marker>::new_();
+        values.push(Marker{});
+        values.push(Marker{});
+        values.push(Marker{});
+
+        const std::array<Marker, 3> same{};
+        const std::array<Marker, 2> shorter{};
+        auto same_span = std::span<const Marker>(same);
+        auto short_span = std::span<const Marker>(shorter);
+
+        assert(values == same_span);
+        assert(same_span == values);
+        assert(!(values == short_span));
+        assert(!(short_span == values));
+    }
+    printf("PASS\n");
+}
+
 void test_array_cross_element_equality_shape() {
     printf("test_array_cross_element_equality_shape: ");
     {
@@ -666,6 +727,7 @@ int main() {
     test_len_helper_shapes();
     test_span_equality_helper_shape();
     test_vector_span_equality_helper_shape();
+    test_span_vec_equality_helper_shape();
     test_array_cross_element_equality_shape();
     test_slice_iter_helpers_shape();
     test_cursor_new_helper_shape();

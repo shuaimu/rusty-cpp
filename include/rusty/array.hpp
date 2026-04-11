@@ -73,6 +73,43 @@ constexpr bool operator==(std::span<L, LExtent> lhs, const std::vector<R, Alloc>
     return rhs == lhs;
 }
 
+// Mirror Rust slice equality semantics across borrowed spans and owned
+// rusty::Vec payloads used by transpiled assertion scaffolding.
+template<typename L, std::size_t LExtent, typename R>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(std::span<L, LExtent> lhs, const rusty::Vec<R>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    if constexpr (requires(const L& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    } else {
+        return true;
+    }
+}
+
+template<typename L, typename R, std::size_t RExtent>
+requires (
+    requires(const L& l, const R& r) { l == r; } ||
+    requires(const L& l, const R& r) { r == l; } ||
+    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
+constexpr bool operator==(const rusty::Vec<L>& lhs, std::span<R, RExtent> rhs) {
+    return rhs == lhs;
+}
+
 // Mixed-element std::array equality for transpiled assertion scaffolding.
 // Keep this narrow: only for different element types and only when one-sided
 // element equality is well-formed.
