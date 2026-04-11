@@ -3774,7 +3774,40 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-8a-1775906952/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-9f-1775909379/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core helper emission; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.10: Collapse the post-10.5.40.9 `bitflags` Stage E semantic helper/parsing parity family (starting with `tests_complement_cases` assertion mismatch and adjacent `difference`/`extend`/`iter`/parser failure surfaces), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.10: Collapse the post-10.5.40.9 `bitflags` Stage E semantic helper/parsing parity family (starting with `tests_complement_cases` assertion mismatch and adjacent `difference`/`extend`/`iter`/parser failure surfaces), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared bitflags helper/visit lowering hardening + focused regressions + matrix reruns) and did not require additional decomposition.
+            - Root-cause findings:
+              - bitflags semantic parity drift was concentrated in helper surfaces (`complement`, `iter`, `iter_names`, formatting) and statement-match visit lowering interactions (`&variant` scrutinee shape and `?`-containing arm control flow).
+              - merged impl conflict selection still needed derived-attr propagation in impl-level collisions (`#[automatically_derived]` on impl blocks), including formatter-lifetime normalized signatures (`fmt::Formatter<'_>` vs `fmt::Formatter`).
+              - debug formatting parity required explicit empty rendering (`Type(0x0)`) in synthetic `to_string()` when no named or unnamed bits are set.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - propagated impl-level `#[automatically_derived]` to merged methods and normalized formatter-lifetime tokens in conflict keys so non-derived `fmt` impls win deterministically.
+              - hardened synthetic bitflags helper surfaces:
+                - `complement()` prefers `from_bits_truncate(...)` when available,
+                - `iter()` / `iter_names()` skip unnamed entries, gate aliases via `remaining`/`intersects`, and preserve unnamed remainder payloads,
+                - synthetic `to_string()` now emits stable debug text with lowercase hex remainder and explicit empty `0x0`.
+              - hardened visit-style statement match lowering:
+                - normalized non-pointer reference scrutinees before `std::visit` (`&variant` no longer emitted as pointer scrutinee),
+                - isolated try-containing arm bodies and synthesized deterministic arm-local fallthrough return shape for `?`-based control flow.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf1054010_conflicting_fmt_prefers_non_derived_impl_from_impl_level_attr`
+              - `test_leaf1054010_conflicting_fmt_prefers_non_derived_when_formatter_lifetime_forms_differ`
+              - `test_leaf1054010_bitflags_synthetic_iter_helpers_preserve_remaining_bits` (extended to assert synthetic `to_string()` shape, including empty `0x0`)
+              - `test_match_variant_reference_statement_scrutinee_uses_variant_value_for_visit`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf1054010 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler test_match_variant_reference_statement_scrutinee_uses_variant_value_for_visit -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --crate bitflags --work-root /tmp/rusty-parity-matrix-10-5-40-10n-1775915403 --keep-work-dirs`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-10o-1775915467 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous `bitflags` Stage E semantic/parsing family is removed (`tests_complement_cases`, parser invalid cases, and final `tests_fmt_cases` drift resolved).
+              - full seven-crate parity matrix now passes (`total=7`, `pass=7`, `fail=0`).
+            - Canonical artifacts:
+              - pre-final fmt parity head: `/tmp/rusty-parity-matrix-10-5-40-10m-1775915109/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - focused passing repro: `/tmp/rusty-parity-matrix-10-5-40-10n-1775915403/bitflags/{baseline.txt,build.log,run.log,matrix.log}`
+              - full passing matrix: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape gated (no crate-specific scripts and no generated C++ patching).
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

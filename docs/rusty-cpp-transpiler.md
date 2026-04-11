@@ -2258,9 +2258,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-5b-1775904094`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
-- confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- previous method-item callable arity + format consteval family from Leaf 10.5.40.4 (`runner.cpp:2850/2966`, `3428+`) is removed by Leaf 10.5.40.5; current deterministic `bitflags` Stage D head is iterator/collection call-shape fallout (`runner.cpp:1550`, `4379/4396/4413`).
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-10o-1775915467`) now passes all seven crates (`pass=7`, `fail=0`).
+- focused `bitflags` repro after Leaf 10.5.40.10 (`/tmp/rusty-parity-matrix-10-5-40-10n-1775915403`) passes (`pass=1`, `fail=0`).
+- the prior `bitflags` Stage E semantic/parsing/fmt frontier is removed by shared transpiler fixes in Leaf 10.5.40.10.
 
 Crate-focused progress integrated from former appendices:
 
@@ -2269,18 +2269,18 @@ Crate-focused progress integrated from former appendices:
 - `cfg-if`: baseline resiliency and alias/import typing fixes
 - `take_mut`: type/lifetime order, ptr/mem path lowering, and template/context fixes
 - `semver`: import/re-export lowering and expanded build-shape fixes
-- `bitflags`: re-export/type-order fixes plus call-argument specialization, selective tuple/option constructor coercion hardening, and block-expression shadow-safe IIFE lowering; active Stage D frontier remains
+- `bitflags`: Stage D+E parity chain through Leaf 10.5.40.10 is closed; helper/parsing/format semantic parity now passes in matrix runs
 - `arrayvec`: remaining deterministic frontier, advanced through many Stage D blocker families
 
 ### 10.6 Active Frontier and Next Work
 
-From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
+The `bitflags` Stage D→E active frontier from the 10.5.40 leaf chain is now closed.
 
-Current deterministic head (post-Leaf 10.5.40.5):
+Current status snapshot:
 
-1. `runner.cpp:1550`: iterator payload/member-shape mismatch (`item._0` instantiated on non-bitflags payload in `TestFlags::from_iter`).
-2. `runner.cpp:4379/4396/4413`: iterator/collection call-surface mismatch (`std::span<const typename T::Bits>::from_iter(...)` unresolved surface).
-3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-5b-1775904094/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. Focused `bitflags` parity repro passes: `/tmp/rusty-parity-matrix-10-5-40-10n-1775915403/bitflags/{baseline.txt,build.log,run.log,matrix.log}`.
+2. Full seven-crate matrix passes: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
+3. Next active work should follow the top unfinished TODO leaf after 10.5.40.10 closure.
 
 Historical active-work chain (retained for traceability):
 
@@ -4704,6 +4704,8 @@ Required approach:
 - for callable-return iterator adapter lowering, do not require concrete `Item` extraction as the only evidence gate before rewriting adapters; associated iterator surfaces (for example `T::IterNames`) must still route through shared iterator helper lowering
 - for bitflags helper merge lowering, do not emit direct self-recursive helper forwarders (`Self::bits(self)`, `Self::from_bits_retain(bits)`, and equivalent owner-qualified forms) that only dispatch back to the same method body; skip those wrappers so concrete helper surfaces remain non-recursive
 - for synthetic bitflags helper signatures emitted in-class, do not use incomplete-type member probes (`decltype(std::declval<T>()._0)`) or deduced `auto` return types that are consumed before definition; emit concrete field-mapped bits types in signatures
+- for statement `match` lowering that dispatches through `std::visit`, do not feed non-pointer variant scrutinees as address-of values (`&variant`) to the visitor; normalize scrutinee emission to variant value/reference shape before `std::visit`
+- for statement `std::visit` arm lowering that contains `?`, do not leave try-returning arm lambdas without a deterministic fallthrough return path; keep try flow arm-local and synthesize a consistent tail return shape so overload resolution and control-flow checks remain well-formed
 - for collect lowering, do not emit `Target::from_iter(...)` on non-owning C++ view targets (`std::span`, `std::string_view`, `std::basic_string_view`) that do not provide Rust-style constructor surfaces
 - for map adapter lowering, do not rewrite optional-like payload maps (`next()` / `next_back()` receivers) into iterator helper calls; keep `Option::map`/`Result::map` semantics when receiver shape indicates optional next-payload surfaces
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms

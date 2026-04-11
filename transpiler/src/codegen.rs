@@ -2743,6 +2743,8 @@ impl CodeGen {
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
+                    let impl_is_automatically_derived =
+                        impl_block_is_automatically_derived(impl_block);
 
                     // Record module path for methods merged from sibling modules
                     if !module_path.is_empty() {
@@ -2771,6 +2773,9 @@ impl CodeGen {
                         if let syn::ImplItem::Fn(method) = impl_item {
                             let mut merged = method.clone();
                             merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                            if impl_is_automatically_derived {
+                                mark_method_automatically_derived(&mut merged);
+                            }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
                                 if let Some(existing_index) =
@@ -3137,6 +3142,7 @@ impl CodeGen {
             if !is_inherent_impl && !is_drop_trait {
                 continue;
             }
+            let impl_is_automatically_derived = impl_block_is_automatically_derived(impl_block);
             let op_name = trait_name
                 .as_ref()
                 .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
@@ -3157,6 +3163,9 @@ impl CodeGen {
                 if let syn::ImplItem::Fn(method) = impl_item {
                     let mut merged = method.clone();
                     merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+                    if impl_is_automatically_derived {
+                        mark_method_automatically_derived(&mut merged);
+                    }
                     let key = impl_method_conflict_key(&merged);
                     if seen_method_keys.contains(&key) {
                         if let Some(existing_index) = find_impl_method_conflict_index(entry, &key) {
@@ -5658,10 +5667,17 @@ impl CodeGen {
                         ));
                     }
                     if !merged_methods.contains("complement") {
-                        self.writeln(&format!(
-                            "{} complement() const {{ return {}{{static_cast<decltype(this->_0)>(~this->_0)}}; }}",
-                            n, n
-                        ));
+                        if merged_methods.contains("from_bits_truncate") {
+                            self.writeln(&format!(
+                                "{} complement() const {{ return {}::from_bits_truncate(static_cast<decltype(this->_0)>(~this->_0)); }}",
+                                n, n
+                            ));
+                        } else {
+                            self.writeln(&format!(
+                                "{} complement() const {{ return {}{{static_cast<decltype(this->_0)>(~this->_0)}}; }}",
+                                n, n
+                            ));
+                        }
                     }
                     if !merged_methods.contains("is_all") {
                         self.writeln(&format!(
@@ -5720,7 +5736,7 @@ impl CodeGen {
                     // iter: iterate over individual set flags using FLAGS constant
                     if !merged_methods.contains("iter") {
                         self.writeln(&format!(
-                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) result.push(FLAGS[i].value()); }} return result; }}",
+                            "rusty::Vec<{n}> iter() const {{ rusty::Vec<{n}> result; {n} rem = *this; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ result.push(flag); rem.remove(flag); }} }} if (!rem.is_empty()) {{ result.push(rem); }} return result; }}",
                             n = n
                         ));
                     }
@@ -5728,7 +5744,13 @@ impl CodeGen {
                     // Returns a wrapper struct supporting both range-for and remaining().
                     if !merged_methods.contains("iter_names") {
                         self.writeln(&format!(
-                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (this->contains(FLAGS[i].value())) {{ v.push(std::make_tuple(FLAGS[i].name(), FLAGS[i].value())); rem.remove(FLAGS[i].value()); }} }} return IterNames{{std::move(v), rem}}; }}",
+                            "auto iter_names() const {{ struct IterNames {{ rusty::Vec<std::tuple<std::string_view, {n}>> items; {n} remaining_; auto begin() const {{ return items.begin(); }} auto end() const {{ return items.end(); }} {n} remaining() const {{ return remaining_; }} }}; {n} rem = *this; rusty::Vec<std::tuple<std::string_view, {n}>> v; for (size_t i = 0; i < FLAGS.size(); i++) {{ if (FLAGS[i].name().empty()) {{ continue; }} const auto flag = FLAGS[i].value(); if (this->contains(flag) && rem.intersects(flag)) {{ v.push(std::make_tuple(FLAGS[i].name(), flag)); rem.remove(flag); }} }} return IterNames{{std::move(v), rem}}; }}",
+                            n = n
+                        ));
+                    }
+                    if !merged_methods.contains("to_string") {
+                        self.writeln(&format!(
+                            "std::string to_string() const {{ rusty::fmt::Formatter f; f.write_str(\"{n}(\"); bool first = true; const auto iter = this->iter_names(); for (auto&& [name, _] : rusty::for_in(rusty::iter(iter))) {{ if (!first) {{ f.write_str(\" | \"); }} first = false; f.write_str(name); }} const auto remaining = iter.remaining(); if (!remaining.is_empty()) {{ if (!first) {{ f.write_str(\" | \"); }} f.write_str(\"0x\"); f.write_str(std::format(\"{{0:x}}\", rusty::format_numeric_arg(remaining))); }} else if (first) {{ f.write_str(\"0x0\"); }} f.write_str(\")\"); return f.str(); }}",
                             n = n
                         ));
                     }
@@ -5756,7 +5778,10 @@ impl CodeGen {
         // E.g., `inline const Prerelease Prerelease::EMPTY = Prerelease(...);`
         if !self.deferred_self_const_defs.is_empty() {
             let deferred = std::mem::take(&mut self.deferred_self_const_defs);
-            for def in &deferred {
+            let (non_flags, flags): (Vec<String>, Vec<String>) = deferred
+                .into_iter()
+                .partition(|def| !def.contains("::FLAGS ="));
+            for def in non_flags.iter().chain(flags.iter()) {
                 self.writeln(def);
             }
         }
@@ -8187,7 +8212,7 @@ impl CodeGen {
     /// Returns `Some(inline_body)` if the body is `self.union(other)` etc.
     fn try_inline_operator_body(
         &self,
-        op_name: &str,
+        _op_name: &str,
         method: &syn::ImplItemFn,
     ) -> Option<String> {
         // Only handle methods with exactly one expression in the body
@@ -8212,6 +8237,11 @@ impl CodeGen {
             return None;
         }
         let helper_name = mc.method.to_string();
+        // For bitflags-like types, keep `self.complement()` call shape in `operator!`
+        // so complement semantics stay aligned with `from_bits_truncate`.
+        if helper_name == "complement" && self.current_struct_is_bitflags_like() {
+            return None;
+        }
         // Map known bitwise helpers to C++ operators on `_0` field.
         // `return_val`: true for operators returning a value, false for
         // compound assignment operators that modify in place.
@@ -8989,8 +9019,8 @@ impl CodeGen {
             return;
         }
 
-        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         if self.try_emit_runtime_match_stmt(match_expr, variant_ctx.as_ref()) {
             return;
         }
@@ -8999,8 +9029,24 @@ impl CodeGen {
         if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
             self.emit_match_as_switch(&scrutinee, &match_expr.arms);
         } else {
-            self.emit_match_as_visit(&scrutinee, &match_expr.arms, variant_ctx.as_ref());
+            let visit_scrutinee =
+                self.emit_match_visit_scrutinee(&match_expr.expr, variant_ctx.as_ref());
+            self.emit_match_as_visit(&visit_scrutinee, &match_expr.arms, variant_ctx.as_ref());
         }
+    }
+
+    fn emit_match_visit_scrutinee(
+        &self,
+        expr: &syn::Expr,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
+        let expr = self.peel_paren_group_expr(expr);
+        if let syn::Expr::Reference(reference) = expr {
+            if !self.is_expr_raw_pointer_like(&reference.expr) {
+                return self.emit_expr_to_string_with_variant_ctx(&reference.expr, variant_ctx);
+            }
+        }
+        self.emit_expr_to_string_with_variant_ctx(expr, variant_ctx)
     }
 
     fn try_emit_runtime_match_stmt(
@@ -9845,11 +9891,11 @@ impl CodeGen {
                         let guard_str = self.emit_expr_to_string(guard);
                         self.writeln(&format!("if ({}) {{", guard_str));
                         self.indent += 1;
-                        self.emit_arm_body(&arm.body);
+                        self.emit_visit_arm_body(&arm.body);
                         self.indent -= 1;
                         self.writeln("}");
                     } else {
-                        self.emit_arm_body(&arm.body);
+                        self.emit_visit_arm_body(&arm.body);
                     }
                     self.indent -= 1;
                     self.writeln("},");
@@ -9896,11 +9942,11 @@ impl CodeGen {
                     let guard_str = self.emit_expr_to_string(guard);
                     self.writeln(&format!("if ({}) {{", guard_str));
                     self.indent += 1;
-                    self.emit_arm_body(&arm.body);
+                    self.emit_visit_arm_body(&arm.body);
                     self.indent -= 1;
                     self.writeln("}");
                 } else {
-                    self.emit_arm_body(&arm.body);
+                    self.emit_visit_arm_body(&arm.body);
                 }
 
                 self.indent -= 1;
@@ -9917,7 +9963,7 @@ impl CodeGen {
                     .push_str(&format!("[&](const {}&) {{\n", cpp_type));
                 self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
-                self.emit_arm_body(&arm.body);
+                self.emit_visit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
                 self.pop_pattern_ref_binding_scope();
@@ -9928,7 +9974,7 @@ impl CodeGen {
                 self.output.push_str("[&](const auto&) {\n");
                 self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
-                self.emit_arm_body(&arm.body);
+                self.emit_visit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
                 self.pop_pattern_ref_binding_scope();
@@ -9941,7 +9987,7 @@ impl CodeGen {
                     .push_str(&format!("[&](const auto& {}) {{\n", name));
                 self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
-                self.emit_arm_body(&arm.body);
+                self.emit_visit_arm_body(&arm.body);
                 self.indent -= 1;
                 self.writeln("},");
                 self.pop_pattern_ref_binding_scope();
@@ -9951,6 +9997,36 @@ impl CodeGen {
                 self.writeln("[&](const auto&) {},");
             }
         }
+    }
+
+    fn emit_visit_arm_body(&mut self, body: &syn::Expr) {
+        if self.expr_tree_has_try(body) {
+            // Keep `return`/`?` control flow local to the arm body so the
+            // outer visit lambda remains `void` in statement-match lowering.
+            self.writeln("[&]() {");
+            self.indent += 1;
+            self.emit_arm_body(body);
+            self.emit_visit_arm_try_fallthrough_return_if_needed(body);
+            self.indent -= 1;
+            self.writeln("}();");
+            return;
+        }
+        self.emit_arm_body(body);
+    }
+
+    fn emit_visit_arm_try_fallthrough_return_if_needed(&mut self, body: &syn::Expr) {
+        let Some(try_inner) = self.first_try_operand_expr(body) else {
+            return;
+        };
+        if let Some(ty) = self.infer_simple_expr_type(try_inner) {
+            let mapped = self.map_type(&ty);
+            if !mapped.is_empty() && mapped != "auto" {
+                self.writeln(&format!("return {}{{}};", mapped));
+                return;
+            }
+        }
+        let inner = self.emit_expr_to_string(try_inner);
+        self.writeln(&format!("return decltype({}){{}};", inner));
     }
 
     fn extract_tuple_struct_bindings(
@@ -17011,6 +17087,28 @@ impl CodeGen {
         }
     }
 
+    fn expr_is_probably_bitwise_not_operand(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            // Bitflags-style APIs and trait defaults commonly use `self.bits()`.
+            // When type inference cannot recover the associated bits type, force
+            // bitwise-not instead of logical-not.
+            syn::Expr::MethodCall(mc) => mc.args.is_empty() && mc.method == "bits",
+            syn::Expr::Call(call) => {
+                let func = self.peel_paren_group_expr(call.func.as_ref());
+                let syn::Expr::Path(path_expr) = func else {
+                    return false;
+                };
+                path_expr
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "bits")
+            }
+            _ => false,
+        }
+    }
+
     fn method_receiver_uses_pointer_member_access(&self, receiver: &syn::Expr) -> bool {
         let receiver = self.peel_paren_group_expr(receiver);
         if self.is_expr_raw_pointer_like(receiver) {
@@ -21576,12 +21674,16 @@ impl CodeGen {
                 }
                 syn::UnOp::Not(_) => {
                     let operand_ty = self.infer_simple_expr_type(&un.expr);
-                    if operand_ty
+                    let use_bitwise_not = operand_ty
                         .as_ref()
                         .is_some_and(|ty| self.is_known_integer_like_type(ty))
-                    {
-                        let operand =
-                            self.emit_expr_to_string_with_expected(&un.expr, operand_ty.as_ref());
+                        || self.expr_is_probably_bitwise_not_operand(&un.expr);
+                    if use_bitwise_not {
+                        let operand = if let Some(operand_ty) = operand_ty.as_ref() {
+                            self.emit_expr_to_string_with_expected(&un.expr, Some(operand_ty))
+                        } else {
+                            self.emit_expr_to_string(&un.expr)
+                        };
                         format!("~{}", operand)
                     } else {
                         let bool_ty: syn::Type = parse_quote!(bool);
@@ -22057,6 +22159,100 @@ impl CodeGen {
         }
     }
 
+    fn expr_tree_has_try(&self, expr: &syn::Expr) -> bool {
+        self.first_try_operand_expr(expr).is_some()
+    }
+
+    fn first_try_operand_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
+        match expr {
+            syn::Expr::Try(try_expr) => Some(try_expr.expr.as_ref()),
+            syn::Expr::Block(block_expr) => {
+                for stmt in &block_expr.block.stmts {
+                    match stmt {
+                        syn::Stmt::Local(local) => {
+                            if let Some(init) = &local.init {
+                                if let Some(found) = self.first_try_operand_expr(&init.expr) {
+                                    return Some(found);
+                                }
+                            }
+                        }
+                        syn::Stmt::Expr(stmt_expr, _) => {
+                            if let Some(found) = self.first_try_operand_expr(stmt_expr) {
+                                return Some(found);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            syn::Expr::If(if_expr) => {
+                for stmt in &if_expr.then_branch.stmts {
+                    match stmt {
+                        syn::Stmt::Local(local) => {
+                            if let Some(init) = &local.init {
+                                if let Some(found) = self.first_try_operand_expr(&init.expr) {
+                                    return Some(found);
+                                }
+                            }
+                        }
+                        syn::Stmt::Expr(stmt_expr, _) => {
+                            if let Some(found) = self.first_try_operand_expr(stmt_expr) {
+                                return Some(found);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if_expr
+                    .else_branch
+                    .as_ref()
+                    .and_then(|(_, else_expr)| self.first_try_operand_expr(else_expr))
+            }
+            syn::Expr::Match(match_expr) => {
+                if let Some(found) = self.first_try_operand_expr(&match_expr.expr) {
+                    return Some(found);
+                }
+                for arm in &match_expr.arms {
+                    if let Some(found) = self.first_try_operand_expr(&arm.body) {
+                        return Some(found);
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        if let Some(found) = self.first_try_operand_expr(guard) {
+                            return Some(found);
+                        }
+                    }
+                }
+                None
+            }
+            syn::Expr::MethodCall(mc) => self
+                .first_try_operand_expr(&mc.receiver)
+                .or_else(|| mc.args.iter().find_map(|arg| self.first_try_operand_expr(arg))),
+            syn::Expr::Call(call) => self
+                .first_try_operand_expr(&call.func)
+                .or_else(|| call.args.iter().find_map(|arg| self.first_try_operand_expr(arg))),
+            syn::Expr::Binary(bin) => self
+                .first_try_operand_expr(&bin.left)
+                .or_else(|| self.first_try_operand_expr(&bin.right)),
+            syn::Expr::Assign(assign) => self
+                .first_try_operand_expr(&assign.left)
+                .or_else(|| self.first_try_operand_expr(&assign.right)),
+            syn::Expr::Unary(unary) => self.first_try_operand_expr(&unary.expr),
+            syn::Expr::Paren(paren) => self.first_try_operand_expr(&paren.expr),
+            syn::Expr::Group(group) => self.first_try_operand_expr(&group.expr),
+            syn::Expr::Reference(reference) => self.first_try_operand_expr(&reference.expr),
+            syn::Expr::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .find_map(|elem| self.first_try_operand_expr(elem)),
+            syn::Expr::Array(array) => array
+                .elems
+                .iter()
+                .find_map(|elem| self.first_try_operand_expr(elem)),
+            _ => None,
+        }
+    }
+
     fn push_transient_statement_scope(&mut self) {
         self.local_bindings.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
@@ -22100,13 +22296,59 @@ impl CodeGen {
             syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
             _ => false,
         };
+        let else_requires_lazy_eval = self.expr_contains_early_return_or_try(else_branch);
 
         let init_decl_type = decl_type
             .strip_prefix("const ")
             .unwrap_or(decl_type)
             .to_string();
+        let then_tail_needs_recursive_if_assign = if_expr
+            .then_branch
+            .stmts
+            .last()
+            .and_then(|stmt| {
+                if let syn::Stmt::Expr(syn::Expr::If(inner_if), None) = stmt {
+                    Some(
+                        self.block_contains_early_return_or_try(&inner_if.then_branch)
+                            || inner_if
+                                .else_branch
+                                .as_ref()
+                                .is_some_and(|(_, e)| self.expr_contains_early_return_or_try(e)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
+        let use_lazy_else_optional = else_result.is_some()
+            && else_requires_lazy_eval
+            && !init_decl_type.contains('&')
+            && !then_tail_needs_recursive_if_assign
+            && !matches!(else_branch.as_ref(), syn::Expr::If(_));
 
-        if let Some(else_value) = &else_result {
+        let mut lazy_storage_var: Option<String> = None;
+        if use_lazy_else_optional {
+            let storage_var = format!("_iflet_value{}", self.iflet_result_counter);
+            self.iflet_result_counter += 1;
+            let storage_ty = if init_decl_type == "auto"
+                || type_string_has_auto_placeholder(&init_decl_type)
+            {
+                let else_value = else_result.as_ref()?;
+                format!("std::remove_cvref_t<decltype(({}))>", else_value)
+            } else {
+                init_decl_type.clone()
+            };
+            self.writeln(&format!(
+                "std::optional<{}> {};",
+                storage_ty, storage_var
+            ));
+            lazy_storage_var = Some(storage_var);
+        }
+
+        if use_lazy_else_optional {
+            // Keep else-branch evaluation inside the generated `else` block so
+            // `if let` statement lowering preserves branch evaluation order.
+        } else if let Some(else_value) = &else_result {
             self.writeln(&format!("{} {} = {};", init_decl_type, cpp_name, else_value));
         } else if else_has_early_return {
             // Else always returns early — use default-init (never reached via else path)
@@ -22168,7 +22410,11 @@ impl CodeGen {
                         }
                     }
                     let val = self.emit_expr_to_string(expr);
-                    self.writeln(&format!("{} = {};", cpp_name, val));
+                    if let Some(storage_var) = lazy_storage_var.as_ref() {
+                        self.writeln(&format!("{}.emplace({});", storage_var, val));
+                    } else {
+                        self.writeln(&format!("{} = {};", cpp_name, val));
+                    }
                     continue;
                 }
             }
@@ -22177,8 +22423,14 @@ impl CodeGen {
 
         self.pop_transient_statement_scope();
         self.indent -= 1;
-        // Emit else-branch statements if it has early returns
-        if else_result.is_none() && else_has_early_return {
+        if let Some(storage_var) = lazy_storage_var.as_ref() {
+            let else_value = else_result.as_ref()?;
+            self.writeln(&format!(
+                "}} else {{ {}.emplace({}); }}",
+                storage_var, else_value
+            ));
+        } else if else_result.is_none() && else_has_early_return {
+            // Emit else-branch statements if it has early returns
             self.writeln("} else {");
             self.indent += 1;
             self.push_transient_statement_scope();
@@ -22197,6 +22449,12 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+        if let Some(storage_var) = lazy_storage_var {
+            self.writeln(&format!(
+                "{} {} = std::move({}).value();",
+                decl_type, cpp_name, storage_var
+            ));
+        }
         Some(())
     }
 
@@ -26875,8 +27133,37 @@ fn should_replace_conflicting_impl_method(
     existing_method: &syn::ImplItemFn,
     candidate_method: &syn::ImplItemFn,
 ) -> bool {
+    // Prefer explicit user-authored trait impls over derive-generated copies
+    // when signatures collide (for example `fmt` from Debug derive vs
+    // non-derived formatter impls).
+    let existing_derived = impl_method_is_automatically_derived(existing_method);
+    let candidate_derived = impl_method_is_automatically_derived(candidate_method);
+    if existing_derived != candidate_derived {
+        return !candidate_derived;
+    }
+
     is_assoc_self_forwarder_method(existing_method)
         && !is_assoc_self_forwarder_method(candidate_method)
+}
+
+fn impl_method_is_automatically_derived(method: &syn::ImplItemFn) -> bool {
+    method
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("automatically_derived"))
+}
+
+fn impl_block_is_automatically_derived(impl_block: &syn::ItemImpl) -> bool {
+    impl_block
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("automatically_derived"))
+}
+
+fn mark_method_automatically_derived(method: &mut syn::ImplItemFn) {
+    if !impl_method_is_automatically_derived(method) {
+        method.attrs.push(parse_quote!(#[automatically_derived]));
+    }
 }
 
 fn find_impl_method_conflict_index(items: &[syn::ImplItem], key: &str) -> Option<usize> {
@@ -26972,11 +27259,25 @@ fn normalize_token_text(tokens: String) -> String {
     let collapsed = tokens.split_whitespace().collect::<Vec<_>>().join(" ");
     // Normalize equivalent Rust path prefixes so `::core::fmt::Formatter`
     // and `fmt::Formatter` produce the same key for dedup purposes.
-    collapsed
+    let mut normalized = collapsed
         .replace(":: core :: fmt ::", "fmt ::")
         .replace(":: std :: fmt ::", "fmt ::")
         .replace("core :: fmt ::", "fmt ::")
-        .replace("std :: fmt ::", "fmt ::")
+        .replace("std :: fmt ::", "fmt ::");
+    // Expanded code often mixes `fmt::Formatter` and `fmt::Formatter<'_>` in
+    // otherwise identical trait method signatures (for example Debug vs
+    // Display `fmt` methods). Normalize formatter lifetime arguments away so
+    // conflict keys remain stable across those equivalent forms.
+    while let Some(start) = normalized.find("fmt :: Formatter <") {
+        let needle_len = "fmt :: Formatter <".len();
+        let tail = &normalized[start + needle_len..];
+        let Some(rel_end) = tail.find('>') else {
+            break;
+        };
+        let end = start + needle_len + rel_end + 1;
+        normalized.replace_range(start..end, "fmt :: Formatter");
+    }
+    normalized
 }
 
 fn is_numeric_cpp_scalar_type(cpp_type: &str) -> bool {
@@ -33305,6 +33606,28 @@ mod tests {
     }
 
     #[test]
+    fn test_match_variant_reference_statement_scrutinee_uses_variant_value_for_visit() {
+        let out = transpile_str(
+            r#"
+            enum E { A(i32), B }
+            struct Holder { kind: E }
+            impl Holder {
+                fn probe(&self) {
+                    match &self.kind {
+                        E::A(_) => { a(); }
+                        E::B => { b(); }
+                    }
+                }
+            }
+            "#,
+        );
+
+        assert!(out.contains("auto&& _m = this->kind;"));
+        assert!(!out.contains("auto&& _m = &this->kind;"));
+        assert!(out.contains("std::visit(overloaded {"));
+    }
+
+    #[test]
     fn test_match_ref_binding_deref_collapses_reference_layer() {
         let out = transpile_str(
             r#"
@@ -39474,6 +39797,103 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf1054010_conflicting_fmt_prefers_non_derived_impl() {
+        let out = transpile_str(
+            r#"
+            #[derive(Debug)]
+            struct Marker;
+
+            impl core::fmt::Display for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("marker")
+                }
+            }
+
+            fn render(m: Marker) -> String {
+                m.to_string()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return f.write_str(\"marker\");"),
+            "non-derived formatter impl should replace conflicting derive fmt body\nGot:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_conflicting_fmt_prefers_non_derived_impl_from_impl_level_attr() {
+        let out = transpile_str(
+            r#"
+            struct Marker;
+
+            #[automatically_derived]
+            impl core::fmt::Debug for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("debug")
+                }
+            }
+
+            impl core::fmt::Display for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("display")
+                }
+            }
+
+            fn render(m: Marker) -> String {
+                m.to_string()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return f.write_str(\"display\");"),
+            "non-derived formatter impl should replace conflicting derived impl-level fmt body\nGot:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return f.write_str(\"debug\");"),
+            "derived impl-level formatter body should not win fmt conflict\nGot:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_conflicting_fmt_prefers_non_derived_when_formatter_lifetime_forms_differ() {
+        let out = transpile_str(
+            r#"
+            struct Marker;
+
+            #[automatically_derived]
+            impl core::fmt::Debug for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    f.write_str("debug")
+                }
+            }
+
+            impl core::fmt::Display for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("display")
+                }
+            }
+
+            fn render(m: Marker) -> String {
+                m.to_string()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return f.write_str(\"display\");"),
+            "display impl should win over derived fmt even when formatter lifetime syntax differs\nGot:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return f.write_str(\"debug\");"),
+            "derived debug impl should not survive fmt conflict\nGot:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
         let out = transpile_str(
             r#"
@@ -43888,6 +44308,149 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf1054010_unary_not_bits_method_lowers_to_bitwise_not() {
+        let out = transpile_str(
+            r#"
+            trait Flags {
+                type Bits;
+                fn bits(self) -> Self::Bits where Self: Sized;
+                fn from_bits_truncate(bits: Self::Bits) -> Self where Self: Sized;
+            }
+
+            fn complement<F: Flags>(value: F) -> F {
+                F::from_bits_truncate(!value.bits())
+            }
+            "#,
+        );
+        assert!(
+            out.contains("from_bits_truncate(~value.bits())"),
+            "bitflags-style bits() unary-not should lower to bitwise-not\nGot: {out}"
+        );
+        assert!(
+            !out.contains("from_bits_truncate(!value.bits())"),
+            "bits() unary-not must not lower to logical-not\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_bitflags_synthetic_complement_prefers_from_bits_truncate() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+
+            impl Flags {
+                fn from_bits_truncate(bits: u8) -> Self { Flags(bits & 0x7) }
+            }
+
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            impl std::ops::BitAnd for Flags {
+                type Output = Self;
+                fn bitand(self, rhs: Self) -> Self { Flags(self.0 & rhs.0) }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Flags complement() const { return Flags::from_bits_truncate("),
+            "synthetic complement should route through from_bits_truncate when available\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_bitflags_synthetic_iter_helpers_preserve_remaining_bits() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+
+            impl Flags {
+                fn from_bits_truncate(bits: u8) -> Self { Flags(bits & 0x7) }
+            }
+
+            impl std::ops::BitOr for Flags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { Flags(self.0 | rhs.0) }
+            }
+            impl std::ops::BitAnd for Flags {
+                type Output = Self;
+                fn bitand(self, rhs: Self) -> Self { Flags(self.0 & rhs.0) }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (this->contains(flag) && rem.intersects(flag))"),
+            "iter_names synthetic helper should gate aliases via remaining/intersects\nGot: {out}"
+        );
+        assert!(
+            out.contains("if (FLAGS[i].name().empty()) { continue; }"),
+            "iter helpers should skip unnamed named-flag entries before intersects/removal\nGot: {out}"
+        );
+        assert!(
+            out.contains("if (!rem.is_empty()) { result.push(rem); }"),
+            "iter synthetic helper should append remaining unnamed bits\nGot: {out}"
+        );
+        assert!(
+            out.contains("std::string to_string() const"),
+            "bitflags synthetic helper should emit to_string for stable debug formatting\nGot: {out}"
+        );
+        assert!(
+            out.contains("f.write_str(\"Flags(\")"),
+            "bitflags synthetic to_string should include the type-name prefix\nGot: {out}"
+        );
+        assert!(
+            out.contains("std::format(\"{0:x}\", rusty::format_numeric_arg(remaining))"),
+            "bitflags synthetic to_string should format remaining unnamed bits as lowercase hex\nGot: {out}"
+        );
+        assert!(
+            out.contains("else if (first) { f.write_str(\"0x0\"); }"),
+            "bitflags synthetic to_string should emit explicit 0x0 when no named or unnamed bits are present\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_if_let_statement_lowering_keeps_else_try_branch_lazy() {
+        let out = transpile_str(
+            r#"
+            fn from_name(s: &str) -> Result<u32, ()> {
+                if s.is_empty() { Err(()) } else { Ok(1) }
+            }
+
+            fn parse(part: &str) -> Result<u32, ()> {
+                let parsed = if let Some(hex) = part.strip_prefix("0x") {
+                    u32::from_str_radix(hex, 16)?
+                } else {
+                    from_name(part)?
+                };
+                Ok(parsed)
+            }
+            "#,
+        );
+        let iflet_pos = out
+            .find("if (_iflet_scrutinee.")
+            .expect("missing if-let scrutinee check");
+        let else_pos = out[iflet_pos..]
+            .find("} else {")
+            .map(|idx| idx + iflet_pos)
+            .expect("missing lowered else branch");
+        let from_name_pos = out[iflet_pos..]
+            .find("from_name(std::string_view(part))")
+            .or_else(|| out[iflet_pos..].find("from_name(part)"))
+            .map(|idx| idx + iflet_pos)
+            .expect("missing from_name(part) call");
+        assert!(
+            from_name_pos > else_pos,
+            "else branch call should be emitted inside lowered else block (lazy evaluation), got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::optional<"),
+            "lazy if-let statement lowering should use temporary optional storage when else has try-flow\nGot:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf105402_bitwise_assign_traits_map_to_cpp_compound_operators() {
         assert_eq!(map_operator_trait("BitAndAssign"), Some("operator&="));
         assert_eq!(map_operator_trait("BitOrAssign"), Some("operator|="));
@@ -44143,6 +44706,41 @@ mod tests {
         assert!(
             out.contains("inline const") && out.contains("MyFlags::FLAGS"),
             "FLAGS should have a deferred definition after class body\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1054010_deferred_flags_definition_emits_after_dependent_consts() {
+        let out = transpile_str(
+            r#"
+            struct Flag<B> {
+                name: &'static str,
+                value: B,
+            }
+            struct MyFlags(u8);
+            impl MyFlags {
+                const FLAGS: &'static [Flag<Self>] = &[
+                    Flag { name: "ABC", value: MyFlags::ABC },
+                ];
+                const A: MyFlags = MyFlags(1);
+                const ABC: MyFlags = MyFlags(MyFlags::A.0 | (1 << 1));
+            }
+            impl std::ops::BitOr for MyFlags {
+                type Output = Self;
+                fn bitor(self, rhs: Self) -> Self { MyFlags(self.0 | rhs.0) }
+            }
+            "#,
+        );
+        let abc_pos = out
+            .find("MyFlags::ABC =")
+            .expect("missing ABC deferred definition");
+        let flags_pos = out
+            .find("MyFlags::FLAGS =")
+            .expect("missing FLAGS deferred definition");
+        assert!(
+            abc_pos < flags_pos,
+            "dependent const values should be emitted before FLAGS deferred initializer\nGot:\n{}",
+            out
         );
     }
 
