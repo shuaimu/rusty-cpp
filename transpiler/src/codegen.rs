@@ -336,6 +336,12 @@ pub struct CodeGen {
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     declared_item_names: HashSet<String>,
+    /// Top-level inline module names declared in this file.
+    /// Used to lower bare module imports (`use crate::{iter};`) as namespace imports.
+    declared_module_names: HashSet<String>,
+    /// Top-level modules that are imported as bare namespaces from nested scopes.
+    /// Used to emit just-enough global namespace forward declarations for alias imports.
+    required_top_level_module_aliases: HashSet<String>,
     /// Maps function names declared inside inline modules to qualified paths.
     module_qualified_functions: HashMap<String, String>,
     /// Tracks inline module names that collide with function names in the same scope.
@@ -511,6 +517,8 @@ impl CodeGen {
             cpp_module_import_path_keys: HashSet::new(),
             in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
+            declared_module_names: HashSet::new(),
+            required_top_level_module_aliases: HashSet::new(),
             module_qualified_functions: HashMap::new(),
             module_namespace_renames: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
@@ -608,6 +616,8 @@ impl CodeGen {
         self.cpp_module_import_path_keys.clear();
         self.in_forward_decl_signature = false;
         self.declared_item_names.clear();
+        self.declared_module_names.clear();
+        self.required_top_level_module_aliases.clear();
         self.emitted_method_conflict_keys.clear();
         self.emitted_non_method_member_names.clear();
         self.current_struct_assoc_cpp_types.clear();
@@ -698,6 +708,9 @@ impl CodeGen {
         // Pass 1i: collect `use ... as Alias` names so forward declaration emission can
         // avoid alias-order-sensitive non-void signatures.
         self.collect_import_alias_names(&file.items);
+        // Pass 1i.5: collect top-level module names that must be forward-declared so
+        // nested bare-module imports can emit valid namespace aliases.
+        self.collect_required_top_level_module_aliases(&file.items, &[]);
         // Pass 1j: detect unsupported by-value circular type SCCs across the
         // full crate/module tree and record deterministic diagnostics.
         let mut all_type_items = Vec::new();
@@ -801,6 +814,7 @@ impl CodeGen {
 
         let mut prologue_text = self.emit_cpp_module_import_prologue();
         prologue_text.push_str(&self.emit_merged_impl_namespace_forward_decls());
+        prologue_text.push_str(&self.emit_top_level_module_forward_decls());
         if !self.unsupported_by_value_cycle_diagnostics.is_empty() {
             let mut diagnostics = self.unsupported_by_value_cycle_diagnostics.clone();
             diagnostics.sort();
@@ -869,6 +883,31 @@ impl CodeGen {
             .impl_source_modules
             .values()
             .flat_map(|modules| modules.iter())
+            .map(|module| module.trim())
+            .filter(|module| !module.is_empty())
+            .map(|module| self.escape_and_rename_qualified_name(module))
+            .collect();
+        namespaces.sort();
+        namespaces.dedup();
+
+        if namespaces.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::new();
+        for ns in namespaces {
+            out.push_str("namespace ");
+            out.push_str(&ns);
+            out.push_str(" {}\n");
+        }
+        out.push('\n');
+        out
+    }
+
+    fn emit_top_level_module_forward_decls(&self) -> String {
+        let mut namespaces: Vec<String> = self
+            .required_top_level_module_aliases
+            .iter()
             .map(|module| module.trim())
             .filter(|module| !module.is_empty())
             .map(|module| self.escape_and_rename_qualified_name(module))
@@ -3181,10 +3220,47 @@ impl CodeGen {
                 }
                 syn::Item::Mod(m) => {
                     self.declared_item_names.insert(m.ident.to_string());
+                    self.declared_module_names.insert(m.ident.to_string());
                 }
                 _ => {}
             }
         }
+    }
+
+    fn collect_required_top_level_module_aliases(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        let prev_stack = self.module_stack.clone();
+        self.module_stack = module_path.to_vec();
+
+        for item in items {
+            match item {
+                syn::Item::Use(u) => {
+                    let paths = self.flatten_use_tree(&u.tree, "");
+                    for path in paths {
+                        let resolved = self.resolve_unqualified_local_import_path(&path);
+                        if let Some(namespace_target) =
+                            self.resolve_bare_module_namespace_import(&resolved)
+                        {
+                            self.required_top_level_module_aliases
+                                .insert(namespace_target);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_required_top_level_module_aliases(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.module_stack = prev_stack;
     }
 
     fn collect_skipped_module_trait_names(&mut self, items: &[syn::Item], module_path: &[String]) {
@@ -6914,12 +6990,22 @@ impl CodeGen {
                 ));
                 continue;
             }
+            if let Some(namespace_target) =
+                self.resolve_bare_module_namespace_import(&resolved_path)
+            {
+                self.emit_namespace_alias_import(&namespace_target);
+                continue;
+            }
             match classify_use_import(&resolved_path) {
                 UseImportAction::RustOnly => {
                     self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 }
                 UseImportAction::Using(mapped_path) => {
                     let using_path = make_using_path_cpp_legal(&mapped_path);
+                    if let Some(namespace_target) = using_path.strip_prefix("namespace ") {
+                        self.emit_namespace_using_import(namespace_target.trim());
+                        continue;
+                    }
                     self.writeln(&format!("{}using {};", export_prefix, using_path));
                     // When importing a data enum type, also import its namespace
                     // so variant structs (EnumName_VariantName) are accessible.
@@ -6936,6 +7022,43 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn resolve_bare_module_namespace_import(&self, path: &str) -> Option<String> {
+        let normalized = normalize_use_import_path(path);
+        if normalized.is_empty()
+            || normalized.contains("::")
+            || normalized.contains(" = ")
+            || normalized.starts_with("::")
+            || normalized.starts_with("namespace ")
+            || self.module_stack.is_empty()
+        {
+            return None;
+        }
+        if !self.declared_module_names.contains(normalized) {
+            return None;
+        }
+        Some(normalized.to_string())
+    }
+
+    fn emit_namespace_alias_import(&mut self, namespace_path: &str) {
+        let trimmed = namespace_path.trim().trim_start_matches("::");
+        if trimmed.is_empty() {
+            return;
+        }
+        let alias = escape_cpp_keyword(trimmed.rsplit("::").next().unwrap_or(trimmed));
+        let target = self.escape_and_rename_qualified_name(trimmed);
+        self.writeln(&format!("namespace {} = ::{};", alias, target));
+    }
+
+    fn emit_namespace_using_import(&mut self, namespace_path: &str) {
+        let trimmed = namespace_path.trim().trim_start_matches("::");
+        if trimmed.is_empty() {
+            return;
+        }
+        let escaped = self.escape_and_rename_qualified_name(trimmed);
+        self.writeln(&format!("namespace {} {{}}", escaped));
+        self.writeln(&format!("using namespace {};", escaped));
     }
 
     fn record_option_alias_import(&mut self, path: &str) {
@@ -25945,6 +26068,8 @@ struct Formatter {\n\
     template<typename... Args>\n\
     static Result debug_struct_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
+    static Result debug_struct_field2_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
+    template<typename... Args>\n\
     Result write_fmt(Args&&... args) const { (append_one(std::forward<Args>(args)), ...); return Result::Ok(std::make_tuple()); }\n\
     rusty::Option<size_t> width() const { return rusty::Option<size_t>(rusty::None); }\n\
     rusty::Option<Alignment> align() const { return rusty::Option<Alignment>(rusty::None); }\n\
@@ -34730,6 +34855,67 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10535_bare_group_module_imports_emit_namespace_aliases() {
+        let out = transpile_str(
+            r#"
+            mod inner {
+                use crate::{iter, parser, tests};
+            }
+            mod iter {
+                pub fn bits() {}
+            }
+            mod parser {
+                pub fn parse() {}
+            }
+            mod tests {
+                pub fn run() {}
+            }
+        "#,
+        );
+        assert!(out.contains("namespace iter {}"));
+        assert!(out.contains("namespace parser {}"));
+        assert!(out.contains("namespace tests {}"));
+        assert!(out.contains("namespace iter = ::iter;"));
+        assert!(out.contains("namespace parser = ::parser;"));
+        assert!(out.contains("namespace tests = ::tests;"));
+        assert!(!out.contains("using ::iter;"));
+        assert!(!out.contains("using ::parser;"));
+        assert!(!out.contains("using ::tests;"));
+        assert!(!out.contains("using namespace iter;"));
+        assert!(!out.contains("using namespace parser;"));
+        assert!(!out.contains("using namespace tests;"));
+
+        let iter_ns = out
+            .find("namespace iter {}")
+            .expect("namespace iter forward declaration should be emitted");
+        let iter_alias = out
+            .find("namespace iter = ::iter;")
+            .expect("namespace iter alias should be emitted");
+        assert!(
+            iter_ns < iter_alias,
+            "namespace forward declaration should precede namespace alias:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10535_pub_glob_reexport_avoids_export_using_namespace() {
+        let out = transpile_str_module(
+            r#"
+            mod holder {
+                pub use external::*;
+                mod external {
+                    pub fn decode() {}
+                }
+            }
+        "#,
+            "bitflags_like",
+        );
+        assert!(out.contains("using namespace external;"));
+        assert!(!out.contains("export using namespace external;"));
+    }
+
+    #[test]
     fn test_leaf414_bare_import_of_skipped_trait_is_rust_only() {
         let out = transpile_str_module(
             r#"
@@ -37554,6 +37740,12 @@ mod tests {
         // The runtime helpers just reference them via the `fmt` namespace.
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("namespace fmt {"));
+    }
+
+    #[test]
+    fn test_leaf10535_runtime_fallback_formatter_supports_debug_struct_field2_finish() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("static Result debug_struct_field2_finish(Args&&...)"));
     }
 
     #[test]

@@ -3375,7 +3375,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-33-1775891420/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-34d-1775893665/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering paths, with no fixture-specific rewrites/scripts and no generated-text patching.
-        - [ ] Leaf 10.5.35: Collapse the post-10.5.34 deterministic full-matrix `bitflags` Stage D compile family generically (starting with invalid namespace `using` forms like `using ::iter;` and missing formatter helper surfaces such as `debug_struct_field2_finish`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+        - [x] *done* Leaf 10.5.35: Collapse the post-10.5.34 deterministic full-matrix `bitflags` Stage D compile family generically (starting with invalid namespace `using` forms like `using ::iter;` and missing formatter helper surfaces such as `debug_struct_field2_finish`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only import/runtime-helper updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - bare module imports (`use crate::{iter, ...};`) were lowered to invalid C++ declarations (`using ::iter;`) and could not support downstream `iter::Type` references from nested scopes.
+            - namespace glob re-exports could still emit invalid module-mode forms (`export using namespace ...`) and lacked a deterministic namespace-availability path when source order referenced modules before definition.
+            - runtime fallback formatter helpers exposed `debug_struct_field1_finish` but not `debug_struct_field2_finish`, which bitflags debug paths called after prior frontier fixes.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - added top-level module-name tracking + nested-use analysis to collect only required bare-module alias targets.
+            - lowered bare nested module imports to namespace aliases (`namespace iter = ::iter;`) and emitted just-enough global namespace forward declarations for those alias targets.
+            - treated namespace imports from glob use trees as namespace directives without `export` prefix and emitted local namespace stubs before `using namespace ...` when needed for source-order safety.
+            - extended runtime fallback formatter helpers with `debug_struct_field2_finish`.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10535_bare_group_module_imports_emit_namespace_aliases`
+            - `test_leaf10535_pub_glob_reexport_avoids_export_using_namespace`
+            - `test_leaf10535_runtime_fallback_formatter_supports_debug_struct_field2_finish`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10535 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_cfg_test_module_omitted -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf413_c_like_enum_forward_decl_precedes_super_reexport_use -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-35b-1775894980 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `bitflags` Stage D (`runner.cpp:986` invalid `using ::iter;`, `runner.cpp:998` missing `debug_struct_field2_finish`, plus namespace re-export/import ordering fallout) is removed.
+            - full-matrix frontier stays at `bitflags` Stage D but advances to the next deterministic compile family rooted at tuple/option/iterator shape mismatches (first hard errors now start at `runner.cpp:2714` `case_` span tuple element mismatch and adjacent surfaces through `runner.cpp:3334`).
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-34d-1775893665/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-35b-1775894980/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in import/runtime helper lowering; no crate-specific scripts and no generated-text patching were introduced.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
