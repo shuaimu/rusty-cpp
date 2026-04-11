@@ -658,7 +658,10 @@ using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded
 template<typename T>
 class range {
 public:
-    range(T start, T end) : start_(start), end_(end) {}
+    T start;
+
+    range(T start_value, T end_value)
+        : start(std::move(start_value)), end_(std::move(end_value)) {}
 
     range into_iter() {
         return std::move(*this);
@@ -671,25 +674,29 @@ public:
         bool operator!=(const iterator& other) const { return current != other.current; }
     };
 
-    iterator begin() const { return {start_}; }
+    iterator begin() const { return {start}; }
     iterator end() const { return {end_}; }
 
-    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start_}); }
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
+
+    bool contains(const T& value) const {
+        return value >= start && value < end_;
+    }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     std::optional<T> next() {
-        if (start_ == end_) {
+        if (start == end_) {
             return std::nullopt;
         }
-        T current = start_;
-        ++start_;
+        T current = start;
+        ++start;
         return current;
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
     size_t count() const {
-        T current = start_;
+        T current = start;
         size_t n = 0;
         while (current != end_) {
             ++current;
@@ -699,7 +706,7 @@ public:
     }
 
 private:
-    T start_, end_;
+    T end_;
 };
 
 template<typename A, typename B>
@@ -709,7 +716,10 @@ range(A, B) -> range<std::common_type_t<A, B>>;
 template<typename T>
 class range_inclusive {
 public:
-    range_inclusive(T start, T end) : start_(start), end_(end) {}
+    T start;
+
+    range_inclusive(T start_value, T end_value)
+        : start(std::move(start_value)), end_(std::move(end_value)) {}
 
     range_inclusive into_iter() {
         return std::move(*this);
@@ -724,22 +734,26 @@ public:
         bool operator!=(const iterator& other) const { return !done; }
     };
 
-    iterator begin() const { return {start_, end_, false}; }
+    iterator begin() const { return {start, end_, false}; }
     iterator end() const { return {end_, end_, true}; }
 
-    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start_}); }
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
+
+    bool contains(const T& value) const {
+        return value >= start && value <= end_;
+    }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     std::optional<T> next() {
         if (done_) {
             return std::nullopt;
         }
-        T current = start_;
-        if (start_ == end_) {
+        T current = start;
+        if (start == end_) {
             done_ = true;
         } else {
-            ++start_;
+            ++start;
         }
         return current;
     }
@@ -749,7 +763,7 @@ public:
         if (done_) {
             return 0;
         }
-        T current = start_;
+        T current = start;
         size_t n = 0;
         while (true) {
             ++n;
@@ -762,7 +776,7 @@ public:
     }
 
 private:
-    T start_, end_;
+    T end_;
     bool done_ = false;
 };
 
@@ -780,6 +794,10 @@ struct range_from {
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+
+    bool contains(const T& value) const {
+        return value >= start;
+    }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     std::optional<T> next() {
@@ -802,6 +820,10 @@ struct range_to {
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
+
+    bool contains(const T& value) const {
+        return value < end;
+    }
 };
 
 /// Full range — equivalent to Rust's `..`.
@@ -810,6 +832,11 @@ struct range_full {
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     template<typename T = size_t>
     Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+
+    template<typename T>
+    bool contains(const T&) const {
+        return true;
+    }
 };
 
 /// Range to inclusive — equivalent to Rust's `..=end`.
@@ -819,6 +846,10 @@ struct range_to_inclusive {
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }
+
+    bool contains(const T& value) const {
+        return value <= end;
+    }
 };
 
 } // namespace rusty

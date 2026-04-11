@@ -2311,7 +2311,9 @@ Current status snapshot:
 20. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1761` (`template declaration cannot appear at block scope`), followed by malformed control-flow lowering around `runner.cpp:1827` (`return break ...` surface).
 21. Focused `smallvec` repro after `Leaf 5.1.13` (`/tmp/rusty-parity-matrix-5-1-13-20260411c/smallvec/...`) collapses the prior post-5.1.12 block-scope template/control-flow first head (`runner.cpp:1761` template-at-block-scope + `runner.cpp:1827` `return break` malformed expression lowering).
 22. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1789` (`rusty::range<size_t>` has no `.contains(...)`), followed by downstream template/path fallout (`rusty::Vec::from_raw_parts` used without template args and unresolved `mem::swap` namespace member).
-23. Next active item is `Leaf 5.1.14` to collapse this post-5.1.13 range/member/path family; guardrail check against §11 remains satisfied (shared AST/runtime-surface-aware fixes only, no crate-specific ad-hoc scripts or generated-output text patching).
+23. Focused `smallvec` repro after `Leaf 5.1.14` (`/tmp/rusty-parity-matrix-5-1-14-20260411c/smallvec/...`) collapses the prior post-5.1.13 range/member/path first head (`runner.cpp:1789` `.contains(...)` on `rusty::range<size_t>`, plus adjacent unspecialized `Vec::from_raw_parts` and `mem::swap` path fallout).
+24. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2004` (`SetLenOnDrop` incomplete-type nested-name call shape), followed by downstream declaration-order/runtime-surface fallout (`runner.cpp:2072` same `SetLenOnDrop::new_` family and `runner.cpp:2177` missing `Formatter::debug_tuple` surface).
+25. Next active item is `Leaf 5.1.15` to collapse this post-5.1.14 local-type-ordering/formatter-surface family; guardrail check against §11 remains satisfied (shared AST/runtime-surface-aware fixes only, no crate-specific ad-hoc scripts or generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

@@ -190,6 +190,12 @@ inline T replace(T& destination, U&& value) {
     return old;
 }
 
+template<typename T>
+inline void swap(T& left, T& right) noexcept(noexcept(std::swap(left, right))) {
+    using std::swap;
+    swap(left, right);
+}
+
 // Rust std::mem::drop consumes a value and destroys it at the end of this call.
 template<typename T>
 inline void drop(T value) {

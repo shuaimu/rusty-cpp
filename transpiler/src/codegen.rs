@@ -21308,7 +21308,35 @@ impl CodeGen {
                 }
             }
             "NonNull" => {
-                if matches!(method_name, "new" | "new_") {
+                if matches!(method_name, "new" | "new_" | "new_unchecked") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!(
+                                    "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
+                                    arg_cpp
+                                )
+                            })
+                        });
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            "Vec" => {
+                if matches!(method_name, "from_raw_parts" | "from_raw_parts_in") {
                     let inferred = call
                         .args
                         .first()
@@ -21369,6 +21397,13 @@ impl CodeGen {
         let owner_has_explicit_args =
             matches!(owner_seg.arguments, syn::PathArguments::AngleBracketed(_));
         let owner_args_omitted = matches!(owner_seg.arguments, syn::PathArguments::None);
+        let method_name = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let vec_from_raw_parts_recovery = owner_name == "Vec"
+            && matches!(method_name.as_str(), "from_raw_parts" | "from_raw_parts_in");
         let owner_is_supported_explicit_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -21393,14 +21428,10 @@ impl CodeGen {
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
             && !(owner_args_omitted && owner_is_supported_omitted_recovery_target)
+            && !(owner_args_omitted && vec_from_raw_parts_recovery)
         {
             return base_func;
         }
-        let method_name = path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
         let expected_owner_args = expected_ty.and_then(|ty| self.expected_type_generic_args(ty));
         let inferred_owner_args =
             self.infer_owner_template_args_for_call(&owner_name, &method_name, call);
@@ -33261,6 +33292,64 @@ mod tests {
         assert!(
             !out.contains("return break;"),
             "local match-break lowering must not emit return break in an expression context, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5114_vec_from_raw_parts_omitted_owner_recovers_pointer_pointee_type() {
+        let out = transpile_str(
+            r#"
+            fn f(ptr: *mut i32, len: usize, cap: usize) {
+                let _v = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Vec<int32_t>::from_raw_parts("),
+            "Vec::from_raw_parts should recover omitted owner args from pointer input, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Vec::from_raw_parts("),
+            "Vec::from_raw_parts should not emit unspecialized owner path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5114_nonnull_new_unchecked_omitted_owner_recovers_pointer_pointee_type() {
+        let out = transpile_str(
+            r#"
+            fn f(ptr: *mut u8) {
+                let _nn = unsafe { NonNull::new_unchecked(ptr) };
+            }
+            "#,
+        );
+        assert!(
+            out.contains("NonNull<uint8_t>::new_unchecked("),
+            "NonNull::new_unchecked should recover omitted owner args from pointer input, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("NonNull::new_unchecked("),
+            "NonNull::new_unchecked should not emit unspecialized owner path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5114_mem_swap_path_maps_to_runtime_mem_swap() {
+        let out = transpile_str(
+            r#"
+            fn f(a: &mut i32, b: &mut i32) {
+                std::mem::swap(a, b);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::mem::swap(a, b);"),
+            "mem::swap should lower to runtime helper path, got:\n{}",
             out
         );
     }

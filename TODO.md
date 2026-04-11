@@ -4284,8 +4284,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-13-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-13-20260411c/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated shared lowering changes; no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.14: `smallvec` Stage D range/member/path compile-head family collapse
-          - Collapse the post-5.1.13 deterministic `smallvec` Stage D family (starting at `runner.cpp:1789` with `rusty::range<size_t>` `.contains(...)` surface mismatch and adjacent `rusty::Vec::from_raw_parts` template omission / `mem::swap` namespace-path fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.14: `smallvec` Stage D range/member/path compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC scope target; no extra decomposition was required.
+          - Deterministic failure family addressed (shared runtime/transpiler fixes only, no crate-specific scripts):
+            - runtime range surfaces now support `contains(...)` on `range`, `range_inclusive`, `range_from`, `range_to`, `range_to_inclusive`, and `range_full`; `range` keeps a mutable public `start` member needed by transpiled guard-adjustment code while preserving iterator compatibility.
+            - owner-template recovery for omitted associated calls now supports `Vec::from_raw_parts{,_in}(...)` by inferring `T` from pointer arguments, collapsing unspecialized `Vec::from_raw_parts` emissions.
+            - owner-template recovery for `NonNull::new_unchecked(...)` now mirrors `new/new_` behavior so omitted owner calls recover pointee template args.
+            - runtime path mapping now rewrites `core/std/mem::swap` to `rusty::mem::swap`, and runtime `rusty::mem::swap` is provided.
+          - Added focused regressions:
+            - `test_leaf5114_vec_from_raw_parts_omitted_owner_recovers_pointer_pointee_type`
+            - `test_leaf5114_nonnull_new_unchecked_omitted_owner_recovers_pointer_pointee_type`
+            - `test_leaf5114_mem_swap_path_maps_to_runtime_mem_swap`
+            - `types::tests::test_function_path_mapping` assertion for `core::mem::swap -> rusty::mem::swap`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5114 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-14-20260411c --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.13 first head at `runner.cpp:1789` (`rusty::range<size_t>` `.contains(...)`) and adjacent `rusty::Vec::from_raw_parts` / `mem::swap` path fallout are collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:2004` (incomplete type `SetLenOnDrop` used in nested-name-specifier call), followed by downstream declaration-order/surface fallout (`runner.cpp:2072` same family and `runner.cpp:2177` `Formatter::debug_tuple` surface gap).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-14-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-14-20260411c/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are shared AST/runtime-surface changes; no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.15: `smallvec` Stage D local-type ordering/formatter-surface compile-head family collapse
+          - Collapse the post-5.1.14 deterministic `smallvec` Stage D family (starting at `runner.cpp:2004` with `SetLenOnDrop` incomplete-type nested-name call shape and adjacent `Formatter::debug_tuple` runtime-surface fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

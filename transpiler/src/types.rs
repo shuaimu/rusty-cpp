@@ -192,6 +192,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
             Some("rusty::mem::align_of")
         }
         "std::mem::replace" | "mem::replace" => Some("rusty::mem::replace"),
+        "std::mem::swap" | "core::mem::swap" | "mem::swap" => Some("rusty::mem::swap"),
         "std::mem::forget" | "mem::forget" => Some("rusty::mem::forget"),
         "usize::checked_next_power_of_two"
         | "std::usize::checked_next_power_of_two"
@@ -658,6 +659,10 @@ mod tests {
         assert_eq!(
             map_function_path("mem::replace"),
             Some("rusty::mem::replace")
+        );
+        assert_eq!(
+            map_function_path("core::mem::swap"),
+            Some("rusty::mem::swap")
         );
         assert_eq!(
             map_function_path("usize::checked_next_power_of_two"),
