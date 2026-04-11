@@ -4219,8 +4219,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-10-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-10-20260411b/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are AST/context-gated and shared; no crate-specific scripts and no generated-output text patching.
-        - [ ] Leaf 5.1.11: `smallvec` Stage D owner-template/bound-type specialization compile-head family collapse
-          - Collapse the post-5.1.10 deterministic `smallvec` Stage D family (starting at `runner.cpp:1474` with unspecialized `NonNull::new_`, followed by unresolved bound-associated variant/type surfaces such as `Included`/`Excluded` and downstream `SmallVec<T>` unresolved-`T` fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.11: `smallvec` Stage D owner-template/bound-type specialization compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC feature scope; no additional decomposition was required.
+          - Deterministic failure family addressed (shared transpiler fix, no crate-specific scripts):
+            - omitted-owner `NonNull::new/new_` inference now has pointer-pointee fallback for weak local-type contexts, eliminating unspecialized `NonNull::new_(...)` emission.
+            - match variant-context inference now treats `start_bound`/`end_bound` method-call matches as `Bound` context when appropriate, so single-segment imported variants (`Included`/`Excluded`/`Unbounded`) lower through runtime-bound visit typing instead of unresolved raw names.
+            - call-type substitution now merges constructor/owner type-argument substitutions with function substitutions, and struct-literal field expected-type lookup now applies call-site expected-type substitutions; this collapses downstream unresolved template-name leakage (`SmallVec<T>` in `Drain<A>` construction sites).
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5111_nonnull_new_omitted_owner_recovers_pointer_pointee_type`
+            - `test_leaf5111_bound_match_with_imported_variants_uses_runtime_bound_context`
+            - `test_leaf5111_constructor_expected_type_substitutes_owner_type_args`
+            - `test_leaf5111_struct_literal_field_expected_type_substitutes_owner_type_args`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5111 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-11-20260411b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.10 first head at `runner.cpp:1474` (unspecialized `NonNull::new_`, `Included`/`Excluded` bound-match fallback, and unresolved `SmallVec<T>` leakage) is collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1616` (`auto new_alloc;` no initializer in `try_grow`), followed by `usize::checked_next_power_of_two` method-path/type-resolution fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-11-20260411b/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-11-20260411b/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are shape-gated and context-aware; no crate-specific scripts and no generated-output text patching.
+        - [ ] Leaf 5.1.12: `smallvec` Stage D local-declaration/method-path compile-head family collapse
+          - Collapse the post-5.1.11 deterministic `smallvec` Stage D family (starting at `runner.cpp:1616` with uninitialized local declaration surface `auto new_alloc;`, followed by `usize::checked_next_power_of_two` method-path/type-resolution fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

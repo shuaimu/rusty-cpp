@@ -4070,47 +4070,151 @@ impl CodeGen {
         &self,
         call: &syn::ExprCall,
     ) -> Option<HashMap<String, syn::Type>> {
-        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
-        if type_params.is_empty() {
-            return None;
-        }
+        let mut substitutions = self.call_owner_type_arg_substitutions(call).unwrap_or_default();
 
-        let mut provided_type_args: Vec<syn::Type> = Vec::new();
-        if let syn::Expr::Path(path_expr) = call.func.as_ref() {
-            if let Some(last_seg) = path_expr.path.segments.last() {
-                if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
-                    provided_type_args.extend(args.args.iter().filter_map(|arg| match arg {
-                        syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
-                            Some(ty.clone())
+        if let Some(type_params) = self.lookup_function_type_param_names(call.func.as_ref()) {
+            if !type_params.is_empty() {
+                let mut provided_type_args: Vec<syn::Type> = Vec::new();
+                if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                    if let Some(last_seg) = path_expr.path.segments.last() {
+                        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            provided_type_args.extend(args.args.iter().filter_map(|arg| match arg {
+                                syn::GenericArgument::Type(ty)
+                                    if !matches!(ty, syn::Type::Infer(_)) =>
+                                {
+                                    Some(ty.clone())
+                                }
+                                _ => None,
+                            }));
                         }
-                        _ => None,
-                    }));
-                }
-            }
-        }
-
-        if provided_type_args.is_empty() {
-            if let Some(inferred) = self.infer_template_args_from_fn_path_return_type(call) {
-                for inferred_arg in inferred {
-                    if let Ok(parsed_ty) = syn::parse_str::<syn::Type>(&inferred_arg) {
-                        provided_type_args.push(parsed_ty);
                     }
                 }
+
+                if provided_type_args.is_empty() {
+                    if let Some(inferred) = self.infer_template_args_from_fn_path_return_type(call)
+                    {
+                        for inferred_arg in inferred {
+                            if let Ok(parsed_ty) = syn::parse_str::<syn::Type>(&inferred_arg) {
+                                provided_type_args.push(parsed_ty);
+                            }
+                        }
+                    }
+                }
+
+                for (param, concrete_ty) in type_params.iter().zip(provided_type_args.into_iter()) {
+                    substitutions.insert(param.clone(), concrete_ty);
+                }
             }
-        }
-
-        if provided_type_args.is_empty() {
-            return None;
-        }
-
-        let mut substitutions = HashMap::new();
-        for (param, concrete_ty) in type_params.iter().zip(provided_type_args.into_iter()) {
-            substitutions.insert(param.clone(), concrete_ty);
         }
         if substitutions.is_empty() {
             None
         } else {
             Some(substitutions)
+        }
+    }
+
+    fn owner_segment_type_arg_substitutions(
+        &self,
+        path: &syn::Path,
+        owner_seg_idx: usize,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let owner_seg = path.segments.iter().nth(owner_seg_idx)?;
+        let syn::PathArguments::AngleBracketed(args) = &owner_seg.arguments else {
+            return None;
+        };
+        let provided_type_args: Vec<syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if provided_type_args.is_empty() {
+            return None;
+        }
+
+        let mut owner_path = syn::Path {
+            leading_colon: path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for seg in path.segments.iter().take(owner_seg_idx + 1) {
+            owner_path.segments.push(seg.clone());
+        }
+        let params = self.declared_type_params_for_path(&owner_path)?;
+        if params.is_empty() {
+            return None;
+        }
+        let owner_key = self.declared_type_key_for_path(&owner_path)?;
+        let param_kinds = self.declared_type_param_kinds.get(&owner_key);
+
+        let mut substitutions = HashMap::new();
+        let mut provided_iter = provided_type_args.into_iter();
+        for (idx, param) in params.iter().enumerate() {
+            let is_type_param = param_kinds
+                .and_then(|kinds| kinds.get(idx))
+                .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+            if !is_type_param {
+                continue;
+            }
+            let Some(concrete_ty) = provided_iter.next() else {
+                break;
+            };
+            substitutions.insert(param.clone(), concrete_ty);
+        }
+
+        if substitutions.is_empty() {
+            None
+        } else {
+            Some(substitutions)
+        }
+    }
+
+    fn call_owner_type_arg_substitutions(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let path = &path_expr.path;
+        if path.segments.is_empty() {
+            return None;
+        }
+
+        let mut candidate_indices: Vec<usize> = Vec::new();
+        if let Some(last_seg) = path.segments.last() {
+            if last_seg
+                .ident
+                .to_string()
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                candidate_indices.push(path.segments.len() - 1);
+            }
+        }
+        if path.segments.len() >= 2 {
+            candidate_indices.push(path.segments.len() - 2);
+        }
+
+        let mut merged = HashMap::new();
+        let mut seen = HashSet::new();
+        for idx in candidate_indices {
+            if !seen.insert(idx) {
+                continue;
+            }
+            if let Some(subs) = self.owner_segment_type_arg_substitutions(path, idx) {
+                merged.extend(subs);
+            }
+        }
+
+        if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
         }
     }
 
@@ -12522,9 +12626,23 @@ impl CodeGen {
                 let ty = self.lookup_field_type_for_expr_base(&field.base, &member)?;
                 self.infer_variant_type_context_from_type(&ty)
             }
-            syn::Expr::MethodCall(_) => self
-                .infer_simple_expr_type(expr)
-                .and_then(|ty| self.infer_variant_type_context_from_type(&ty)),
+            syn::Expr::MethodCall(mc) => {
+                if matches!(mc.method.to_string().as_str(), "start_bound" | "end_bound")
+                    && !self.data_enum_types.contains("Bound")
+                {
+                    if let Some(ty) = self.infer_simple_expr_type(expr) {
+                        if let Some(ctx) = self.infer_variant_type_context_from_type(&ty) {
+                            return Some(ctx);
+                        }
+                    }
+                    return Some(VariantTypeContext {
+                        enum_name: "Bound".to_string(),
+                        template_args: Vec::new(),
+                    });
+                }
+                self.infer_simple_expr_type(expr)
+                    .and_then(|ty| self.infer_variant_type_context_from_type(&ty))
+            }
             syn::Expr::Paren(p) => self.infer_variant_type_context_from_expr(&p.expr),
             syn::Expr::Group(g) => self.infer_variant_type_context_from_expr(&g.expr),
             syn::Expr::Reference(r) => self.infer_variant_type_context_from_expr(&r.expr),
@@ -18885,8 +19003,11 @@ impl CodeGen {
                                 let expr = field_exprs
                                     .get(field_name)
                                     .expect("field presence checked above");
-                                let field_ty =
-                                    self.lookup_struct_literal_field_type(struct_expr, field_name);
+                                let field_ty = self.lookup_struct_literal_field_type(
+                                    struct_expr,
+                                    field_name,
+                                    expected_ty,
+                                );
                                 let value = self
                                     .emit_expr_to_string_with_expected_and_move_if_needed(
                                         expr,
@@ -18941,7 +19062,7 @@ impl CodeGen {
                     .lookup_struct_literal_field_cpp_name(struct_expr, &rust_member_name)
                     .unwrap_or_else(|| escape_cpp_keyword(&rust_member_name));
                 let field_ty =
-                    self.lookup_struct_literal_field_type(struct_expr, &rust_member_name);
+                    self.lookup_struct_literal_field_type(struct_expr, &rust_member_name, expected_ty);
                 let val = self.emit_expr_to_string_with_expected_and_move_if_needed(
                     &f.expr,
                     field_ty.as_ref(),
@@ -19096,6 +19217,7 @@ impl CodeGen {
         &self,
         struct_expr: &syn::ExprStruct,
         field_name: &str,
+        expected_ty: Option<&syn::Type>,
     ) -> Option<syn::Type> {
         let struct_name = struct_expr.path.segments.last()?.ident.to_string();
         let struct_name = if struct_name == "Self" {
@@ -19103,7 +19225,73 @@ impl CodeGen {
         } else {
             struct_name
         };
-        self.lookup_struct_field_type(&struct_name, field_name)
+        let base_field_ty = self.lookup_struct_field_type(&struct_name, field_name)?;
+
+        let mut substitutions = HashMap::new();
+        if let Some(last_idx) = struct_expr.path.segments.len().checked_sub(1) {
+            if let Some(owner_subs) =
+                self.owner_segment_type_arg_substitutions(&struct_expr.path, last_idx)
+            {
+                substitutions.extend(owner_subs);
+            }
+        }
+
+        if substitutions.is_empty()
+            && expected_ty
+                .is_some_and(|ty| self.expected_type_matches_struct_literal_path(ty, &struct_expr.path))
+        {
+            let expected_ty = expected_ty.map(|ty| self.peel_reference_paren_group_type(ty));
+            if let Some(syn::Type::Path(tp)) = expected_ty {
+                if let Some(last_seg) = tp.path.segments.last() {
+                    if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                        let provided_type_args: Vec<syn::Type> = args
+                            .args
+                            .iter()
+                            .filter_map(|arg| match arg {
+                                syn::GenericArgument::Type(ty)
+                                    if !matches!(ty, syn::Type::Infer(_)) =>
+                                {
+                                    Some(ty.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        if !provided_type_args.is_empty() {
+                            let scoped_key = self.scoped_type_key(&struct_name);
+                            let params = self
+                                .declared_type_params
+                                .get(&struct_name)
+                                .or_else(|| self.declared_type_params.get(&scoped_key));
+                            let param_kinds = self
+                                .declared_type_param_kinds
+                                .get(&struct_name)
+                                .or_else(|| self.declared_type_param_kinds.get(&scoped_key));
+                            if let Some(params) = params {
+                                let mut provided_iter = provided_type_args.into_iter();
+                                for (idx, param) in params.iter().enumerate() {
+                                    let is_type_param = param_kinds
+                                        .and_then(|kinds| kinds.get(idx))
+                                        .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+                                    if !is_type_param {
+                                        continue;
+                                    }
+                                    let Some(concrete_ty) = provided_iter.next() else {
+                                        break;
+                                    };
+                                    substitutions.insert(param.clone(), concrete_ty);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if substitutions.is_empty() {
+            Some(base_field_ty)
+        } else {
+            Some(self.substitute_type_params_in_type(&base_field_ty, &substitutions))
+        }
     }
 
     fn lookup_struct_literal_field_cpp_name(
@@ -19809,12 +19997,14 @@ impl CodeGen {
             syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
-                self.lookup_local_binding_type(&name).or_else(|| {
-                    Some(syn::Type::Path(syn::TypePath {
-                        qself: None,
-                        path: path.path.clone(),
-                    }))
-                })
+                self.lookup_local_binding_type(&name)
+                    .or_else(|| self.lookup_local_placeholder_type_hint(&name).cloned())
+                    .or_else(|| {
+                        Some(syn::Type::Path(syn::TypePath {
+                            qself: None,
+                            path: path.path.clone(),
+                        }))
+                    })
             }
             syn::Expr::Reference(r) => self.infer_hint_type_from_expr(&r.expr),
             syn::Expr::Cast(cast) => {
@@ -19845,6 +20035,13 @@ impl CodeGen {
                             let out: syn::Type = parse_quote!(rusty::Vec<#inner>);
                             return Some(out);
                         }
+                    }
+                    if matches!(
+                        joined.as_str(),
+                        "std::move" | "core::mem::move" | "rusty::move" | "move"
+                    ) && call.args.len() == 1
+                    {
+                        return self.infer_hint_type_from_expr(&call.args[0]);
                     }
                     if path_expr.path.segments.len() == 1
                         && path_expr.path.segments[0]
@@ -20529,9 +20726,18 @@ impl CodeGen {
                         .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
                             syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
                             _ => None,
+                        })
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!(
+                                    "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
+                                    arg_cpp
+                                )
+                            })
                         });
-                    if inferred.is_some() {
-                        Some(vec![inferred])
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
                     } else {
                         None
                     }
@@ -34074,6 +34280,83 @@ mod tests {
         assert!(out.contains("MaybeUninit<T>::uninit()"));
         assert!(!out.contains("MaybeUninit::uninit()"));
         assert!(!out.contains("E_from_inline{"));
+    }
+
+    #[test]
+    fn test_leaf5111_nonnull_new_omitted_owner_recovers_pointer_pointee_type() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            fn wrap<T>(p: *mut T) -> NonNull<T> {
+                let (ptr, _n) = (p, 1usize);
+                NonNull::new(ptr).expect("nonnull")
+            }
+            "#,
+        );
+        assert!(out.contains("NonNull<"));
+        assert!(out.contains("::new_(") || out.contains("::new("));
+        assert!(!out.contains("NonNull::new_("));
+        assert!(!out.contains("NonNull::new("));
+    }
+
+    #[test]
+    fn test_leaf5111_bound_match_with_imported_variants_uses_runtime_bound_context() {
+        let out = transpile_str(
+            r#"
+            use std::ops::RangeBounds;
+            use std::ops::Bound::{Included, Excluded, Unbounded};
+            fn start_index<R: RangeBounds<usize>>(range: R) -> usize {
+                match range.start_bound() {
+                    Unbounded => 0,
+                    Included(&i) => i,
+                    Excluded(&i) => i + 1,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>"));
+        assert!(!out.contains("const Included&"));
+        assert!(!out.contains("const Excluded&"));
+    }
+
+    #[test]
+    fn test_leaf5111_constructor_expected_type_substitutes_owner_type_args() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            struct Outer<A> { a: A }
+            struct Wrap<T>(NonNull<Outer<T>>);
+            impl<A> Outer<A> {
+                fn make(ptr: *mut Outer<A>) -> Wrap<A> {
+                    Wrap::<A>(NonNull::new(ptr).expect("nonnull"))
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("Wrap<A> make("));
+        assert!(out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new("));
+        assert!(!out.contains("NonNull<Outer<T>>::new_("));
+        assert!(!out.contains("NonNull<Outer<T>>::new("));
+    }
+
+    #[test]
+    fn test_leaf5111_struct_literal_field_expected_type_substitutes_owner_type_args() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            struct Outer<A> { a: A }
+            struct Wrap<T> { ptr: NonNull<Outer<T>> }
+            impl<A> Outer<A> {
+                fn make(ptr: *mut Outer<A>) -> Wrap<A> {
+                    Wrap { ptr: NonNull::new(ptr).expect("nonnull") }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("Wrap<A> make("));
+        assert!(out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new("));
+        assert!(!out.contains("NonNull<Outer<T>>::new_("));
+        assert!(!out.contains("NonNull<Outer<T>>::new("));
     }
 
     #[test]
