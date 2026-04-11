@@ -12607,10 +12607,7 @@ impl CodeGen {
         let mut loop_binding_names = HashSet::new();
         self.collect_pattern_binding_names(&for_expr.pat, &mut loop_binding_names);
 
-        let iter_is_borrowed = matches!(
-            self.peel_paren_group_expr(&for_expr.expr),
-            syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr)
-        );
+        let iter_is_borrowed = self.for_loop_iterable_is_borrowed(&for_expr.expr);
         let iterable_self_shadows_loop_binding =
             self.for_loop_iterable_self_shadows_binding(&for_expr.expr, &loop_binding_names);
         let iter = match self.peel_paren_group_expr(&for_expr.expr) {
@@ -12679,6 +12676,38 @@ impl CodeGen {
         iter_name
             .as_ref()
             .is_some_and(|name| loop_binding_names.contains(name))
+    }
+
+    fn type_is_non_raw_reference(&self, ty: &syn::Type) -> bool {
+        fn peel_paren_group_type<'a>(ty: &'a syn::Type) -> &'a syn::Type {
+            match ty {
+                syn::Type::Paren(paren) => peel_paren_group_type(&paren.elem),
+                syn::Type::Group(group) => peel_paren_group_type(&group.elem),
+                _ => ty,
+            }
+        }
+        let ty = peel_paren_group_type(ty);
+        let syn::Type::Reference(reference) = ty else {
+            return false;
+        };
+        !matches!(peel_paren_group_type(&reference.elem), syn::Type::Ptr(_))
+    }
+
+    fn for_loop_iterable_is_borrowed(&self, iterable_expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(iterable_expr);
+        match expr {
+            syn::Expr::Reference(reference) => !self.is_expr_raw_pointer_like(&reference.expr),
+            syn::Expr::Path(path_expr) if path_expr.path.segments.len() == 1 => {
+                let name = path_expr.path.segments[0].ident.to_string();
+                if name == "self" {
+                    self.current_self_receiver_is_reference() && !self.is_expr_raw_pointer_like(expr)
+                } else {
+                    self.lookup_local_binding_type(&name)
+                        .is_some_and(|ty| self.type_is_non_raw_reference(&ty))
+                }
+            }
+            _ => false,
+        }
     }
 
     fn extract_for_loop_iterable_root_name(&self, iterable_expr: &syn::Expr) -> Option<String> {
@@ -31280,6 +31309,32 @@ mod tests {
     fn test_for_in_variable() {
         let out = transpile_str("fn f() { for x in items { x; } }");
         assert!(out.contains("for (auto&& x : rusty::for_in(items)) {"));
+    }
+
+    #[test]
+    fn test_leaf105404_ref_typed_for_loop_iterable_uses_borrowed_iteration_and_collapses_deref() {
+        let out = transpile_str(
+            r#"
+            fn f(inputs: &[(u8, bool)], value: u8) {
+                for (input, expected) in inputs {
+                    let _ = value & *input;
+                    let _ = *expected;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("for (auto&& [input, expected] : rusty::for_in(rusty::iter(inputs))) {"),
+            "for-loop over ref-typed path should iterate through rusty::iter(...), got:\n{out}"
+        );
+        assert!(
+            !out.contains("value & *input"),
+            "deref of borrowed tuple binding should collapse for C++ tuple destructuring, got:\n{out}"
+        );
+        assert!(
+            !out.contains("= *expected;"),
+            "deref of borrowed tuple bool binding should collapse, got:\n{out}"
+        );
     }
 
     #[test]

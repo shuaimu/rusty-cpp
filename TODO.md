@@ -3599,7 +3599,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-3b-1775902336/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in transpiler/runtime helpers; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2850+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+          - [x] *done* Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2850+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared for-loop borrow-shape detection fix + focused regression) and did not require additional decomposition.
+            - Root-cause findings:
+              - borrowed-loop detection in `emit_for_loop` only recognized syntactic `for ... in &expr` forms.
+              - expanded bitflags uses `for (input, expected) in inputs` where `inputs` is reference-typed (`&[(T, bool)]`); this path was misclassified as non-borrowed, so pattern ref-binding scope was not pushed.
+              - unary deref lowering then preserved raw `*input` / `*expected` in C++, but structured tuple loop bindings are value-shaped (`const T`), causing `indirection requires pointer operand` hard errors.
+            - Implemented shared transpiler fix in `transpiler/src/codegen.rs`:
+              - added type-aware borrowed iterable detection (`for_loop_iterable_is_borrowed`) for for-loops, including single-segment path iterables whose Rust type is a non-raw-pointer reference.
+              - switched `emit_for_loop` to use this detection so reference-typed iterable paths now go through borrowed iteration lowering (`rusty::for_in(rusty::iter(...))`) and ref-pattern scope handling.
+            - Added focused fixture-agnostic regression:
+              - `test_leaf105404_ref_typed_for_loop_iterable_uses_borrowed_iteration_and_collapses_deref`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105404 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-4a-1775902990 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:2850/2868/2966+` (`*input` pointer-deref on non-pointer tuple payloads) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to:
+                - `runner.cpp:2850/2966` method-item/function-item call-shape arity mismatch (`inherent(value, input)` against unary `contains`/`difference` callable forms),
+                - adjacent `runner.cpp:3428+` consteval `std::format` format-string expression shape fallout.
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-3b-1775902336/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-4a-1775902990/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type/AST-shape-gated in core loop lowering; no crate-specific scripts and no generated C++ patching were introduced.
+          - [ ] Leaf 10.5.40.5: Collapse the post-10.5.40.4 method-item callable-arity + format-consteval head (`runner.cpp:2850/2966` unary callable passed as binary and adjacent `runner.cpp:3428+` consteval `std::format` shape) with shared callable/format lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
