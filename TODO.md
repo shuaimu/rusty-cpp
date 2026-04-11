@@ -3543,7 +3543,35 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - previous head capture: `/tmp/rusty-parity-matrix-10-5-39a-1775905600/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
               - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-1b-1775910400/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in core transpiler lowering; no crate-specific scripts and no generated C++ patching were introduced.
-          - [ ] Leaf 10.5.40.2: Collapse the post-10.5.40.1 bitflags operator-surface head (`runner.cpp:4405` missing `|=`) with shared transpiler/runtime operator-lowering or runtime surface fixes and targeted regressions.
+          - [x] *done* Leaf 10.5.40.2: Collapse the post-10.5.40.1 bitflags operator-surface head (`runner.cpp:4405` missing `|=`) with shared transpiler/runtime operator-lowering or runtime surface fixes and targeted regressions.
+            - Plan/scope check: this subleaf stayed under the <1000 LOC guardrail (shared operator-trait mapping + focused regressions) and did not require additional decomposition.
+            - Root-cause findings:
+              - bitflags emits `impl BitOrAssign` methods inside `const _: () = { ... }` blocks; extraction/renaming depends on `map_operator_trait`.
+              - `map_operator_trait` lacked mappings for bitwise/shift assign traits (`BitOrAssign`, `BitAndAssign`, `BitXorAssign`, `ShlAssign`, `ShrAssign`), so assign-trait impl methods were not classified as operator traits and never emitted as `operator|=`/related C++ operators.
+            - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+              - extended `map_operator_trait` with assign-operator mappings:
+                - `BitAndAssign` → `operator&=`
+                - `BitOrAssign` → `operator|=`
+                - `BitXorAssign` → `operator^=`
+                - `ShlAssign` → `operator<<=`
+                - `ShrAssign` → `operator>>=`
+              - this unblocks operator-trait method extraction/rename paths (including const-block operator impls) without crate-specific rewrites.
+            - Added focused fixture-agnostic regressions:
+              - `test_leaf105402_bitwise_assign_traits_map_to_cpp_compound_operators`
+              - `test_leaf105402_const_block_bitor_assign_emits_operator_or_assign`
+            - Verification:
+              - `cargo test -p rusty-cpp-transpiler leaf105402 -- --nocapture`
+              - `cargo test -p rusty-cpp-transpiler`
+              - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-40-2a-1775901231 --keep-work-dirs`
+            - Deterministic frontier movement:
+              - previous first hard-error family at `runner.cpp:4405` (`strict |= flag` missing `operator|=`) is removed.
+              - full-matrix frontier remains `bitflags` Stage D and advances to:
+                - `runner.cpp:6057/6084` unresolved helper surfaces (`rusty::write_hex`, `parse_hex`),
+                - adjacent pointer-deref call-shape fallout (`runner.cpp:2753+`, `*input` on non-pointer tuple payload values).
+            - Canonical artifacts:
+              - previous head capture: `/tmp/rusty-parity-matrix-10-5-40-1b-1775910400/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+              - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and trait/AST-shape-gated in core operator mapping; no crate-specific scripts and no generated C++ patching were introduced.
           - [ ] Leaf 10.5.40.3: Collapse the post-10.5.40.2 formatter/parser helper-surface head (`runner.cpp:5967/5994` unresolved `rusty::write_hex` / `parse_hex`) with shared runtime/transpiler mapping fixes and targeted regressions.
           - [ ] Leaf 10.5.40.4: Collapse the post-10.5.40.3 pointer-deref call-shape head (`runner.cpp:2663+` invalid `*input` on non-pointer tuple payloads) with shared pattern/call lowering fixes and targeted regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)

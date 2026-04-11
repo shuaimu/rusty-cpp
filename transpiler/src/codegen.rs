@@ -26306,6 +26306,11 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "MulAssign" => Some("operator*="),
         "DivAssign" => Some("operator/="),
         "RemAssign" => Some("operator%="),
+        "BitAndAssign" => Some("operator&="),
+        "BitOrAssign" => Some("operator|="),
+        "BitXorAssign" => Some("operator^="),
+        "ShlAssign" => Some("operator<<="),
+        "ShrAssign" => Some("operator>>="),
         "Index" => Some("operator[]"),
         "Deref" => Some("operator*"),
         "PartialEq" => Some("operator=="),
@@ -43056,6 +43061,46 @@ mod tests {
         // is_empty should also not be duplicated
         let is_empty_count = out.matches("is_empty()").count();
         assert!(is_empty_count >= 1, "is_empty() should appear at least once\nGot: {out}");
+    }
+
+    #[test]
+    fn test_leaf105402_bitwise_assign_traits_map_to_cpp_compound_operators() {
+        assert_eq!(map_operator_trait("BitAndAssign"), Some("operator&="));
+        assert_eq!(map_operator_trait("BitOrAssign"), Some("operator|="));
+        assert_eq!(map_operator_trait("BitXorAssign"), Some("operator^="));
+        assert_eq!(map_operator_trait("ShlAssign"), Some("operator<<="));
+        assert_eq!(map_operator_trait("ShrAssign"), Some("operator>>="));
+    }
+
+    #[test]
+    fn test_leaf105402_const_block_bitor_assign_emits_operator_or_assign() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+
+            impl Flags {
+                fn insert(&mut self, rhs: Self) {
+                    self.0 |= rhs.0;
+                }
+            }
+
+            const _: () = {
+                impl std::ops::BitOrAssign for Flags {
+                    fn bitor_assign(&mut self, rhs: Self) {
+                        self.insert(rhs);
+                    }
+                }
+            };
+            "#,
+        );
+        assert!(
+            out.contains("operator|="),
+            "BitOrAssign impl should emit operator|=\nGot: {out}"
+        );
+        assert!(
+            !out.contains("bitor_assign("),
+            "BitOrAssign method name should be renamed to operator|=\nGot: {out}"
+        );
     }
 
     #[test]

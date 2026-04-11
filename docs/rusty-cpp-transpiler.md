@@ -2230,9 +2230,9 @@ Target matrix:
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-1b-1775910400`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
+- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-2a-1775901231`) advanced through 7 crates with `pass=6`, `fail=1`, stopping on first failure (`bitflags` Stage D)
 - confirmed passes in that run: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`
-- previous tuple literal harmonization family from Leaf 10.5.39 (`runner.cpp:3123/3171`) is removed by Leaf 10.5.40.1; current deterministic `bitflags` Stage D head now starts at operator/helper/call-shape fallout (`runner.cpp:4405`, `5967/5994`, `2663+`).
+- previous operator-surface family from Leaf 10.5.40.1 (`runner.cpp:4405` missing `|=`) is removed by Leaf 10.5.40.2; current deterministic `bitflags` Stage D head now starts at helper/pointer-call-shape fallout (`runner.cpp:6057/6084`, `2753+`).
 
 Crate-focused progress integrated from former appendices:
 
@@ -2248,12 +2248,11 @@ Crate-focused progress integrated from former appendices:
 
 From the active TODO frontier, the currently active leaf work is now in the `bitflags` Stage D chain.
 
-Current deterministic head (post-Leaf 10.5.40.1):
+Current deterministic head (post-Leaf 10.5.40.2):
 
-1. `runner.cpp:4405`: missing `|=` operator surface in bitflags strict-update path.
-2. `runner.cpp:5967/5994`: unresolved formatter/parser helper surfaces (`rusty::write_hex` and `parse_hex`) in expanded bitflags codepaths.
-3. `runner.cpp:2663+`: adjacent pointer-deref call-shape fallout (`*input` emitted where non-pointer value is expected).
-4. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-1b-1775910400/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+1. `runner.cpp:6057/6084`: unresolved formatter/parser helper surfaces (`rusty::write_hex` and `parse_hex`) in expanded bitflags codepaths.
+2. `runner.cpp:2753+`: adjacent pointer-deref call-shape fallout (`*input` emitted where non-pointer tuple payload value is expected).
+3. Canonical artifacts: `/tmp/rusty-parity-matrix-10-5-40-2a-1775901231/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
 
 Historical active-work chain (retained for traceability):
 
