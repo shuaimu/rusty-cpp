@@ -4307,8 +4307,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `/tmp/rusty-parity-matrix-5-1-14-20260411c/smallvec/{baseline.txt,build.log,matrix.log}`
             - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-14-20260411c/smallvec/run.log`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes are shared AST/runtime-surface changes; no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.15: `smallvec` Stage D local-type ordering/formatter-surface compile-head family collapse
-          - Collapse the post-5.1.14 deterministic `smallvec` Stage D family (starting at `runner.cpp:2004` with `SetLenOnDrop` incomplete-type nested-name call shape and adjacent `Formatter::debug_tuple` runtime-surface fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.15: `smallvec` Stage D local-type ordering/formatter-surface compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed under the <1000 LOC target; no further decomposition was needed.
+          - Deterministic failure family addressed (shared transpiler/runtime-helper fixes only, no crate-specific scripts):
+            - top-level type ordering now accounts for associated-call owner dependencies discovered in impl method bodies (e.g., `SetLenOnDrop::new_(...)` inside merged `SmallVec` methods), so helper types are emitted before inline consumers.
+            - runtime fallback formatter surface now supports chained tuple-debug builders via `f.debug_tuple(...).field(...).finish()`.
+          - Added focused regressions:
+            - `test_leaf5115_impl_body_assoc_call_dependency_orders_helper_type_before_consumer`
+            - `test_leaf5115_runtime_fallback_formatter_supports_debug_tuple_builder_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5115 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-15-20260411a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.14 first head at `runner.cpp:2004` (`SetLenOnDrop` incomplete-type nested-name call) and adjacent `Formatter::debug_tuple` surface errors (`runner.cpp:2177`, `runner.cpp:2247`) are collapsed from the first deterministic slot.
+            - new first hard-error family starts at `runner.cpp:1345` (`SetLenOnDrop` destructor dereference shape: invalid unary `*` on `size_t&`-lowered storage), followed by adjacent `ConstNonNull::new_` cast/call-shape fallout (`runner.cpp:1354`) and downstream `move(for_each)` callable-resolution fallout (`runner.cpp:2288`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-15-20260411a/smallvec/{baseline.txt,build.log,matrix.log}`
+            - matrix-reported run artifact path (Stage D failed before run stage): `/tmp/rusty-parity-matrix-5-1-15-20260411a/smallvec/run.log`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stay shared and AST/runtime-surface-gated with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.16: `smallvec` Stage D len-guard/callable-shape compile-head family collapse
+          - Collapse the post-5.1.15 deterministic `smallvec` Stage D family (starting at `runner.cpp:1345` with `SetLenOnDrop` destructor pointer/reference lowering mismatch and adjacent `ConstNonNull::new_`/`move(for_each)` callable-shape fallout), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

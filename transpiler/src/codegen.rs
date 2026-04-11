@@ -5,6 +5,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use syn;
 use syn::parse::Parser;
 use syn::parse_quote;
+use syn::visit::{self, Visit};
 
 use crate::types;
 
@@ -90,6 +91,49 @@ const IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER: &str = "__rusty_option_take_value_
 enum GenericParamDefault {
     Type(syn::Type),
     Const(syn::Expr),
+}
+
+struct AssocCallOwnerTypeCollector<'a> {
+    known_type_names: &'a HashSet<String>,
+    owner_type_names: HashSet<String>,
+}
+
+impl<'a> AssocCallOwnerTypeCollector<'a> {
+    fn new(known_type_names: &'a HashSet<String>) -> Self {
+        Self {
+            known_type_names,
+            owner_type_names: HashSet::new(),
+        }
+    }
+
+    fn into_owner_type_names(self) -> HashSet<String> {
+        self.owner_type_names
+    }
+
+    fn extract_owner_type_name(path: &syn::Path) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        path.segments
+            .iter()
+            .nth(path.segments.len().saturating_sub(2))
+            .map(|segment| segment.ident.to_string())
+    }
+}
+
+impl<'ast> Visit<'ast> for AssocCallOwnerTypeCollector<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path_expr) = node.func.as_ref() {
+            if path_expr.qself.is_none() {
+                if let Some(owner_name) = Self::extract_owner_type_name(&path_expr.path) {
+                    if self.known_type_names.contains(owner_name.as_str()) {
+                        self.owner_type_names.insert(owner_name);
+                    }
+                }
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
 }
 
 /// Code generation context tracking indentation and output buffer.
@@ -1370,11 +1414,21 @@ impl CodeGen {
             return;
         }
 
+        let impl_body_dependencies =
+            Self::collect_impl_body_assoc_call_type_dependencies(items, &type_names);
+
         // 3. For each struct/enum, find which other type names appear in its fields.
         let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); n];
         let mut indegree: Vec<usize> = vec![0; n];
         for (pos, &idx) in struct_indices.iter().enumerate() {
-            let field_types = match items[idx] {
+            let owner_name = match items[idx] {
+                syn::Item::Struct(s) => s.ident.to_string(),
+                syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                    e.ident.to_string()
+                }
+                _ => continue,
+            };
+            let mut dependency_type_names = match items[idx] {
                 syn::Item::Struct(s) => Self::collect_field_type_names(&s.fields, &type_names),
                 syn::Item::Enum(e) => {
                     let mut deps = HashSet::new();
@@ -1385,7 +1439,10 @@ impl CodeGen {
                 }
                 _ => continue,
             };
-            for dep_name in &field_types {
+            if let Some(extra_deps) = impl_body_dependencies.get(owner_name.as_str()) {
+                dependency_type_names.extend(extra_deps.iter().cloned());
+            }
+            for dep_name in &dependency_type_names {
                 if let Some(&dep_pos) = name_to_struct_pos.get(dep_name.as_str()) {
                     if dep_pos != pos && outgoing[dep_pos].insert(pos) {
                         indegree[pos] += 1;
@@ -1497,6 +1554,61 @@ impl CodeGen {
         for (new_pos, &sorted_pos) in sorted_indices.iter().enumerate() {
             items[struct_indices[new_pos]] = original_items_at_struct_positions[sorted_pos];
         }
+    }
+
+    fn collect_impl_body_assoc_call_type_dependencies(
+        items: &[&syn::Item],
+        type_names: &HashSet<String>,
+    ) -> HashMap<String, HashSet<String>> {
+        let mut dependencies_by_owner: HashMap<String, HashSet<String>> = HashMap::new();
+        for item in items {
+            let syn::Item::Impl(item_impl) = item else {
+                continue;
+            };
+            let Some(owner_name) = Self::impl_self_type_name(item_impl) else {
+                continue;
+            };
+            if !type_names.contains(owner_name.as_str()) {
+                continue;
+            }
+
+            let mut owner_deps: HashSet<String> = HashSet::new();
+            for impl_item in &item_impl.items {
+                let syn::ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                let mut collector = AssocCallOwnerTypeCollector::new(type_names);
+                collector.visit_block(&method.block);
+                owner_deps.extend(
+                    collector
+                        .into_owner_type_names()
+                        .into_iter()
+                        .filter(|name| name != &owner_name),
+                );
+            }
+
+            if !owner_deps.is_empty() {
+                dependencies_by_owner
+                    .entry(owner_name)
+                    .or_default()
+                    .extend(owner_deps);
+            }
+        }
+        dependencies_by_owner
+    }
+
+    fn impl_self_type_name(item_impl: &syn::ItemImpl) -> Option<String> {
+        let syn::Type::Path(type_path) = item_impl.self_ty.as_ref() else {
+            return None;
+        };
+        if type_path.qself.is_some() {
+            return None;
+        }
+        type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
     }
 
     /// Detect strongly connected components in the by-value type dependency graph.
@@ -29233,6 +29345,34 @@ struct DebugList {\n\
 struct Formatter {\n\
     mutable std::string out_;\n\
     std::string str() const { return out_; }\n\
+    struct DebugTuple {\n\
+        const Formatter* formatter;\n\
+        bool first = true;\n\
+        explicit DebugTuple(const Formatter* formatter_init) : formatter(formatter_init) {}\n\
+        template<typename Name>\n\
+        DebugTuple& name(Name&& value) {\n\
+            if (formatter) {\n\
+                formatter->append_one(std::forward<Name>(value));\n\
+                formatter->out_ += \"(\";\n\
+            }\n\
+            return *this;\n\
+        }\n\
+        template<typename Arg>\n\
+        DebugTuple& field(Arg&& arg) {\n\
+            if (formatter) {\n\
+                if (!first) { formatter->out_ += \", \"; }\n\
+                first = false;\n\
+                formatter->append_one(std::forward<Arg>(arg));\n\
+            }\n\
+            return *this;\n\
+        }\n\
+        Result finish() {\n\
+            if (formatter) {\n\
+                formatter->out_ += \")\";\n\
+            }\n\
+            return Result::Ok(std::make_tuple());\n\
+        }\n\
+    };\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
@@ -29248,6 +29388,12 @@ struct Formatter {\n\
     Result write_char(Ch&& ch) const { out_.push_back(static_cast<char>(ch)); return Result::Ok(std::make_tuple()); }\n\
     template<typename Str>\n\
     Result write_str(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }\n\
+    template<typename Name>\n\
+    DebugTuple debug_tuple(Name&& name) const {\n\
+        DebugTuple tuple(this);\n\
+        tuple.name(std::forward<Name>(name));\n\
+        return tuple;\n\
+    }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
 private:\n\
     template<typename Arg>\n\
@@ -42542,6 +42688,15 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5115_runtime_fallback_formatter_supports_debug_tuple_builder_surface() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("struct DebugTuple {"));
+        assert!(helpers.contains("DebugTuple& field(Arg&& arg)"));
+        assert!(helpers.contains("Result finish()"));
+        assert!(helpers.contains("DebugTuple debug_tuple(Name&& name) const"));
+    }
+
+    #[test]
     fn test_leaf10526_runtime_to_string_supports_fmt_display_fallback() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("requires(rusty::fmt::Formatter& f) { value.fmt(f); }"));
@@ -46638,6 +46793,40 @@ mod tests {
             "Inner must be emitted before Outer (used in Option<Inner> field)\n\
              Inner at {inner_pos}, Outer at {outer_pos}"
         );
+    }
+
+    #[test]
+    fn test_leaf5115_impl_body_assoc_call_dependency_orders_helper_type_before_consumer() {
+        let out = transpile_str(
+            r#"
+            struct VecLike;
+            impl VecLike {
+                fn from_elem(len: usize) -> VecLike {
+                    let _guard = SetLenOnDrop::new_(len);
+                    VecLike
+                }
+            }
+
+            struct SetLenOnDrop {
+                local_len: usize,
+            }
+            impl SetLenOnDrop {
+                fn new_(len: usize) -> SetLenOnDrop {
+                    SetLenOnDrop { local_len: len }
+                }
+            }
+            "#,
+        );
+
+        let helper_pos = out
+            .find("struct SetLenOnDrop {")
+            .expect("SetLenOnDrop definition emitted");
+        let consumer_pos = out.find("struct VecLike {").expect("VecLike definition emitted");
+        assert!(
+            helper_pos < consumer_pos,
+            "types used via associated calls in merged impl bodies must be emitted first\nGot:\n{out}"
+        );
+        assert!(out.contains("SetLenOnDrop::new_("));
     }
 
     #[test]
