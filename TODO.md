@@ -3337,7 +3337,45 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-33-1775891420/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/AST-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
-        - [ ] Leaf 10.5.34: Collapse the post-10.5.33 deterministic full-matrix `arrayvec` Stage E runtime parity family generically (starting with transpiled-run assertion mismatches at `test_drop_in_insert` and `test_into_inner_1`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+        - [x] *done* Leaf 10.5.34: Collapse the post-10.5.33 deterministic full-matrix `arrayvec` Stage E runtime parity family generically (starting with transpiled-run assertion mismatches at `test_drop_in_insert` and `test_into_inner_1`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only runtime/match/constructor lowering updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - runtime `Result`/`Option` tuple-struct match lowering eagerly materialized payload temps (`unwrap`/`unwrap_err`) even for wildcard payload patterns; in `Err(_)`-style arms this introduced observable side effects and extra drop behavior (surfacing in `arrayvec` runtime parity failures such as `test_drop_in_insert`).
+            - `Deref`/`DerefMut` methods returning associated `Target` projections could still emit `const Target&`/`Target&` signatures when `Target` resolved to temporary view-like types (for example `std::span`/`std::string_view`), creating dangling-reference shapes (surfacing in `test_into_inner_1`).
+            - associated formatter method calls written as `core::fmt::Formatter::write_* (f, ...)` were preserved as static C++ calls instead of receiver calls (`f.write_*`), causing compile failures once arrayvec blockers were cleared.
+            - expression-form variant `match` lowering did not handle `Pat::Struct` arms in `std::visit` mode; such arms degraded to duplicate generic fallbacks, yielding ambiguous visitor overloads.
+            - empty block expressions (`{}`) in value position were lowered to `unreachable()` instead of Rust unit values, and data-enum struct-literal paths (`Enum::Variant { ... }`) were preserved as invalid scoped C++ members instead of concrete variant-struct targets.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - tightened runtime tuple-struct match lowering (statement + expression paths) to only materialize payload temps when bindings/guards/payload conditions need them.
+            - added current-struct associated-type tracking for deref-like method signatures and softened view-like `Target` returns to by-value forms.
+            - rewrote formatter associated `write_str`/`write_char` call shapes to receiver-method calls.
+            - added explicit `Pat::Struct` expression-visit arm lowering with typed variant lambdas and field bindings.
+            - lowered empty block expressions to unit (`std::make_tuple()`) and rewrote data-enum struct-literal targets to `Enum_Variant{...}`.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10534_runtime_result_err_wildcard_match_avoids_unwrap_side_effects`
+            - `test_leaf10534_deref_view_target_methods_return_value_not_target_reference`
+            - `test_leaf10534_formatter_write_str_associated_call_uses_receiver_method`
+            - `test_leaf10534_formatter_write_char_associated_call_uses_receiver_method`
+            - `test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas`
+            - `test_leaf10534_data_enum_struct_literal_path_uses_variant_struct_target`
+            - `test_leaf10534_empty_block_expr_lowers_to_unit_tuple_value`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10534 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10527_auto_derived_c_like_enum_fmt_does_not_emit_rusty_fmt_helper -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10533_assoc_pointer_types_use_add_pointer_hardening -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327241_nested_self_deref_reborrow_drops_address_of_artifact -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327341_string_backed_hash_method_lowers_to_runtime_helper -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf426_deref_trait_match_uses_reference_aware_deref_lowering -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-34d-1775893665 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `arrayvec` Stage E (`test_drop_in_insert` / `test_into_inner_1` runtime assertion mismatch) is removed.
+            - full-matrix frontier now advances to `bitflags` Stage D compile fallout; first deterministic hard errors start at `runner.cpp:986` (`using ::iter;` namespace-using form) and adjacent formatter helper surface mismatch at `runner.cpp:998` (`debug_struct_field2_finish` missing in runtime formatter helpers).
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-33-1775891420/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-34d-1775893665/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering paths, with no fixture-specific rewrites/scripts and no generated-text patching.
+        - [ ] Leaf 10.5.35: Collapse the post-10.5.34 deterministic full-matrix `bitflags` Stage D compile family generically (starting with invalid namespace `using` forms like `using ::iter;` and missing formatter helper surfaces such as `debug_struct_field2_finish`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

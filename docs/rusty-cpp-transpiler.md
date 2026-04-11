@@ -4672,6 +4672,10 @@ Required approach:
 - for circular type-ordering fallback, do not silently reorder true by-value SCCs and proceed without explicit unsupported diagnostics; emit deterministic cycle diagnostics so unsupported architecture gaps are visible at generation time
 - for by-value SCC diagnostics, do not emit only unordered type sets; include deterministic cycle paths so failure fixtures can assert concrete cycle structure and avoid ambiguous diagnostics
 - for opt-in by-value cycle breaking, do not enable rewriting by default and do not choose feedback edges with non-deterministic traversal order; require explicit activation and deterministic edge selection with emitted rewrite diagnostics
+- for formatter associated-call lowering, do not preserve Rust associated method syntax (`Formatter::write_str(f, ...)`, `Formatter::write_char(f, ...)`) as static C++ member calls; lower to receiver-method form (`f.write_*`) so instance-only formatter surfaces compile
+- for expression-form enum `match` lowering, do not drop struct-variant arms to duplicate generic visit fallbacks (`[&](const auto&) ...`); emit typed variant lambdas with explicit field bindings to keep `std::visit` overload sets unambiguous
+- for empty block expressions (`{}`) in value position, do not fall back to `unreachable()`; lower to Rust unit value shape (`std::make_tuple()`)
+- for data-enum struct-literal constructors (`Enum::Variant { ... }`), do not preserve scoped variant member syntax in C++; lower to concrete generated variant-struct targets (`Enum_Variant{...}`)
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 

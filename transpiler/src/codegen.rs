@@ -348,6 +348,10 @@ pub struct CodeGen {
     /// Used to deduplicate merged associated const/type aliases and avoid collisions
     /// with data fields.
     emitted_non_method_member_names: Vec<HashSet<String>>,
+    /// Stack of associated type aliases emitted for the currently emitted struct.
+    /// Enables method-signature adjustments (for example Deref view targets) while
+    /// impl items are being consumed from `impl_blocks`.
+    current_struct_assoc_cpp_types: Vec<HashMap<String, String>>,
     /// Stack tracking whether current function/method context returns a value.
     /// Used for tail expression lowering decisions (e.g., tail `match`).
     return_value_scopes: Vec<bool>,
@@ -511,6 +515,7 @@ impl CodeGen {
             module_namespace_renames: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
+            current_struct_assoc_cpp_types: Vec::new(),
             return_value_scopes: Vec::new(),
             return_type_hints: Vec::new(),
             constructor_template_hints: Vec::new(),
@@ -605,6 +610,7 @@ impl CodeGen {
         self.declared_item_names.clear();
         self.emitted_method_conflict_keys.clear();
         self.emitted_non_method_member_names.clear();
+        self.current_struct_assoc_cpp_types.clear();
         self.return_value_scopes.clear();
         self.return_type_hints.clear();
         self.constructor_template_hints.clear();
@@ -4960,13 +4966,16 @@ impl CodeGen {
         // `<Self as Trait>::Assoc` can resolve through the alias.
         // Track emitted names to prevent duplicate emission later.
         let mut early_emitted_type_aliases: HashSet<String> = HashSet::new();
+        let mut early_assoc_type_cpp_types: HashMap<String, String> = HashMap::new();
         if let Some(ref methods) = merged_impl_items {
             let prev_struct = self.current_struct.clone();
             self.current_struct = Some(name_str.clone());
             self.emitted_non_method_member_names.push(HashSet::new());
             for impl_item in methods {
                 if let syn::ImplItem::Type(t) = impl_item {
+                    let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
+                    let alias_cpp_type = self.map_type(&t.ty);
                     self.emit_impl_item(impl_item);
                     let alias_was_emitted = self
                         .emitted_non_method_member_names
@@ -4974,6 +4983,11 @@ impl CodeGen {
                         .is_some_and(|scope| scope.contains(&alias_name));
                     if alias_was_emitted {
                         early_emitted_type_aliases.insert(alias_name);
+                        early_assoc_type_cpp_types.insert(alias_rust_name, alias_cpp_type.clone());
+                        early_assoc_type_cpp_types.insert(
+                            escape_cpp_keyword(&t.ident.to_string()),
+                            alias_cpp_type,
+                        );
                     }
                 }
             }
@@ -5291,6 +5305,8 @@ impl CodeGen {
             non_method_member_names.extend(early_emitted_type_aliases.iter().cloned());
             self.emitted_non_method_member_names
                 .push(non_method_member_names);
+            self.current_struct_assoc_cpp_types
+                .push(early_assoc_type_cpp_types.clone());
 
             // Collect source modules for using-namespace inside method bodies
             let current_module = self.module_stack.join("::");
@@ -5312,6 +5328,7 @@ impl CodeGen {
                 self.emit_impl_item(impl_item);
             }
             self.merged_method_using_namespaces.clear();
+            self.current_struct_assoc_cpp_types.pop();
             self.emitted_non_method_member_names.pop();
             // Save emitted method names before popping for synthetic check
             emitted_methods_in_struct = self
@@ -7497,6 +7514,38 @@ impl CodeGen {
             .all(|name| scope.contains(&escape_cpp_keyword(&name)))
     }
 
+    fn resolve_current_struct_assoc_cpp_type(&self, assoc_name: &str) -> Option<String> {
+        if let Some(scope) = self.current_struct_assoc_cpp_types.last() {
+            if let Some(ty) = scope
+                .get(assoc_name)
+                .or_else(|| scope.get(&escape_cpp_keyword(assoc_name)))
+            {
+                return Some(ty.clone());
+            }
+        }
+        let struct_name = self.current_struct.as_ref()?;
+        self.resolve_assoc_type_from_impl_blocks(struct_name, assoc_name)
+    }
+
+    fn is_view_like_cpp_type(ty: &str) -> bool {
+        let mut normalized = ty.trim();
+        if let Some(stripped) = normalized.strip_prefix("const ") {
+            normalized = stripped.trim();
+        }
+        if let Some(stripped) = normalized.strip_suffix('&') {
+            normalized = stripped.trim();
+        }
+        normalized.starts_with("std::span<") || normalized == "std::string_view"
+    }
+
+    fn to_mutable_view_cpp_type(ty: &str) -> String {
+        let normalized = ty.trim();
+        if let Some(rest) = normalized.strip_prefix("std::span<const ") {
+            return format!("std::span<{}", rest);
+        }
+        normalized.to_string()
+    }
+
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
         let emitted_template_key = self.emitted_template_signature_key(&method.sig.generics);
@@ -7557,6 +7606,24 @@ impl CodeGen {
                 self.return_type_current_struct_assoc_aliases_emitted(&method.sig.output);
             if !can_keep_explicit_current_struct_assoc_return {
                 return_type = "auto".to_string();
+            }
+        }
+        // For Deref/DerefMut implementations where Target resolves to a view-like
+        // runtime type (`std::span`/`std::string_view`), returning `Target&` creates
+        // dangling references when body helpers synthesize temporaries. Return
+        // view targets by value instead.
+        if (is_deref_method || is_deref_mut_method)
+            && return_type.contains("::Target&")
+            && self
+                .resolve_current_struct_assoc_cpp_type("Target")
+                .is_some_and(|ty| Self::is_view_like_cpp_type(&ty))
+        {
+            if let Some(target_ty) = self.resolve_current_struct_assoc_cpp_type("Target") {
+                return_type = if is_deref_mut_method {
+                    Self::to_mutable_view_cpp_type(&target_ty)
+                } else {
+                    target_ty
+                };
             }
         }
 
@@ -8533,22 +8600,33 @@ impl CodeGen {
                         return false;
                     }
                     let matched_value = format!("_mv{}", idx);
-                    arm_binding_lines.push(format!(
-                        "auto {} = std::as_const(_m).{}();",
-                        matched_value, unwrap_method
-                    ));
                     let mut binding_stmts = Vec::new();
-                    if !self.collect_pattern_binding_stmts(&ts.elems[0], &matched_value, &mut binding_stmts) {
+                    let payload_condition = if !self.collect_pattern_binding_stmts(
+                        &ts.elems[0],
+                        &matched_value,
+                        &mut binding_stmts,
+                    ) {
                         let Some(payload_condition) =
                             self.tuple_pattern_elem_value_condition(&ts.elems[0], &matched_value)
                         else {
                             return false;
                         };
-                        if let Some(payload_condition) = payload_condition {
-                            arm_post_conditions.push(payload_condition);
-                        }
+                        payload_condition
                     } else {
-                        arm_binding_lines.extend(binding_stmts);
+                        None
+                    };
+                    let needs_payload_materialization = !binding_stmts.is_empty()
+                        || payload_condition.is_some()
+                        || arm.guard.is_some();
+                    if needs_payload_materialization {
+                        arm_binding_lines.push(format!(
+                            "auto {} = std::as_const(_m).{}();",
+                            matched_value, unwrap_method
+                        ));
+                    }
+                    arm_binding_lines.extend(binding_stmts);
+                    if let Some(payload_condition) = payload_condition {
+                        arm_post_conditions.push(payload_condition);
                     }
                     format!("_m.{}()", cond_method)
                 }
@@ -10542,6 +10620,45 @@ impl CodeGen {
                         parts.push(format!("[&](const {}&) {{ return {}; }}", cpp_type, body));
                     }
                 }
+                syn::Pat::Struct(ps) => {
+                    let cpp_type = scoped.visit_pattern_cpp_type(&ps.path, variant_ctx, Some("_m"));
+                    let visit_param = if scoped.pattern_requires_mut_ref_binding(&arm.pat) {
+                        format!("{}& _v", cpp_type)
+                    } else {
+                        format!("const {}& _v", cpp_type)
+                    };
+                    let mut binding_stmts = Vec::new();
+                    for field_pat in &ps.fields {
+                        let field_name = field_pat.member.clone();
+                        let field_name_str = match &field_name {
+                            syn::Member::Named(ident) => ident.to_string(),
+                            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+                        };
+                        let binding_name = match &*field_pat.pat {
+                            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                            _ => field_name_str.clone(),
+                        };
+                        binding_stmts.push(format!("const auto& {} = _v.{};", binding_name, field_name_str));
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str = scoped.emit_expr_to_string(guard);
+                        parts.push(format!(
+                            "[&]({}) {{ {} if ({}) return {}; return {}; }}",
+                            visit_param,
+                            binding_stmts.join(" "),
+                            guard_str,
+                            body,
+                            scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
+                        ));
+                    } else {
+                        parts.push(format!(
+                            "[&]({}) {{ {} return {}; }}",
+                            visit_param,
+                            binding_stmts.join(" "),
+                            body
+                        ));
+                    }
+                }
                 syn::Pat::Wild(_) => {
                     parts.push(format!("[&](const auto&) {{ return {}; }}", body));
                 }
@@ -10708,11 +10825,6 @@ impl CodeGen {
                     }
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     let matched_value = format!("_mv{}", idx);
-                    out.push_str(&format!(
-                        "auto {} = std::as_const(_m).{}(); ",
-                        matched_value, unwrap_method
-                    ));
-
                     let mut binding_stmts = Vec::new();
                     let payload_match_condition = if !self.collect_pattern_binding_stmts(
                         &ts.elems[0],
@@ -10723,6 +10835,15 @@ impl CodeGen {
                     } else {
                         None
                     };
+                    let needs_payload_materialization = !binding_stmts.is_empty()
+                        || payload_match_condition.is_some()
+                        || arm.guard.is_some();
+                    if needs_payload_materialization {
+                        out.push_str(&format!(
+                            "auto {} = std::as_const(_m).{}(); ",
+                            matched_value, unwrap_method
+                        ));
+                    }
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
                         out.push(' ');
@@ -17477,6 +17598,7 @@ impl CodeGen {
     ) -> String {
         let target_name = self
             .expected_struct_literal_cpp_type(struct_expr, expected_ty)
+            .or_else(|| self.try_emit_data_enum_variant_struct_literal_target(&struct_expr.path))
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
 
         let resolved_struct_name = struct_expr.path.segments.last().map(|seg| {
@@ -17602,6 +17724,35 @@ impl CodeGen {
             })
             .collect();
         format!("{}{{{}}}", target_name, fields.join(", "))
+    }
+
+    fn try_emit_data_enum_variant_struct_literal_target(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let mut start = 0;
+        while start < segments.len() && matches!(segments[start].as_str(), "crate" | "self" | "super")
+        {
+            start += 1;
+        }
+        if start + 2 > segments.len() {
+            return None;
+        }
+        let enum_idx = segments.len() - 2;
+        let variant_idx = segments.len() - 1;
+        if enum_idx < start {
+            return None;
+        }
+        let enum_name = &segments[enum_idx];
+        if !self.data_enum_types.contains(enum_name) {
+            return None;
+        }
+        let variant_name = &segments[variant_idx];
+        let mut enum_path = path.clone();
+        enum_path.segments.pop();
+        let cpp_enum_name = self.emit_path_to_string(&enum_path);
+        Some(format!("{}_{}", cpp_enum_name, variant_name))
     }
 
     fn expected_reference_inner_type<'a>(
@@ -19235,6 +19386,35 @@ impl CodeGen {
         }
 
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
+        if matches!(
+            func.as_str(),
+            "rusty::fmt::Formatter::write_str"
+                | "rusty::fmt::Formatter::write_char"
+                | "core::fmt::Formatter::write_str"
+                | "core::fmt::Formatter::write_char"
+                | "std::fmt::Formatter::write_str"
+                | "std::fmt::Formatter::write_char"
+                | "fmt::Formatter::write_str"
+                | "fmt::Formatter::write_char"
+        ) && call.args.len() >= 2
+        {
+            let receiver = match self.peel_paren_group_expr(&call.args[0]) {
+                syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                expr => self.emit_expr_to_string(expr),
+            };
+            let method = if func.ends_with("write_char") {
+                "write_char"
+            } else {
+                "write_str"
+            };
+            let args: Vec<String> = call
+                .args
+                .iter()
+                .skip(1)
+                .map(|arg| self.emit_expr_maybe_move(arg))
+                .collect();
+            return format!("{}.{}({})", receiver, method, args.join(", "));
+        }
         if matches!(
             func.as_str(),
             "rusty::ptr::read"
@@ -24763,7 +24943,7 @@ impl CodeGen {
         }
 
         if block.stmts.is_empty() {
-            return Some(self.match_expr_unreachable_fallback().to_string());
+            return Some("std::make_tuple()".to_string());
         }
 
         let mut inner = self.clone();
@@ -36064,6 +36244,56 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10534_deref_view_target_methods_return_value_not_target_reference() {
+        let out = transpile_str(
+            r#"
+            use std::ops::{Deref, DerefMut};
+            struct Buf {
+                xs: [i32; 2],
+            }
+            impl Deref for Buf {
+                type Target = [i32];
+                fn deref(&self) -> &Self::Target {
+                    &self.xs
+                }
+            }
+            impl DerefMut for Buf {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.xs
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("std::span<const int32_t> operator*() const {"));
+        assert!(!out.contains("Target& operator*() const"));
+        assert!(out.contains("std::span<int32_t> deref_mut() {"));
+        assert!(!out.contains("Target& deref_mut()"));
+    }
+
+    #[test]
+    fn test_leaf10534_runtime_result_err_wildcard_match_avoids_unwrap_side_effects() {
+        let out = transpile_str(
+            r#"
+            fn stmt(ret: Result<i32, i32>) {
+                match ret {
+                    Err(_) => {}
+                    _ => {}
+                }
+            }
+            fn expr(ret: Result<i32, i32>) -> i32 {
+                match ret {
+                    Err(_) => 1,
+                    _ => 2,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("if (_m.is_err()) {"));
+        assert!(!out.contains("std::as_const(_m).unwrap_err()"));
+        assert!(!out.contains("_m.unwrap_err()"));
+    }
+
+    #[test]
     fn test_leaf10512_shadowed_param_pointer_cast_uses_outer_reference_binding_in_initializer() {
         let out = transpile_str(
             r#"
@@ -37425,6 +37655,120 @@ mod tests {
             "#,
         );
         assert!(!out.contains("rusty_fmt(const Op& self"));
+    }
+
+    #[test]
+    fn test_leaf10534_formatter_write_str_associated_call_uses_receiver_method() {
+        let out = transpile_str(
+            r#"
+            struct Wrapper;
+
+            impl core::fmt::Display for Wrapper {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    core::fmt::Formatter::write_str(f, "Exact")
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return f.write_str(\"Exact\");"));
+        assert!(!out.contains("Formatter::write_str(f, \"Exact\")"));
+    }
+
+    #[test]
+    fn test_leaf10534_formatter_write_char_associated_call_uses_receiver_method() {
+        let out = transpile_str(
+            r#"
+            enum Marker {
+                Dot,
+            }
+
+            impl core::fmt::Display for Marker {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    core::fmt::Formatter::write_char(f, '.')
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return f.write_char(U'.');"));
+        assert!(!out.contains("Formatter::write_char(f, '.')"));
+    }
+
+    #[test]
+    fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
+        let out = transpile_str(
+            r#"
+            enum ParseKind {
+                EmptyFlag,
+                InvalidNamedFlag { got: () },
+                InvalidHexFlag { got: () },
+            }
+
+            impl core::fmt::Debug for ParseKind {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    match self {
+                        ParseKind::EmptyFlag => core::fmt::Formatter::write_str(f, "EmptyFlag"),
+                        ParseKind::InvalidNamedFlag { got: __self_0 } => {
+                            core::fmt::Formatter::debug_struct_field1_finish(
+                                f,
+                                "InvalidNamedFlag",
+                                "got",
+                                __self_0,
+                            )
+                        }
+                        ParseKind::InvalidHexFlag { got: __self_0 } => {
+                            core::fmt::Formatter::debug_struct_field1_finish(
+                                f,
+                                "InvalidHexFlag",
+                                "got",
+                                __self_0,
+                            )
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("[&](const ParseKind_EmptyFlag&) { return f.write_str(\"EmptyFlag\"); }"));
+        assert!(out.contains("[&](const ParseKind_InvalidNamedFlag& _v) { const auto& __self_0 = _v.got; return rusty::fmt::Formatter::debug_struct_field1_finish"));
+        assert!(out.contains("[&](const ParseKind_InvalidHexFlag& _v) { const auto& __self_0 = _v.got; return rusty::fmt::Formatter::debug_struct_field1_finish"));
+        assert!(
+            !out.contains(
+                "[&](const auto&) { return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }"
+            ),
+            "struct-variant debug arms should lower to typed lambdas, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10534_data_enum_struct_literal_path_uses_variant_struct_target() {
+        let out = transpile_str(
+            r#"
+            enum ParseKind {
+                InvalidHexFlag { got: () },
+            }
+
+            fn make() -> ParseKind {
+                ParseKind::InvalidHexFlag { got: {} }
+            }
+            "#,
+        );
+        assert!(out.contains("return ParseKind_InvalidHexFlag{.got = std::make_tuple()};"));
+        assert!(!out.contains("ParseKind::InvalidHexFlag{"));
+    }
+
+    #[test]
+    fn test_leaf10534_empty_block_expr_lowers_to_unit_tuple_value() {
+        let out = transpile_str(
+            r#"
+            fn unit_local() {
+                let got = {};
+                let _ = got;
+            }
+            "#,
+        );
+        assert!(out.contains("const auto got = std::make_tuple();"));
+        assert!(!out.contains("const auto got = rusty::intrinsics::unreachable();"));
     }
 
     #[test]
@@ -39302,10 +39646,7 @@ mod tests {
         "#,
         );
         assert!(out.contains("if (_m.is_err()) {"));
-        assert!(
-            out.contains("auto _mv0 = _m.unwrap_err();")
-                || out.contains("auto _mv0 = std::as_const(_m).unwrap_err();")
-        );
+        assert!(!out.contains("unwrap_err()"));
         assert!(!out.contains("std::visit(overloaded {"));
         assert!(!out.contains("complex tuple-struct pattern binding"));
     }
