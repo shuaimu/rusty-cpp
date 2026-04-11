@@ -4483,8 +4483,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-22-20260411a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver-shape-gated in core iterator adapter lowering, with no generated-output patching and no crate-specific ad-hoc scripts.
-        - [ ] Leaf 5.1.23: `smallvec` Stage D boxed-array literal numeric-element typing compile-head family collapse
-          - Collapse the new post-5.1.22 deterministic `smallvec` Stage D family beginning at `runner.cpp:2656` (`Vec<int>` to `Vec<uint8_t>` conversion failure in `SmallVec::<[u8; N]>::from_vec(...)` boxed-array literal paths), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.23: `smallvec` Stage D boxed-array literal numeric-element typing compile-head family collapse
+          - Plan/scope check: shared transpiler associated-call argument-typing hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - associated static-call lowering under expected owner type (`try_emit_associated_call_with_expected_type`) now propagates owner type-argument substitutions into argument expected-type lookup/fallback, so omitted-owner generic calls like `SmallVec::from_vec(...)` specialize `Vec<A::Item>` argument expectations under typed context.
+            - `into_vec` boxed-array payload specialization now recognizes all canonical path spellings (`rusty::boxed::into_vec`, `into_vec`, `alloc::boxed::into_vec`, `std::boxed::into_vec`) so UFCS/path-normalization variants keep u8-context coercion behavior.
+            - type-parameter substitution for associated projections remains qself-safe for non-path replacements (`A::Item` + `A -> [u8; N]`), preserving shared `is_u8` context detection for boxed-array literal numeric elements.
+          - Added focused regressions:
+            - `test_leaf5123_into_vec_box_new_u8_context_from_assoc_item_projection_coerces_array_elements`
+            - `test_leaf5123_into_vec_box_new_non_u8_assoc_item_projection_stays_uncoerced`
+            - `test_leaf5123_smallvec_omitted_owner_from_vec_uses_u8_assoc_item_hint_for_boxed_array`
+            - `test_leaf5123_smallvec_crate_from_vec_ufcs_into_vec_uses_u8_assoc_item_hint_for_boxed_array`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5123 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf41543333333327121 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-23-20260411c --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.22 first-head family at `runner.cpp:2656` (`Vec<int>` to `Vec<unsigned char>` conversion in boxed-array literal `SmallVec::from_vec(...)` paths) with adjacent same-family fallout at `runner.cpp:3227` and `runner.cpp:4364/4384/4404/4424` is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2691` (`operator==` mismatch: `rusty::Vec<const unsigned char*>` vs `std::array<int, 1>` in `into_iter` assertions), with adjacent same-family fallout at `runner.cpp:2713` (`std::array<int, 3>`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-23-20260411c/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core associated-call and `into_vec` lowering paths, with no generated-output patching and no crate-specific ad-hoc scripts.
+        - [ ] Leaf 5.1.24: `smallvec` Stage D `into_iter` assertion element-shape parity compile-head family collapse
+          - Collapse the new post-5.1.23 deterministic `smallvec` Stage D family beginning at `runner.cpp:2691`/`2713` (`rusty::Vec<const unsigned char*>` compared against integer `std::array{...}` literals in `into_iter` assertion paths), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

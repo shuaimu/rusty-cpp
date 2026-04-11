@@ -4161,22 +4161,36 @@ impl CodeGen {
                             }
                         } else if let Some(first_seg) = tp.path.segments.first() {
                             let name = first_seg.ident.to_string();
-                            if let Some(syn::Type::Path(replacement_path)) =
-                                substitutions.get(&name)
-                            {
-                                if replacement_path.qself.is_none() {
-                                    let mut merged = syn::punctuated::Punctuated::new();
-                                    for seg in replacement_path.path.segments.iter() {
-                                        merged.push(seg.clone());
+                            if let Some(replacement) = substitutions.get(&name) {
+                                if let syn::Type::Path(replacement_path) = replacement {
+                                    if replacement_path.qself.is_none() {
+                                        let mut merged = syn::punctuated::Punctuated::new();
+                                        for seg in replacement_path.path.segments.iter() {
+                                            merged.push(seg.clone());
+                                        }
+                                        for seg in tp.path.segments.iter().skip(1) {
+                                            merged.push(seg.clone());
+                                        }
+                                        tp.path.leading_colon = replacement_path
+                                            .path
+                                            .leading_colon
+                                            .or(tp.path.leading_colon);
+                                        tp.path.segments = merged;
                                     }
+                                } else {
+                                    let mut tail_path = syn::Path {
+                                        leading_colon: None,
+                                        segments: syn::punctuated::Punctuated::new(),
+                                    };
                                     for seg in tp.path.segments.iter().skip(1) {
-                                        merged.push(seg.clone());
+                                        tail_path.segments.push(seg.clone());
                                     }
-                                    tp.path.leading_colon = replacement_path
-                                        .path
-                                        .leading_colon
-                                        .or(tp.path.leading_colon);
-                                    tp.path.segments = merged;
+                                    if !tail_path.segments.is_empty() {
+                                        let replacement_ty = replacement.clone();
+                                        *ty = syn::parse_quote!(<#replacement_ty>::#tail_path);
+                                        recurse(ty, substitutions);
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -4260,6 +4274,88 @@ impl CodeGen {
                 }
             }
         }
+        if substitutions.is_empty() {
+            None
+        } else {
+            Some(substitutions)
+        }
+    }
+
+    fn call_owner_type_arg_substitutions_from_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let expected_ty = expected_ty?;
+        let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+        let syn::Type::Path(expected_tp) = expected_ty else {
+            return None;
+        };
+        let expected_owner_seg = expected_tp.path.segments.last()?;
+        let expected_owner_name = expected_owner_seg.ident.to_string();
+        let syn::PathArguments::AngleBracketed(expected_args) = &expected_owner_seg.arguments else {
+            return None;
+        };
+        let expected_type_args: Vec<syn::Type> = expected_args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if expected_type_args.is_empty() {
+            return None;
+        }
+
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let path = &path_expr.path;
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let owner_idx = path.segments.len() - 2;
+        let owner_seg = path.segments.iter().nth(owner_idx)?;
+        if !matches!(owner_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let owner_name = owner_seg.ident.to_string();
+        if owner_name != "Self" && owner_name != expected_owner_name {
+            return None;
+        }
+
+        let mut owner_path = syn::Path {
+            leading_colon: path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for seg in path.segments.iter().take(owner_idx + 1) {
+            owner_path.segments.push(seg.clone());
+        }
+        let params = self.declared_type_params_for_path(&owner_path)?;
+        if params.is_empty() {
+            return None;
+        }
+        let owner_key = self.declared_type_key_for_path(&owner_path)?;
+        let param_kinds = self.declared_type_param_kinds.get(&owner_key);
+
+        let mut substitutions = HashMap::new();
+        let mut expected_iter = expected_type_args.into_iter();
+        for (idx, param) in params.iter().enumerate() {
+            let is_type_param = param_kinds
+                .and_then(|kinds| kinds.get(idx))
+                .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+            if !is_type_param {
+                continue;
+            }
+            let Some(expected_arg_ty) = expected_iter.next() else {
+                break;
+            };
+            substitutions.insert(param.clone(), expected_arg_ty);
+        }
+
         if substitutions.is_empty() {
             None
         } else {
@@ -20373,14 +20469,32 @@ impl CodeGen {
         }
         let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
         let rust_method_name = func_path.segments.last()?.ident.to_string();
+        let expected_substitutions =
+            self.call_owner_type_arg_substitutions_from_expected_type(call, Some(expected_ty));
         let args: Vec<String> = call
             .args
             .iter()
             .enumerate()
             .map(|(idx, arg)| {
-                let style = self.lookup_method_arg_pass_style(&rust_method_name, idx);
-                let expected_ty = self.lookup_method_arg_expected_type(&rust_method_name, idx);
-                self.emit_call_arg_with_pass_style(arg, style, expected_ty, false, None)
+                let style = self
+                    .lookup_function_arg_pass_style(call.func.as_ref(), idx)
+                    .or_else(|| self.lookup_method_arg_pass_style(&rust_method_name, idx));
+                let expected_ty = self
+                    .lookup_function_arg_expected_type_for_call(
+                        call,
+                        idx,
+                        expected_substitutions.as_ref(),
+                    )
+                    .or_else(|| {
+                        let fallback = self.lookup_method_arg_expected_type(&rust_method_name, idx)?;
+                        if let Some(substitutions) = expected_substitutions.as_ref() {
+                            return Some(
+                                self.substitute_type_params_in_type(fallback, substitutions),
+                            );
+                        }
+                        Some(fallback.clone())
+                    });
+                self.emit_call_arg_with_pass_style(arg, style, expected_ty.as_ref(), false, None)
             })
             .collect();
         if owner_cpp.starts_with("rusty::HashMap")
@@ -20522,13 +20636,38 @@ impl CodeGen {
 
     fn is_u8_syn_type(ty: &syn::Type) -> bool {
         match ty {
-            syn::Type::Path(tp) => tp
-                .path
-                .segments
-                .last()
-                .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "u8" | "uint8_t")),
+            syn::Type::Path(tp) => {
+                if tp
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "u8" | "uint8_t"))
+                {
+                    return true;
+                }
+                if tp
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "Item")
+                    && let Some(qself) = &tp.qself
+                {
+                    return Self::is_u8_assoc_item_owner(qself.ty.as_ref());
+                }
+                false
+            }
             syn::Type::Paren(p) => Self::is_u8_syn_type(&p.elem),
             syn::Type::Group(g) => Self::is_u8_syn_type(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn is_u8_assoc_item_owner(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Array(arr) => Self::is_u8_syn_type(&arr.elem),
+            syn::Type::Reference(r) => Self::is_u8_assoc_item_owner(&r.elem),
+            syn::Type::Paren(p) => Self::is_u8_assoc_item_owner(&p.elem),
+            syn::Type::Group(g) => Self::is_u8_assoc_item_owner(&g.elem),
             _ => false,
         }
     }
@@ -22451,7 +22590,11 @@ impl CodeGen {
                 return format!("rusty::collect_range({})", arg);
             }
         }
-        if func == "rusty::boxed::into_vec" && call.args.len() == 1 {
+        if matches!(
+            func.as_str(),
+            "rusty::boxed::into_vec" | "into_vec" | "alloc::boxed::into_vec" | "std::boxed::into_vec"
+        ) && call.args.len() == 1
+        {
             if let Some(specialized_arg) =
                 self.try_emit_into_vec_box_new_with_inferred_tuple_payload(&call.args[0])
             {
@@ -22601,7 +22744,18 @@ impl CodeGen {
         }
 
         let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
-        let call_type_substitutions = self.function_call_type_arg_substitutions(call);
+        let mut call_type_substitutions =
+            self.function_call_type_arg_substitutions(call).unwrap_or_default();
+        if let Some(expected_substitutions) =
+            self.call_owner_type_arg_substitutions_from_expected_type(call, expected_ty)
+        {
+            call_type_substitutions.extend(expected_substitutions);
+        }
+        let call_type_substitutions = if call_type_substitutions.is_empty() {
+            None
+        } else {
+            Some(call_type_substitutions)
+        };
         let call_args: Vec<String> = call
             .args
             .iter()
@@ -22638,8 +22792,14 @@ impl CodeGen {
                             .chars()
                             .next()
                             .is_some_and(|ch| ch.is_ascii_uppercase());
-                    if owner_looks_like_type && method == "from_inline" {
-                        return self.lookup_method_arg_expected_type(&method, idx).cloned();
+                    if owner_looks_like_type {
+                        let fallback = self.lookup_method_arg_expected_type(&method, idx)?.clone();
+                        if let Some(substitutions) = call_type_substitutions.as_ref() {
+                            return Some(
+                                self.substitute_type_params_in_type(&fallback, substitutions),
+                            );
+                        }
+                        return Some(fallback);
                     }
                     None
                 });
@@ -37736,6 +37896,124 @@ mod tests {
         assert!(out.contains(
             "var.push(rusty::boxed::into_vec(rusty::boxed::box_new(rusty::array_repeat(static_cast<uint8_t>(9), 4))));"
         ));
+    }
+
+    #[test]
+    fn test_leaf5123_into_vec_box_new_u8_context_from_assoc_item_projection_coerces_array_elements()
+    {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            impl ArrayLike for [u8; 1] { type Item = u8; }
+            struct SmallVec<A: ArrayLike>;
+            impl<A: ArrayLike> SmallVec<A> {
+                fn from_vec(_v: Vec<A::Item>) -> Self { SmallVec }
+            }
+            fn f() {
+                let _ = SmallVec::<[u8; 1]>::from_vec(into_vec(alloc::boxed::box_new([0, 1, 2])));
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "SmallVec<std::array<uint8_t, 1>>::from_vec(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{static_cast<uint8_t>(0), static_cast<uint8_t>(1), static_cast<uint8_t>(2)})))"
+        ), "{out}");
+        assert!(!out.contains("box_new(std::array{0, 1, 2})"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5123_into_vec_box_new_non_u8_assoc_item_projection_stays_uncoerced() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            impl ArrayLike for [i32; 1] { type Item = i32; }
+            struct SmallVec<A: ArrayLike>;
+            impl<A: ArrayLike> SmallVec<A> {
+                fn from_vec(_v: Vec<A::Item>) -> Self { SmallVec }
+            }
+            fn f() {
+                let _ = SmallVec::<[i32; 1]>::from_vec(into_vec(alloc::boxed::box_new([0, 1, 2])));
+            }
+            "#,
+        );
+        assert!(out.contains("box_new(std::array{0, 1, 2})"), "{out}");
+        assert!(!out.contains("static_cast<uint8_t>(0)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5123_smallvec_omitted_owner_from_vec_uses_u8_assoc_item_hint_for_boxed_array() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec<A>;
+            impl<A> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+                fn inline_size(&self) -> usize { 0 }
+                fn push(&mut self, _v: u8) {}
+                fn from_vec(_v: Vec<u8>) -> Self { SmallVec }
+            }
+            fn f() {
+                let v: SmallVec<[u8; 1]> = {
+                    let count = 0 + 1;
+                    let mut vec = SmallVec::new();
+                    if count <= vec.inline_size() {
+                        vec.push(0);
+                        vec
+                    } else {
+                        SmallVec::from_vec(into_vec(alloc::boxed::box_new([0])))
+                    }
+                };
+                let _ = v;
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "SmallVec<std::array<uint8_t, 1>>::from_vec(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{static_cast<uint8_t>(0)})))"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("box_new(std::array{0})"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5123_smallvec_crate_from_vec_ufcs_into_vec_uses_u8_assoc_item_hint_for_boxed_array()
+    {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            impl ArrayLike for [u8; 1] { type Item = u8; }
+
+            struct SmallVec<A: ArrayLike>;
+            impl<A: ArrayLike> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+                fn inline_size(&self) -> usize { 0 }
+                fn push(&mut self, _v: u8) {}
+                fn from_vec(_v: Vec<A::Item>) -> Self { SmallVec }
+            }
+
+            fn f() {
+                let _v: SmallVec<[u8; 1]> = {
+                    let count = 0 + 1;
+                    let mut vec = crate::SmallVec::new();
+                    if count <= vec.inline_size() {
+                        vec.push(0);
+                        vec
+                    } else {
+                        crate::SmallVec::from_vec(<[_]>::into_vec(alloc::boxed::box_new([0, 1, 2, 3, 4, 5, 6, 7])))
+                    }
+                };
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "SmallVec<std::array<uint8_t, 1>>::from_vec(rusty::boxed::into_vec(rusty::boxed::box_new(std::array{static_cast<uint8_t>(0), static_cast<uint8_t>(1), static_cast<uint8_t>(2), static_cast<uint8_t>(3), static_cast<uint8_t>(4), static_cast<uint8_t>(5), static_cast<uint8_t>(6), static_cast<uint8_t>(7)})))"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("box_new(std::array{0, 1, 2, 3, 4, 5, 6, 7})"),
+            "{out}"
+        );
     }
 
     #[test]
