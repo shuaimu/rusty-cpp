@@ -4076,9 +4076,19 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Deterministic Stage D frontier movement:
             - prior first-head family (early unresolved adapter/type-order cluster beginning with `VecDequeIntoIter`/`VecIntoIter`, `::intersperse::Intersperse`, and related namespace/type-order fallout) is removed from the first deterministic slot.
             - new first hard error family begins at `merge_join` associated-type alias lowering (`MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>` with unbound `T`) at `runner.cpp:1170`, followed by downstream `ziptuple::Zip` and `EitherOrBoth`/format/runtime surface fallout; canonical artifacts at `/tmp/rusty-parity-matrix-5-1-3-20260411g/itertools/{baseline.txt,build.log,run.log,matrix.log}`.
-        - [ ] Leaf 5.1.4: Re-run full ten-crate parity matrix and record closure status
-          - Run `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-<timestamp> --keep-work-dirs`
-          - If all ten pass, mark Leaf 5.1 complete; otherwise record first deterministic failure head and canonical artifact paths for next leaf
+        - [x] *done* Leaf 5.1.4: Re-run full ten-crate parity matrix and record closure status
+          - Plan/scope check: verification-only leaf (matrix rerun + status recording) is <<1000 LOC and required no implementation decomposition.
+          - Re-ran full matrix:
+            - `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-20260411h --keep-work-dirs`
+          - Outcome: not all ten pass; deterministic first failing crate is now `semver` (`total=6`, `pass=5`, `fail=1` before remaining crates run).
+          - New deterministic Stage D first hard-error family:
+            - `runner.cpp:931` conflicting declaration for `error::ErrorKind` (`struct ErrorKind;` forward declaration vs `using ErrorKind = std::variant<...>` alias surface).
+            - immediate cascade includes `PTR_BYTES`/`TAIL_BYTES` declaration conflicts and `Identifier`/tail-field fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-10x-20260411h/semver/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): this leaf remained deterministic-first evidence capture only; no crate-specific scripts or generated-output patching.
+        - [ ] Leaf 5.1.5: `semver` Stage D compile-head regression collapse
+          - Collapse the post-5.1.4 deterministic `semver` Stage D declaration-surface family generically (starting with `error::ErrorKind` forward-declaration/alias conflict at `runner.cpp:931`), add focused fixture-agnostic regressions, then re-run `--crate semver`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
