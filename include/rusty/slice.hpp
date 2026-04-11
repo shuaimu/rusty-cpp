@@ -9,6 +9,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "rusty/option.hpp"
 
@@ -488,6 +489,22 @@ decltype(auto) map(Range&& range, Func&& func) {
             detail::dependent_false_v<std::remove_reference_t<Range>>,
             "rusty::map requires next() to return an Option/optional-like value"
         );
+    } else if constexpr (
+        requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }
+    ) {
+        auto&& range_ref = std::forward<Range>(range);
+        auto mapper = std::forward<Func>(func);
+        using item_ref = decltype(*std::begin(range_ref));
+        using mapped_type = std::decay_t<decltype(std::invoke(
+            mapper,
+            detail::deref_if_pointer(std::declval<item_ref>())))>;
+        std::vector<mapped_type> out;
+        for (auto&& item : for_in(range_ref)) {
+            out.push_back(std::invoke(
+                mapper,
+                detail::deref_if_pointer(std::forward<decltype(item)>(item))));
+        }
+        return out;
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return map(
             std::forward<Range>(range).into_iter(),

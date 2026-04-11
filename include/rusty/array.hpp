@@ -266,8 +266,6 @@ auto collect_range(Range&& range_like) {
             out.push(std::forward<decltype(item)>(item));
         }
         return out;
-    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
-        return collect_range(std::forward<Range>(range_like).into_iter());
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
         auto iter = std::forward<Range>(range_like);
         using NextResult = decltype(iter.next());
@@ -288,6 +286,8 @@ auto collect_range(Range&& range_like) {
             out.push(detail::option_take_value(item));
         }
         return out;
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+        return collect_range(std::forward<Range>(range_like).into_iter());
     } else {
         static_assert(
             detail::collect_range_dependent_false_v<Range>,

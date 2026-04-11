@@ -498,6 +498,26 @@ void test_collect_range_iterator_adapter_shape() {
     printf("PASS\n");
 }
 
+void test_map_begin_end_range_shape() {
+    printf("test_map_begin_end_range_shape: ");
+    struct IterNamesMock {
+        std::vector<std::tuple<std::string_view, int>> items;
+        auto begin() const { return items.begin(); }
+        auto end() const { return items.end(); }
+    };
+    IterNamesMock mock{{std::make_tuple("A", 1), std::make_tuple("B", 3), std::make_tuple("C", 7)}};
+    auto mapped = rusty::map(mock, [](auto&& pair) {
+        auto&& [_, value] = pair;
+        return value;
+    });
+    auto collected = rusty::collect_range(std::move(mapped));
+    assert(collected.len() == 3);
+    assert(collected[0] == 1);
+    assert(collected[1] == 3);
+    assert(collected[2] == 7);
+    printf("PASS\n");
+}
+
 void test_rev_enumerate_iterator_adapter_shape() {
     printf("test_rev_enumerate_iterator_adapter_shape: ");
     {
@@ -657,6 +677,7 @@ int main() {
     test_count_iterator_helper_shape();
     test_take_iterator_adapter_shape();
     test_collect_range_iterator_adapter_shape();
+    test_map_begin_end_range_shape();
     test_rev_enumerate_iterator_adapter_shape();
     test_iter_vec_enumerate_adapter_shape();
     test_iter_mut_enumerate_preserves_mutability_shape();

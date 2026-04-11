@@ -3490,6 +3490,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-37a-1775897398/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-38a-1775903800/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): changes stayed shared and shape-gated; no crate-specific scripts, no post-generation text patching, and no blanket method-call rewrites were introduced.
+        - [x] *done* Leaf 10.5.39: Collapse the post-10.5.38 deterministic full-matrix `bitflags` Stage D iterator-range normalization / `collect_range` recursion family generically (starting with `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:270` deduced-return recursion and adjacent `runner.cpp:3998` `iter_names().map(...)` next-like static-assert), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared runtime helper-order/surface changes plus focused runtime regression tests stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - `collect_range` dispatch preferred `into_iter()` before `next()`, and mapped next-adapter types can satisfy both; this caused recursive deduced-auto return instantiation in `collect_range(...into_iter())`.
+            - shared `rusty::map` only handled next-like sources and attempted to adapt begin/end-only ranges through next-like paths, tripping static-asserts for range-only iterator-name payloads.
+          - Implemented shared runtime fixes:
+            - `include/rusty/array.hpp`: reordered `collect_range` dispatch to prefer `next()` before `into_iter()` for iterator-like wrappers that expose both surfaces.
+            - `include/rusty/slice.hpp`: added a begin/end range `map` branch that eagerly maps through shared `for_in(...)` into `std::vector<mapped_type>`; retained next-like and `into_iter` paths unchanged.
+          - Added focused fixture-agnostic regressions:
+            - `tests/rusty_array_test.cpp`: `test_map_begin_end_range_shape` (begin/end-only range mapped via `rusty::map`, then collected via `collect_range`).
+          - Verification:
+            - `ctest --test-dir build-tests --output-on-failure -R rusty_array_test`
+            - `cargo test -p rusty-cpp-transpiler leaf10538 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-39a-1775905600 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family rooted at `collect_range` recursion (`array.hpp:270`) and `iter_names()` map adapter static-assert (`runner.cpp:3998`) is removed.
+            - full-matrix frontier remains `bitflags` Stage D and advances to the next deterministic compile family rooted at:
+              - `runner.cpp:3123/3171` tuple literal element-type harmonization (`std::array{std::make_tuple(...uint8_t...), std::make_tuple(...int...)}` CTAD mismatch),
+              - `runner.cpp:4405` missing `|=` surface,
+              - `runner.cpp:5967/5994` unresolved bitflag formatter/parser helper calls (`rusty::write_hex`, `parse_hex`),
+              - and adjacent pointer-deref call-shape fallout around `runner.cpp:2663+`.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-38a-1775903800/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-39a-1775905600/bitflags/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime adapters; no crate-specific scripts, no generated C++ patching, and no blanket receiver rewrites were introduced.
+        - [ ] Leaf 10.5.40: Collapse the post-10.5.39 deterministic full-matrix `bitflags` Stage D tuple-harmonization + helper-surface + pointer-call-shape family generically (starting with `runner.cpp:3123/3171` `std::array` tuple CTAD mismatch, `runner.cpp:4405` `|=` surface gap, and `runner.cpp:5967/5994` unresolved `write_hex`/`parse_hex`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`
