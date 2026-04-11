@@ -4250,7 +4250,29 @@ Active work items:
      - new deterministic head starts at `runner.cpp:2180` in `parse::comparator` (`patch_shadow1` lowered as `std::nullopt_t` and then used via `.is_some()`), with adjacent fallout at `runner.cpp:2193` (`.is_some()` repeat), `runner.cpp:2200` (const assignment), and `runner.cpp:2203` (stale `text_shadow12` binding use).
    - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-18-1775870799/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/control-flow-shape-gated in core local-binding + if-let lowering paths, with no crate-specific rewrites/scripts and no generated-text patching.
-172. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.18` (`runner.cpp:2180` `parse::comparator` if-let result-shape drift where `_iflet_result*` tuple element degrades to `std::nullopt_t` and breaks option-like `.is_some()` flow, with adjacent stale-binding/const-assignment fallout at `runner.cpp:2193/2200/2203`).
+172. `Leaf 10.5.19` is complete.
+   - plan/scope check: shared transpiler-only lowering/type-inference hardening + focused regressions stayed well below the <1000 LOC threshold and required no additional decomposition.
+   - implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+     - hardened if-let tuple statement-block lowering to use per-element inferred tuple expected types when seeding else/default tuple values, so `None` tuple elements lower into typed `Option` surfaces instead of `std::nullopt_t` auto-deduction traps.
+     - added a fallback `?` payload inference path for local tuple-env updates so `let (...) = foo()?;` contributes element types when direct initializer inference misses the payload.
+     - preserved reference element shape when binding `if let` condition patterns into inference env (avoids degrading `&str` to `str` and stabilizes tuple-branch merge typing).
+     - restored tuple peer Result-constructor context emission stability by preserving peer-context lowering when expected type context is also available.
+   - focused regressions:
+     - `transpiler/src/codegen.rs`:
+       - `test_leaf10519_if_let_tuple_result_assigns_multistmt_tail_value`
+       - `test_leaf10519_single_if_result_temp_is_mutable_in_statement_lowering`
+       - `test_leaf10519_if_let_tuple_result_seed_is_option_typed_not_nullopt_tuple`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10519 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf41543333333161 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `tests/transpile_tests/run_parity_matrix.sh --crate semver --work-root /tmp/rusty-parity-matrix-10-5-19b-1775873154 --keep-work-dirs`
+   - deterministic semver Stage D frontier movement:
+     - previous first hard-error family member at `runner.cpp:2150` (`_iflet_result2` assignment into `std::tuple<std::nullopt_t, ...>`) is removed.
+     - new deterministic head starts at `runner.cpp:2172` (`_iflet_result3` in adjacent patch branch still deduces `std::nullopt_t`), with adjacent fallout at `runner.cpp:2180/2193` (`.is_some()` on nullopt_t), `runner.cpp:2203` (stale `text_shadow12` binding), and `runner.cpp:2209+` return-shape cascade.
+   - canonical artifacts: `/tmp/rusty-parity-matrix-10-5-19b-1775873154/semver/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`.
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and AST/type-context-gated in core if-let/type-inference lowering, with no crate-specific rewrites/scripts and no generated-text patching.
+173. Current active next leaf is the next Phase 21 deterministic semver Stage D family after `10.5.19` (starting at `runner.cpp:2172` in `parse::comparator`, `_iflet_result3` tuple seed still deducing `std::nullopt_t` with downstream `.is_some()`/stale-binding return-shape fallout at `runner.cpp:2180+`).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

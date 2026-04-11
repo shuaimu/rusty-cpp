@@ -76,6 +76,13 @@ enum IntoReceiverKind {
     ScalarLike,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IfTupleElemType {
+    Concrete(syn::Type),
+    NonePath,
+    Unknown,
+}
+
 const IF_LET_OPTION_HAS_VALUE_HELPER_MARKER: &str = "__rusty_option_has_value_helper";
 const IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER: &str = "__rusty_option_take_value_helper";
 
@@ -8654,9 +8661,7 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
         peer_expr: Option<&syn::Expr>,
     ) -> Option<String> {
-        if expected_ty.is_some() {
-            return None;
-        }
+        let _ = expected_ty;
         let peer_expr = peer_expr?;
         let expr = self.extract_value_expr(expr)?;
         let syn::Expr::Call(call) = expr else {
@@ -11917,6 +11922,22 @@ impl CodeGen {
                 } else {
                     None
                 };
+                let inferred_tuple_type = local
+                    .init
+                    .as_ref()
+                    .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr))
+                    .and_then(|ty| match self.peel_reference_paren_group_type(&ty) {
+                        syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
+                        _ => None,
+                    });
+                let rust_binding_names: Vec<Option<String>> = tuple
+                    .elems
+                    .iter()
+                    .map(|p| match p {
+                        syn::Pat::Ident(pi) if pi.ident != "_" => Some(pi.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect();
                 let names: Vec<String> = tuple
                     .elems
                     .iter()
@@ -11947,6 +11968,15 @@ impl CodeGen {
                             names.join(", "),
                             expr_str
                         ));
+                        if let Some(tuple_ty) = inferred_tuple_type.as_ref() {
+                            for (raw_name, elem_ty) in
+                                rust_binding_names.iter().zip(tuple_ty.elems.iter())
+                            {
+                                if let Some(name) = raw_name {
+                                    self.update_local_binding_type(name.clone(), elem_ty.clone());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -12826,6 +12856,9 @@ impl CodeGen {
                         // direct local type evidence).
                         return Some(parse_quote!(std::optional<std::tuple<>>));
                     }
+                    if let Some(ret_ty) = self.lookup_function_return_type(call.func.as_ref()) {
+                        return Some(ret_ty.clone());
+                    }
                 }
                 if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(expr) {
                     let arg_ty = self.infer_simple_expr_type(ctor_arg)?;
@@ -12982,6 +13015,10 @@ impl CodeGen {
                     None
                 }
             }
+            syn::Expr::Try(try_expr) => self
+                .infer_local_binding_type_from_initializer(&try_expr.expr)
+                .or_else(|| self.infer_simple_expr_type(&try_expr.expr))
+                .and_then(|ty| self.try_unwrap_try_operand_type(&ty)),
             syn::Expr::If(if_expr) => self.infer_constructor_expected_type_from_if(if_expr),
             syn::Expr::Match(match_expr) => {
                 self.infer_constructor_expected_type_from_match(match_expr)
@@ -12998,6 +13035,26 @@ impl CodeGen {
                 .and_then(|inner| self.infer_local_binding_type_from_initializer(inner)),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
+            _ => None,
+        }
+    }
+
+    fn try_unwrap_try_operand_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let last_name = last.ident.to_string();
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let mut type_args = args.args.iter().filter_map(|arg| match arg {
+            syn::GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        });
+        match last_name.as_str() {
+            "Result" | "Option" => type_args.next(),
             _ => None,
         }
     }
@@ -14045,10 +14102,401 @@ impl CodeGen {
         }
     }
 
+    fn extract_tail_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
+        match block.stmts.last()? {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            _ => None,
+        }
+    }
+
     fn extract_single_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
         match expr {
             syn::Expr::Block(block) => self.extract_single_expr_from_block(&block.block),
             _ => self.extract_value_expr(expr),
+        }
+    }
+
+    fn infer_tuple_result_type_for_if_expr(&self, if_expr: &syn::ExprIf) -> Option<syn::Type> {
+        let env = HashMap::new();
+        let elem_types = self.infer_tuple_result_elem_types_for_if_expr(if_expr, &env)?;
+        let mut concrete = Vec::with_capacity(elem_types.len());
+        for elem in elem_types {
+            match elem {
+                IfTupleElemType::Concrete(ty) => concrete.push(ty),
+                IfTupleElemType::NonePath | IfTupleElemType::Unknown => return None,
+            }
+        }
+        Some(parse_quote!((#(#concrete),*)))
+    }
+
+    fn infer_tuple_result_elem_expected_types_for_if_expr(
+        &self,
+        if_expr: &syn::ExprIf,
+    ) -> Option<Vec<Option<syn::Type>>> {
+        let env = HashMap::new();
+        let elem_types = self.infer_tuple_result_elem_types_for_if_expr(if_expr, &env)?;
+        Some(
+            elem_types
+                .into_iter()
+                .map(|elem| match elem {
+                    IfTupleElemType::Concrete(ty) => Some(ty),
+                    IfTupleElemType::NonePath | IfTupleElemType::Unknown => None,
+                })
+                .collect(),
+        )
+    }
+
+    fn emit_expr_with_tuple_elem_expected_types(
+        &self,
+        expr: &syn::Expr,
+        tuple_elem_expected: Option<&[Option<syn::Type>]>,
+        fallback_expected: Option<&syn::Type>,
+    ) -> String {
+        let expr = self.peel_paren_group_expr(expr);
+        if let Some(expected) = tuple_elem_expected {
+            if let syn::Expr::Tuple(tuple_expr) = expr {
+                if tuple_expr.elems.len() == expected.len() {
+                    let elems: Vec<String> = tuple_expr
+                        .elems
+                        .iter()
+                        .zip(expected.iter())
+                        .map(|(elem, elem_ty)| {
+                            self.emit_expr_to_string_with_expected_and_move_if_needed(
+                                elem,
+                                elem_ty.as_ref(),
+                            )
+                        })
+                        .collect();
+                    return format!("std::make_tuple({})", elems.join(", "));
+                }
+            }
+        }
+        self.emit_expr_to_string_with_expected(expr, fallback_expected)
+    }
+
+    fn infer_tuple_result_elem_types_for_if_expr(
+        &self,
+        if_expr: &syn::ExprIf,
+        env: &HashMap<String, syn::Type>,
+    ) -> Option<Vec<IfTupleElemType>> {
+        let then_tail = self.extract_tail_expr_from_block(&if_expr.then_branch)?;
+        let mut then_env = env.clone();
+        if let syn::Expr::Let(let_expr) = if_expr.cond.as_ref() {
+            self.populate_inferred_env_from_if_let_condition(let_expr, &mut then_env);
+        }
+        let then_types =
+            self.infer_tuple_result_elem_types_for_expr_with_env(then_tail, &then_env)?;
+        let (_, else_expr) = if_expr.else_branch.as_ref()?;
+        let else_types = self.infer_tuple_result_elem_types_for_expr_with_env(else_expr, env)?;
+        self.merge_if_tuple_elem_types(&then_types, &else_types)
+    }
+
+    fn infer_tuple_result_elem_types_for_expr_with_env(
+        &self,
+        expr: &syn::Expr,
+        env: &HashMap<String, syn::Type>,
+    ) -> Option<Vec<IfTupleElemType>> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Block(block_expr) => {
+                self.infer_tuple_result_elem_types_from_block_with_env(&block_expr.block, env)
+            }
+            syn::Expr::If(if_expr) => self.infer_tuple_result_elem_types_for_if_expr(if_expr, env),
+            syn::Expr::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .map(|elem| self.infer_tuple_elem_type_with_env(elem, env))
+                .collect(),
+            _ => None,
+        }
+    }
+
+    fn infer_tuple_result_elem_types_from_block_with_env(
+        &self,
+        block: &syn::Block,
+        env: &HashMap<String, syn::Type>,
+    ) -> Option<Vec<IfTupleElemType>> {
+        let mut local_env = env.clone();
+        let tail_expr = self.extract_tail_expr_from_block(block)?;
+        let stmt_count = block.stmts.len().saturating_sub(1);
+        for stmt in block.stmts.iter().take(stmt_count) {
+            self.update_inferred_local_env_from_stmt(stmt, &mut local_env);
+        }
+        self.infer_tuple_result_elem_types_for_expr_with_env(tail_expr, &local_env)
+    }
+
+    fn update_inferred_local_env_from_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        env: &mut HashMap<String, syn::Type>,
+    ) {
+        let syn::Stmt::Local(local) = stmt else {
+            return;
+        };
+        let Some(init) = &local.init else {
+            return;
+        };
+        let inferred_ty = self
+            .infer_local_binding_type_from_initializer(&init.expr)
+            .or_else(|| self.infer_try_payload_type_from_expr(&init.expr));
+        let Some(inferred_ty) = inferred_ty else {
+            return;
+        };
+        match &local.pat {
+            syn::Pat::Ident(pi) => {
+                env.insert(pi.ident.to_string(), inferred_ty);
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                let tuple_ty = self.peel_reference_paren_group_type(&inferred_ty);
+                let syn::Type::Tuple(tuple_type) = tuple_ty else {
+                    return;
+                };
+                for (pat_elem, elem_ty) in tuple_pat.elems.iter().zip(tuple_type.elems.iter()) {
+                    if let syn::Pat::Ident(pi) = pat_elem {
+                        if pi.ident != "_" {
+                            env.insert(pi.ident.to_string(), elem_ty.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn infer_try_payload_type_from_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Try(try_expr) = expr else {
+            return None;
+        };
+        let inner = self.peel_paren_group_expr(&try_expr.expr);
+        match inner {
+            syn::Expr::Call(call) => {
+                let ret_ty = self.lookup_function_return_type(call.func.as_ref())?;
+                self.try_unwrap_try_operand_type(ret_ty)
+            }
+            syn::Expr::MethodCall(method_call) => {
+                let ret_ty = self.infer_method_call_result_type_for_local(method_call)?;
+                self.try_unwrap_try_operand_type(&ret_ty)
+            }
+            _ => None,
+        }
+    }
+
+    fn populate_inferred_env_from_if_let_condition(
+        &self,
+        let_expr: &syn::ExprLet,
+        env: &mut HashMap<String, syn::Type>,
+    ) {
+        let Some(scrutinee_ty) = self.infer_expr_type_with_env(&let_expr.expr, env) else {
+            return;
+        };
+        let value_ty = self
+            .unwrap_option_or_result_value_type(&scrutinee_ty)
+            .unwrap_or(scrutinee_ty);
+        self.bind_pattern_types_into_env(&let_expr.pat, &value_ty, env);
+    }
+
+    fn bind_pattern_types_into_env(
+        &self,
+        pat: &syn::Pat,
+        ty: &syn::Type,
+        env: &mut HashMap<String, syn::Type>,
+    ) {
+        let peeled_ty = self.peel_reference_paren_group_type(ty).clone();
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.ident != "_" {
+                    env.insert(pi.ident.to_string(), ty.clone());
+                }
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                let tuple_ty = self.peel_reference_paren_group_type(&peeled_ty);
+                let syn::Type::Tuple(tuple_type) = tuple_ty else {
+                    return;
+                };
+                for (pat_elem, elem_ty) in tuple_pat.elems.iter().zip(tuple_type.elems.iter()) {
+                    self.bind_pattern_types_into_env(pat_elem, elem_ty, env);
+                }
+            }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                let tuple_ty = self.peel_reference_paren_group_type(&peeled_ty);
+                let syn::Type::Tuple(tuple_type) = tuple_ty else {
+                    return;
+                };
+                if tuple_struct_pat.elems.len() == 1
+                    && matches!(tuple_struct_pat.elems.first(), Some(syn::Pat::Tuple(_)))
+                {
+                    if let Some(single_pat) = tuple_struct_pat.elems.first() {
+                        self.bind_pattern_types_into_env(single_pat, tuple_ty, env);
+                    }
+                    return;
+                }
+                for (pat_elem, elem_ty) in
+                    tuple_struct_pat.elems.iter().zip(tuple_type.elems.iter())
+                {
+                    self.bind_pattern_types_into_env(pat_elem, elem_ty, env);
+                }
+            }
+            syn::Pat::Reference(reference_pat) => {
+                self.bind_pattern_types_into_env(&reference_pat.pat, &peeled_ty, env);
+            }
+            syn::Pat::Type(type_pat) => {
+                self.bind_pattern_types_into_env(&type_pat.pat, &type_pat.ty, env);
+            }
+            syn::Pat::Paren(paren_pat) => {
+                self.bind_pattern_types_into_env(&paren_pat.pat, &peeled_ty, env);
+            }
+            _ => {}
+        }
+    }
+
+    fn infer_tuple_elem_type_with_env(
+        &self,
+        expr: &syn::Expr,
+        env: &HashMap<String, syn::Type>,
+    ) -> Option<IfTupleElemType> {
+        if self.expr_is_option_none_path(expr) {
+            return Some(IfTupleElemType::NonePath);
+        }
+        if let Some(some_arg) = self.extract_option_some_call_arg(expr) {
+            if let Some(arg_ty) = self.infer_expr_type_with_env(some_arg, env) {
+                return Some(IfTupleElemType::Concrete(parse_quote!(Option<#arg_ty>)));
+            }
+            return Some(IfTupleElemType::Unknown);
+        }
+        Some(
+            self.infer_expr_type_with_env(expr, env)
+                .map(IfTupleElemType::Concrete)
+                .unwrap_or(IfTupleElemType::Unknown),
+        )
+    }
+
+    fn infer_expr_type_with_env(
+        &self,
+        expr: &syn::Expr,
+        env: &HashMap<String, syn::Type>,
+    ) -> Option<syn::Type> {
+        let expr = self.extract_value_expr(expr)?;
+        if let syn::Expr::Path(path) = expr {
+            if path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                if let Some(ty) = env.get(&name) {
+                    return Some(ty.clone());
+                }
+            }
+        }
+        self.infer_simple_expr_type(expr)
+    }
+
+    fn expr_is_option_none_path(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Path(path) => self.is_option_none_path(&path.path),
+            _ => false,
+        }
+    }
+
+    fn extract_option_some_call_arg<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if matches!(
+            joined.as_str(),
+            "Some" | "Option::Some" | "core::option::Option::Some"
+        ) {
+            return call.args.first();
+        }
+        None
+    }
+
+    fn is_option_like_syn_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let last_name = last.ident.to_string();
+        last_name == "Option" || last_name == "optional" || self.option_type_aliases.contains(&last_name)
+    }
+
+    fn merge_if_tuple_elem_types(
+        &self,
+        left: &[IfTupleElemType],
+        right: &[IfTupleElemType],
+    ) -> Option<Vec<IfTupleElemType>> {
+        if left.len() != right.len() {
+            return None;
+        }
+        let mut merged = Vec::with_capacity(left.len());
+        for (l, r) in left.iter().zip(right.iter()) {
+            let merged_elem = match (l, r) {
+                (IfTupleElemType::Concrete(lhs), IfTupleElemType::Concrete(rhs))
+                    if Self::types_equivalent_by_tokens(lhs, rhs) =>
+                {
+                    IfTupleElemType::Concrete(lhs.clone())
+                }
+                (IfTupleElemType::Unknown, IfTupleElemType::Concrete(rhs)) => {
+                    IfTupleElemType::Concrete(rhs.clone())
+                }
+                (IfTupleElemType::Concrete(lhs), IfTupleElemType::Unknown) => {
+                    IfTupleElemType::Concrete(lhs.clone())
+                }
+                (IfTupleElemType::Unknown, IfTupleElemType::Unknown) => IfTupleElemType::Unknown,
+                (IfTupleElemType::NonePath, IfTupleElemType::Concrete(rhs))
+                    if self.is_option_like_syn_type(rhs) =>
+                {
+                    IfTupleElemType::Concrete(rhs.clone())
+                }
+                (IfTupleElemType::Concrete(lhs), IfTupleElemType::NonePath)
+                    if self.is_option_like_syn_type(lhs) =>
+                {
+                    IfTupleElemType::Concrete(lhs.clone())
+                }
+                (IfTupleElemType::NonePath, IfTupleElemType::Unknown)
+                | (IfTupleElemType::Unknown, IfTupleElemType::NonePath) => {
+                    IfTupleElemType::Unknown
+                }
+                (IfTupleElemType::NonePath, IfTupleElemType::NonePath) => IfTupleElemType::NonePath,
+                _ => return None,
+            };
+            merged.push(merged_elem);
+        }
+        Some(merged)
+    }
+
+    fn unwrap_option_or_result_value_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let last_name = last.ident.to_string();
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let mut type_args = args.args.iter().filter_map(|arg| match arg {
+            syn::GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        });
+        match last_name.as_str() {
+            "Result" | "Option" => type_args.next(),
+            _ => None,
         }
     }
 
@@ -19523,11 +19971,16 @@ impl CodeGen {
             _ => false,
         };
 
+        let init_decl_type = decl_type
+            .strip_prefix("const ")
+            .unwrap_or(decl_type)
+            .to_string();
+
         if let Some(else_value) = &else_result {
-            self.writeln(&format!("{} {} = {};", decl_type, cpp_name, else_value));
+            self.writeln(&format!("{} {} = {};", init_decl_type, cpp_name, else_value));
         } else if else_has_early_return {
             // Else always returns early — use default-init (never reached via else path)
-            self.writeln(&format!("{} {} {{}};", decl_type, cpp_name));
+            self.writeln(&format!("{} {} {{}};", init_decl_type, cpp_name));
         } else {
             return None;
         }
@@ -19564,7 +20017,7 @@ impl CodeGen {
                                 self.expr_contains_early_return_or_try(e)
                             })
                         {
-                            self.emit_if_assign_as_statement_block(cpp_name, inner_if);
+                            self.emit_if_assign_as_statement_block(cpp_name, inner_if, None);
                             continue;
                         }
                     }
@@ -19617,6 +20070,7 @@ impl CodeGen {
         &mut self,
         result_var: &str,
         if_expr: &syn::ExprIf,
+        expected_ty: Option<&syn::Type>,
     ) {
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
@@ -19647,13 +20101,13 @@ impl CodeGen {
                                 self.expr_contains_early_return_or_try(e)
                             })
                         {
-                            self.emit_if_assign_as_statement_block(result_var, inner_if);
+                            self.emit_if_assign_as_statement_block(result_var, inner_if, expected_ty);
                             self.indent -= 1;
                             self.writeln("}}");
                             return;
                         }
                     }
-                    let val = self.emit_expr_to_string(expr);
+                    let val = self.emit_expr_to_string_with_expected(expr, expected_ty);
                     self.writeln(&format!("{} = {};", result_var, val));
                     continue;
                 }
@@ -19666,12 +20120,36 @@ impl CodeGen {
             match else_expr.as_ref() {
                 syn::Expr::Block(b) => {
                     if let Some(single) = self.extract_single_expr_from_block(&b.block) {
-                        let val = self.emit_expr_to_string(single);
+                        let val = self.emit_expr_to_string_with_expected(single, expected_ty);
                         self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
                     } else {
                         self.writeln("} else {");
                         self.indent += 1;
-                        for stmt in &b.block.stmts {
+                        let stmts = &b.block.stmts;
+                        for (i, stmt) in stmts.iter().enumerate() {
+                            let is_last = i == stmts.len() - 1;
+                            if is_last {
+                                if let syn::Stmt::Expr(expr, None) = stmt {
+                                    if let syn::Expr::If(inner_if) = expr {
+                                        if self.block_contains_early_return_or_try(&inner_if.then_branch)
+                                            || inner_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                                                self.expr_contains_early_return_or_try(e)
+                                            })
+                                        {
+                                            self.emit_if_assign_as_statement_block(
+                                                result_var,
+                                                inner_if,
+                                                expected_ty,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    let val =
+                                        self.emit_expr_to_string_with_expected(expr, expected_ty);
+                                    self.writeln(&format!("{} = {};", result_var, val));
+                                    continue;
+                                }
+                            }
                             self.emit_stmt(stmt, false);
                         }
                         self.indent -= 1;
@@ -19686,16 +20164,16 @@ impl CodeGen {
                     {
                         self.writeln("} else {");
                         self.indent += 1;
-                        self.emit_if_assign_as_statement_block(result_var, else_if);
+                        self.emit_if_assign_as_statement_block(result_var, else_if, expected_ty);
                         self.indent -= 1;
                         self.writeln("}}");
                     } else {
-                        let val = self.emit_expr_to_string(else_expr);
+                        let val = self.emit_expr_to_string_with_expected(else_expr, expected_ty);
                         self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
                     }
                 }
                 other => {
-                    let val = self.emit_expr_to_string(other);
+                    let val = self.emit_expr_to_string_with_expected(other, expected_ty);
                     self.writeln(&format!("}} else {{ {} = {}; }}}}", result_var, val));
                 }
             }
@@ -19713,12 +20191,26 @@ impl CodeGen {
             return None;
         };
 
+        let inferred_result_ty = self.infer_tuple_result_type_for_if_expr(if_expr);
+        let inferred_result_elem_expected =
+            self.infer_tuple_result_elem_expected_types_for_if_expr(if_expr);
+
         // Emit else-branch value as default for the result variable.
         let else_result = match else_branch.as_ref() {
             syn::Expr::Block(b) => self
                 .extract_single_expr_from_block(&b.block)
-                .map(|e| self.emit_expr_to_string(e)),
-            other => Some(self.emit_expr_to_string(other)),
+                .map(|e| {
+                    self.emit_expr_with_tuple_elem_expected_types(
+                        e,
+                        inferred_result_elem_expected.as_deref(),
+                        inferred_result_ty.as_ref(),
+                    )
+                }),
+            other => Some(self.emit_expr_with_tuple_elem_expected_types(
+                other,
+                inferred_result_elem_expected.as_deref(),
+                inferred_result_ty.as_ref(),
+            )),
         };
         let else_has_early_return = match else_branch.as_ref() {
             syn::Expr::Block(b) => self.block_contains_early_return_or_try(&b.block),
@@ -19728,7 +20220,12 @@ impl CodeGen {
         let result_var = format!("_iflet_result{}", self.iflet_result_counter);
         self.iflet_result_counter += 1;
         if let Some(else_value) = &else_result {
-            self.writeln(&format!("auto {} = {};", result_var, else_value));
+            if let Some(result_ty) = inferred_result_ty.as_ref() {
+                let result_cpp_ty = self.map_type(result_ty);
+                self.writeln(&format!("{} {} = {};", result_cpp_ty, result_var, else_value));
+            } else {
+                self.writeln(&format!("auto {} = {};", result_var, else_value));
+            }
         } else if else_has_early_return {
             // Else always returns early — we need a dummy init.
             // Extract then-branch tail expr to get the type via decltype.
@@ -19779,11 +20276,16 @@ impl CodeGen {
                                 self.expr_contains_early_return_or_try(e)
                             })
                         {
-                            self.emit_if_assign_as_statement_block(&result_var, inner_if);
+                            self.emit_if_assign_as_statement_block(
+                                &result_var,
+                                inner_if,
+                                inferred_result_ty.as_ref(),
+                            );
                             continue;
                         }
                     }
-                    let val = self.emit_expr_to_string(expr);
+                    let val =
+                        self.emit_expr_to_string_with_expected(expr, inferred_result_ty.as_ref());
                     self.writeln(&format!("{} = {};", result_var, val));
                     continue;
                 }
@@ -19810,6 +20312,15 @@ impl CodeGen {
             })
             .collect();
         self.writeln(&format!("auto [{}] = std::move({});", names.join(", "), result_var));
+        if let Some(syn::Type::Tuple(tuple_ty)) = inferred_result_ty.as_ref() {
+            for (pat, elem_ty) in tuple.elems.iter().zip(tuple_ty.elems.iter()) {
+                if let syn::Pat::Ident(pi) = pat {
+                    if pi.ident != "_" {
+                        self.update_local_binding_type(pi.ident.to_string(), elem_ty.clone());
+                    }
+                }
+            }
+        }
         Some(())
     }
 
@@ -34391,6 +34902,111 @@ mod tests {
         assert!(
             out.contains("RUSTY_TRY_INTO(numeric_identifier"),
             "nested else branch with `?` should stay in outer function scope lowering, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10519_if_let_tuple_result_assigns_multistmt_tail_value() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(text: &str) -> Option<(char, &str)> { None }
+            fn numeric_identifier(text: &str) -> Result<(u64, &str), i32> {
+                Ok((1, text))
+            }
+            fn parse_minor(text: &str) -> Result<(Option<u64>, &str), i32> {
+                let (minor, text) = if let Some(text) = text.strip_prefix('.') {
+                    if let Some((_, text)) = wildcard(text) {
+                        (None, text)
+                    } else {
+                        let (minor, text) = numeric_identifier(text)?;
+                        (Some(minor), text)
+                    }
+                } else {
+                    (None, text)
+                };
+                if minor.is_some() {
+                    Ok((minor, text))
+                } else {
+                    Ok((None, text))
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("_iflet_result0 = std::make_tuple(std::make_optional("),
+            "multi-statement branch tail should assign tuple value into result temp, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("\n                std::make_tuple(std::make_optional("),
+            "multi-statement branch tail must not emit a bare tuple expression statement, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10519_single_if_result_temp_is_mutable_in_statement_lowering() {
+        let out = transpile_str(
+            r#"
+            fn parse_text(text: &str) -> Result<&str, i32> {
+                let text = if text.starts_with('+') {
+                    let (_, text) = Ok::<(u64, &str), i32>((1, text))?;
+                    text
+                } else {
+                    text
+                };
+                Ok(text)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto text_shadow1 = text;"),
+            "statement-lowered if-init temp should be mutable for branch assignment, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto text_shadow1 = text;"),
+            "statement-lowered if-init temp must not be const when branch assigns to it, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10519_if_let_tuple_result_seed_is_option_typed_not_nullopt_tuple() {
+        let out = transpile_str(
+            r#"
+            fn wildcard(text: &str) -> Option<(char, &str)> { None }
+            fn numeric_identifier(text: &str) -> Result<(u64, &str), i32> { Ok((1, text)) }
+            fn parse_minor(text: &str) -> Result<(Option<u64>, &str), i32> {
+                let (minor, text) = if let Some(text) = text.strip_prefix('.') {
+                    if let Some((_, text)) = wildcard(text) {
+                        (None, text)
+                    } else {
+                        let (minor, text) = numeric_identifier(text)?;
+                        (Some(minor), text)
+                    }
+                } else {
+                    (None, text)
+                };
+                if minor.is_some() {
+                    Ok((minor, text))
+                } else {
+                    Ok((None, text))
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "std::tuple<rusty::Option<uint64_t>, std::string_view> _iflet_result0 ="
+            ),
+            "if-let tuple result temp should be explicitly typed with Option payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("auto _iflet_result0 = std::make_tuple(std::nullopt"),
+            "if-let tuple result temp must not deduce nullopt_t tuple element type, got:\n{}",
             out
         );
     }
