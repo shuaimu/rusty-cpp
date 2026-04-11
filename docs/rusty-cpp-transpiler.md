@@ -4507,7 +4507,32 @@ Active work items:
      - previous head capture: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
      - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
    - guardrail check against wrong-approach checklist (§11): fixes stayed shared and order/type-shape-gated in core codegen paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
-185. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D return-type deduction family after `10.5.31` (starting with `runner.cpp:1440` and adjacent `runner.cpp:1456/737` where `auto` return branches mix `std::nullopt_t` and `std::optional<T>`).
+185. `Leaf 10.5.32` is complete.
+   - plan/scope check: shared transpiler-only return-signature/alias-tracking updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+   - root-cause findings:
+     - early associated-type alias tracking in struct emission recorded aliases before confirming emission, so constrained-mode skipped aliases still appeared "available" and incorrectly kept explicit dependent-associated return signatures.
+     - module-mode trait runtime helper default methods always emitted `static auto` signatures; methods returning `Option<Self::Item>` then mixed `std::nullopt` and `std::make_optional(...)` branch returns, producing C++ return-deduction mismatch (`nullopt_t` vs `optional<T>`) in `arrayvec` (`ArrayVecImpl::pop`).
+   - implemented shared fixes in `transpiler/src/codegen.rs`:
+     - tightened early associated-alias bookkeeping in `emit_struct` so aliases are recorded only when `ImplItem::Type` emission actually succeeds (not skipped in constrained mode).
+     - changed module-mode trait runtime helper signatures to trailing explicit return form (`static auto ... -> <mapped-type>`) with `Self_` mapped through `decltype(self_)`, removing `auto` return-type drift while preserving shared generic lowering.
+   - focused regressions:
+     - `test_leaf10532_module_mode_assoc_alias_emitted_keeps_explicit_return_type`
+     - `test_leaf10532_module_mode_struct_assoc_alias_skipped_still_softens_return_signature`
+   - verification:
+     - `cargo test -p rusty-cpp-transpiler leaf10529 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf10532 -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf415433_module_mode_trait_default_methods_emit_runtime_helper_and_keep_import -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler leaf415433_module_mode_trait_default_method_self_const_uses_self_alias -- --nocapture`
+     - `cargo test -p rusty-cpp-transpiler`
+     - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-32b-1775900450 --keep-work-dirs`
+   - deterministic full-matrix frontier movement:
+     - previous first hard-error family at `runner.cpp:1440/1456/737` (`auto` return deduction mismatch in Option-returning branches) is removed.
+     - new first hard-error family is reference-element pointer-surface fallout at `runner.cpp:1228/1231` (`as_ptr`/`as_mut_ptr` pointer-to-reference declarations on `ArrayVec<const int&, 2>`), with adjacent storage-cast failures at `runner.cpp:1245`.
+   - canonical artifacts:
+     - previous head capture: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+     - post-fix matrix: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+   - guardrail check against wrong-approach checklist (§11): fixes stayed shared and type-shape-gated in core codegen paths; no crate-specific rewrites/scripts or generated-text patching were introduced.
+186. Current active next leaf is the next deterministic full-matrix `arrayvec` Stage D reference-element pointer/storage-cast family after `10.5.32` (starting with `runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and adjacent `runner.cpp:1245` `ArrayVec::from` storage-cast fallout).
 
 ### 10.7 Parity Harness and Matrix Command Reference
 

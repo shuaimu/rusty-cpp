@@ -3287,6 +3287,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - previous head capture: `/tmp/rusty-parity-matrix-10-5-30-1775891702/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/order-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
+        - [x] *done* Leaf 10.5.32: Collapse the post-10.5.31 deterministic full-matrix `arrayvec` Stage D return-type deduction family generically (starting with `runner.cpp:1440` and adjacent `runner.cpp:1456/737` where `auto` return branches mixed `std::nullopt_t` and `std::optional<T>`), add fixture-agnostic regressions, then re-run full seven-crate matrix.
+          - Plan/scope check: shared transpiler-only return-signature/alias-tracking updates plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Root-cause findings:
+            - early associated-type alias tracking in struct emission recorded alias names before confirming emission, so constrained-mode skipped aliases were still treated as available and incorrectly kept explicit dependent-associated return signatures (reintroducing `either`-style alias lookup failures).
+            - module-mode trait runtime helper default methods always emitted `static auto` signatures; methods returning `Option<Self::Item>` then mixed `std::nullopt`/`std::make_optional(...)` branch returns and triggered C++ `auto` return deduction mismatch (`nullopt_t` vs `optional<T>`), notably in `ArrayVecImpl::pop`.
+          - Implemented shared transpiler fixes in `transpiler/src/codegen.rs`:
+            - tightened early associated-alias bookkeeping in `emit_struct` to record aliases only when the alias actually entered the non-method member scope (i.e., only when `ImplItem::Type` emission succeeded and was not skipped).
+            - strengthened module-mode trait runtime helper signatures by emitting trailing explicit return types (`static auto ... -> <mapped-type>`) derived from method output with `Self_` context and `decltype(self_)` substitution, eliminating `auto`/`nullopt` deduction drift while preserving constrained generic lowering.
+          - Added focused fixture-agnostic regressions:
+            - `test_leaf10532_module_mode_assoc_alias_emitted_keeps_explicit_return_type`
+            - `test_leaf10532_module_mode_struct_assoc_alias_skipped_still_softens_return_signature`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf10529 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf10532 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf415433_module_mode_trait_default_methods_emit_runtime_helper_and_keep_import -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf415433_module_mode_trait_default_method_self_const_uses_self_alias -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `PATH=/tmp/rusty-fake-gpp-bin:$PATH tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10-5-32b-1775900450 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - previous first hard-error family in `arrayvec` Stage D (`runner.cpp:1440/1456/737` `auto` return deduction mismatch between `nullopt_t` and `optional<T>`) is removed.
+            - new first hard-error family is reference-element pointer-surface fallout at `runner.cpp:1228/1231` (`as_ptr`/`as_mut_ptr` pointer-to-reference declarations on `ArrayVec<const int&, 2>`), with adjacent `ArrayVec::from` storage-cast failures at `runner.cpp:1245`.
+          - Canonical artifacts:
+            - previous head capture: `/tmp/rusty-parity-matrix-10-5-31-1775888784/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - post-fix matrix rerun: `/tmp/rusty-parity-matrix-10-5-32b-1775900450/arrayvec/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in core codegen paths, with no crate-specific rewrites/scripts and no generated-text patching.
+        - [ ] Leaf 10.5.33: Collapse the post-10.5.32 deterministic full-matrix `arrayvec` Stage D reference-element pointer/storage-cast family generically (starting with `runner.cpp:1228/1231` pointer-to-reference `as_ptr`/`as_mut_ptr` declarations and adjacent `runner.cpp:1245` `ArrayVec::from` storage-cast failures), add fixture-agnostic regressions, then re-run full seven-crate matrix.
       - [x] *done* Leaf 11: Fix circular type ordering for semver (architecture gap #1)
           - [x] *done* Leaf 11.1: Implement forward declaration analysis: detect when type A uses type B and B uses A, emit forward declarations to break the cycle
             - Added `can_reach_cycle()` helper and cycle detection in `topological_sort_structs`

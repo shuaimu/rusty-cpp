@@ -4967,8 +4967,14 @@ impl CodeGen {
             for impl_item in methods {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
-                    early_emitted_type_aliases.insert(alias_name);
                     self.emit_impl_item(impl_item);
+                    let alias_was_emitted = self
+                        .emitted_non_method_member_names
+                        .last()
+                        .is_some_and(|scope| scope.contains(&alias_name));
+                    if alias_was_emitted {
+                        early_emitted_type_aliases.insert(alias_name);
+                    }
                 }
             }
             self.emitted_non_method_member_names.pop();
@@ -6445,10 +6451,46 @@ impl CodeGen {
                 params.push(format!("auto {}", name));
             }
 
+            // Map return type with a temporary `Self_` context so associated
+            // projections (e.g. `Self::Item`) lower to `typename Self_::Item`.
+            let mapped_return_type = {
+                let prev_struct = self.current_struct.clone();
+                self.current_struct = Some("Self_".to_string());
+                let mut self_scope = HashSet::new();
+                self_scope.insert("Self_".to_string());
+                self.type_param_scopes.push(self_scope);
+                let prev_self_declared_params = if self_assoc_type_placeholders.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.declared_type_params
+                            .insert("Self_".to_string(), self_assoc_type_placeholders.clone()),
+                    )
+                };
+                let mapped = self.map_return_type(&method.sig.output);
+                if let Some(prev) = prev_self_declared_params {
+                    if let Some(prev_params) = prev {
+                        self.declared_type_params
+                            .insert("Self_".to_string(), prev_params);
+                    } else {
+                        self.declared_type_params.remove("Self_");
+                    }
+                }
+                self.type_param_scopes.pop();
+                self.current_struct = prev_struct;
+                mapped
+            };
+            // `Self_` is local to the function body, so use a trailing return
+            // type that references the receiver expression directly.
+            let signature_return_type = mapped_return_type.replace(
+                "Self_",
+                "std::remove_reference_t<decltype(self_)>",
+            );
             self.writeln(&format!(
-                "static auto {}({}) {{",
+                "static auto {}({}) -> {} {{",
                 escape_cpp_keyword(&method.sig.ident.to_string()),
-                params.join(", ")
+                params.join(", "),
+                signature_return_type
             ));
             self.indent += 1;
             self.writeln("using Self_ = std::remove_reference_t<decltype(self_)>;");
@@ -6466,7 +6508,7 @@ impl CodeGen {
                         .insert("Self_".to_string(), self_assoc_type_placeholders.clone()),
                 )
             };
-            let return_type = self.map_return_type(&method.sig.output);
+            let return_type = mapped_return_type;
             self.push_return_value_scope(&return_type);
             self.push_return_type_hint(&method.sig.output);
             self.push_param_bindings(&method.sig.inputs);
@@ -7366,6 +7408,95 @@ impl CodeGen {
         }
     }
 
+    fn collect_current_struct_assoc_projection_names(
+        &self,
+        ty: &syn::Type,
+        names: &mut HashSet<String>,
+    ) {
+        match ty {
+            syn::Type::Path(tp) => {
+                if let Some(current) = self.current_struct.as_deref() {
+                    if let Some(qself) = &tp.qself {
+                        if let syn::Type::Path(base) = qself.ty.as_ref() {
+                            if base.path.segments.len() == 1 {
+                                let base_name = base.path.segments[0].ident.to_string();
+                                if base_name == "Self" || base_name == current {
+                                    if let Some(last) = tp.path.segments.last() {
+                                        names.insert(last.ident.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        self.collect_current_struct_assoc_projection_names(&qself.ty, names);
+                    }
+                    if tp.path.segments.len() >= 2 {
+                        if let Some(first) = tp.path.segments.first() {
+                            let first_name = first.ident.to_string();
+                            if first_name == "Self" || first_name == current {
+                                if let Some(last) = tp.path.segments.last() {
+                                    names.insert(last.ident.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                for segment in &tp.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                self.collect_current_struct_assoc_projection_names(inner, names);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(reference) => {
+                self.collect_current_struct_assoc_projection_names(&reference.elem, names);
+            }
+            syn::Type::Paren(paren) => {
+                self.collect_current_struct_assoc_projection_names(&paren.elem, names);
+            }
+            syn::Type::Group(group) => {
+                self.collect_current_struct_assoc_projection_names(&group.elem, names);
+            }
+            syn::Type::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_current_struct_assoc_projection_names(elem, names);
+                }
+            }
+            syn::Type::Array(array) => {
+                self.collect_current_struct_assoc_projection_names(&array.elem, names);
+            }
+            syn::Type::Slice(slice) => {
+                self.collect_current_struct_assoc_projection_names(&slice.elem, names);
+            }
+            syn::Type::Ptr(ptr) => {
+                self.collect_current_struct_assoc_projection_names(&ptr.elem, names);
+            }
+            _ => {}
+        }
+    }
+
+    fn return_type_current_struct_assoc_aliases_emitted(
+        &self,
+        output: &syn::ReturnType,
+    ) -> bool {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return false;
+        };
+        let mut assoc_names = HashSet::new();
+        self.collect_current_struct_assoc_projection_names(ty, &mut assoc_names);
+        if assoc_names.is_empty() {
+            return false;
+        }
+        let Some(scope) = self.emitted_non_method_member_names.last() else {
+            return false;
+        };
+        assoc_names
+            .into_iter()
+            .all(|name| scope.contains(&escape_cpp_keyword(&name)))
+    }
+
     fn emit_method(&mut self, method: &syn::ImplItemFn) {
         let method_ident = method.sig.ident.to_string();
         let emitted_template_key = self.emitted_template_signature_key(&method.sig.generics);
@@ -7422,7 +7553,11 @@ impl CodeGen {
             && (self.return_type_contains_dependent_assoc(&method.sig.output)
                 || self.return_type_references_current_struct_assoc(&method.sig.output))
         {
-            return_type = "auto".to_string();
+            let can_keep_explicit_current_struct_assoc_return =
+                self.return_type_current_struct_assoc_aliases_emitted(&method.sig.output);
+            if !can_keep_explicit_current_struct_assoc_return {
+                return_type = "auto".to_string();
+            }
         }
 
         // Analyze receiver to determine method kind
@@ -31692,7 +31827,7 @@ mod tests {
             "my_crate",
         );
         assert!(out.contains("struct Foo {"));
-        assert!(out.contains("static auto clear(auto& self_) {"));
+        assert!(out.contains("static auto clear(auto& self_) -> void {"));
         assert!(out.contains("self_.truncate(0);"));
         assert!(out.contains("using helper::Foo;"));
         assert!(!out.contains("// Rust-only: using helper::Foo;"));
@@ -32588,7 +32723,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leaf4154333333381_module_mode_option_self_assoc_next_uses_explicit_option_shape() {
+    fn test_leaf10532_module_mode_assoc_alias_emitted_keeps_explicit_return_type() {
         let out = transpile_str_module(
             r#"
             struct IntoIter<T> {
@@ -32610,10 +32745,37 @@ mod tests {
             "#,
             "leaf4154333333381",
         );
+        assert!(
+            out.contains("rusty::Option<typename IntoIter::Item> next(")
+                || out.contains("rusty::Option<Item> next(")
+                || out.contains("rusty::Option<T> next(")
+        );
+        assert!(!out.contains("auto next("));
+        assert!(out.contains("using Item = T;"));
         assert!(out.contains("return std::nullopt;"));
-        assert!(out.contains("return std::make_optional(value);"));
-        assert!(!out.contains("rusty::Option<typename IntoIter::Item>(rusty::None)"));
-        assert!(!out.contains("rusty::Option<typename IntoIter::Item>(value)"));
+        assert!(
+            out.contains("return std::make_optional(value);")
+                || out.contains("return std::make_optional(std::move(value));")
+        );
+    }
+
+    #[test]
+    fn test_leaf10532_module_mode_struct_assoc_alias_skipped_still_softens_return_signature() {
+        let out = transpile_str_module(
+            r#"
+            trait IteratorLike { type Item; fn next(self) -> Option<Self::Item>; }
+            struct IterEither<L, R> { left: L, right: R }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for IterEither<L, R> {
+                type Item = L::Item;
+                fn next(self) -> Option<IterEither::Item> { None }
+            }
+            "#,
+            "either",
+        );
+        assert!(out.contains("auto next("));
+        assert!(!out.contains("using Item = typename L::Item;"));
+        assert!(!out.contains("rusty::Option<typename IterEither::Item> next("));
+        assert!(out.contains("return std::nullopt;"));
     }
 
     #[test]
