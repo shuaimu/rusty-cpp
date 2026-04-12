@@ -5353,6 +5353,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-60b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and comparator-shape-gated in transpiler runtime helper emission; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.61: `smallvec` Stage D `NonNull::new*` omitted-owner pointer decltype recovery compile-head family collapse
+          - Plan/scope check: shared transpiler owner-inference hardening plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - `NonNull::new` / `new_` / `new_unchecked` omitted-owner template recovery now keeps pointer-decltype fallback priority when direct inferred pointee type is placeholder-like (`auto`, TODO marker, or single-segment unresolved type-param-like surface).
+            - this prevents erroneous `NonNull<A>::new_(b.as_mut_ptr())` surfaces in associated-item contexts and recovers pointer-derived pointee type (`std::remove_pointer_t<std::remove_reference_t<decltype((...))>>`) instead.
+            - this collapses the deterministic post-5.1.60 first-head family at `runner.cpp:2004` (`unsigned int*`/`int*` cannot convert to `std::array<...>*` from mis-specialized `NonNull` owner surfaces).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5161_nonnull_new_prefers_pointer_decltype_in_assoc_item_context`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5161 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-61a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.60 first-head family at `runner.cpp:2004` (mis-specialized `NonNull` owner/pointee mismatch) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/array.hpp:597` (`rusty::len` static assertion for unsupported range shape), with adjacent downstream runtime-surface fallout (`include/rusty/vec.hpp` option-helper lookup and iterator/option surface errors).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-61a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in owner-template recovery; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

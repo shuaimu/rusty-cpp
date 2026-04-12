@@ -2493,6 +2493,10 @@ Current status snapshot:
    - routing generated runtime fallback `cmp`/`partial_cmp` ordering through shared `rusty::cmp::detail::less_than(...)` instead of unconditional direct `a < b`/`b < a`,
    - implementing `less_than(...)` with dual support for direct `<`-comparable values and lexicographically comparable begin/end ranges via `std::lexicographical_compare(...)`.
 124. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2004` (`NonNull` pointee-owner mismatch in `from_slice`/`from_heap`: `unsigned int*` cannot convert to `std::array<unsigned int, 2>*`), with adjacent downstream runtime-surface fallout (`rusty::len` static-assert and iterator/option surfaces). Guardrail check against §11 remains satisfied for `Leaf 5.1.60` (fix stayed shared and comparator-shape-gated in runtime-helper emission, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+125. Focused `smallvec` repro after `Leaf 5.1.61` (`/tmp/rusty-parity-matrix-5-1-61a-20260412/smallvec/...`) collapses the prior post-5.1.60 `NonNull` owner/pointee mismatch family by:
+   - hardening omitted-owner `NonNull::new*` template recovery to prefer pointer-decltype-derived pointee recovery when direct inferred pointee type is placeholder-like (`auto`, TODO markers, or single-segment type-param-like placeholders),
+   - preserving direct inferred pointee types when concrete and stable.
+126. New first deterministic Stage D head in `smallvec` now starts at `/home/shuai/git/rusty-cpp/include/rusty/array.hpp:597` (`rusty::len` static assertion on unsupported range shape), with adjacent downstream runtime-surface fallout (`/home/shuai/git/rusty-cpp/include/rusty/vec.hpp` option helper lookup and iterator/option shape errors). Guardrail check against §11 remains satisfied for `Leaf 5.1.61` (fix stayed shared and type-shape-gated in owner-template recovery, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

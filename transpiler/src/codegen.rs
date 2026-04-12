@@ -23762,23 +23762,38 @@ impl CodeGen {
             }
             "NonNull" => {
                 if matches!(method_name, "new" | "new_" | "new_unchecked") {
-                    let inferred = call
+                    let inferred_from_type = call
                         .args
                         .first()
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
                         .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
                             syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
                             _ => None,
-                        })
-                        .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!(
-                                    "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
-                                    arg_cpp
-                                )
-                            })
                         });
+                    let inferred_from_decltype = call.args.first().map(|arg| {
+                        let arg_cpp = self.emit_expr_to_string(arg);
+                        format!(
+                            "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
+                            arg_cpp
+                        )
+                    });
+                    let inferred = match (inferred_from_type, inferred_from_decltype) {
+                        (Some(from_type), Some(from_decltype))
+                            if from_type == "auto"
+                                || from_type.contains("/* TODO")
+                                || (from_type
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase())
+                                    && from_type
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '_')) =>
+                        {
+                            Some(from_decltype)
+                        }
+                        (Some(from_type), _) => Some(from_type),
+                        (None, from_decltype) => from_decltype,
+                    };
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
                     } else {
@@ -38493,6 +38508,31 @@ mod tests {
         assert!(out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new("));
         assert!(!out.contains("NonNull<Outer<T>>::new_("));
         assert!(!out.contains("NonNull<Outer<T>>::new("));
+    }
+
+    #[test]
+    fn test_leaf5161_nonnull_new_prefers_pointer_decltype_in_assoc_item_context() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            trait ArrayLike { type Item; }
+            struct SmallVec<A: ArrayLike>(A);
+            impl<A: ArrayLike> SmallVec<A> {
+                fn from_slice(slice: &[A::Item]) {
+                    let mut b = slice.to_vec();
+                    let ptr = NonNull::new(b.as_mut_ptr()).expect("nonnull");
+                    let _ = ptr;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((")
+                || out.contains("NonNull<rusty::detail::associated_item_t<A>>::new_(")
+                || out.contains("NonNull<typename A::Item>::new_("),
+            "{out}"
+        );
+        assert!(!out.contains("NonNull<A>::new_("), "{out}");
     }
 
     #[test]
