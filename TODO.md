@@ -5545,7 +5545,35 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-68b-20260412/smallvec/{baseline.txt,matrix.log,runner.cpp,build.probe.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and container/slice-shape-gated in transpiler/runtime paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.69: `smallvec` Stage D `SmallVecData` variant-constructor lowering (`Inline`/`Heap`) compile-head family collapse
+        - [x] *done* Leaf 5.1.69: `smallvec` Stage D `SmallVecData` variant-constructor lowering (`Inline`/`Heap`) compile-head family collapse
+          - Plan/scope check: focused transpiler variant-constructor lowering hardening + targeted codegen regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - prevented expected-type associated static-call rewriting from intercepting data-enum variant constructor paths when the method segment is a real variant (`Enum::Variant(...)`),
+            - normalized data-enum variant struct target emission (call and struct-literal forms) to preserve explicit enum template args or recover omitted in-scope args (`Enum_Variant<T...>`), avoiding unresolved member surfaces and CTAD-only variant emissions in generic contexts,
+            - this collapses the deterministic post-5.1.68 first-head family at `runner.cpp:1426/1438` (`SmallVecData<A>::Inline(...)` unresolved + `SmallVecData_Heap{...}` CTAD failure).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5169_data_enum_variant_ctor_assoc_fn_uses_variant_struct_template_args`
+            - `codegen::tests::test_leaf5169_data_enum_variant_struct_literal_assoc_fn_uses_template_args`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf5110_data_enum_assoc_method_call_is_not_rewritten_as_variant_ctor`
+            - `codegen::tests::test_leaf10534_data_enum_struct_literal_path_uses_variant_struct_target`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5169 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5110_data_enum_assoc_method_call_is_not_rewritten_as_variant_ctor -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10534_data_enum_struct_literal_path_uses_variant_struct_target -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler` (attempted twice; host-level `cc1plus` I/O wait intermittently stalled `parity_matrix_harness::test_parity_matrix_single_crate_run_passes_for_either_control`)
+            - `cargo test -p rusty-cpp-transpiler -- --skip test_parity_matrix_single_crate_run_passes_for_either_control`
+            - `timeout 180 cargo test -p rusty-cpp-transpiler test_parity_matrix_single_crate_run_passes_for_either_control -- --nocapture`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-69a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.68 first-head family at `runner.cpp:1426/1438` (`SmallVecData` variant-constructor unresolved/CTAD) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1323` (`CollectionAllocErr` err-arm payload lowered as direct member access `_mv2.layout` on the sum wrapper), with adjacent downstream helper/type-shape families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-69a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and data-enum/variant-shape-gated in transpiler lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.70: `smallvec` Stage D `CollectionAllocErr` err-arm payload pattern lowering (`_mv2.layout`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

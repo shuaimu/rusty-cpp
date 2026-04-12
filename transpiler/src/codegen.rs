@@ -21990,8 +21990,7 @@ impl CodeGen {
         let variant_name = &segments[variant_idx];
         let mut enum_path = path.clone();
         enum_path.segments.pop();
-        let cpp_enum_name = self.emit_path_to_string(&enum_path);
-        Some(format!("{}_{}", cpp_enum_name, variant_name))
+        Some(self.data_enum_variant_struct_type_name(&enum_path, variant_name))
     }
 
     fn expected_reference_inner_type<'a>(
@@ -22406,8 +22405,16 @@ impl CodeGen {
         if owner_cpp.contains("<auto") {
             return None;
         }
-        let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
         let rust_method_name = func_path.segments.last()?.ident.to_string();
+        if self.data_enum_types.contains(&expected_last)
+            && self
+                .data_enum_variants_by_enum
+                .get(&expected_last)
+                .is_some_and(|variants| variants.contains(&rust_method_name))
+        {
+            return None;
+        }
+        let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
         let expected_substitutions =
             self.call_owner_type_arg_substitutions_from_expected_type(call, Some(expected_ty));
         let args: Vec<String> = call
@@ -25125,6 +25132,48 @@ impl CodeGen {
         None
     }
 
+    fn data_enum_variant_struct_type_name(&self, enum_path: &syn::Path, variant_name: &str) -> String {
+        let mut enum_base_path = enum_path.clone();
+        if let Some(last) = enum_base_path.segments.last_mut() {
+            last.arguments = syn::PathArguments::None;
+        }
+        let cpp_enum_base = self.emit_path_to_string(&enum_base_path);
+        let variant_base = format!("{}_{}", cpp_enum_base, variant_name);
+
+        let explicit_args: Vec<String> = enum_path
+            .segments
+            .last()
+            .and_then(|seg| match &seg.arguments {
+                syn::PathArguments::AngleBracketed(args) => Some(
+                    args.args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            syn::GenericArgument::Type(ty)
+                                if !matches!(ty, syn::Type::Infer(_)) =>
+                            {
+                                Some(self.map_type(ty))
+                            }
+                            syn::GenericArgument::Const(expr) => {
+                                Some(self.emit_expr_to_string(expr))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if !explicit_args.is_empty() {
+            return format!("{}<{}>", variant_base, explicit_args.join(", "));
+        }
+        if let Some(recovered) =
+            self.recover_omitted_local_generic_type_args(&enum_base_path, &variant_base)
+        {
+            return recovered;
+        }
+        variant_base
+    }
+
     /// Detect and emit a general data enum variant constructor call.
     /// E.g., `ErrorKind::LeadingZero(pos)` → `ErrorKind_LeadingZero{pos}`
     /// when `ErrorKind` is a known data enum type.
@@ -25193,8 +25242,7 @@ impl CodeGen {
             p.segments = segs.into_iter().collect();
             p
         };
-        let cpp_enum_name = self.emit_path_to_string(&enum_path);
-        let cpp_variant_struct = format!("{}_{}", cpp_enum_name, variant_name);
+        let cpp_variant_struct = self.data_enum_variant_struct_type_name(&enum_path, variant_name);
 
         // Emit args
         let args: Vec<String> = call
@@ -38639,6 +38687,48 @@ mod tests {
         assert!(out.contains("MaybeUninit<T>::uninit()"));
         assert!(!out.contains("MaybeUninit::uninit()"));
         assert!(!out.contains("E_from_inline{"));
+    }
+
+    #[test]
+    fn test_leaf5169_data_enum_variant_ctor_assoc_fn_uses_variant_struct_template_args() {
+        let out = transpile_str(
+            r#"
+            use std::mem::MaybeUninit;
+
+            enum SmallVecData<A> {
+                Inline(MaybeUninit<A>),
+                Heap { len: usize },
+            }
+
+            impl<A> SmallVecData<A> {
+                fn from_inline(inline_: MaybeUninit<A>) -> SmallVecData<A> {
+                    SmallVecData::Inline(inline_)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return SmallVecData_Inline<A>{"));
+        assert!(!out.contains("SmallVecData<A>::Inline("));
+    }
+
+    #[test]
+    fn test_leaf5169_data_enum_variant_struct_literal_assoc_fn_uses_template_args() {
+        let out = transpile_str(
+            r#"
+            enum SmallVecData<A> {
+                Inline(A),
+                Heap { len: usize },
+            }
+
+            impl<A> SmallVecData<A> {
+                fn from_heap(len: usize) -> SmallVecData<A> {
+                    SmallVecData::Heap { len }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return SmallVecData_Heap<A>{"));
+        assert!(!out.contains("return SmallVecData_Heap{"));
     }
 
     #[test]
