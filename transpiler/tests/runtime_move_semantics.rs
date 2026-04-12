@@ -1377,6 +1377,34 @@ fn test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage() {
 }
 
 #[test]
+fn test_leaf5184_mem_size_of_std_array_uses_rust_layout() {
+    let source = r#"
+        #include <array>
+        #include <rusty/mem.hpp>
+
+        struct NonTrivial {
+            int value;
+            NonTrivial() : value(0) {}
+            ~NonTrivial() noexcept(false) {}
+        };
+
+        int main() {
+            const bool zero_array_matches_rust =
+                rusty::mem::size_of<std::array<NonTrivial, 0>>() == 0;
+            const bool non_zero_array_matches_rust =
+                rusty::mem::size_of<std::array<NonTrivial, 3>>() == 3 * sizeof(NonTrivial);
+            const bool zero_array_align_matches_rust =
+                rusty::mem::align_of<std::array<NonTrivial, 0>>() == alignof(NonTrivial);
+            return (zero_array_matches_rust &&
+                    non_zero_array_matches_rust &&
+                    zero_array_align_matches_rust) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5184_mem_size_of_std_array_rust_layout");
+}
+
+#[test]
 fn test_maybe_uninit_new_surface_initializes_value_for_assume_init() {
     let source = r#"
         #include <rusty/maybe_uninit.hpp>

@@ -1,6 +1,7 @@
 #ifndef RUSTY_MEM_HPP
 #define RUSTY_MEM_HPP
 
+#include <array>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -30,6 +31,26 @@ inline std::mutex& forgotten_addresses_mutex() {
 template<typename T, typename = void>
 struct rust_layout_size {
     static constexpr std::size_t value = sizeof(T);
+};
+
+template<typename T, typename = void>
+struct rust_layout_align {
+    static constexpr std::size_t value = alignof(T);
+};
+
+// Mirror Rust `[T; N]` layout sizing semantics for `std::array<T, N>`.
+// In particular, Rust treats `[T; 0]` as size 0 while C++ `std::array<T, 0>`
+// commonly has size 1.
+template<typename T, std::size_t N>
+struct rust_layout_size<std::array<T, N>, void> {
+    static constexpr std::size_t value = N * sizeof(T);
+};
+
+// Mirror Rust `[T; N]` alignment semantics for `std::array<T, N>`.
+// Rust keeps array alignment equal to element alignment even for N=0.
+template<typename T, std::size_t N>
+struct rust_layout_align<std::array<T, N>, void> {
+    static constexpr std::size_t value = alignof(T);
 };
 
 // Emulate Rust layout for transpiled fixed-capacity containers that expose:
@@ -141,7 +162,7 @@ constexpr std::size_t size_of() noexcept {
 template<typename T>
 constexpr std::size_t align_of() noexcept {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
-    return alignof(Value);
+    return detail::rust_layout_align<Value>::value;
 }
 
 template<typename From, typename To>

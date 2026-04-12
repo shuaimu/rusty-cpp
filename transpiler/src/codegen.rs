@@ -31347,17 +31347,22 @@ impl CodeGen {
         let is_move_closure = closure.capture.is_some();
         // Determine capture mode
         let capture = if is_move_closure {
-            // `move` closure → capture by move
-            // We'd need to know which variables are captured to emit
-            // [var1 = std::move(var1), var2 = std::move(var2)]
-            // but without full analysis, we use a simpler approach:
-            // emit [=] with `mutable`. Rust move closures can mutate captured
-            // by-value bindings; C++ value-capture lambdas need `mutable` to
-            // allow non-const access to captures in `operator()`.
-            "="
+            // `move` closure → value-capture by default plus explicit move-init
+            // captures for referenced outer locals to preserve move ownership
+            // semantics for non-copy values.
+            let moved_captures = self.collect_move_closure_capture_cpp_names(closure);
+            if moved_captures.is_empty() {
+                "=".to_string()
+            } else {
+                let mut capture_parts = vec!["=".to_string()];
+                for cpp_name in moved_captures {
+                    capture_parts.push(format!("{0} = std::move({0})", cpp_name));
+                }
+                capture_parts.join(", ")
+            }
         } else {
             // Default: borrow environment → capture by reference
-            "&"
+            "&".to_string()
         };
         let lambda_mutability = if is_move_closure { " mutable" } else { "" };
 
@@ -31433,6 +31438,349 @@ impl CodeGen {
                     )
                 }
             }
+        }
+    }
+
+    fn collect_move_closure_capture_cpp_names(&self, closure: &syn::ExprClosure) -> Vec<String> {
+        let mut referenced_names = HashSet::new();
+        self.collect_path_local_names_for_move_capture(&closure.body, &mut referenced_names);
+
+        let mut param_names = HashSet::new();
+        for input in &closure.inputs {
+            self.collect_closure_param_names_from_pat(input, &mut param_names);
+        }
+
+        let mut local_binding_names = HashSet::new();
+        self.collect_local_binding_names_in_expr_for_move_capture(
+            &closure.body,
+            &mut local_binding_names,
+        );
+
+        let mut cpp_names = Vec::new();
+        for rust_name in referenced_names {
+            if param_names.contains(&rust_name) || local_binding_names.contains(&rust_name) {
+                continue;
+            }
+            let Some(cpp_name) = self.lookup_local_binding_cpp_name(&rust_name) else {
+                continue;
+            };
+            if !is_simple_cpp_identifier(&cpp_name) {
+                continue;
+            }
+            cpp_names.push(cpp_name.to_string());
+        }
+        cpp_names.sort();
+        cpp_names.dedup();
+        cpp_names
+    }
+
+    fn collect_path_local_names_for_move_capture(
+        &self,
+        expr: &syn::Expr,
+        out: &mut HashSet<String>,
+    ) {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Path(path_expr) => {
+                if path_expr.path.segments.len() == 1 {
+                    out.insert(path_expr.path.segments[0].ident.to_string());
+                }
+            }
+            syn::Expr::Call(call) => {
+                self.collect_path_local_names_for_move_capture(&call.func, out);
+                for arg in &call.args {
+                    self.collect_path_local_names_for_move_capture(arg, out);
+                }
+            }
+            syn::Expr::MethodCall(method_call) => {
+                self.collect_path_local_names_for_move_capture(&method_call.receiver, out);
+                for arg in &method_call.args {
+                    self.collect_path_local_names_for_move_capture(arg, out);
+                }
+            }
+            syn::Expr::Binary(bin) => {
+                self.collect_path_local_names_for_move_capture(&bin.left, out);
+                self.collect_path_local_names_for_move_capture(&bin.right, out);
+            }
+            syn::Expr::Unary(unary) => {
+                self.collect_path_local_names_for_move_capture(&unary.expr, out);
+            }
+            syn::Expr::Reference(reference) => {
+                self.collect_path_local_names_for_move_capture(&reference.expr, out);
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_path_local_names_for_move_capture(&assign.left, out);
+                self.collect_path_local_names_for_move_capture(&assign.right, out);
+            }
+            syn::Expr::Let(let_expr) => {
+                self.collect_path_local_names_for_move_capture(&let_expr.expr, out);
+            }
+            syn::Expr::Field(field) => {
+                self.collect_path_local_names_for_move_capture(&field.base, out);
+            }
+            syn::Expr::Index(index) => {
+                self.collect_path_local_names_for_move_capture(&index.expr, out);
+                self.collect_path_local_names_for_move_capture(&index.index, out);
+            }
+            syn::Expr::Cast(cast_expr) => {
+                self.collect_path_local_names_for_move_capture(&cast_expr.expr, out);
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_path_local_names_for_move_capture(&try_expr.expr, out);
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_path_local_names_for_move_capture(&await_expr.base, out);
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_path_local_names_for_move_capture(&if_expr.cond, out);
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_path_local_names_for_move_capture(else_expr, out);
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_path_local_names_for_move_capture(&match_expr.expr, out);
+                for arm in &match_expr.arms {
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_path_local_names_for_move_capture(guard, out);
+                    }
+                    self.collect_path_local_names_for_move_capture(&arm.body, out);
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_path_local_names_for_move_capture(&while_expr.cond, out);
+                for stmt in &while_expr.body.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::ForLoop(for_loop) => {
+                self.collect_path_local_names_for_move_capture(&for_loop.expr, out);
+                for stmt in &for_loop.body.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_path_local_names_for_move_capture(elem, out);
+                }
+            }
+            syn::Expr::Array(array) => {
+                for elem in &array.elems {
+                    self.collect_path_local_names_for_move_capture(elem, out);
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_path_local_names_for_move_capture(&field.expr, out);
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_path_local_names_for_move_capture(rest, out);
+                }
+            }
+            syn::Expr::Break(brk) => {
+                if let Some(value) = &brk.expr {
+                    self.collect_path_local_names_for_move_capture(value, out);
+                }
+            }
+            syn::Expr::Return(ret) => {
+                if let Some(value) = &ret.expr {
+                    self.collect_path_local_names_for_move_capture(value, out);
+                }
+            }
+            syn::Expr::Closure(closure) => {
+                self.collect_path_local_names_for_move_capture(&closure.body, out);
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_path_local_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_path_local_names_in_stmt_for_move_capture(
+        &self,
+        stmt: &syn::Stmt,
+        out: &mut HashSet<String>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_path_local_names_for_move_capture(&init.expr, out);
+                }
+            }
+            syn::Stmt::Expr(expr, _) => self.collect_path_local_names_for_move_capture(expr, out),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_local_binding_names_in_expr_for_move_capture(
+        &self,
+        expr: &syn::Expr,
+        out: &mut HashSet<String>,
+    ) {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Let(let_expr) => {
+                self.collect_closure_param_names_from_pat(&let_expr.pat, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(&let_expr.expr, out);
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&if_expr.cond, out);
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_local_binding_names_in_expr_for_move_capture(else_expr, out);
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&match_expr.expr, out);
+                for arm in &match_expr.arms {
+                    self.collect_closure_param_names_from_pat(&arm.pat, out);
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_local_binding_names_in_expr_for_move_capture(guard, out);
+                    }
+                    self.collect_local_binding_names_in_expr_for_move_capture(&arm.body, out);
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&while_expr.cond, out);
+                for stmt in &while_expr.body.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::ForLoop(for_loop) => {
+                self.collect_closure_param_names_from_pat(&for_loop.pat, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(&for_loop.expr, out);
+                for stmt in &for_loop.body.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            syn::Expr::Closure(closure) => {
+                for input in &closure.inputs {
+                    self.collect_closure_param_names_from_pat(input, out);
+                }
+                self.collect_local_binding_names_in_expr_for_move_capture(&closure.body, out);
+            }
+            syn::Expr::Call(call) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&call.func, out);
+                for arg in &call.args {
+                    self.collect_local_binding_names_in_expr_for_move_capture(arg, out);
+                }
+            }
+            syn::Expr::MethodCall(method_call) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&method_call.receiver, out);
+                for arg in &method_call.args {
+                    self.collect_local_binding_names_in_expr_for_move_capture(arg, out);
+                }
+            }
+            syn::Expr::Binary(bin) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&bin.left, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(&bin.right, out);
+            }
+            syn::Expr::Unary(unary) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&unary.expr, out);
+            }
+            syn::Expr::Reference(reference) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&reference.expr, out);
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&assign.left, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(&assign.right, out);
+            }
+            syn::Expr::Field(field) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&field.base, out);
+            }
+            syn::Expr::Index(index) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&index.expr, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(&index.index, out);
+            }
+            syn::Expr::Cast(cast_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&cast_expr.expr, out);
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&try_expr.expr, out);
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(&await_expr.base, out);
+            }
+            syn::Expr::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_local_binding_names_in_expr_for_move_capture(elem, out);
+                }
+            }
+            syn::Expr::Array(array) => {
+                for elem in &array.elems {
+                    self.collect_local_binding_names_in_expr_for_move_capture(elem, out);
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_local_binding_names_in_expr_for_move_capture(&field.expr, out);
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_local_binding_names_in_expr_for_move_capture(rest, out);
+                }
+            }
+            syn::Expr::Break(brk) => {
+                if let Some(value) = &brk.expr {
+                    self.collect_local_binding_names_in_expr_for_move_capture(value, out);
+                }
+            }
+            syn::Expr::Return(ret) => {
+                if let Some(value) = &ret.expr {
+                    self.collect_local_binding_names_in_expr_for_move_capture(value, out);
+                }
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_local_binding_names_in_stmt_for_move_capture(stmt, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_local_binding_names_in_stmt_for_move_capture(
+        &self,
+        stmt: &syn::Stmt,
+        out: &mut HashSet<String>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                self.collect_closure_param_names_from_pat(&local.pat, out);
+                if let Some(init) = &local.init {
+                    self.collect_local_binding_names_in_expr_for_move_capture(&init.expr, out);
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_local_binding_names_in_expr_for_move_capture(expr, out);
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
         }
     }
 
@@ -36357,6 +36705,17 @@ fn extract_direct_local_ident(expr: &syn::Expr) -> Option<String> {
     }
 }
 
+fn is_simple_cpp_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 fn call_path_is_value_constructor(path_expr: &syn::ExprPath) -> bool {
     // Tuple-struct / enum-variant constructors are value-consuming call sites.
     // Rust names for these constructors are UpperCamelCase; function-style
@@ -41089,8 +41448,26 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::panic::catch_unwind([=]() mutable {"), "{out}");
+        assert!(
+            out.contains("rusty::panic::catch_unwind([=, v = std::move(v)]() mutable {"),
+            "{out}"
+        );
         assert!(out.contains("v.push(1);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5184_move_closure_emits_move_init_capture_for_used_local() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<i32>::new();
+                let _c = move || {
+                    v.push(1);
+                };
+            }
+            "#,
+        );
+        assert!(out.contains("[=, v = std::move(v)]() mutable {"), "{out}");
     }
 
     #[test]

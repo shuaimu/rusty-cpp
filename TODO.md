@@ -5881,7 +5881,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-83b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-semantics-gated in core `mem::forget` behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.84: `smallvec` Stage E `tests_insert_many_panic_panic_*` panic-family failures with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.84: `smallvec` Stage E `tests_insert_many_panic_panic_*` panic-family failures with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared move-closure and Rust-layout hardening:
+            - `transpiler/src/codegen.rs`: move closures now emit explicit move-init captures for referenced outer locals (`[=, x = std::move(x)]`) instead of bare `[=]`, preserving Rust move ownership in mutation paths (`catch_unwind(move || { vec.push(...) })` and related shapes).
+            - `include/rusty/mem.hpp`: added Rust-layout overrides for `std::array<T, N>` sizing/alignment (`size=N*sizeof(T)`, `align=alignof(T)`), including `N=0` behavior parity for `size_of`/`align_of`.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5184_move_closure_emits_move_init_capture_for_used_local`
+            - `codegen::tests::test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda` (expectation updated for move-init capture shape)
+            - `runtime_move_semantics::test_leaf5184_mem_size_of_std_array_uses_rust_layout`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5184_move_closure_emits_move_init_capture_for_used_local -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf5184 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-84c-20260412`
+          - Deterministic frontier movement:
+            - prior post-5.1.83 first Stage E failure family (`tests_insert_many_panic_panic_*` panic fallout with trailing allocator abort) is collapsed from deterministic first-head slots.
+            - `tests_insert_many_panic_panic_*` now passes; new deterministic first Stage E failure is `tests::into_iter` runtime failure (`Range end out of bounds`) with allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-84c-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-shape-gated in core closure lowering and runtime layout helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.85: `smallvec` Stage E `tests::into_iter` runtime failure (`Range end out of bounds`) with allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
