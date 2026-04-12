@@ -5,13 +5,12 @@
 #include <type_traits>
 #include "unsafe_cell.hpp"
 
-// Cell<T> - Interior mutability for Copy types
-// Provides interior mutability for types that implement Copy
+// Cell<T> - Interior mutability
+// Provides interior mutability with Rust-like `Cell` surfaces.
 //
 // Guarantees:
 // - Single-threaded only (not thread-safe)
 // - No runtime borrow checking (unlike RefCell)
-// - Only for types that can be copied bitwise
 // - Zero overhead - uses UnsafeCell internally
 
 // @safe
@@ -20,8 +19,6 @@ namespace rusty {
 // @safe - Cell provides interior mutability for Copy types
 template<typename T>
 class Cell {
-    static_assert(std::is_trivially_copyable_v<T>,
-                  "Cell<T> requires T to be trivially copyable (similar to Rust's Copy trait)");
 private:
     UnsafeCell<T> value;
 
@@ -29,13 +26,15 @@ public:
     // @safe - Constructors
     Cell() : value() {}
     // @safe
-    explicit Cell(T val) : value(val) {}
+    explicit Cell(T val) : value(std::move(val)) {}
     // @safe - Rust-style constructor path used by transpiled code (`Cell::new(...)`)
-    static Cell new_(T val) { return Cell(val); }
+    static Cell new_(T val) { return Cell(std::move(val)); }
 
-    // @safe - Get a copy of the value
+    // @safe - Get a copy of the value (available only for copyable payloads)
     // @lifetime: (&'a) -> T
-    T get() const {
+    template<typename U = T>
+    typename std::enable_if_t<std::is_copy_constructible_v<U>, U>
+    get() const {
         // @unsafe
         { return *value.get(); }
     }
@@ -44,7 +43,7 @@ public:
     // @lifetime: (&'a, T) -> void
     void set(T val) const {
         // @unsafe
-        { *value.get() = val; }
+        { *value.get() = std::move(val); }
     }
 
     // @safe - Replace the value and return the old one
@@ -52,8 +51,8 @@ public:
     T replace(T val) const {
         // @unsafe
         {
-            T old = *value.get();
-            *value.get() = val;
+            T old = std::move(*value.get());
+            *value.get() = std::move(val);
             return old;
         }
     }
@@ -63,9 +62,8 @@ public:
     void swap(Cell& other) const {
         // @unsafe
         {
-            T temp = *value.get();
-            *value.get() = *other.value.get();
-            *other.value.get() = temp;
+            using std::swap;
+            swap(*value.get(), *other.value.get());
         }
     }
 

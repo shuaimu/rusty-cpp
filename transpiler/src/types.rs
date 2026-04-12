@@ -60,6 +60,24 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Condvar" | "std::sync::Condvar" => Some(("rusty::Condvar", false)),
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
         "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
+        "std::thread::Thread" => Some(("rusty::thread::Thread", false)),
+        "std::sync::atomic::AtomicBool" | "core::sync::atomic::AtomicBool" => {
+            Some(("rusty::sync::atomic::AtomicBool", false))
+        }
+        "std::sync::atomic::AtomicUsize" | "core::sync::atomic::AtomicUsize" => {
+            Some(("rusty::sync::atomic::AtomicUsize", false))
+        }
+        "std::sync::atomic::AtomicPtr" | "core::sync::atomic::AtomicPtr" => {
+            Some(("rusty::sync::atomic::AtomicPtr", true))
+        }
+        "AtomicBool" | "atomic::AtomicBool" => Some(("rusty::sync::atomic::AtomicBool", false)),
+        "AtomicUsize" | "atomic::AtomicUsize" => {
+            Some(("rusty::sync::atomic::AtomicUsize", false))
+        }
+        "AtomicPtr" | "atomic::AtomicPtr" => Some(("rusty::sync::atomic::AtomicPtr", true)),
+        "std::sync::atomic::Ordering" | "core::sync::atomic::Ordering" => {
+            Some(("rusty::sync::atomic::Ordering", false))
+        }
         "core::task::Poll" => Some(("rusty::Poll", true)),
         "core::task::Context" => Some(("rusty::Context", false)),
 
@@ -151,6 +169,12 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         | "alloc::vec::Vec::extend_from_slice" => Some("rusty::vec_extend_from_slice"),
         // thread::spawn
         "thread::spawn" | "std::thread::spawn" => Some("rusty::thread::spawn"),
+        "thread::current" | "std::thread::current" => Some("rusty::thread::current"),
+        "thread::park" | "std::thread::park" => Some("rusty::thread::park"),
+        "thread::yield_now" | "std::thread::yield_now" => Some("rusty::thread::yield_now"),
+        "std::sync::atomic::fence" | "core::sync::atomic::fence" => {
+            Some("rusty::sync::atomic::fence")
+        }
         // I/O functions
         "io::stdin" | "std::io::stdin" => Some("rusty::io::stdin_"),
         "io::stdout" | "std::io::stdout" => Some("rusty::io::stdout_"),
@@ -506,6 +530,30 @@ mod tests {
         assert_eq!(map_std_type("Condvar"), Some(("rusty::Condvar", false)));
         assert_eq!(map_std_type("Barrier"), Some(("rusty::Barrier", false)));
         assert_eq!(map_std_type("Once"), Some(("rusty::Once", false)));
+        assert_eq!(
+            map_std_type("std::sync::atomic::AtomicPtr"),
+            Some(("rusty::sync::atomic::AtomicPtr", true))
+        );
+        assert_eq!(
+            map_std_type("AtomicPtr"),
+            Some(("rusty::sync::atomic::AtomicPtr", true))
+        );
+        assert_eq!(
+            map_std_type("std::sync::atomic::AtomicUsize"),
+            Some(("rusty::sync::atomic::AtomicUsize", false))
+        );
+        assert_eq!(
+            map_std_type("AtomicUsize"),
+            Some(("rusty::sync::atomic::AtomicUsize", false))
+        );
+        assert_eq!(
+            map_std_type("std::sync::atomic::Ordering"),
+            Some(("rusty::sync::atomic::Ordering", false))
+        );
+        assert_eq!(
+            map_std_type("std::thread::Thread"),
+            Some(("rusty::thread::Thread", false))
+        );
     }
 
     #[test]
@@ -548,6 +596,18 @@ mod tests {
         assert_eq!(
             map_function_path("thread::spawn"),
             Some("rusty::thread::spawn")
+        );
+        assert_eq!(
+            map_function_path("std::thread::current"),
+            Some("rusty::thread::current")
+        );
+        assert_eq!(
+            map_function_path("std::thread::park"),
+            Some("rusty::thread::park")
+        );
+        assert_eq!(
+            map_function_path("std::sync::atomic::fence"),
+            Some("rusty::sync::atomic::fence")
         );
         assert_eq!(map_function_path("Unknown::method"), None);
     }

@@ -983,6 +983,39 @@ fn test_vec_drop_panic_is_catchable_via_catch_unwind() {
 }
 
 #[test]
+fn test_cell_supports_non_copy_payload_take_and_replace() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+
+        struct NonCopy {
+            int value;
+            explicit NonCopy(int v) : value(v) {}
+            NonCopy(const NonCopy&) = delete;
+            NonCopy& operator=(const NonCopy&) = delete;
+            NonCopy(NonCopy&&) noexcept = default;
+            NonCopy& operator=(NonCopy&&) noexcept = default;
+        };
+
+        int main() {
+            auto cell = rusty::Cell<rusty::Option<NonCopy>>::new_(
+                rusty::Option<NonCopy>(NonCopy(7)));
+            auto first = cell.take();
+            if (first.is_none()) {
+                return 1;
+            }
+            if (cell.take().is_some()) {
+                return 1;
+            }
+            cell.set(rusty::Option<NonCopy>(NonCopy(9)));
+            auto replaced = cell.replace(rusty::Option<NonCopy>(rusty::None));
+            return replaced.is_some() ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "cell_non_copy_take_replace");
+}
+
+#[test]
 fn test_catch_unwind_accepts_plain_callable_without_assert_wrapper() {
     let source = r#"
         #include <rusty/panic.hpp>
@@ -1150,6 +1183,57 @@ fn test_leaf5190_as_slice_rvalue_array_preserves_value_comparison_surface() {
     "#;
 
     compile_and_run_cpp(source, "leaf5190_as_slice_rvalue_array_surface");
+}
+
+#[test]
+fn test_leaf5191_slice_full_rvalue_vec_keeps_owned_storage_alive() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/vec.hpp>
+
+        static rusty::Vec<int> make_vec() {
+            auto out = rusty::Vec<int>::new_();
+            out.push(1);
+            out.push(2);
+            out.push(3);
+            return out;
+        }
+
+        int main() {
+            auto view = rusty::slice_full(make_vec());
+            auto noise = rusty::Vec<int>::new_();
+            noise.push(9);
+            (void)noise;
+            return (view == std::array{1, 2, 3}) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5191_slice_full_rvalue_vec_lifetime");
+}
+
+#[test]
+fn test_leaf5191_as_slice_rvalue_vec_preserves_value_comparison_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/vec.hpp>
+
+        static rusty::Vec<int> make_vec() {
+            auto out = rusty::Vec<int>::new_();
+            out.push(1);
+            out.push(2);
+            out.push(3);
+            return out;
+        }
+
+        int main() {
+            auto view = rusty::as_slice(make_vec());
+            return (view == std::array{1, 2, 3}) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5191_as_slice_rvalue_vec_surface");
 }
 
 #[test]

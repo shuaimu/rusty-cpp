@@ -13,21 +13,74 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 namespace rusty {
 namespace mem {
 
 namespace detail {
-inline std::unordered_map<const void*, std::size_t>& forgotten_addresses() {
+struct forgotten_address_key {
+    const void* address;
+    const void* type_tag;
+
+    bool operator==(const forgotten_address_key& other) const noexcept {
+        return address == other.address && type_tag == other.type_tag;
+    }
+};
+
+struct forgotten_address_key_hash {
+    std::size_t operator()(const forgotten_address_key& key) const noexcept {
+        const std::size_t a = std::hash<const void*>{}(key.address);
+        const std::size_t b = std::hash<const void*>{}(key.type_tag);
+        return a ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2));
+    }
+};
+
+inline std::unordered_map<forgotten_address_key, std::size_t, forgotten_address_key_hash>&
+forgotten_addresses() {
     // Keep storage alive for the entire process lifetime to avoid teardown-order
     // crashes when global/static destructors still call forgotten-address APIs.
-    static auto* addresses = new std::unordered_map<const void*, std::size_t>();
+    static auto* addresses =
+        new std::unordered_map<forgotten_address_key, std::size_t, forgotten_address_key_hash>();
     return *addresses;
 }
 
 inline std::mutex& forgotten_addresses_mutex() {
     static auto* mutex = new std::mutex();
     return *mutex;
+}
+
+template<typename T>
+inline const void* forgotten_type_tag() noexcept {
+    static const int tag = 0;
+    return &tag;
+}
+
+inline void mark_forgotten_key(const void* address, const void* type_tag) noexcept {
+    if (address == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(forgotten_addresses_mutex());
+    auto& addresses = forgotten_addresses();
+    addresses[forgotten_address_key{address, type_tag}] += 1;
+}
+
+inline bool consume_forgotten_key(const void* address, const void* type_tag) noexcept {
+    if (address == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(forgotten_addresses_mutex());
+    auto& addresses = forgotten_addresses();
+    const auto it = addresses.find(forgotten_address_key{address, type_tag});
+    if (it == addresses.end()) {
+        return false;
+    }
+    if (it->second > 1) {
+        it->second -= 1;
+    } else {
+        addresses.erase(it);
+    }
+    return true;
 }
 
 template<typename T, typename = void>
@@ -39,6 +92,49 @@ template<typename T, typename = void>
 struct rust_layout_align {
     static constexpr std::size_t value = alignof(T);
 };
+
+template<typename T>
+using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+
+template<typename T, typename = void>
+struct variant_like {
+    using type = remove_cvref_t<T>;
+};
+
+template<typename T>
+struct variant_like<T, std::void_t<typename remove_cvref_t<T>::variant>> {
+    using type = typename remove_cvref_t<T>::variant;
+};
+
+template<typename T>
+using variant_like_t = typename variant_like<T>::type;
+
+template<typename T>
+concept smallvec_like_layout = requires(T& value) {
+    value.capacity_field;
+    value.data;
+    typename std::variant_alternative_t<0, variant_like_t<decltype(value.data)>>;
+    typename std::variant_alternative_t<1, variant_like_t<decltype(value.data)>>;
+    std::declval<std::variant_alternative_t<0, variant_like_t<decltype(value.data)>>&>()._0;
+    std::declval<std::variant_alternative_t<1, variant_like_t<decltype(value.data)>>&>().ptr;
+    std::declval<std::variant_alternative_t<1, variant_like_t<decltype(value.data)>>&>().len;
+};
+
+template<smallvec_like_layout T>
+constexpr std::size_t smallvec_like_rust_layout_size() noexcept {
+    using Data = variant_like_t<decltype(std::declval<T&>().data)>;
+    using InlineVariant = std::variant_alternative_t<0, Data>;
+    using InlineStorage =
+        remove_cvref_t<decltype(std::declval<InlineVariant&>()._0)>;
+
+    constexpr std::size_t pointer_size = sizeof(std::uintptr_t);
+    constexpr std::size_t inline_bytes = rust_layout_size<InlineStorage>::value;
+    constexpr std::size_t rounded_inline =
+        ((inline_bytes + pointer_size - 1) / pointer_size) * pointer_size;
+    constexpr std::size_t payload_bytes =
+        (rounded_inline < pointer_size) ? pointer_size : rounded_inline;
+    return 2 * pointer_size + payload_bytes;
+}
 
 // Mirror Rust `[T; N]` layout sizing semantics for `std::array<T, N>`.
 // In particular, Rust treats `[T; 0]` as size 0 while C++ `std::array<T, 0>`
@@ -158,6 +254,9 @@ inline auto manually_drop_new(T&& value)
 template<typename T>
 constexpr std::size_t size_of() noexcept {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    if constexpr (detail::smallvec_like_layout<Value>) {
+        return detail::smallvec_like_rust_layout_size<Value>();
+    }
     return detail::rust_layout_size<Value>::value;
 }
 
@@ -188,30 +287,23 @@ inline To transmute(From from) {
 }
 
 inline void mark_forgotten_address(const void* address) noexcept {
-    if (address == nullptr) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
-    auto& addresses = detail::forgotten_addresses();
-    addresses[address] += 1;
+    detail::mark_forgotten_key(address, nullptr);
 }
 
 inline bool consume_forgotten_address(const void* address) noexcept {
-    if (address == nullptr) {
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
-    auto& addresses = detail::forgotten_addresses();
-    const auto it = addresses.find(address);
-    if (it == addresses.end()) {
-        return false;
-    }
-    if (it->second > 1) {
-        it->second -= 1;
-    } else {
-        addresses.erase(it);
-    }
-    return true;
+    return detail::consume_forgotten_key(address, nullptr);
+}
+
+template<typename T>
+inline void mark_forgotten_typed(const T* address) noexcept {
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    detail::mark_forgotten_key(address, detail::forgotten_type_tag<Value>());
+}
+
+template<typename T>
+inline bool consume_forgotten_typed(const T* address) noexcept {
+    using Value = std::remove_cv_t<std::remove_reference_t<T>>;
+    return detail::consume_forgotten_key(address, detail::forgotten_type_tag<Value>());
 }
 
 inline void clear_forgotten_address_range(const void* base, std::size_t bytes) noexcept {
@@ -230,13 +322,18 @@ inline void clear_forgotten_address_range(const void* base, std::size_t bytes) n
     std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
     auto& addresses = detail::forgotten_addresses();
     for (auto it = addresses.begin(); it != addresses.end();) {
-        const auto current = reinterpret_cast<std::uintptr_t>(it->first);
+        const auto current = reinterpret_cast<std::uintptr_t>(it->first.address);
         if (current >= start && current < end) {
             it = addresses.erase(it);
         } else {
             ++it;
         }
     }
+}
+
+inline void clear_all_forgotten_addresses() noexcept {
+    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    detail::forgotten_addresses().clear();
 }
 
 template<typename T, typename U>
@@ -249,6 +346,12 @@ inline T replace(T& destination, U&& value) {
     destination.~T();
     new (&destination) T(std::move(replacement));
     return old;
+}
+
+template<typename T>
+requires std::is_default_constructible_v<T>
+inline T take(T& destination) {
+    return replace(destination, T{});
 }
 
 template<typename T>

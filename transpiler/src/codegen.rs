@@ -2610,7 +2610,7 @@ impl CodeGen {
     fn module_name_conflicts_with_global_symbol(name: &str) -> bool {
         // C global symbols that routinely conflict with namespace names in
         // generated translation units once system headers are included.
-        matches!(name, "free")
+        matches!(name, "free" | "sync")
     }
 
     fn collect_scope_module_dependencies(
@@ -2790,7 +2790,7 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    self.emit_template_prefix(&s.generics);
+                    self.emit_template_prefix_without_type_defaults(&s.generics);
                     self.writeln(&format!("struct {};", name));
                     emitted_any = true;
                 }
@@ -2800,10 +2800,10 @@ impl CodeGen {
                         continue;
                     }
                     if enum_is_c_like(e) {
-                        self.emit_template_prefix(&e.generics);
+                        self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("enum class {};", name));
                     } else if self.enum_uses_struct_wrapper(e) {
-                        self.emit_template_prefix(&e.generics);
+                        self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("struct {};", name));
                     } else {
                         self.emit_data_enum_alias_forward_decl(e);
@@ -2834,7 +2834,14 @@ impl CodeGen {
             if type_string_has_auto_placeholder(&ty) {
                 continue;
             }
-            self.writeln(&format!("extern const {} {};", ty, name));
+            if ty.contains('*') {
+                // Preserve pointer mutability in forward declarations for const items.
+                // `extern const T* name;` changes pointee constness; emit `T* const`
+                // shape instead to match later `constexpr T*` definitions.
+                self.writeln(&format!("extern {} const {};", ty, name));
+            } else {
+                self.writeln(&format!("extern const {} {};", ty, name));
+            }
             emitted_any = true;
         }
 
@@ -6367,6 +6374,11 @@ impl CodeGen {
                     .collect()
             })
             .unwrap_or_default();
+        let has_bitflags_flags_const = merged_impl_items.as_ref().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| matches!(item, syn::ImplItem::Const(c) if c.ident == "FLAGS"))
+        });
 
         // Emit doc comments
         self.emit_doc_comments(&s.attrs);
@@ -6866,7 +6878,7 @@ impl CodeGen {
                     .operator_renames
                     .keys()
                     .any(|(type_key, _)| *type_key == name_str || *type_key == scoped_key);
-                if has_operators {
+                if has_operators && has_bitflags_flags_const {
                     let n = name.to_string();
                     // Use the saved emitted method names from before the pop.
                     let merged_methods = &emitted_methods_in_struct;
@@ -7742,9 +7754,19 @@ impl CodeGen {
                 "const"
             }
         } else {
-            "constexpr"
+            if ty.contains('*') {
+                // Pointer constants often lower through reinterpret casts that are not
+                // constexpr-friendly on all targets; prefer `const` storage.
+                "const"
+            } else {
+                "constexpr"
+            }
         };
-        self.writeln(&format!("{} {} {} = {};", storage, ty, name, expr));
+        if storage == "const" && ty.contains('*') {
+            self.writeln(&format!("{} const {} = {};", ty, name, expr));
+        } else {
+            self.writeln(&format!("{} {} {} = {};", storage, ty, name, expr));
+        }
     }
 
     fn emit_static(&mut self, s: &syn::ItemStatic) {
@@ -8410,7 +8432,8 @@ impl CodeGen {
             root_ident.as_str(),
             "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp"
         ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase())
-            && !self.declared_item_names.contains(&root_ident);
+            && !self.declared_item_names.contains(&root_ident)
+            && !self.import_alias_names.contains(&root_ident);
 
         if is_external {
             self.writeln(&format!(
@@ -8488,6 +8511,12 @@ impl CodeGen {
                     self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 }
                 UseImportAction::Using(mapped_path) => {
+                    if let Some(template_alias_stmt) =
+                        self.template_alias_import_statement(&mapped_path)
+                    {
+                        self.writeln(&format!("{}{}", export_prefix, template_alias_stmt));
+                        continue;
+                    }
                     let using_path = make_using_path_cpp_legal(&mapped_path);
                     if let Some(namespace_target) = using_path.strip_prefix("namespace ") {
                         self.emit_namespace_using_import(namespace_target.trim());
@@ -8505,9 +8534,101 @@ impl CodeGen {
                     }
                 }
                 UseImportAction::Raw(statement) => {
+                    if let Some(alias_name) = parse_namespace_alias_name(&statement) {
+                        self.declared_item_names.insert(alias_name.to_string());
+                        self.import_alias_names.insert(alias_name.to_string());
+                    }
                     self.writeln(&format!("{}{}", export_prefix, statement));
                 }
             }
+        }
+    }
+
+    fn template_alias_import_statement(&mut self, mapped_path: &str) -> Option<String> {
+        let normalized = normalize_use_import_path(mapped_path);
+        let (alias, target) = split_use_import_alias(normalized)?;
+        let target_key = self.alias_import_target_declared_type_key(target);
+        let target_params = target_key
+            .as_ref()
+            .and_then(|key| self.declared_type_params.get(key))
+            .cloned();
+        let target_kinds = target_key
+            .as_ref()
+            .and_then(|key| self.declared_type_param_kinds.get(key))
+            .cloned();
+        let target_defaults = target_key
+            .as_ref()
+            .and_then(|key| self.declared_type_param_defaults.get(key))
+            .cloned();
+
+        if !self.alias_import_target_requires_template_alias(target, target_params.as_ref()) {
+            return None;
+        }
+        if let Some(params) = target_params
+            && !params.is_empty()
+        {
+            let kinds = target_kinds.unwrap_or_else(|| vec![GenericParamKind::Type; params.len()]);
+            let defaults = target_defaults.unwrap_or_else(|| vec![None; params.len()]);
+            self.register_template_alias_declared_type(alias, params, kinds, defaults);
+        }
+        let escaped_alias = escape_cpp_keyword(alias);
+        let trimmed_target = target.trim().trim_start_matches("::");
+        if trimmed_target.is_empty() {
+            return None;
+        }
+        let escaped_target = if target.contains("::") {
+            self.escape_and_rename_qualified_name(trimmed_target)
+        } else {
+            escape_cpp_keyword(trimmed_target)
+        };
+        Some(format!(
+            "template<typename... Ts> using {} = {}<Ts...>;",
+            escaped_alias, escaped_target
+        ))
+    }
+
+    fn alias_import_target_requires_template_alias(
+        &self,
+        target: &str,
+        resolved_params: Option<&Vec<String>>,
+    ) -> bool {
+        if alias_target_requires_template_alias(target) {
+            return true;
+        }
+        if target.contains('<') {
+            return false;
+        }
+        resolved_params.is_some_and(|params| !params.is_empty())
+    }
+
+    fn alias_import_target_declared_type_key(&self, target: &str) -> Option<String> {
+        let parsed_path = syn::parse_str::<syn::Path>(target.trim_start_matches("::")).ok()?;
+        self.declared_type_key_for_path(&parsed_path)
+    }
+
+    fn register_template_alias_declared_type(
+        &mut self,
+        alias: &str,
+        params: Vec<String>,
+        kinds: Vec<GenericParamKind>,
+        defaults: Vec<Option<GenericParamDefault>>,
+    ) {
+        self.local_declared_types.insert(alias.to_string());
+        self.declared_type_params
+            .insert(alias.to_string(), params.clone());
+        self.declared_type_param_kinds
+            .insert(alias.to_string(), kinds.clone());
+        self.declared_type_param_defaults
+            .insert(alias.to_string(), defaults.clone());
+        if !self.module_stack.is_empty() {
+            let scoped_alias = format!("{}::{}", self.module_stack.join("::"), alias);
+            self.local_declared_types.insert(scoped_alias.clone());
+            self.declared_type_params
+                .insert(scoped_alias.clone(), params);
+            self.declared_type_param_kinds
+                .insert(scoped_alias.clone(), kinds);
+            self.declared_type_param_defaults
+                .insert(scoped_alias, defaults);
         }
     }
 
@@ -8696,6 +8817,7 @@ impl CodeGen {
     fn collect_emitted_template_parts(
         &self,
         generics: &syn::Generics,
+        include_type_defaults: bool,
     ) -> (Vec<String>, Vec<String>) {
         let mut params: Vec<String> = Vec::new();
         let mut emitted_type_params: Vec<&syn::TypeParam> = Vec::new();
@@ -8704,7 +8826,12 @@ impl CodeGen {
                 syn::GenericParam::Type(tp)
                     if !self.is_type_param_in_scope(&tp.ident.to_string()) =>
                 {
-                    params.push(format!("typename {}", tp.ident));
+                    if include_type_defaults && let Some(default) = &tp.default {
+                        let default_ty = self.map_type(default);
+                        params.push(format!("typename {} = {}", tp.ident, default_ty));
+                    } else {
+                        params.push(format!("typename {}", tp.ident));
+                    }
                     emitted_type_params.push(tp);
                 }
                 syn::GenericParam::Const(cp)
@@ -8768,7 +8895,7 @@ impl CodeGen {
     }
 
     fn emitted_template_signature_key(&self, generics: &syn::Generics) -> String {
-        let (params, constraints) = self.collect_emitted_template_parts(generics);
+        let (params, constraints) = self.collect_emitted_template_parts(generics, true);
         if params.is_empty() {
             return String::new();
         }
@@ -11324,7 +11451,8 @@ impl CodeGen {
                         format!("_m.{}()", cond_method)
                     } else {
                         if pi.ident != "_" {
-                            arm_binding_lines.push(format!("const auto& {} = _m;", pi.ident));
+                            let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                            arm_binding_lines.push(format!("const auto& {} = _m;", cpp_name));
                         }
                         "true".to_string()
                     }
@@ -11522,6 +11650,9 @@ impl CodeGen {
         arms: &[syn::Arm],
         variant_ctx: Option<&VariantTypeContext>,
     ) -> bool {
+        if arms.is_empty() {
+            return false;
+        }
         arms.iter().all(|arm| match &arm.pat {
             syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => true,
             syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
@@ -11727,7 +11858,8 @@ impl CodeGen {
                 }
                 syn::Pat::Ident(pi) => {
                     if pi.ident != "_" {
-                        binding_stmts.push(format!("const auto& {} = _m_tuple;", pi.ident));
+                        let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                        binding_stmts.push(format!("const auto& {} = _m_tuple;", cpp_name));
                     }
                 }
                 syn::Pat::Wild(_) => {}
@@ -11919,7 +12051,13 @@ impl CodeGen {
             }
             syn::Expr::Field(field) => self.is_stable_reference_lvalue_expr(&field.base),
             syn::Expr::Index(index) => self.is_stable_reference_lvalue_expr(&index.expr),
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => true,
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                // `&*x` is stable only when `x` itself is stable (or a raw pointer).
+                // Treating every deref as stable lets `&*temporary_box()` escape as a
+                // dangling reference in tuple assertion lowering.
+                self.is_expr_raw_pointer_like(&unary.expr)
+                    || self.is_stable_reference_lvalue_expr(&unary.expr)
+            }
             syn::Expr::Reference(r) => self.is_stable_reference_lvalue_expr(&r.expr),
             syn::Expr::Paren(p) => self.is_stable_reference_lvalue_expr(&p.expr),
             syn::Expr::Group(g) => self.is_stable_reference_lvalue_expr(&g.expr),
@@ -12199,7 +12337,7 @@ impl CodeGen {
                         syn::Member::Unnamed(idx) => format!("_{}", idx.index),
                     };
                     let binding_name = match &*field_pat.pat {
-                        syn::Pat::Ident(pi) => pi.ident.to_string(),
+                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => field_name_str.clone(),
                     };
                     self.writeln(&format!(
@@ -12250,7 +12388,7 @@ impl CodeGen {
             }
             syn::Pat::Ident(pi) => {
                 // Catch-all binding: `x =>` → [](const auto& x) { ... }
-                let name = &pi.ident;
+                let name = escape_cpp_keyword(&pi.ident.to_string());
                 self.write_indent();
                 self.output
                     .push_str(&format!("[&](const auto& {}) {{\n", name));
@@ -12305,7 +12443,7 @@ impl CodeGen {
         elems
             .iter()
             .map(|p| match p {
-                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 syn::Pat::Wild(_) => "_".to_string(),
                 _ => "_".to_string(),
             })
@@ -12336,6 +12474,7 @@ impl CodeGen {
         match pat {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
+                    let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
                         "auto&"
                     } else if pi.by_ref.is_some() {
@@ -12347,7 +12486,7 @@ impl CodeGen {
                     };
                     out.push(format!(
                         "{} {} = {};",
-                        binding_prefix, pi.ident, source_expr
+                        binding_prefix, cpp_name, source_expr
                     ));
                 }
                 true
@@ -12695,7 +12834,7 @@ impl CodeGen {
     fn for_both_lambda_components(&self, pat: &syn::Pat) -> Option<(String, String, String)> {
         match pat {
             syn::Pat::Ident(pi) => {
-                let name = pi.ident.to_string();
+                let name = escape_cpp_keyword(&pi.ident.to_string());
                 if pi.by_ref.is_some() && pi.mutability.is_some() {
                     Some((
                         "auto& _v".to_string(),
@@ -12744,10 +12883,11 @@ impl CodeGen {
         binding_pat: &syn::Pat,
         body_expr: &syn::Expr,
     ) -> Option<String> {
-        let binding_name = match binding_pat {
+        let rust_binding_name = match binding_pat {
             syn::Pat::Ident(pi) => pi.ident.to_string(),
             _ => return None,
         };
+        let cpp_binding_name = escape_cpp_keyword(&rust_binding_name);
 
         let body_expr = self.peel_paren_group_expr(body_expr);
         let syn::Expr::MethodCall(mc) = body_expr else {
@@ -12765,14 +12905,14 @@ impl CodeGen {
             return None;
         }
         let receiver_name = path.path.segments[0].ident.to_string();
-        if receiver_name != binding_name {
+        if receiver_name != rust_binding_name {
             return None;
         }
 
         let arg = self.emit_expr_maybe_move(mc.args.first()?);
         match mc.method.to_string().as_str() {
-            "read" => Some(format!("rusty::io::read({}, {})", binding_name, arg)),
-            "write" => Some(format!("rusty::io::write({}, {})", binding_name, arg)),
+            "read" => Some(format!("rusty::io::read({}, {})", cpp_binding_name, arg)),
+            "write" => Some(format!("rusty::io::write({}, {})", cpp_binding_name, arg)),
             _ => None,
         }
     }
@@ -13409,9 +13549,10 @@ impl CodeGen {
                 }
                 syn::Pat::Ident(pi) if pi.ident != "_" => {
                     // Catch-all with binding: `cmp => cmp` → declare alias to scrutinee
+                    let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     parts.push(format!(
                         "{{ const auto& {} = _m; {}{};  }}",
-                        pi.ident, ret_prefix, body
+                        cpp_name, ret_prefix, body
                     ));
                 }
                 syn::Pat::Range(_) => {
@@ -13676,9 +13817,10 @@ impl CodeGen {
                     parts.push(format!("[&](const auto&) {{ return {}; }}", arm_value));
                 }
                 syn::Pat::Ident(pi) => {
+                    let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     parts.push(format!(
                         "[&](const auto& {}) {{ return {}; }}",
-                        pi.ident, arm_value
+                        cpp_name, arm_value
                     ));
                 }
                 _ => {
@@ -13925,8 +14067,9 @@ impl CodeGen {
                         saw_runtime_pattern = true;
                         out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     } else {
+                        let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                         out.push_str("if (true) { ");
-                        out.push_str(&format!("const auto& {} = _m; ", pi.ident));
+                        out.push_str(&format!("const auto& {} = _m; ", cpp_name));
                     }
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = self.emit_expr_to_string(guard);
@@ -14234,8 +14377,8 @@ impl CodeGen {
                         }
                         if let syn::Pat::Ident(pi) = elem_pat {
                             if pi.ident != "_" {
-                                bindings
-                                    .push(format!("const auto& {} = {};", pi.ident, value_name));
+                                let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                                bindings.push(format!("const auto& {} = {};", cpp_name, value_name));
                             }
                         }
                     }
@@ -14316,7 +14459,8 @@ impl CodeGen {
                 true
             }
             syn::Pat::Ident(pi) => {
-                params.push(format!("const auto& {}", pi.ident));
+                let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                params.push(format!("const auto& {}", cpp_name));
                 true
             }
             syn::Pat::Wild(_) => {
@@ -14968,13 +15112,14 @@ impl CodeGen {
                     self.emit_if_let_else(else_branch);
                 } else {
                     // if let x = expr → if (true) { auto x = expr; ... } (always matches)
+                    let cpp_name = escape_cpp_keyword(&name);
                     if first {
                         self.writeln("if (true) {");
                     } else {
                         self.output.push_str("if (true) {\n");
                     }
                     self.indent += 1;
-                    self.writeln(&format!("auto {} = {};", name, scrutinee));
+                    self.writeln(&format!("auto {} = {};", cpp_name, scrutinee));
                     self.emit_block(then_branch);
                     self.indent -= 1;
                     self.emit_if_let_else(else_branch);
@@ -27898,7 +28043,9 @@ impl CodeGen {
                 };
                 let binding = if ts.elems.len() == 1 {
                     match ts.elems.first()? {
-                        syn::Pat::Ident(pi) if pi.ident != "_" => Some(pi.ident.to_string()),
+                        syn::Pat::Ident(pi) if pi.ident != "_" => {
+                            Some(escape_cpp_keyword(&pi.ident.to_string()))
+                        }
                         syn::Pat::Wild(_) => None,
                         _ => return None,
                     }
@@ -27938,7 +28085,7 @@ impl CodeGen {
                 let binding = if pi.ident == "_" {
                     None
                 } else {
-                    Some(pi.ident.to_string())
+                    Some(escape_cpp_keyword(&pi.ident.to_string()))
                 };
                 Some(("true".to_string(), binding, None))
             }
@@ -28638,6 +28785,9 @@ impl CodeGen {
         match_expr: &syn::ExprMatch,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        if match_expr.arms.is_empty() {
+            return self.match_expr_unreachable_fallback_with_expected(expected_ty);
+        }
         if self.match_expr_has_explicit_return_arm(match_expr) {
             if let Some(lowered) = self.emit_try_style_runtime_match_expr(match_expr, expected_ty) {
                 return lowered;
@@ -29568,6 +29718,31 @@ impl CodeGen {
             "std::cmp::Ordering::Equal" => return "rusty::cmp::Ordering::Equal".to_string(),
             "std::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
             _ => {}
+        }
+
+        if segments.len() >= 4
+            && matches!(segments[0].as_str(), "std" | "core")
+            && segments[1] == "sync"
+            && segments[2] == "atomic"
+        {
+            let mut resolved = vec![
+                "rusty".to_string(),
+                "sync".to_string(),
+                "atomic".to_string(),
+            ];
+            resolved.extend(segments[3..].iter().cloned());
+            for seg in &mut resolved {
+                *seg = escape_cpp_keyword(seg);
+            }
+            return resolved.join("::");
+        }
+        if segments.len() >= 3 && segments[0] == "std" && segments[1] == "thread" {
+            let mut resolved = vec!["rusty".to_string(), "thread".to_string()];
+            resolved.extend(segments[2..].iter().cloned());
+            for seg in &mut resolved {
+                *seg = escape_cpp_keyword(seg);
+            }
+            return resolved.join("::");
         }
 
         // Try user-provided type mappings first (highest priority)
@@ -31145,8 +31320,7 @@ impl CodeGen {
             }
             syn::Type::Ptr(p) => {
                 let inner = self.map_type(&p.elem);
-                let needs_pointer_trait_hardening =
-                    inner.ends_with('&') || self.type_references_in_scope_type_param(&p.elem);
+                let needs_pointer_trait_hardening = inner.ends_with('&');
                 let needs_assoc_pointer_hardening = self.type_contains_dependent_assoc(&p.elem)
                     || self.type_references_current_struct_assoc(&p.elem);
                 if needs_pointer_trait_hardening {
@@ -31918,13 +32092,13 @@ impl CodeGen {
                 // Untyped param: |x| → forwarding reference.
                 // This preserves Rust call-site ownership/borrow behavior without
                 // forcing eager copies for inferred reference parameters.
-                format!("auto&& {}", pi.ident)
+                format!("auto&& {}", escape_cpp_keyword(&pi.ident.to_string()))
             }
             syn::Pat::Type(pt) => {
                 // Typed param: |x: i32| → int32_t x
                 let ty = self.map_type(&pt.ty);
                 let name = match pt.pat.as_ref() {
-                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                     _ => "_".to_string(),
                 };
                 format!("{} {}", ty, name)
@@ -31933,10 +32107,12 @@ impl CodeGen {
             syn::Pat::Reference(pr) => {
                 // |&x| → auto& x  or  |&mut x| → auto& x
                 match pr.pat.as_ref() {
-                    syn::Pat::Ident(pi) => format!("auto& {}", pi.ident),
+                    syn::Pat::Ident(pi) => {
+                        format!("auto& {}", escape_cpp_keyword(&pi.ident.to_string()))
+                    }
                     syn::Pat::Type(pt) => {
                         let name = match pt.pat.as_ref() {
-                            syn::Pat::Ident(pi) => pi.ident.to_string(),
+                            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                             _ => "_".to_string(),
                         };
                         format!("auto& {}", name)
@@ -31977,9 +32153,9 @@ impl CodeGen {
         };
         let raw_name = format!("_closure_ref_param{}", index);
         let binding_name = match pr.pat.as_ref() {
-            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
             syn::Pat::Type(pt) => match pt.pat.as_ref() {
-                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => self.emit_pat_to_string(&pr.pat),
             },
             _ => self.emit_pat_to_string(&pr.pat),
@@ -32770,7 +32946,20 @@ impl CodeGen {
     /// Lifetime parameters are erased (skipped).
     /// Trait bounds are emitted as `requires` clauses.
     fn emit_template_prefix(&mut self, generics: &syn::Generics) {
-        let (params, constraints) = self.collect_emitted_template_parts(generics);
+        let (params, constraints) = self.collect_emitted_template_parts(generics, true);
+        if params.is_empty() {
+            return;
+        }
+
+        self.writeln(&format!("template<{}>", params.join(", ")));
+
+        if !constraints.is_empty() {
+            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
+        }
+    }
+
+    fn emit_template_prefix_without_type_defaults(&mut self, generics: &syn::Generics) {
+        let (params, constraints) = self.collect_emitted_template_parts(generics, false);
         if params.is_empty() {
             return;
         }
@@ -33579,6 +33768,36 @@ struct Formatter {\n\
             return Result::Ok(std::make_tuple());\n\
         }\n\
     };\n\
+    struct DebugStruct {\n\
+        const Formatter* formatter;\n\
+        bool first = true;\n\
+        explicit DebugStruct(const Formatter* formatter_init) : formatter(formatter_init) {}\n\
+        template<typename Name>\n\
+        DebugStruct& name(Name&& value) {\n\
+            if (formatter) {\n\
+                formatter->append_one(std::forward<Name>(value));\n\
+                formatter->out_ += \"{\";\n\
+            }\n\
+            return *this;\n\
+        }\n\
+        template<typename FieldName, typename Arg>\n\
+        DebugStruct& field(FieldName&& field_name, Arg&& arg) {\n\
+            if (formatter) {\n\
+                if (!first) { formatter->out_ += \", \"; }\n\
+                first = false;\n\
+                formatter->append_one(std::forward<FieldName>(field_name));\n\
+                formatter->out_ += \": \";\n\
+                formatter->append_one(std::forward<Arg>(arg));\n\
+            }\n\
+            return *this;\n\
+        }\n\
+        Result finish() {\n\
+            if (formatter) {\n\
+                formatter->out_ += \"}\";\n\
+            }\n\
+            return Result::Ok(std::make_tuple());\n\
+        }\n\
+    };\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
@@ -33599,6 +33818,12 @@ struct Formatter {\n\
         DebugTuple tuple(this);\n\
         tuple.name(std::forward<Name>(name));\n\
         return tuple;\n\
+    }\n\
+    template<typename Name>\n\
+    DebugStruct debug_struct(Name&& name) const {\n\
+        DebugStruct st(this);\n\
+        st.name(std::forward<Name>(name));\n\
+        return st;\n\
     }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
 private:\n\
@@ -34429,6 +34654,12 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_string_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_sync_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_thread_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_net_import(normalized) {
         return action;
     }
@@ -34503,6 +34734,17 @@ fn parse_namespace_alias_target(statement: &str) -> Option<&str> {
         return None;
     }
     Some(target)
+}
+
+fn parse_namespace_alias_name(statement: &str) -> Option<&str> {
+    let trimmed = statement.trim().strip_suffix(';')?;
+    let rest = trimmed.strip_prefix("namespace ")?;
+    let (alias, _) = rest.split_once('=')?;
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return None;
+    }
+    Some(alias)
 }
 
 fn alias_target_requires_template_alias(target: &str) -> bool {
@@ -34719,6 +34961,84 @@ fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
         return Some(UseImportAction::Using("rusty::String".to_string()));
     }
     None
+}
+
+fn rewrite_std_sync_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::sync" || path == "core::sync" {
+        // Avoid introducing a global `sync` namespace alias, which collides with
+        // POSIX `::sync()` when system headers are visible.
+        return Some(UseImportAction::RustOnly);
+    }
+
+    let sync_item = path
+        .strip_prefix("std::sync::")
+        .or_else(|| path.strip_prefix("core::sync::"))?;
+
+    if sync_item == "atomic" {
+        return Some(UseImportAction::Raw(
+            "namespace atomic = rusty::sync::atomic;".to_string(),
+        ));
+    }
+    if let Some(item) = sync_item.strip_prefix("atomic::") {
+        let action = match item {
+            "AtomicBool" => UseImportAction::Using("rusty::sync::atomic::AtomicBool".to_string()),
+            "AtomicPtr" => UseImportAction::Using("rusty::sync::atomic::AtomicPtr".to_string()),
+            "AtomicUsize" => UseImportAction::Using("rusty::sync::atomic::AtomicUsize".to_string()),
+            "Ordering" => UseImportAction::Using("rusty::sync::atomic::Ordering".to_string()),
+            "fence" => UseImportAction::Using("rusty::sync::atomic::fence".to_string()),
+            _ => UseImportAction::RustOnly,
+        };
+        return Some(action);
+    }
+
+    if sync_item == "mpsc" {
+        return Some(UseImportAction::Raw(
+            "namespace mpsc = rusty::sync::mpsc;".to_string(),
+        ));
+    }
+    if let Some(item) = sync_item.strip_prefix("mpsc::") {
+        let action = match item {
+            "channel" => UseImportAction::Using("rusty::sync::mpsc::channel".to_string()),
+            "Sender" => UseImportAction::Using("rusty::sync::mpsc::Sender".to_string()),
+            "Receiver" => UseImportAction::Using("rusty::sync::mpsc::Receiver".to_string()),
+            "RecvError" => UseImportAction::Using("rusty::sync::mpsc::RecvError".to_string()),
+            "TryRecvError" => UseImportAction::Using("rusty::sync::mpsc::TryRecvError".to_string()),
+            "TrySendError" => UseImportAction::Using("rusty::sync::mpsc::TrySendError".to_string()),
+            _ => UseImportAction::RustOnly,
+        };
+        return Some(action);
+    }
+
+    let action = match sync_item {
+        "Arc" => UseImportAction::Using("rusty::Arc".to_string()),
+        "Weak" => UseImportAction::Using("rusty::Weak".to_string()),
+        "Mutex" => UseImportAction::Using("rusty::Mutex".to_string()),
+        "RwLock" => UseImportAction::Using("rusty::RwLock".to_string()),
+        "Condvar" => UseImportAction::Using("rusty::Condvar".to_string()),
+        "Barrier" => UseImportAction::Using("rusty::Barrier".to_string()),
+        "Once" => UseImportAction::Using("rusty::Once".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_thread_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::thread" {
+        return Some(UseImportAction::Raw(
+            "namespace thread = rusty::thread;".to_string(),
+        ));
+    }
+
+    let thread_item = path.strip_prefix("std::thread::")?;
+    let action = match thread_item {
+        "spawn" => UseImportAction::Using("rusty::thread::spawn".to_string()),
+        "Thread" => UseImportAction::Using("rusty::thread::Thread".to_string()),
+        "current" => UseImportAction::Using("rusty::thread::current".to_string()),
+        "park" => UseImportAction::Using("rusty::thread::park".to_string()),
+        "yield_now" => UseImportAction::Using("rusty::thread::yield_now".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 fn rewrite_std_net_import(path: &str) -> Option<UseImportAction> {
@@ -36967,6 +37287,31 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf523_top_level_const_mut_pointer_forward_decl_preserves_pointee_mutability() {
+        let out = transpile_str(
+            r#"
+            const P: *mut i32 = std::ptr::null_mut();
+            fn f() -> *mut i32 { P }
+            "#,
+        );
+        assert!(
+            out.contains("extern int32_t* const P;"),
+            "expected pointer-const forward declaration shape, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("extern const int32_t* P;"),
+            "forward declaration must not turn *mut T into const T*:\n{}",
+            out
+        );
+        assert!(
+            out.contains("int32_t* const P ="),
+            "definition must preserve mutable-pointee pointer-const shape, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf41543333333327111_local_new_const_uses_factory_materialization() {
         let out = transpile_str(
             r#"
@@ -38775,6 +39120,48 @@ mod tests {
         assert!(!out.contains("std::visit(overloaded {"));
         assert!(!out.contains("const Ok&"));
         assert!(!out.contains("const Err&"));
+    }
+
+    #[test]
+    fn test_leaf523_runtime_result_keyword_binding_uses_escaped_cpp_name() {
+        let out = transpile_str(
+            r#"
+            fn f(x: Result<i32, (i32, i32)>) -> i32 {
+                match x {
+                    Ok(v) => v,
+                    Err((void, other)) => void + other,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto&& void_ = std::get<0>(_mv1);"),
+            "expected escaped binding, got:\n{}",
+            out
+        );
+        assert!(!out.contains("auto&& void = std::get<0>(_mv1);"));
+    }
+
+    #[test]
+    fn test_leaf523_empty_match_expr_lowers_to_typed_unreachable() {
+        let out = transpile_str(
+            r#"
+            enum Void {}
+            fn f(v: Void) -> i32 {
+                match v {}
+            }
+            "#,
+        );
+        assert!(
+            out.contains("[&]() -> int32_t { rusty::intrinsics::unreachable(); }()"),
+            "empty match should lower to typed unreachable, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("auto&& _m = v;  }()"),
+            "empty match must not emit empty lambda body, got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -42101,6 +42488,43 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf522_std_sync_atomic_and_mpsc_imports_rewritten() {
+        let out = transpile_str(
+            r#"
+            use std::sync::atomic;
+            use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
+            use std::sync::mpsc::channel;
+        "#,
+        );
+        assert!(out.contains("namespace atomic = rusty::sync::atomic;"));
+        assert!(out.contains("using rusty::sync::atomic::AtomicBool;"));
+        assert!(out.contains("using rusty::sync::atomic::AtomicPtr;"));
+        assert!(out.contains("using rusty::sync::atomic::AtomicUsize;"));
+        assert!(out.contains("using rusty::sync::atomic::Ordering;"));
+        assert!(out.contains("using rusty::sync::atomic::fence;"));
+        assert!(out.contains("using rusty::sync::mpsc::channel;"));
+        assert!(!out.contains("using std::sync::atomic"));
+        assert!(!out.contains("using std::sync::mpsc::channel"));
+    }
+
+    #[test]
+    fn test_leaf522_std_thread_imports_rewritten() {
+        let out = transpile_str(
+            r#"
+            use std::thread;
+            use std::thread::{Thread, current, park, yield_now};
+        "#,
+        );
+        assert!(out.contains("namespace thread = rusty::thread;"));
+        assert!(out.contains("using rusty::thread::Thread;"));
+        assert!(out.contains("using rusty::thread::current;"));
+        assert!(out.contains("using rusty::thread::park;"));
+        assert!(out.contains("using rusty::thread::yield_now;"));
+        assert!(!out.contains("using std::thread::Thread"));
+        assert!(!out.contains("using std::thread::current"));
+    }
+
+    #[test]
     fn test_leaf4154333333334_std_str_imports_rewritten() {
         let out = transpile_str(
             r#"
@@ -44641,6 +45065,48 @@ mod tests {
         );
         assert!(out.contains("template<bool CHECK = false>"));
         assert!(out.contains("return with_default(7);"));
+    }
+
+    #[test]
+    fn test_leaf523_type_generic_default_is_preserved_in_template_prefix() {
+        let out = transpile_str(
+            r#"
+            struct Wrapper<T, U = T> {
+                value: U,
+                marker: T,
+            }
+            "#,
+        );
+        assert!(out.contains("template<typename T, typename U = T>"));
+    }
+
+    #[test]
+    fn test_leaf523_fn_pointer_type_default_is_preserved_in_template_prefix() {
+        let out = transpile_str(
+            r#"
+            struct Lazy<T, F = fn() -> T> {
+                init: F,
+            }
+            "#,
+        );
+        assert!(out.contains("template<typename T, typename F = rusty::SafeFn<T()>>"));
+    }
+
+    #[test]
+    fn test_leaf523_forward_declaration_omits_type_defaults() {
+        let out = transpile_str_module(
+            r#"
+            pub struct Wrapper<T, U = T> {
+                value: U,
+            }
+            "#,
+            "defaults",
+        );
+        assert!(out.contains("template<typename T, typename U>\nstruct Wrapper;"));
+        assert!(
+            out.contains("template<typename T, typename U = T>\nexport struct Wrapper {")
+                || out.contains("template<typename T, typename U = T>\nstruct Wrapper {")
+        );
     }
 
     #[test]
@@ -47537,6 +48003,31 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf521_module_name_sync_is_renamed_to_avoid_global_symbol_collision() {
+        let out = transpile_str(
+            r#"
+            mod sync {
+                pub fn spin() {}
+            }
+            fn use_it() {
+                sync::spin();
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("namespace sync_mod {"),
+            "expected sync namespace rename, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("sync_mod::spin"),
+            "expected rewritten path through renamed namespace, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
         let out = transpile_str(
             r#"
@@ -48867,6 +49358,110 @@ mod tests {
         assert!(out.contains("template<typename... Ts> using Option2 = rusty::Option<Ts...>;"));
         assert!(!out.contains("using std::option::Option2 ="));
         assert!(!out.contains("using Option2 = std::option::Option"));
+    }
+
+    #[test]
+    fn test_leaf523_generic_type_alias_import_uses_template_alias_form() {
+        let out = transpile_str(
+            r#"
+            mod imp {
+                pub struct OnceCell<T> {
+                    value: T,
+                }
+            }
+            mod sync {
+                use super::imp::OnceCell as Imp;
+                pub struct Wrapper<T> {
+                    inner: Imp<T>,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("template<typename... Ts> using Imp = imp::OnceCell<Ts...>;"));
+        assert!(!out.contains("using Imp = imp::OnceCell;"));
+    }
+
+    #[test]
+    fn test_leaf523_generic_alias_owner_path_recovers_omitted_type_args() {
+        let out = transpile_str(
+            r#"
+            mod imp {
+                pub struct OnceCell<T>(T);
+                impl<T> OnceCell<T> {
+                    pub fn new_() -> OnceCell<T> {
+                        panic!();
+                    }
+                }
+            }
+            mod sync {
+                use super::imp::OnceCell as Imp;
+                pub struct Wrap<T>(Imp<T>);
+                impl<T> Wrap<T> {
+                    pub fn new_() -> Wrap<T> {
+                        Wrap(Imp::new_())
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("template<typename... Ts> using Imp = imp::OnceCell<Ts...>;"));
+        assert!(out.contains("Imp<T>::new_()"), "expected recovered alias args, got:\n{}", out);
+        assert!(!out.contains("Imp::new_()"));
+    }
+
+    #[test]
+    fn test_leaf523_non_bitflags_newtype_with_operator_impl_does_not_emit_flags_helpers() {
+        let out = transpile_str(
+            r#"
+            struct Newtype(u32);
+            impl core::ops::BitOr for Newtype {
+                type Output = Newtype;
+                fn bitor(self, _rhs: Newtype) -> Newtype {
+                    self
+                }
+            }
+            "#,
+        );
+        assert!(!out.contains("FLAGS.size()"), "unexpected FLAGS helper emitted:\n{}", out);
+        assert!(!out.contains("iter_names() const"), "unexpected bitflags helper emitted:\n{}", out);
+    }
+
+    #[test]
+    fn test_leaf523_use_alias_root_is_not_misclassified_as_external_crate() {
+        let out = transpile_str(
+            r#"
+            use core::sync::atomic as atomic;
+            use atomic::{AtomicUsize, Ordering};
+            fn f() {
+                let x = AtomicUsize::new_(0);
+                let _ = x.load(Ordering::Acquire);
+            }
+            "#,
+        );
+        assert!(out.contains("namespace atomic = rusty::sync::atomic;"));
+        assert!(out.contains("using atomic::AtomicUsize;"));
+        assert!(out.contains("using atomic::Ordering;"));
+        assert!(!out.contains("external crate 'atomic'"));
+        assert!(!out.contains("Rust-only unresolved import: using atomic::AtomicUsize;"));
+    }
+
+    #[test]
+    fn test_leaf523_rewritten_namespace_alias_root_is_not_misclassified_as_external_crate() {
+        let out = transpile_str(
+            r#"
+            use core::sync::atomic;
+            use atomic::{AtomicUsize, Ordering};
+            fn f() {
+                let x = AtomicUsize::new_(0);
+                let _ = x.load(Ordering::Acquire);
+            }
+            "#,
+        );
+        assert!(out.contains("namespace atomic = rusty::sync::atomic;"));
+        assert!(out.contains("using atomic::AtomicUsize;"));
+        assert!(out.contains("using atomic::Ordering;"));
+        assert!(!out.contains("external crate 'atomic'"));
+        assert!(!out.contains("Rust-only unresolved import: using atomic::AtomicUsize;"));
     }
 
     #[test]
@@ -51323,8 +51918,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("std::add_pointer_t<T> p"));
-        assert!(out.contains("std::add_pointer_t<std::add_const_t<T>> q"));
+        assert!(out.contains("T* p"));
+        assert!(out.contains("const T* q"));
         assert!(out.contains("std::add_pointer_t<const int32_t&> r"));
         assert!(!out.contains("&*"));
     }
@@ -51793,6 +52388,35 @@ mod tests {
         assert!(out.contains("auto _m0_tmp = rusty::slice_full(buf);"));
         assert!(out.contains("auto _m1_tmp = rusty::slice_to(mock, rusty::len(buf));"));
         assert!(!out.contains("auto _m1 = &rusty::slice_to(mock, rusty::len(buf));"));
+    }
+
+    #[test]
+    fn test_leaf5191_tuple_match_deref_temporary_materializes_before_address() {
+        let out = transpile_str(
+            r#"
+            use std::ops::Deref;
+
+            struct BoxI32 { value: i32 }
+
+            impl Deref for BoxI32 {
+                type Target = i32;
+                fn deref(&self) -> &Self::Target { &self.value }
+            }
+
+            fn mk() -> BoxI32 { BoxI32 { value: 1 } }
+
+            fn f() {
+                match (&*mk(), &1) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("auto _m0_tmp = *mk();"), "{out}");
+        assert!(out.contains("auto _m0 = &_m0_tmp;"), "{out}");
+        assert!(!out.contains("auto _m0 = &*mk();"), "{out}");
     }
 
     #[test]

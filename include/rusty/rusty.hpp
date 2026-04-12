@@ -59,11 +59,14 @@
 #include "rusty/move.hpp"
 
 // Synchronization primitives (std::sync equivalent)
+#include "rusty/sync/atomic.hpp"
+#include "rusty/sync/mpsc.hpp"
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"
 #include "rusty/condvar.hpp"
 #include "rusty/barrier.hpp"
 #include "rusty/once.hpp"
+#include "rusty/thread.hpp"
 #include "rusty/async.hpp"
 
 // Convenience aliases in rusty namespace

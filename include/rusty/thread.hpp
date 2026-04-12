@@ -5,12 +5,67 @@
 #include <memory>
 #include <concepts>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 #include <functional>
 #include "traits.hpp"
 
 namespace rusty::thread {
+
+namespace detail {
+struct ParkToken {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool notified = false;
+};
+
+inline std::shared_ptr<ParkToken> current_park_token() {
+    thread_local std::shared_ptr<ParkToken> token = std::make_shared<ParkToken>();
+    return token;
+}
+} // namespace detail
+
+class Thread {
+private:
+    std::shared_ptr<detail::ParkToken> token_;
+
+    explicit Thread(std::shared_ptr<detail::ParkToken> token)
+        : token_(std::move(token)) {}
+
+public:
+    Thread()
+        : token_(detail::current_park_token()) {}
+
+    static Thread current() {
+        return Thread(detail::current_park_token());
+    }
+
+    void unpark() const {
+        if (!token_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(token_->mutex);
+        token_->notified = true;
+        token_->cv.notify_one();
+    }
+};
+
+inline Thread current() {
+    return Thread::current();
+}
+
+inline void park() {
+    auto token = detail::current_park_token();
+    std::unique_lock<std::mutex> lock(token->mutex);
+    token->cv.wait(lock, [&]() { return token->notified; });
+    token->notified = false;
+}
+
+inline void yield_now() {
+    std::this_thread::yield();
+}
 
 // ============================================================================
 // JoinHandle - Rust-style: detaches on drop if not joined
