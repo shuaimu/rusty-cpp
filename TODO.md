@@ -5206,6 +5206,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-53b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated across transpiler/runtime surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.54: `smallvec` Stage D `rusty::iter` option-like `next()` receiver compile-head family collapse
+          - Plan/scope check: shared runtime-header hardening plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - runtime `rusty::iter(...)` now accepts option-like `next()` iterators as valid iterable receivers and preserves receiver forwarding/reference category through shared range-preservation plumbing.
+            - option-like `next()` result detection in `include/rusty/slice.hpp` no longer depends on helpers defined in other headers; `slice.hpp` now carries local option-like probe/take helpers with slice-local trait names, removing include-order coupling that previously blocked iterator-shape recognition.
+            - this collapses the deterministic post-5.1.53 first-head family at `include/rusty/slice.hpp:583` / `runner.cpp:2273` (`rusty::iter((*this))` rejected for `IntoIter` receivers, then invalid-void-expression fallout in `for_in(iter(...))` lowering).
+          - Implemented in:
+            - `include/rusty/slice.hpp`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5154_slice_iter_accepts_option_like_next_iterators`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5154 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics slice_ -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-54a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.53 first-head family at `include/rusty/slice.hpp:583` / `runner.cpp:2273` (`rusty::iter` rejecting option-like `next()` receivers) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/option.hpp:211` (`Option<T>::unwrap_or_else` default callable returns `void` in `swap_remove` unreachable-path lowering at `runner.cpp:1731`), followed by downstream CTAD/adapter families (`DropOnPanic` constructor deduction at `runner.cpp:1838`, `iterable.into_iter()` shape at `runner.cpp:1815`, and related runtime-surface fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-54a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and shape-gated in runtime iterator adaptation; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -382,6 +382,40 @@ fn test_slice_for_each_runtime_adapter_surface() {
 }
 
 #[test]
+fn test_leaf5154_slice_iter_accepts_option_like_next_iterators() {
+    let source = r#"
+        #include <rusty/slice.hpp>
+
+        struct CountingIter {
+            int current;
+            int end;
+
+            rusty::Option<int> next() {
+                if (current >= end) {
+                    return rusty::None;
+                }
+                return rusty::Option<int>(current++);
+            }
+        };
+
+        int main() {
+            CountingIter iter{0, 4};
+            int sum = 0;
+            for (auto&& value : rusty::for_in(rusty::iter(iter))) {
+                sum += value;
+            }
+
+            if (sum != 6) {
+                return 1;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_iter_option_like_next_surface");
+}
+
+#[test]
 fn test_slice_get_runtime_helper_surface() {
     let source = r#"
         #include <array>

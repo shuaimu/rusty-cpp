@@ -124,6 +124,58 @@ namespace detail {
 template<typename T>
 inline constexpr bool dependent_false_v = false;
 
+template<typename T, typename = void>
+struct slice_has_is_some : std::false_type {};
+
+template<typename T>
+struct slice_has_is_some<T, std::void_t<decltype(std::declval<const T&>().is_some())>>
+    : std::true_type {};
+
+template<typename T, typename = void>
+struct slice_has_unwrap : std::false_type {};
+
+template<typename T>
+struct slice_has_unwrap<T, std::void_t<decltype(std::declval<T&>().unwrap())>>
+    : std::true_type {};
+
+template<typename T, typename = void>
+struct slice_has_has_value : std::false_type {};
+
+template<typename T>
+struct slice_has_has_value<T, std::void_t<decltype(std::declval<const T&>().has_value())>>
+    : std::true_type {};
+
+template<typename T, typename = void>
+struct slice_has_reset : std::false_type {};
+
+template<typename T>
+struct slice_has_reset<T, std::void_t<decltype(std::declval<T&>().reset())>>
+    : std::true_type {};
+
+template<typename Opt>
+bool option_like_has_value(const Opt& opt) {
+    if constexpr (slice_has_is_some<Opt>::value) {
+        return opt.is_some();
+    } else if constexpr (slice_has_has_value<Opt>::value) {
+        return opt.has_value();
+    } else {
+        return static_cast<bool>(opt);
+    }
+}
+
+template<typename Opt>
+auto option_like_take_value(Opt& opt) {
+    if constexpr (slice_has_unwrap<Opt>::value) {
+        return opt.unwrap();
+    } else if constexpr (slice_has_has_value<Opt>::value && slice_has_reset<Opt>::value) {
+        auto value = std::move(*opt);
+        opt.reset();
+        return value;
+    } else {
+        return std::move(*opt);
+    }
+}
+
 template<typename NextResult, typename = void>
 struct is_option_like_next_result : std::false_type {};
 
@@ -131,8 +183,8 @@ template<typename NextResult>
 struct is_option_like_next_result<
     NextResult,
     std::void_t<
-        decltype(option_has_value(std::declval<const NextResult&>())),
-        decltype(option_take_value(std::declval<NextResult&>()))>> : std::true_type {};
+        decltype(option_like_has_value(std::declval<const NextResult&>())),
+        decltype(option_like_take_value(std::declval<NextResult&>()))>> : std::true_type {};
 
 template<typename NextResult>
 inline constexpr bool is_option_like_next_result_v =
@@ -154,7 +206,7 @@ using next_result_t = decltype(std::declval<Iter&>().next());
 
 template<typename Iter>
 using next_item_t =
-    std::decay_t<decltype(option_take_value(std::declval<next_result_t<Iter>&>()))>;
+    std::decay_t<decltype(option_like_take_value(std::declval<next_result_t<Iter>&>()))>;
 
 template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
@@ -205,11 +257,11 @@ public:
         void advance() {
             current_.reset();
             auto next_item = iter_->next();
-            if (!option_has_value(next_item)) {
+            if (!option_like_has_value(next_item)) {
                 at_end_ = true;
                 return;
             }
-            current_.emplace(option_take_value(next_item));
+            current_.emplace(option_like_take_value(next_item));
             at_end_ = false;
         }
 
@@ -246,12 +298,12 @@ public:
             std::invoke(std::declval<Func&>(), deref_if_pointer(std::declval<item_type>())))>;
 
         auto item = iter_.next();
-        if (!option_has_value(item)) {
+        if (!option_like_has_value(item)) {
             return std::optional<mapped_type>{};
         }
         return std::optional<mapped_type>(std::invoke(
             func_,
-            deref_if_pointer(option_take_value(item))));
+            deref_if_pointer(option_like_take_value(item))));
     }
 
 private:
@@ -277,13 +329,13 @@ public:
         using item_type = next_item_t<Iter>;
         using entry_type = std::tuple<size_t, item_type>;
         auto item = iter_.next();
-        if (!option_has_value(item)) {
+        if (!option_like_has_value(item)) {
             return std::optional<entry_type>{};
         }
         return std::optional<entry_type>(
             std::in_place,
             index_++,
-            option_take_value(item)
+            option_like_take_value(item)
         );
     }
 
@@ -339,7 +391,7 @@ public:
             return next_result{};
         }
         auto item = iter_.next();
-        if (!option_has_value(item)) {
+        if (!option_like_has_value(item)) {
             return item;
         }
         --remaining_;
@@ -369,7 +421,7 @@ public:
     auto next() {
         while (remaining_ > 0) {
             auto skipped = iter_.next();
-            if (!option_has_value(skipped)) {
+            if (!option_like_has_value(skipped)) {
                 remaining_ = 0;
                 return skipped;
             }
@@ -410,10 +462,10 @@ public:
 
         while (true) {
             auto item = iter_.next();
-            if (!option_has_value(item)) {
+            if (!option_like_has_value(item)) {
                 return next_result{};
             }
-            item_type candidate = option_take_value(item);
+            item_type candidate = option_like_take_value(item);
             if (std::invoke(pred_, deref_if_pointer(candidate))) {
                 return next_result(std::move(candidate));
             }
@@ -470,15 +522,15 @@ public:
         }
 
         auto item = iter_.next();
-        if (!option_has_value(item)) {
+        if (!option_like_has_value(item)) {
             return scan_result{};
         }
 
         auto scanned = std::invoke(
             func_,
             state_,
-            deref_if_pointer(option_take_value(item)));
-        if (!option_has_value(scanned)) {
+            deref_if_pointer(option_like_take_value(item)));
+        if (!option_like_has_value(scanned)) {
             done_ = true;
         }
         return scanned;
@@ -568,6 +620,8 @@ template<typename Range>
 decltype(auto) iter(Range&& range) {
     if constexpr (requires { std::forward<Range>(range).iter(); }) {
         return std::forward<Range>(range).iter();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::preserve_for_in_range(std::forward<Range>(range));
     } else if constexpr (requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }) {
         auto&& view = std::forward<Range>(range);
         using elem_ptr = decltype(view.data());
@@ -581,7 +635,7 @@ decltype(auto) iter(Range&& range) {
     } else {
         static_assert(
             detail::dependent_false_v<Range>,
-            "rusty::iter requires iter(), data()/size(), or dereferenceable receiver"
+            "rusty::iter requires iter(), option-like next(), data()/size(), or dereferenceable receiver"
         );
     }
 }

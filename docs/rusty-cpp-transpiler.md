@@ -2464,6 +2464,10 @@ Current status snapshot:
    - adding shared runtime `NonNull<T>::as_mut()` surface in `include/rusty/ptr.hpp`, and
    - hardening local-binding inference/emission so `let x = ptr.as_mut()` preserves mutable-reference declaration shape instead of decaying to `const auto` copy.
 110. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/slice.hpp:583` (`rusty::iter requires iter(), data()/size(), or dereferenceable receiver`) with adjacent `runner.cpp:2273` invalid-void-expression fallout and downstream iterator/option-surface gaps. Guardrail check against §11 remains satisfied for `Leaf 5.1.53` (fixes stayed shared and AST/type-shape-gated across transpiler/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+111. Focused `smallvec` repro after `Leaf 5.1.54` (`/tmp/rusty-parity-matrix-5-1-54a-20260412/smallvec/...`) collapses the prior post-5.1.53 `rusty::iter` option-like `next()` rejection family by:
+   - allowing `rusty::iter(...)` to treat option-like `next()` receivers as valid iterable surfaces while preserving receiver forwarding/reference category, and
+   - making option-like `next()` detection in `include/rusty/slice.hpp` self-contained (slice-local option probe/take helpers) so iterator-shape recognition no longer depends on helper definitions from other headers/include order.
+112. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/option.hpp:211` (`Option<T>::unwrap_or_else` default callable returns `void` in `swap_remove` unreachable-path lowering at `runner.cpp:1731`), followed by downstream CTAD/adapter families (`DropOnPanic` constructor deduction at `runner.cpp:1838`, `iterable.into_iter()` shape at `runner.cpp:1815`, and related runtime-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.54` (fix stayed shared and shape-gated in runtime iterator adaptation, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
