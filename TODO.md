@@ -5954,7 +5954,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-87a-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in generic `Drop` move-ctor generation; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.88: `smallvec` Stage E `tests_max_swap_remove` expected-panic mismatch (`FAILED: expected panic`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.88: `smallvec` Stage E `tests_max_swap_remove` expected-panic mismatch (`FAILED: expected panic`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared transpiler hardening for lowered `swap(i, j)` call semantics:
+            - `transpiler/src/codegen.rs`: index-swap lowering now evaluates both indices once (`_swap_i`, `_swap_j`), computes `rusty::len(_swap_view)`, and emits explicit bounds-guarded panic (`rusty::panicking::panic("index out of bounds")`) before calling `rusty::mem::swap(...)`.
+            - this restores Rust panic behavior for out-of-bounds `swap` calls on lowered slice/view receivers and prevents unchecked `operator[]` access in generated C++.
+          - Added focused regressions:
+            - strengthened `codegen::tests::test_leaf5127_smallvec_swap_on_self_lowers_to_index_swap_helper` to assert single-evaluation bindings and explicit bounds-guarded panic before swap.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5127 -- --nocapture`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-88b-20260412`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+          - Deterministic frontier movement:
+            - prior post-5.1.87 first Stage E failure (`tests_max_swap_remove FAILED: expected panic` with trailing allocator abort) is collapsed from deterministic first-head slots.
+            - `tests_max_swap_remove` now passes (`expected panic` honored); new first deterministic Stage E failure is allocator abort on `rusty_test_tests_test_as_ref` (single-test runner repro: `free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-88b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in generic method-call lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.89: `smallvec` Stage E allocator abort after `tests_test_as_mut` with single-test deterministic repro on `rusty_test_tests_test_as_ref` (`free(): double free detected in tcache 2`) failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

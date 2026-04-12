@@ -20667,7 +20667,7 @@ impl CodeGen {
                 "_swap_recv"
             };
             return format!(
-                "[&]() {{ auto&& _swap_recv = {}; auto&& _swap_view = {}; rusty::mem::swap(_swap_view[{}], _swap_view[{}]); }}()",
+                "[&]() {{ auto&& _swap_recv = {}; auto&& _swap_view = {}; const auto _swap_i = {}; const auto _swap_j = {}; const auto _swap_len = rusty::len(_swap_view); if (!(_swap_i < _swap_len && _swap_j < _swap_len)) {{ rusty::panicking::panic(\"index out of bounds\"); }} rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]); }}()",
                 receiver, swap_view_expr, lhs_idx, rhs_idx
             );
         }
@@ -50786,7 +50786,19 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("rusty::mem::swap(_swap_view[i], _swap_view[j]);"),
+            out.contains("const auto _swap_i = i;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("const auto _swap_j = j;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("if (!(_swap_i < _swap_len && _swap_j < _swap_len)) { rusty::panicking::panic(\"index out of bounds\"); }"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]);"),
             "{out}"
         );
         assert!(!out.contains("this->swap("), "{out}");
