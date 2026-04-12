@@ -10209,11 +10209,12 @@ impl CodeGen {
         if path_expr.path.segments.len() < 2 {
             return None;
         }
+        let owner_seg_idx = path_expr.path.segments.len().saturating_sub(2);
         let owner = path_expr
             .path
             .segments
             .iter()
-            .nth_back(1)
+            .nth(owner_seg_idx)
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
         let method = path_expr
@@ -10230,8 +10231,16 @@ impl CodeGen {
         if !owner_looks_like_type {
             return None;
         }
-        self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr)
+        let expected = self
+            .lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr)
             .or_else(|| self.lookup_method_arg_expected_type(&method, arg_idx).cloned())
+            ?;
+        if let Some(substitutions) =
+            self.owner_segment_type_arg_substitutions(&path_expr.path, owner_seg_idx)
+        {
+            return Some(self.substitute_type_params_in_type(&expected, &substitutions));
+        }
+        Some(expected)
     }
 
     fn collect_uninitialized_local_type_hints_from_method_call(
@@ -49219,6 +49228,14 @@ mod tests {
                 && !out.contains("std::span<const A::Item>(_slice_ref_tmp)")
                 && !out.contains("-> std::span<const A::Item>"),
             "concrete-owner associated from indexed-slice calls must not leak unresolved A::Item span surfaces\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::span<const int"),
+            "indexed-slice lowering should not regress to integer-default span element typing\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::array{1, 2, 3}"),
+            "indexed-slice lowering should keep typed array storage under associated-owner expected context\nGot: {out}"
         );
     }
 

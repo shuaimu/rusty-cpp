@@ -2405,6 +2405,10 @@ Current status snapshot:
    - hardening `try_emit_reference_expr_with_expected_span_storage(...)` to detect out-of-scope type-parameter leakage in expected span element surfaces, and
    - lowering those cases via deduced span-storage lambda return shapes instead of explicit `std::span<const A::Item>` emission.
 82. New first deterministic Stage D head in `smallvec` remains at `runner.cpp:3906/3964` but moves to concrete element-typing mismatch (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)` no matching overload), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapters, `from_iter`/`from_raw_parts`, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.39` (fix stayed shared and type-surface-gated, with no crate-specific scripts and no generated-output text patching).
+83. Focused `smallvec` repro after `Leaf 5.1.40` (`/tmp/rusty-parity-matrix-5-1-40a-20260412/smallvec/...`) collapses the prior post-5.1.39 concrete span element mismatch family by:
+   - applying owner-segment generic substitutions to associated-call fallback expected types (`Owner::<...>::method(...)`) before argument lowering, and
+   - preserving specialized element context for indexed-slice associated `from(...)` calls so fallback no longer degrades to `std::span<const int>`.
+84. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4087` (`clone_iter.next().value()` lowering to private `Option` member/call surface), followed by downstream runtime/adapter gaps (`IntoIter::skip`, `Vec::from_raw_parts`, `Vec::from_iter`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.40` (fix stayed shared and owner-type-substitution-gated in core associated-call fallback typing, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

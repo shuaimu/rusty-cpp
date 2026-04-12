@@ -4839,6 +4839,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-39a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-surface-gated in core span-storage lowering; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.40: `smallvec` Stage D associated-call fallback owner-type substitution for indexed-slice `from(...)` arguments compile-head family collapse
+          - Plan/scope check: shared transpiler-only associated-call expected-type substitution hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - associated-call expected-type fallback now applies owner-segment generic substitutions for path forms like `Owner::<T...>::method(...)` before returning argument expected types.
+            - this ensures fallback expected types derived from owner-method metadata (`&[A::Item]`) are specialized at call sites (`A -> [u32; 2]`) instead of leaking unresolved owner-type parameters into downstream expression typing.
+            - indexed-slice lowering for `SmallVec::<[u32;2]>::from(&[1,2,3][..])` now carries specialized element context and no longer regresses to `std::span<const int>` mismatch at the deterministic compile head.
+          - Implemented in `transpiler/src/codegen.rs`:
+            - `lookup_associated_call_arg_expected_type_fallback(...)` now:
+              - resolves owner segment index deterministically for associated-call paths,
+              - substitutes owner generic args into fallback expected argument types via `owner_segment_type_arg_substitutions(...)` + `substitute_type_params_in_type(...)`.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - strengthened `test_leaf5139_assoc_from_indexed_slice_avoids_unresolved_item_span_surface` to assert:
+              - no `std::span<const int...>` fallback,
+              - no untyped `std::array{1, 2, 3}` regression.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5139 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-40a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.39 first-head family at `runner.cpp:3906/3964` (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)` no matching overload) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4087` (`clone_iter.next().value()` lowering to private `Option` union member surface / invalid call), followed by downstream runtime/adapter gaps (`IntoIter::skip`, `Vec::from_raw_parts`, `Vec::from_iter`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-40a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and owner-type-substitution-gated in core associated-call fallback typing; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
