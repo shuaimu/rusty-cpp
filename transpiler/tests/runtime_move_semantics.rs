@@ -1638,6 +1638,40 @@ fn test_mem_forget_marks_const_values_with_rusty_drop_guard() {
 }
 
 #[test]
+fn test_leaf5183_mem_forget_non_marked_vec_transfers_ownership() {
+    let source = r#"
+        #include <array>
+        #include <rusty/mem.hpp>
+        #include <rusty/rusty.hpp>
+        #include <rusty/vec.hpp>
+
+        int main() {
+            auto vec = rusty::boxed::into_vec(
+                rusty::boxed::box_new(std::array<unsigned char, 4>{1, 2, 3, 4}));
+            const auto len = vec.len();
+            const auto cap = vec.capacity();
+            auto* ptr = rusty::as_mut_ptr(vec);
+
+            rusty::mem::forget(std::move(vec));
+
+            {
+                auto recovered = rusty::Vec<unsigned char>::from_raw_parts(ptr, len, cap);
+                if (recovered.len() != 4) {
+                    return 1;
+                }
+                if (recovered[0] != 1 || recovered[3] != 4) {
+                    return 2;
+                }
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5183_mem_forget_non_marked_vec");
+}
+
+#[test]
 fn test_mem_forget_const_prevents_is_empty_destructor_recursion_shape() {
     let source = r#"
         #include <rusty/mem.hpp>

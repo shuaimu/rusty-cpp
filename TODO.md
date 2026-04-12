@@ -5864,6 +5864,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-82c-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core tuple/reference lowering and inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.83: `smallvec` Stage E `tests_drain_forget` allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime ownership-forget hardening in `include/rusty/mem.hpp`:
+            - added `rusty::mem::detail::leak_construct<T>(...)` helper with nothrow raw allocation and constructor-exception cleanup, so forget fallback can intentionally leak safely without hidden teardown crashes.
+            - extended `rusty::mem::forget(T&&)` for types without `rusty_mark_forgotten` to transfer ownership into leaked storage (move-first, copy fallback) instead of prior no-op behavior, so moved owning values (for example `rusty::Vec`) are actually forgotten and do not double-free later.
+          - Added focused regression:
+            - `runtime_move_semantics::test_leaf5183_mem_forget_non_marked_vec_transfers_ownership`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf5183_mem_forget_non_marked_vec_transfers_ownership -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-83b-20260412`
+          - Deterministic frontier movement:
+            - prior post-5.1.82 first Stage E failure family (`tests_drain_forget` allocator abort) is collapsed from deterministic first-head slots.
+            - `tests_drain_forget` now passes; new deterministic first Stage E failure family is `tests_insert_many_panic_panic_*` panic fallout (starting at `tests_insert_many_panic_panic_early_at_end`), with trailing allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-83b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-semantics-gated in core `mem::forget` behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.84: `smallvec` Stage E `tests_insert_many_panic_panic_*` panic-family failures with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -51,6 +51,19 @@ struct rust_layout_size<
     static constexpr std::size_t value =
         sizeof(LenField) + std::tuple_size_v<Storage> * sizeof(Element);
 };
+
+template<typename T, typename... Args>
+inline void leak_construct(Args&&... args) noexcept {
+    void* storage = ::operator new(sizeof(T), std::nothrow);
+    if (storage == nullptr) {
+        return;
+    }
+    try {
+        new (storage) T(std::forward<Args>(args)...);
+    } catch (...) {
+        ::operator delete(storage);
+    }
+}
 } // namespace detail
 
 template<typename T>
@@ -218,6 +231,13 @@ inline void forget(T&& value) noexcept {
         } else {
             value.rusty_mark_forgotten();
         }
+    } else if constexpr (std::is_move_constructible_v<Plain> && !std::is_const_v<Value>) {
+        // Generic ownership-forget fallback for non-guarded owning types (e.g. rusty::Vec):
+        // move payload into leaked storage so the source becomes moved-from and no longer owns.
+        detail::leak_construct<Plain>(std::move(value));
+    } else if constexpr (std::is_copy_constructible_v<Plain>) {
+        // Last-resort fallback when move is unavailable; keeps forget surface total.
+        detail::leak_construct<Plain>(value);
     }
 }
 
