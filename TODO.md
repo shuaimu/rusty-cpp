@@ -4635,6 +4635,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-29/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core local binding/pointer inference paths, with no crate-specific scripts and no generated-output text patching.
+        - [x] *done* Leaf 5.1.30: `smallvec` Stage D iterator-map untyped-closure unary-deref compile-head family collapse
+          - Plan/scope check: shared transpiler-only closure-context/deref-lowering hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - iterator `map(...)` closure emission now tracks closure parameter names in a scoped iterator-map callback context so unary-deref lowering can distinguish callback-parameter paths from unrelated expressions.
+            - unary-deref lowering now collapses one deref layer only for untyped iterator-map closure parameter paths (`*v -> v`, `**v -> *v`), removing invalid over-deref emission in boxed-byte map callbacks while preserving non-map behavior.
+            - closure emission gained context-aware helper flow for iterator-map callbacks, with scope push/pop contained to closure-body emission and no blanket deref rewrite outside that scope.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5130_iter_map_untyped_param_single_deref_collapses_in_map_context`
+            - `test_leaf5130_iter_map_untyped_param_double_deref_collapses_one_layer`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5130 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf133 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-30 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.29 first-head family at `runner.cpp:3016` (`invalid type argument of unary '*'` in iterator-map boxed-byte deref shape; adjacent `runner.cpp:3060/3104/3148`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3171` (`passing const SmallVec<...> as this argument discards qualifiers`) in `catch_unwind([=](){ ... })` closures, with adjacent same-family `catch_unwind` callable-shape fallout at `runner.cpp:3170/3180/3190/3200/3210`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-30/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and narrowly context-gated to iterator-map callback parameter scopes; no crate-specific scripts and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

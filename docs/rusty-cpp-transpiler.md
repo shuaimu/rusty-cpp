@@ -2359,6 +2359,11 @@ Current status snapshot:
    - making `as_ptr`/`as_mut_ptr` pointer inference wrapper-aware for both pointee and mutability (`NonNull`/`ConstNonNull`/`Unique`/`Ptr`/`MutPtr`), so `NonNull::as_ptr()` lowers to mutable raw-pointer shape.
 59. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3016` (`invalid type argument of unary '*'` in iterator-map boxed-byte deref shape), with adjacent same-family fallout at `runner.cpp:3060/3104/3148` and downstream callback-signature mismatch chain in `slice.hpp`.
 60. Guardrail check against §11 remains satisfied for `Leaf 5.1.29`: fixes stayed shared and AST/type-context-gated in core local-binding/pointer inference paths, with no crate-specific scripts and no generated-output text patching.
+61. Focused `smallvec` repro after `Leaf 5.1.30` (`/tmp/rusty-parity-matrix-5-1-30/smallvec/...`) collapses the prior post-5.1.29 iterator-map unary-deref first-head family by:
+   - introducing scoped iterator-map callback parameter tracking for closure emission, and
+   - collapsing exactly one unary-deref layer only for untyped iterator-map callback parameter paths (`*v -> v`, `**v -> *v`) while keeping non-map closure deref lowering unchanged.
+62. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3171` (`passing const SmallVec<...> as this argument discards qualifiers`) in `catch_unwind([=](){ ... })` closure bodies, with adjacent same-family callable-shape fallout at `runner.cpp:3170/3180/3190/3200/3210` (`catch_unwind` expects `AssertUnwindSafe<F>` wrapper surface).
+63. Guardrail check against §11 remains satisfied for `Leaf 5.1.30`: fix stayed shared and narrowly context-gated to iterator-map callback-parameter scopes; no crate-specific scripts and no generated-output text patching were introduced.
 
 Historical active-work chain (retained for traceability):
 
@@ -4822,6 +4827,7 @@ Required approach:
 - for struct-literal field expected-type lowering, do not consume raw declared field metadata without substituting call-site owner type arguments (including expected-type inferred owner args); apply owner substitution before emitting field initializer expected types to avoid unresolved generic leakage (`T` vs concrete `A`) in nested associated constructor calls
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking
 - for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
+- for unary-deref lowering inside closures, do not globally collapse deref on untyped closure params across all closure kinds; restrict deref-collapse to proven callback contexts (for example iterator-map callback parameter scope) and collapse at most one layer per deref expression
 - for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
 - for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout

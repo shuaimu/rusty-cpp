@@ -381,6 +381,9 @@ pub struct CodeGen {
     deref_method_scopes: Vec<bool>,
     /// Scope stack marking emission inside a DerefMut trait method (`deref_mut`).
     deref_mut_method_scopes: Vec<bool>,
+    /// Closure-parameter name scopes for iterator `map` closure bodies where
+    /// Rust `*param` should collapse one reference layer for untyped params.
+    iterator_map_closure_param_scopes: Vec<HashSet<String>>,
     /// Optional scoped replacement for Rust `self` path lowering.
     /// Default `self` lowering is `(*this)` for member methods; extension free
     /// function emission overrides it to a local receiver parameter (for example `self_`).
@@ -613,6 +616,7 @@ impl CodeGen {
             pattern_ref_bindings: Vec::new(),
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
+            iterator_map_closure_param_scopes: Vec::new(),
             self_path_overrides: Vec::new(),
             module_name: None,
             crate_name: None,
@@ -786,6 +790,7 @@ impl CodeGen {
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
+        self.iterator_map_closure_param_scopes.clear();
         self.self_path_overrides.clear();
         self.block_depth = 0;
         self.cyclic_type_names.clear();
@@ -18230,6 +18235,22 @@ impl CodeGen {
             .unwrap_or(false)
     }
 
+    fn push_iterator_map_closure_param_scope(&mut self, names: HashSet<String>) {
+        self.iterator_map_closure_param_scopes.push(names);
+    }
+
+    fn should_collapse_untyped_iterator_map_param_deref(&self, name: &str) -> bool {
+        if !self
+            .iterator_map_closure_param_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+        {
+            return false;
+        }
+        self.lookup_local_binding_type(name).is_none()
+    }
+
     fn push_force_typed_option_ctor_scope(&mut self, enabled: bool) {
         self.force_typed_option_ctor_scopes.push(enabled);
     }
@@ -24240,6 +24261,14 @@ impl CodeGen {
                     }
                 }
                 syn::UnOp::Deref(_) => {
+                    if let syn::Expr::Path(path) = self.peel_paren_group_expr(&un.expr) {
+                        if path.path.segments.len() == 1 {
+                            let name = path.path.segments[0].ident.to_string();
+                            if self.should_collapse_untyped_iterator_map_param_deref(&name) {
+                                return self.emit_expr_to_string(&un.expr);
+                            }
+                        }
+                    }
                     if self.is_expr_reference_like(&un.expr)
                         || self.is_self_reference_field_access(&un.expr)
                     {
@@ -26116,7 +26145,12 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
-        let mapper = self.emit_expr_maybe_move(mc.args.first()?);
+        let mapper_arg = self.peel_paren_group_expr(mc.args.first()?);
+        let mapper = if let syn::Expr::Closure(closure) = mapper_arg {
+            self.emit_closure_to_string_with_iterator_map_context(closure)
+        } else {
+            self.emit_expr_maybe_move(mc.args.first()?)
+        };
         Some(format!("rusty::map({}, {})", receiver, mapper))
     }
 
@@ -28797,6 +28831,22 @@ impl CodeGen {
     /// - Type paths / constants (ALL_CAPS names)
     /// Emit a closure expression as a C++ lambda.
     fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
+        self.emit_closure_to_string_with_map_param_scope(closure, None)
+    }
+
+    fn emit_closure_to_string_with_iterator_map_context(
+        &self,
+        closure: &syn::ExprClosure,
+    ) -> String {
+        let param_scope = self.collect_closure_param_names_for_scope(closure);
+        self.emit_closure_to_string_with_map_param_scope(closure, Some(param_scope))
+    }
+
+    fn emit_closure_to_string_with_map_param_scope(
+        &self,
+        closure: &syn::ExprClosure,
+        map_param_scope: Option<HashSet<String>>,
+    ) -> String {
         // Determine capture mode
         let capture = if closure.capture.is_some() {
             // `move` closure → capture by move
@@ -28830,6 +28880,9 @@ impl CodeGen {
 
         let mut inner = self.new_inner_for_block();
         inner.bind_closure_params_for_emission(closure);
+        if let Some(names) = map_param_scope {
+            inner.push_iterator_map_closure_param_scope(names);
+        }
 
         // Determine if the body is a block or a single expression
         match closure.body.as_ref() {
@@ -28877,6 +28930,33 @@ impl CodeGen {
     fn bind_closure_params_for_emission(&mut self, closure: &syn::ExprClosure) {
         for input in &closure.inputs {
             self.bind_closure_param_for_emission(input);
+        }
+    }
+
+    fn collect_closure_param_names_for_scope(&self, closure: &syn::ExprClosure) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for input in &closure.inputs {
+            self.collect_closure_param_names_from_pat(input, &mut names);
+        }
+        names
+    }
+
+    fn collect_closure_param_names_from_pat(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.ident != "_" {
+                    out.insert(pi.ident.to_string());
+                }
+            }
+            syn::Pat::Type(pt) => self.collect_closure_param_names_from_pat(&pt.pat, out),
+            syn::Pat::Reference(pr) => self.collect_closure_param_names_from_pat(&pr.pat, out),
+            syn::Pat::Paren(p) => self.collect_closure_param_names_from_pat(&p.pat, out),
+            syn::Pat::Tuple(tuple_pat) => {
+                for elem in &tuple_pat.elems {
+                    self.collect_closure_param_names_from_pat(elem, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -37035,6 +37115,44 @@ mod tests {
         );
         assert!(out.contains("rusty::map(rusty::iter(v),"));
         assert!(!out.contains("rusty::iter(v).map("));
+    }
+
+    #[test]
+    fn test_leaf5130_iter_map_untyped_param_single_deref_collapses_in_map_context() {
+        let out = transpile_str(
+            r#"
+            fn f(v: [u8; 3]) -> Vec<u8> {
+                v.iter().map(|v| *v).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return v; })"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return *v; })"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5130_iter_map_untyped_param_double_deref_collapses_one_layer() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<Box<u8>>) -> Vec<u8> {
+                v.iter().map(|v| **v).collect::<Vec<_>>()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return *v; })"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return **v; })"),
+            "{out}"
+        );
     }
 
     #[test]
