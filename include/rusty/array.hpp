@@ -592,10 +592,63 @@ size_t len(const Container& container) {
         return rusty::len(container.as_str());
     } else if constexpr (requires { std::size(container); }) {
         return static_cast<size_t>(std::size(container));
+    } else if constexpr (requires { container.size_hint(); }) {
+        auto hint = container.size_hint();
+        if constexpr (requires { std::get<1>(hint); }) {
+            auto upper = std::get<1>(hint);
+            if constexpr (requires {
+                              detail::option_has_value(upper);
+                              detail::option_take_value(upper);
+                          }) {
+                if (detail::option_has_value(upper)) {
+                    return static_cast<size_t>(detail::option_take_value(upper));
+                }
+            } else if constexpr (std::is_integral_v<std::remove_cvref_t<decltype(upper)>>) {
+                return static_cast<size_t>(upper);
+            }
+        }
+        if constexpr (requires { std::get<0>(hint); }) {
+            return static_cast<size_t>(std::get<0>(hint));
+        } else {
+            static_assert(
+                detail::collect_range_dependent_false_v<Container>,
+                "rusty::len requires tuple-like size_hint() bounds");
+        }
+    } else if constexpr (requires {
+                             const_cast<std::remove_cvref_t<Container>&>(container).size_hint();
+                         }) {
+        auto hint = const_cast<std::remove_cvref_t<Container>&>(container).size_hint();
+        if constexpr (requires { std::get<1>(hint); }) {
+            auto upper = std::get<1>(hint);
+            if constexpr (requires {
+                              detail::option_has_value(upper);
+                              detail::option_take_value(upper);
+                          }) {
+                if (detail::option_has_value(upper)) {
+                    return static_cast<size_t>(detail::option_take_value(upper));
+                }
+            } else if constexpr (std::is_integral_v<std::remove_cvref_t<decltype(upper)>>) {
+                return static_cast<size_t>(upper);
+            }
+        }
+        if constexpr (requires { std::get<0>(hint); }) {
+            return static_cast<size_t>(std::get<0>(hint));
+        } else {
+            static_assert(
+                detail::collect_range_dependent_false_v<Container>,
+                "rusty::len requires tuple-like size_hint() bounds");
+        }
+    } else if constexpr (requires { container.into_iter(); }) {
+        return rusty::len(container.into_iter());
+    } else if constexpr (requires {
+                             const_cast<std::remove_cvref_t<Container>&>(container).into_iter();
+                         }) {
+        return rusty::len(const_cast<std::remove_cvref_t<Container>&>(container).into_iter());
     } else {
         static_assert(
             detail::collect_range_dependent_false_v<Container>,
-            "rusty::len requires len(), size(), as_str(), or std::size-compatible range");
+            "rusty::len requires len(), size(), as_str(), std::size-compatible range, "
+            "size_hint(), or into_iter()");
     }
 }
 

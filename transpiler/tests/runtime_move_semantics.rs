@@ -1168,6 +1168,108 @@ fn test_len_supports_as_str_wrappers_without_size_surface() {
 }
 
 #[test]
+fn test_leaf5162_len_supports_size_hint_iterators_and_into_iter_receivers() {
+    let source = r#"
+        #include <cstddef>
+        #include <tuple>
+        #include <rusty/array.hpp>
+
+        struct ExactIter {
+            std::size_t remaining;
+
+            rusty::Option<int> next() {
+                if (remaining == 0) {
+                    return rusty::None;
+                }
+                --remaining;
+                return rusty::Option<int>(0);
+            }
+
+            std::tuple<std::size_t, rusty::Option<std::size_t>> size_hint() const {
+                return std::make_tuple(remaining, rusty::Option<std::size_t>(remaining));
+            }
+        };
+
+        struct IntoIterOnly {
+            std::size_t remaining;
+            ExactIter into_iter() const { return ExactIter{remaining}; }
+        };
+
+        int main() {
+            ExactIter iter{3};
+            if (rusty::len(iter) != 3) {
+                return 1;
+            }
+
+            auto first = iter.next();
+            if (!first.is_some()) {
+                return 2;
+            }
+            if (rusty::len(iter) != 2) {
+                return 3;
+            }
+
+            if (rusty::len(IntoIterOnly{4}) != 4) {
+                return 4;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5162_len_size_hint_and_into_iter");
+}
+
+#[test]
+fn test_leaf5162_vec_from_iter_supports_option_like_next_surfaces() {
+    let source = r#"
+        #include <optional>
+        #include <rusty/option.hpp>
+        #include <rusty/vec.hpp>
+
+        struct RustOptionIter {
+            int current;
+            int end;
+
+            rusty::Option<int> next() {
+                if (current >= end) {
+                    return rusty::None;
+                }
+                return rusty::Option<int>(current++);
+            }
+        };
+
+        struct StdOptionalIter {
+            int current;
+            int end;
+
+            std::optional<int> next() {
+                if (current >= end) {
+                    return std::nullopt;
+                }
+                return current++;
+            }
+        };
+
+        int main() {
+            auto from_rust_option = rusty::Vec<int>::from_iter(RustOptionIter{0, 3});
+            if (from_rust_option.len() != 3 || from_rust_option[0] != 0 || from_rust_option[2] != 2) {
+                return 1;
+            }
+
+            auto from_std_optional = rusty::Vec<int>::from_iter(StdOptionalIter{5, 8});
+            if (from_std_optional.len() != 3 || from_std_optional[0] != 5 || from_std_optional[2] != 7) {
+                return 2;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5162_vec_from_iter_option_like_next");
+}
+
+#[test]
 fn test_mem_forget_marks_const_values_with_rusty_drop_guard() {
     let source = r#"
         #include <rusty/mem.hpp>

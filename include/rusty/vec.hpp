@@ -88,14 +88,34 @@ public:
     template<typename Iter>
     static Vec<T> from_iter(Iter&& iter) {
         Vec<T> result;
+        auto option_like_has_value = [](const auto& opt) {
+            if constexpr (requires { opt.is_some(); }) {
+                return opt.is_some();
+            } else if constexpr (requires { opt.has_value(); }) {
+                return opt.has_value();
+            } else {
+                return static_cast<bool>(opt);
+            }
+        };
+        auto option_like_take_value = [](auto& opt) {
+            if constexpr (requires { opt.unwrap(); }) {
+                return opt.unwrap();
+            } else if constexpr (requires { opt.has_value(); opt.reset(); }) {
+                auto value = std::move(*opt);
+                opt.reset();
+                return value;
+            } else {
+                return std::move(*opt);
+            }
+        };
         if constexpr (requires { std::forward<Iter>(iter).next(); }) {
             auto&& next_iter = std::forward<Iter>(iter);
             while (true) {
                 auto item = next_iter.next();
-                if (!option_has_value(item)) {
+                if (!option_like_has_value(item)) {
                     break;
                 }
-                result.push(option_take_value(item));
+                result.push(option_like_take_value(item));
             }
         } else if constexpr (requires { std::forward<Iter>(iter).into_iter(); }) {
             return from_iter(std::forward<Iter>(iter).into_iter());

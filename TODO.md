@@ -5373,6 +5373,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-61a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in owner-template recovery; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.62: `smallvec` Stage D iterator-like `len` + `Vec::from_iter` option-like next helper compile-head family collapse
+          - Plan/scope check: shared runtime helper hardening plus focused runtime regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - `rusty::len(...)` now accepts iterator-like receivers exposing `size_hint()` (and `into_iter()` fallback), including tuple-like lower/upper hint extraction with Option-like upper-bound support.
+            - `Vec::from_iter` now performs self-contained option-like `next()` handling (`is_some`/`has_value`/bool probe + value extraction) so header ordering no longer depends on `array.hpp`-local helper lookup.
+            - this collapses the deterministic post-5.1.61 first-head family at `include/rusty/array.hpp:597` (`rusty::len` static assertion for unsupported iterator range shape) and adjacent `include/rusty/vec.hpp` option-helper lookup fallout.
+          - Implemented in:
+            - `include/rusty/array.hpp`
+            - `include/rusty/vec.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5162_len_supports_size_hint_iterators_and_into_iter_receivers`
+            - `runtime_move_semantics::test_leaf5162_vec_from_iter_supports_option_like_next_surfaces`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5162 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-62a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.61 first-head family at `include/rusty/array.hpp:597` (`rusty::len` static assertion on iterator-like receivers) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/vec.hpp:118` (`Vec::from_iter` option-like payload shape mismatch: `const unsigned char*` to `unsigned char`), with adjacent downstream runtime-surface fallout (`runner.cpp:2031` unresolved `repeat(...)` and later iterator/string adapter families).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-62a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime helper surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
