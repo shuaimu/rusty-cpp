@@ -18493,6 +18493,37 @@ impl CodeGen {
         )
     }
 
+    fn extract_add_pointer_inner_cpp_type(ty: &str) -> Option<String> {
+        let trimmed = ty.trim();
+        let prefix = "std::add_pointer_t<";
+        if !trimmed.starts_with(prefix) || !trimmed.ends_with('>') {
+            return None;
+        }
+        let inner = trimmed
+            .strip_prefix(prefix)?
+            .strip_suffix('>')?
+            .trim()
+            .to_string();
+        if inner.is_empty() {
+            return None;
+        }
+        Some(inner)
+    }
+
+    fn pointer_const_cast_target_cpp_type(target_ptr_cpp: &str) -> Option<String> {
+        if let Some(inner) = Self::extract_add_pointer_inner_cpp_type(target_ptr_cpp) {
+            if inner.trim_start().starts_with("const ") {
+                return None;
+            }
+            return Some(format!("std::add_pointer_t<std::add_const_t<{}>>", inner));
+        }
+        let pointee = target_ptr_cpp.trim().trim_end_matches('*').trim();
+        if pointee.is_empty() || pointee.starts_with("const ") {
+            return None;
+        }
+        Some(format!("const {}*", pointee))
+    }
+
     fn is_known_integer_like_type(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
@@ -19794,6 +19825,11 @@ impl CodeGen {
         arg_idx: usize,
         declared_expected: Option<&syn::Type>,
     ) -> Option<syn::Type> {
+        let declared_expected_assoc_like = declared_expected.is_some_and(|declared| {
+            self.type_contains_dependent_assoc(declared)
+                || self.type_references_current_struct_assoc(declared)
+                || self.type_looks_like_assoc_projection(declared)
+        });
         let allow_infer = match declared_expected {
             None => true,
             Some(declared_expected) => matches!(
@@ -19807,7 +19843,7 @@ impl CodeGen {
                                 .chars()
                                 .next()
                                 .is_some_and(|c| c.is_ascii_uppercase()))
-            ),
+            ) || declared_expected_assoc_like,
         };
         if !allow_infer {
             return None;
@@ -19825,16 +19861,91 @@ impl CodeGen {
             return None;
         };
         let last = tp.path.segments.last()?;
+        let receiver_owner_name = last.ident.to_string();
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
             return None;
         };
-        args.args
+        let inferred = args
+            .args
             .iter()
             .filter_map(|arg| match arg {
                 syn::GenericArgument::Type(t) => Some(t.clone()),
                 _ => None,
             })
-            .nth(elem_arg_idx)
+            .nth(elem_arg_idx)?;
+
+        // For dependent associated-item method signatures (for example
+        // `fn push(&mut self, value: A::Item)`), prefer the receiver's concrete
+        // item type instead of the whole owner argument (`A` or `[T; N]`).
+        if declared_expected_assoc_like
+            && let Some(item_ty) = self.extract_iter_item_type_from_type(&inferred)
+        {
+            return Some(item_ty);
+        }
+
+        // SmallVec stores an array-like owner parameter (`[T; N]` / `A: Array`)
+        // while element-taking methods expect the item type (`T` / `A::Item`).
+        // When method-signature expected type metadata is ambiguous for shared
+        // method names (for example `push`), recover item type from receiver owner.
+        if matches!(receiver_owner_name.as_str(), "SmallVec")
+            && matches!(method_name, "push" | "try_push" | "insert" | "try_insert")
+            && let Some(item_ty) = self.extract_iter_item_type_from_type(&inferred)
+        {
+            return Some(item_ty);
+        }
+
+        Some(inferred)
+    }
+
+    fn type_looks_like_assoc_projection(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_some() {
+                    return true;
+                }
+                if tp.path.segments.len() >= 2
+                    && tp.path.segments.last().is_some_and(|seg| {
+                        let first = tp
+                            .path
+                            .segments
+                            .first()
+                            .map(|s| s.ident.to_string())
+                            .unwrap_or_default();
+                        matches!(seg.arguments, syn::PathArguments::None)
+                            && (first == "Self"
+                                || first
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase()))
+                    })
+                {
+                    return true;
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner_ty) => {
+                                self.type_looks_like_assoc_projection(inner_ty)
+                            }
+                            _ => false,
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_looks_like_assoc_projection(&r.elem),
+            syn::Type::Ptr(p) => self.type_looks_like_assoc_projection(&p.elem),
+            syn::Type::Slice(s) => self.type_looks_like_assoc_projection(&s.elem),
+            syn::Type::Array(a) => self.type_looks_like_assoc_projection(&a.elem),
+            syn::Type::Paren(p) => self.type_looks_like_assoc_projection(&p.elem),
+            syn::Type::Group(g) => self.type_looks_like_assoc_projection(&g.elem),
+            syn::Type::Tuple(tup) => tup
+                .elems
+                .iter()
+                .any(|elem| self.type_looks_like_assoc_projection(elem)),
+            _ => false,
+        }
     }
 
     fn try_emit_map_err_callable_arg(&self, arg: &syn::Expr) -> Option<String> {
@@ -21691,7 +21802,7 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 let last = tp.path.segments.last()?;
                 match last.ident.to_string().as_str() {
-                    "ArrayVec" | "IntoIter" | "Iter" | "Vec" | "span" | "range"
+                    "ArrayVec" | "IntoIter" | "Iter" | "Vec" | "array" | "span" | "range"
                     | "range_inclusive" | "range_from" | "range_to" | "range_to_inclusive"
                     | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo" | "RangeToInclusive" => {
                         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
@@ -24061,9 +24172,20 @@ impl CodeGen {
                     let target_is_mut_ptr =
                         matches!(c.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some());
                     let target_pointee_str = ty.trim_end_matches('*').trim();
-                    if target_is_mut_ptr && !target_pointee_str.starts_with("const ") {
-                        // E.g. `*const u8 as *mut u8`: ty = "uint8_t*", pointee = "uint8_t"
-                        // → const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(expr))
+                    if target_is_mut_ptr
+                        && let Some(const_ty) = Self::pointer_const_cast_target_cpp_type(&ty)
+                    {
+                        // E.g. `*const u8 as *mut u8`:
+                        // `ty = uint8_t*` -> const target `const uint8_t*`.
+                        // For hardened pointer aliases (e.g. `std::add_pointer_t<T>`),
+                        // use `std::add_pointer_t<std::add_const_t<T>>` instead of
+                        // adding an extra `*` layer.
+                        format!(
+                            "const_cast<{}>(reinterpret_cast<{}>({}))",
+                            ty, const_ty, expr
+                        )
+                    } else if target_is_mut_ptr && !target_pointee_str.starts_with("const ") {
+                        // Fallback for plain pointer spellings.
                         let const_ty = format!("const {}*", target_pointee_str);
                         format!(
                             "const_cast<{}>(reinterpret_cast<{}>({}))",
@@ -46123,6 +46245,57 @@ mod tests {
         );
         assert!(!out.contains("return std::nullopt;"), "{out}");
         assert!(!out.contains("return std::make_optional("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5126_smallvec_push_box_new_infers_box_owner_template_from_assoc_item_context() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            impl ArrayLike for [Box<u8>; 8] { type Item = Box<u8>; }
+            struct SmallVec<A: ArrayLike>;
+            impl<A: ArrayLike> SmallVec<A> {
+                fn new() -> Self { SmallVec }
+                fn push(&mut self, _value: A::Item) {}
+            }
+            fn f() {
+                let mut v: SmallVec<[Box<u8>; 8]> = SmallVec::new();
+                for x in 0..8 {
+                    v.push(Box::new(x));
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("v.push(rusty::Box<uint8_t>::new_("), "{out}");
+        assert!(!out.contains("v.push(rusty::Box::new_("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5126_assoc_item_pointer_cast_uses_add_pointer_const_variant_without_extra_star() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            fn cast_item_ptr<A: ArrayLike>(ptr: *const A) -> *mut A::Item {
+                ptr as *mut A::Item
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "reinterpret_cast<std::add_pointer_t<std::add_const_t<typename A::Item>>>(ptr)"
+            ) || out.contains(
+                "reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::detail::associated_item_t<A>>>>(ptr)"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains(
+                "reinterpret_cast<const std::add_pointer_t<rusty::detail::associated_item_t<A>>*>(ptr)"
+            ) && !out.contains(
+                "reinterpret_cast<const std::add_pointer_t<typename A::Item>*>(ptr)"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

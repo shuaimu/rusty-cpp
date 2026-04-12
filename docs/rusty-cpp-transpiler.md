@@ -2343,6 +2343,11 @@ Current status snapshot:
    - scoping typed `Option` ctor lowering to auto-return methods that mix `Some(...)` and `None` under dependent-assoc softening (removing mixed-branch auto-deduction drift).
 51. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2956` (`template<class T> class rusty::Box used without template arguments`), with adjacent same-family fallout at `runner.cpp:3014` and nearby Box-shape/type-surface errors (`runner.cpp:1387`).
 52. Guardrail check against §11 remains satisfied for `Leaf 5.1.25`: fixes stayed shared and AST/type-shape/context-gated in core lowering paths; no crate-specific ad-hoc scripts and no generated-output text patching were introduced.
+53. Focused `smallvec` repro after `Leaf 5.1.26` (`/tmp/rusty-parity-matrix-5-1-26-20260412a/smallvec/...`) collapses the prior post-5.1.25 `rusty::Box` unspecialized first-head family by:
+   - allowing method-arg receiver inference for assoc-projection-shaped expected types even when the projection owner type param is out-of-scope at the concrete call site (`A::Item` call contexts),
+   - recovering `SmallVec` element expected types from array-like owner args for element-taking methods (`push`/`insert` family), and
+   - hardening `std::add_pointer_t<T>` const-cast lowering to use `std::add_pointer_t<std::add_const_t<T>>` without extra pointer indirection.
+54. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1730` (`SmallVec<...>` missing `swap` member in `swap_remove` path), with adjacent early fallout at `runner.cpp:1387` (`rusty::ptr::NonNull<...>::new_` missing member) and downstream `triple_mut`/iterator assertion shape errors; guardrail check against §11 remains satisfied (`Leaf 5.1.26` fixes stayed shared and AST/type-context-gated, with no crate-specific scripts and no generated-output patching).
 
 Historical active-work chain (retained for traceability):
 

@@ -4550,8 +4550,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-25-20260412a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape/context-gated in core lowering paths; no generated-output text patching and no crate-specific ad-hoc scripts were introduced.
-        - [ ] Leaf 5.1.26: `smallvec` Stage D `rusty::Box` unspecialized surface compile-head family collapse
-          - Collapse the new post-5.1.25 deterministic `smallvec` Stage D family beginning at `runner.cpp:2956` / `runner.cpp:3014` (`rusty::Box` referenced without template args) and adjacent Box-shape fallout (`runner.cpp:1387` `NonNull<rusty::Box<...>>::new_`/pointer-cast mismatch), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.26: `smallvec` Stage D `rusty::Box` unspecialized surface compile-head family collapse
+          - Plan/scope check: shared transpiler expected-type/pointer-cast hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-arg expected-type inference now treats assoc-projection-shaped expectations (`A::Item` / qself forms) as inferable even when the projection owner type param is out-of-scope at the concrete call site, so receiver-driven item extraction is still applied.
+            - `SmallVec` element-taking method inference (`push`/`try_push`/`insert`/`try_insert`) now recovers item expectations from array-like owner args (`[T; N]`/`std::array<T, N>`) to preserve associated `A::Item` call-context specialization.
+            - add-pointer const-cast hardening now emits `std::add_pointer_t<std::add_const_t<T>>` for `std::add_pointer_t<T>` targets without introducing an extra pointer layer.
+          - Added focused regressions:
+            - `test_leaf5126_smallvec_push_box_new_infers_box_owner_template_from_assoc_item_context`
+            - `test_leaf5126_assoc_item_pointer_cast_uses_add_pointer_const_variant_without_extra_star`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5126 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-26-20260412a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.25 first-head family at `runner.cpp:2956/3014` (`rusty::Box` used without template args) plus adjacent `runner.cpp:1387` pointer-cast shape fallout is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1730` (`SmallVec<...>` missing `swap` member in `swap_remove` path), with adjacent early fallout at `runner.cpp:1387` (`rusty::ptr::NonNull<...>::new_` missing member) and downstream `triple_mut`/iterator assertion shape errors.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-26-20260412a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core lowering/inference paths; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
