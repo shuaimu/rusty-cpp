@@ -5044,6 +5044,38 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-47a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime, with no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching.
+        - [x] *done* Leaf 5.1.48: `smallvec` Stage D iterator `.filter(...)` adapter-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime iterator-filter adapter hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites iterator-like `.filter(pred)` calls to shared runtime helper form `rusty::filter(receiver, pred)` under iterator/probable-iterator receiver gating.
+            - `Option`/`Result` `filter` calls and non-iterator methods named `filter` remain unchanged.
+            - runtime `include/rusty/slice.hpp` now provides shared option-like next-iterator filter surfaces (`filter_next_iter`, `make_filter_next_iter`, and public `rusty::filter(...)`) with a `size_hint()` surface compatible with generated `.size_hint()._0` accesses.
+            - this collapses the deterministic post-5.1.47 first-head family at `runner.cpp:4970` (`rusty::range<int>` missing `.filter(...)` adapter surface).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added iterator-gated `.filter(...)` method-call lowering to `rusty::filter(...)`.
+              - extended probable-iterator receiver detection and iterator-item inference pass-through for `filter`/`rusty::filter` call shapes.
+            - `include/rusty/slice.hpp`:
+              - added `detail::filter_next_iter` adapter and `detail::filter_size_hint` return shape.
+              - added `detail::make_filter_next_iter(...)`.
+              - added public `rusty::filter(...)` helper with iterator/into_iter fallback behavior.
+          - Added focused regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf5148_iterator_filter_lowers_to_runtime_helper`
+              - `test_leaf5148_non_iterator_filter_method_call_is_unchanged`
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - `test_slice_filter_runtime_adapter_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5148 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_slice_filter_runtime_adapter_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-48a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.47 first-head family at `runner.cpp:4970` (`range.filter(...)` adapter surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:5144` (`SmallVec<...>` missing `.get(...)` method surface), followed by downstream gaps (inline-capacity static-call shape and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-48a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime, with no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

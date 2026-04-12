@@ -2437,6 +2437,10 @@ Current status snapshot:
    - rewriting iterator-like `.scan(state, f)` method calls to shared runtime helper form `rusty::scan(receiver, state, f)` in transpiler method-call lowering under iterator/probable-iterator receiver gating, and
    - adding shared runtime iterator-scan surfaces in `include/rusty/slice.hpp` (`scan_next_iter`, `make_scan_next_iter`, and public `rusty::scan(...)`) with option-like next/closure-result enforcement.
 98. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4970` (`rusty::range<int>` missing `.filter(...)` adapter surface), followed by downstream runtime/type-surface gaps (`SmallVec::get`, inline-capacity static-call shape, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.47` (fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime changes, with no crate-specific scripts and no generated-output text patching).
+99. Focused `smallvec` repro after `Leaf 5.1.48` (`/tmp/rusty-parity-matrix-5-1-48a-20260412/smallvec/...`) collapses the prior post-5.1.47 iterator `.filter(...)` adapter family by:
+   - rewriting iterator-like `.filter(pred)` method calls to shared runtime helper form `rusty::filter(receiver, pred)` in transpiler method-call lowering under iterator/probable-iterator receiver gating while preserving Option/Result and non-iterator `filter` surfaces, and
+   - adding shared runtime iterator-filter surfaces in `include/rusty/slice.hpp` (`filter_next_iter`, `make_filter_next_iter`, and public `rusty::filter(...)`) with generated-callsite-compatible `size_hint()._0` shape.
+100. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:5144` (`SmallVec<std::array<int, 2>>` missing `.get(...)` method surface), followed by downstream runtime/type-surface gaps (inline-capacity static-call shape and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.48` (fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime changes, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

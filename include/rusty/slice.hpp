@@ -383,6 +383,59 @@ private:
     size_t remaining_;
 };
 
+struct filter_size_hint {
+    size_t _0;
+    rusty::Option<size_t> _1;
+};
+
+template<typename Iter, typename Pred>
+class filter_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<Iter>>,
+        "rusty::filter requires next() to return an Option/optional-like value"
+    );
+
+    filter_next_iter(Iter iter, Pred pred)
+        : iter_(std::forward<Iter>(iter)), pred_(std::move(pred)) {}
+
+    filter_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using iter_type = std::remove_reference_t<Iter>;
+        using next_result = next_result_t<iter_type>;
+        using item_type = next_item_t<iter_type>;
+
+        while (true) {
+            auto item = iter_.next();
+            if (!option_has_value(item)) {
+                return next_result{};
+            }
+            item_type candidate = option_take_value(item);
+            if (std::invoke(pred_, deref_if_pointer(candidate))) {
+                return next_result(std::move(candidate));
+            }
+        }
+    }
+
+    filter_size_hint size_hint() const {
+        if constexpr (requires(const std::remove_reference_t<Iter>& iter) { iter.count(); }) {
+            return filter_size_hint{
+                0,
+                rusty::Option<size_t>(static_cast<size_t>(iter_.count()))
+            };
+        } else {
+            return filter_size_hint{0, rusty::None};
+        }
+    }
+
+private:
+    Iter iter_;
+    Pred pred_;
+};
+
 template<typename Iter, typename State, typename Func>
 class scan_next_iter {
 public:
@@ -477,6 +530,16 @@ auto make_skip_next_iter(Iter&& iter, size_t remaining) {
     using stored_iter =
         std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
     return skip_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
+}
+
+template<typename Iter, typename Pred>
+auto make_filter_next_iter(Iter&& iter, Pred&& pred) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    using stored_pred = std::decay_t<Pred>;
+    return filter_next_iter<stored_iter, stored_pred>(
+        std::forward<Iter>(iter),
+        std::forward<Pred>(pred));
 }
 
 template<typename Iter, typename State, typename Func>
@@ -619,6 +682,28 @@ decltype(auto) map(Range&& range, Func&& func) {
         return detail::make_map_next_iter(
             iter(std::forward<Range>(range)),
             std::forward<Func>(func));
+    }
+}
+
+template<typename Range, typename Pred>
+decltype(auto) filter(Range&& range, Pred&& pred) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_filter_next_iter(
+            std::forward<Range>(range),
+            std::forward<Pred>(pred));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::filter requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return filter(
+            std::forward<Range>(range).into_iter(),
+            std::forward<Pred>(pred));
+    } else {
+        return filter(
+            iter(std::forward<Range>(range)),
+            std::forward<Pred>(pred));
     }
 }
 

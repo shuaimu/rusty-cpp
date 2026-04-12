@@ -296,6 +296,49 @@ fn test_slice_scan_runtime_adapter_surface() {
 }
 
 #[test]
+fn test_slice_filter_runtime_adapter_surface() {
+    let source = r#"
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+
+        int main() {
+            auto iter = rusty::filter(
+                rusty::range(0, 5),
+                [](int n) { return n % 2 == 0; });
+
+            const auto hint = iter.size_hint();
+            if (hint._0 != 0) {
+                return 1;
+            }
+
+            auto first = iter.next();
+            if (!first.has_value() || *first != 0) {
+                return 2;
+            }
+
+            auto second = iter.next();
+            if (!second.has_value() || *second != 2) {
+                return 3;
+            }
+
+            auto third = iter.next();
+            if (!third.has_value() || *third != 4) {
+                return 4;
+            }
+
+            auto done = iter.next();
+            if (done.has_value()) {
+                return 5;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_filter_runtime_surface");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

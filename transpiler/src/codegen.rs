@@ -20030,6 +20030,16 @@ impl CodeGen {
             let scanner = self.emit_expr_maybe_move(&mc.args[1]);
             return format!("rusty::scan({}, {}, {})", receiver, state, scanner);
         }
+        if mc.method == "filter"
+            && mc.args.len() == 1
+            && !self.receiver_is_option_or_result_like_expr(&mc.receiver)
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let predicate = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::filter({}, {})", receiver, predicate);
+        }
         if let Some(enumerate_call) = self.try_emit_iter_enumerate_call(mc) {
             return enumerate_call;
         }
@@ -23208,6 +23218,10 @@ impl CodeGen {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
                     if (joined == "scan" || joined == "rusty::scan") && !call.args.is_empty() {
+                        return self.infer_iter_item_type_from_expr(&call.args[0]);
+                    }
+                    if (joined == "filter" || joined == "rusty::filter") && !call.args.is_empty()
+                    {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
                 }
@@ -26985,6 +26999,7 @@ impl CodeGen {
                         | "as_bytes"
                         | "chars"
                         | "map"
+                        | "filter"
                         | "filter_map"
                         | "enumerate"
                         | "rev"
@@ -27014,6 +27029,7 @@ impl CodeGen {
                             | "as_bytes"
                             | "chars"
                             | "map"
+                            | "filter"
                             | "filter_map"
                             | "enumerate"
                             | "rev"
@@ -27052,6 +27068,8 @@ impl CodeGen {
                         | "rusty::iter_mut"
                         | "map"
                         | "rusty::map"
+                        | "filter"
+                        | "rusty::filter"
                         | "filter_map"
                         | "rusty::filter_map"
                         | "enumerate"
@@ -47821,6 +47839,37 @@ mod tests {
         );
         assert!(out.contains("s.scan(1, 2)"), "{out}");
         assert!(!out.contains("rusty::scan(s, 1, 2)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5148_iterator_filter_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let iter = (0..5).filter(|n| n % 2 == 0);
+                let _ = iter.count();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::filter((rusty::range(0, 5)),"), "{out}");
+        assert!(!out.contains("(rusty::range(0, 5)).filter("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5148_non_iterator_filter_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn filter(&self, n: usize) {}
+            }
+            fn f(s: S) {
+                s.filter(1);
+            }
+        "#,
+        );
+        assert!(out.contains("s.filter(1)"), "{out}");
+        assert!(!out.contains("rusty::filter(s, 1)"), "{out}");
     }
 
     #[test]
