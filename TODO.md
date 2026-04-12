@@ -5333,6 +5333,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-59c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and runtime-shape-gated; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.60: `smallvec` Stage D span-ordering `partial_cmp` fallback compile-head family collapse
+          - Plan/scope check: shared transpiler helper update plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - generated runtime fallback compare helpers now route `cmp`/`partial_cmp` through shared `rusty::cmp::detail::less_than(...)` instead of unconditional direct `a < b`/`b < a`.
+            - `less_than(...)` supports both direct `<`-comparable values and lexicographically comparable begin/end ranges via `std::lexicographical_compare(...)`, collapsing `std::span<...>` ordering compile failures in assertion compare scaffolding.
+            - this collapses the deterministic post-5.1.59 first-head family at `runner.cpp:94/95` (`no match for operator<` on `std::span<const unsigned int, ...>`).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5160_runtime_partial_cmp_fallback_supports_lexicographical_ranges`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5160 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-60b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.59 first-head family at `runner.cpp:94/95` (`std::span` ordering via direct `<` in runtime fallback `partial_cmp`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2004` (`NonNull` pointee-owner mismatch in `from_slice`/`from_heap` flow: `unsigned int*` to `std::array<unsigned int, 2>*`), with adjacent downstream runtime-surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-60b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and comparator-shape-gated in transpiler runtime helper emission; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

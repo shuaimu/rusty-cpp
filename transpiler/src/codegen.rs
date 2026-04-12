@@ -32108,14 +32108,40 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
     "namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+namespace detail {\n\
+template<typename... Ts>\n\
+inline constexpr bool dependent_false_v = false;\n\
+template<typename L, typename R>\n\
+bool less_than(const L& lhs, const R& rhs) {\n\
+    if constexpr (requires { lhs < rhs; }) {\n\
+        return lhs < rhs;\n\
+    } else if constexpr (requires {\n\
+        std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs);\n\
+        *std::begin(lhs) < *std::begin(rhs);\n\
+        *std::begin(rhs) < *std::begin(lhs);\n\
+    }) {\n\
+        return std::lexicographical_compare(\n\
+            std::begin(lhs), std::end(lhs),\n\
+            std::begin(rhs), std::end(rhs),\n\
+            [](const auto& a, const auto& b) { return a < b; }\n\
+        );\n\
+    } else {\n\
+        static_assert(\n\
+            dependent_false_v<L, R>,\n\
+            \"rusty::cmp fallback requires direct < support or lexicographically comparable begin/end ranges\"\n\
+        );\n\
+        return false;\n\
+    }\n\
+}\n\
+} // namespace detail\n\
 // Compare two values and return Ordering (works for primitives and types with </>).\n\
 template<typename A, typename B>\n\
 Ordering cmp(const A& a, const B& b) {\n\
     if constexpr (requires { a.cmp(b); }) {\n\
         return a.cmp(b);\n\
     } else {\n\
-        if (a < b) return Ordering::Less;\n\
-        if (b < a) return Ordering::Greater;\n\
+        if (detail::less_than(a, b)) return Ordering::Less;\n\
+        if (detail::less_than(b, a)) return Ordering::Greater;\n\
         return Ordering::Equal;\n\
     }\n\
 }\n\
@@ -32166,8 +32192,8 @@ auto partial_cmp(const A& a, const B& b) {\n\
     if constexpr (requires { a.partial_cmp(b); }) {\n\
         return a.partial_cmp(b);\n\
     } else {\n\
-        if (a < b) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
-        if (b < a) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
+        if (rusty::cmp::detail::less_than(a, b)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);\n\
+        if (rusty::cmp::detail::less_than(b, a)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);\n\
         return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);\n\
     }\n\
 }\n\
@@ -46022,6 +46048,16 @@ mod tests {
     fn test_leaf415433333333_runtime_fallback_includes_partial_cmp_helper() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("auto partial_cmp(A&& a, B&& b)"));
+    }
+
+    #[test]
+    fn test_leaf5160_runtime_partial_cmp_fallback_supports_lexicographical_ranges() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("namespace detail {"));
+        assert!(helpers.contains("bool less_than(const L& lhs, const R& rhs)"));
+        assert!(helpers.contains("std::lexicographical_compare("));
+        assert!(helpers.contains("rusty::cmp::detail::less_than(a, b)"));
+        assert!(helpers.contains("rusty::cmp::detail::less_than(b, a)"));
     }
 
     #[test]

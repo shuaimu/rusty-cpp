@@ -2489,6 +2489,10 @@ Current status snapshot:
    - adding shared Rust-style `size_hint()` surfaces to `rusty::range<T>` and `rusty::range_inclusive<T>` that report exact finite remaining bounds (`(remaining, Some(remaining))`), and
    - adding shared Rust-style `size_hint()` surface to `rusty::range_from<T>` that reports open-ended bounds (`(usize::MAX, None)`).
 122. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:94/95` (ordering compare scaffolding emits `operator<` on `std::span<...>` payloads, which has no viable overload), with downstream comparison/runtime-surface fallout. Guardrail check against §11 remains satisfied for `Leaf 5.1.59` (fixes stayed shared and runtime-surface-gated, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+123. Focused `smallvec` repro after `Leaf 5.1.60` (`/tmp/rusty-parity-matrix-5-1-60b-20260412/smallvec/...`) collapses the prior post-5.1.59 `std::span` ordering compare family by:
+   - routing generated runtime fallback `cmp`/`partial_cmp` ordering through shared `rusty::cmp::detail::less_than(...)` instead of unconditional direct `a < b`/`b < a`,
+   - implementing `less_than(...)` with dual support for direct `<`-comparable values and lexicographically comparable begin/end ranges via `std::lexicographical_compare(...)`.
+124. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2004` (`NonNull` pointee-owner mismatch in `from_slice`/`from_heap`: `unsigned int*` cannot convert to `std::array<unsigned int, 2>*`), with adjacent downstream runtime-surface fallout (`rusty::len` static-assert and iterator/option surfaces). Guardrail check against §11 remains satisfied for `Leaf 5.1.60` (fix stayed shared and comparator-shape-gated in runtime-helper emission, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
