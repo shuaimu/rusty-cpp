@@ -23794,11 +23794,19 @@ impl CodeGen {
             syn::Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();
                 if method == "map" && mc.args.len() == 1 {
+                    let source_item_ty = self.infer_iter_item_type_from_expr(&mc.receiver);
                     if let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[0]) {
                         if let Some(ret) = self.infer_hint_type_from_expr(&closure.body) {
                             return Some(ret);
                         }
+                        if let Some(source_item_ty) = source_item_ty.as_ref()
+                            && let Some(ret) =
+                                self.infer_map_closure_item_type_from_source(closure, source_item_ty)
+                        {
+                            return Some(ret);
+                        }
                     }
+                    return source_item_ty;
                 }
                 if method == "drain" {
                     if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
@@ -23874,6 +23882,10 @@ impl CodeGen {
                         }
                     }
                     if joined == "map" || joined == "rusty::map" {
+                        let source_item_ty = call
+                            .args
+                            .first()
+                            .and_then(|source| self.infer_iter_item_type_from_expr(source));
                         if call.args.len() >= 2 {
                             if let syn::Expr::Closure(closure) =
                                 self.peel_paren_group_expr(&call.args[1])
@@ -23881,11 +23893,18 @@ impl CodeGen {
                                 if let Some(ret) = self.infer_hint_type_from_expr(&closure.body) {
                                     return Some(ret);
                                 }
+                                if let Some(source_item_ty) = source_item_ty.as_ref()
+                                    && let Some(ret) = self
+                                        .infer_map_closure_item_type_from_source(
+                                            closure,
+                                            source_item_ty,
+                                        )
+                                {
+                                    return Some(ret);
+                                }
                             }
                         }
-                        if let Some(source) = call.args.first() {
-                            return self.infer_iter_item_type_from_expr(source);
-                        }
+                        return source_item_ty;
                     }
                     if (joined == "take" || joined == "rusty::take") && !call.args.is_empty() {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
@@ -23923,6 +23942,81 @@ impl CodeGen {
             _ => self
                 .infer_simple_expr_type(expr)
                 .and_then(|ty| self.extract_iter_item_type_from_type(&ty)),
+        }
+    }
+
+    fn infer_map_closure_item_type_from_source(
+        &self,
+        closure: &syn::ExprClosure,
+        source_item_ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        if closure.inputs.len() != 1 {
+            return None;
+        }
+        let syn::Pat::Ident(param_ident) = closure.inputs.first()? else {
+            return None;
+        };
+        let param_name = param_ident.ident.to_string();
+        let deref_depth =
+            self.expr_deref_chain_depth_for_ident(&closure.body, &param_name)?;
+        // Keep inference aligned with map closure emission:
+        // for untyped iterator-map params, collapse one deref layer.
+        let effective_deref_depth = deref_depth.saturating_sub(1);
+        let mut inferred = source_item_ty.clone();
+        for _ in 0..effective_deref_depth {
+            inferred = self.infer_deref_result_type_from_type(&inferred)?;
+        }
+        Some(inferred)
+    }
+
+    fn expr_deref_chain_depth_for_ident(&self, expr: &syn::Expr, ident: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut current = self.peel_paren_group_expr(expr);
+        while let syn::Expr::Unary(unary) = current {
+            if !matches!(unary.op, syn::UnOp::Deref(_)) {
+                break;
+            }
+            depth += 1;
+            current = self.peel_paren_group_expr(&unary.expr);
+        }
+        let syn::Expr::Path(path) = current else {
+            return None;
+        };
+        if path.path.segments.len() != 1 || path.path.segments[0].ident != ident {
+            return None;
+        }
+        Some(depth)
+    }
+
+    fn infer_deref_result_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Reference(reference) => Some((*reference.elem).clone()),
+            syn::Type::Ptr(pointer) => Some((*pointer.elem).clone()),
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                let owner = last.ident.to_string();
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                let first_type_arg = || {
+                    args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                };
+                match owner.as_str() {
+                    "associated_item_t" => {
+                        let owner_ty = first_type_arg()?;
+                        let item_ty = self.extract_iter_item_type_from_type(&owner_ty)?;
+                        self.infer_deref_result_type_from_type(&item_ty)
+                    }
+                    "Box" | "NonNull" | "ConstNonNull" | "Ptr" | "MutPtr" | "Unique"
+                    | "reference_wrapper" => first_type_arg(),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -50231,6 +50325,25 @@ mod tests {
         assert!(out.contains("next().unwrap()"), "{out}");
         assert!(!out.contains("next().has_value()"), "{out}");
         assert!(!out.contains("next().value()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5174_map_deref_chain_infers_array_assertion_element_type() {
+        let expr: syn::Expr = syn::parse_str("v.iter().map(|v| **v)").unwrap();
+        let mut cg = CodeGen::new();
+        let mut scope = HashMap::new();
+        scope.insert(
+            "v".to_string(),
+            Some(syn::parse_str::<syn::Type>("SmallVec<[Box<u8>; 8]>").unwrap()),
+        );
+        cg.local_bindings.push(scope);
+        let inferred = cg
+            .infer_iter_item_type_from_expr(&expr)
+            .expect("map expression should infer iterator item type");
+        assert_eq!(
+            normalize_token_text(inferred.to_token_stream().to_string()),
+            "u8"
+        );
     }
 
     #[test]

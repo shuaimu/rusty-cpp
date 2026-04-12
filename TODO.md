@@ -5680,7 +5680,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-73a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core local inference and method lowering paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.74: `smallvec` Stage D associated-item element-shape mismatch in assertion array literals (`associated_item_t<std::array<rusty::Box<u8>, N>>` forcing `int -> Box<u8>` in `insert_many` parity paths) compile-head family collapse
+        - [x] *done* Leaf 5.1.74: `smallvec` Stage D associated-item element-shape mismatch in assertion array literals (`associated_item_t<std::array<rusty::Box<u8>, N>>` forcing `int -> Box<u8>` in `insert_many` parity paths) compile-head family collapse
+          - Plan/scope check: shared iterator-map item inference hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - hardened iterator-map item-type inference to recover closure-return item types for deref-chain map bodies on untyped params (including one-layer deref-collapse parity with map-closure emission),
+            - added deref-result inference support for `rusty::detail::associated_item_t<Owner>` proxies by resolving concrete owner item shape before deref,
+            - this collapses the deterministic post-5.1.73 first-head family at `runner.cpp:3054` (typed assertion array literal forced to `associated_item_t<std::array<rusty::Box<uint8_t>, 8>>` causing `int -> Box<uint8_t>` conversion failures).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5174_map_deref_chain_infers_array_assertion_element_type`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf5130_iter_map_untyped_param_single_deref_collapses_in_map_context`
+            - `codegen::tests::test_leaf5130_iter_map_untyped_param_double_deref_collapses_one_layer`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5174 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5130_iter_map_untyped_param_single_deref_collapses_in_map_context -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5130_iter_map_untyped_param_double_deref_collapses_one_layer -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-74a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.73 first-head family at `runner.cpp:3054` (assertion array literal typed as `associated_item_t<std::array<rusty::Box<uint8_t>, 8>>`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1874` (`DropOnPanic<A>` constructor owner mismatch: emitted `unsigned char*` passed where `std::add_pointer_t<A>` expects `std::array<unsigned char, 8>*`), with adjacent downstream pointer/helper surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-74a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core iterator-map inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.75: `smallvec` Stage D `DropOnPanic<A>` pointer-owner mismatch in `insert_many` (`std::add_pointer_t<A>` vs payload pointer `A::Item*`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
