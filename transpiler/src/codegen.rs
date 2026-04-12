@@ -325,6 +325,10 @@ pub struct CodeGen {
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
+    /// Previous same-scope binding types overwritten by shadow registrations.
+    /// Used so in-progress initializers can still recover the immediately
+    /// shadowed binding type for `let x = x.method(...)` patterns.
+    local_shadowed_binding_types: Vec<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Names of locals currently being initialized.
     /// Used to keep initializer expression/type lookup resolving the outer
     /// binding when a local shadows an existing name (`let x = x.next()`).
@@ -593,6 +597,7 @@ impl CodeGen {
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
             local_bindings: Vec::new(),
+            local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
@@ -769,6 +774,7 @@ impl CodeGen {
         self.param_bindings.clear();
         self.callable_param_bound_scopes.clear();
         self.local_bindings.clear();
+        self.local_shadowed_binding_types.clear();
         self.local_cpp_bindings.clear();
         self.local_cpp_names_used.clear();
         self.pending_loop_var_bindings.clear();
@@ -9972,6 +9978,7 @@ impl CodeGen {
         let prev_repeat_hints = std::mem::replace(&mut self.repeat_elem_type_hints, repeat_hints);
         self.local_placeholder_type_hints.push(placeholder_hints);
         self.local_bindings.push(HashMap::new());
+        self.local_shadowed_binding_types.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
         self.local_cpp_names_used.push(HashSet::new());
         self.local_const_bindings.push(HashMap::new());
@@ -10098,6 +10105,7 @@ impl CodeGen {
 
         self.block_depth -= 1;
         self.local_bindings.pop();
+        self.local_shadowed_binding_types.pop();
         self.local_cpp_bindings.pop();
         self.local_cpp_names_used.pop();
         self.local_const_bindings.pop();
@@ -14064,10 +14072,12 @@ impl CodeGen {
                 local_consts.insert(rust_name.clone(), false);
             }
             self.local_bindings.push(local_types);
+            self.local_shadowed_binding_types.push(HashMap::new());
             self.local_const_bindings.push(local_consts);
             self.emit_block(then_branch);
             self.local_const_bindings.pop();
             self.local_bindings.pop();
+            self.local_shadowed_binding_types.pop();
             self.local_cpp_bindings.pop();
         }
         self.indent -= 1;
@@ -14265,10 +14275,12 @@ impl CodeGen {
                 local_consts.insert(rust_name.clone(), false);
             }
             self.local_bindings.push(local_types);
+            self.local_shadowed_binding_types.push(HashMap::new());
             self.local_const_bindings.push(local_consts);
             self.emit_block(body);
             self.local_const_bindings.pop();
             self.local_bindings.pop();
+            self.local_shadowed_binding_types.pop();
             self.local_cpp_bindings.pop();
         }
         self.indent -= 1;
@@ -15383,7 +15395,12 @@ impl CodeGen {
 
     fn register_local_binding(&mut self, name: String, ty: Option<syn::Type>) {
         if let Some(scope) = self.local_bindings.last_mut() {
-            scope.insert(name, ty);
+            let previous = scope.insert(name.clone(), ty);
+            if let (Some(prev), Some(shadow_scope)) =
+                (previous, self.local_shadowed_binding_types.last_mut())
+            {
+                shadow_scope.entry(name).or_default().push(prev);
+            }
         }
     }
 
@@ -16182,14 +16199,20 @@ impl CodeGen {
         let method = mc.method.to_string();
 
         if matches!(method.as_str(), "as_ptr" | "as_mut_ptr") && mc.args.is_empty() {
+            let mut as_ptr_returns_mut = method == "as_mut_ptr";
             let pointee_ty = self
                 .infer_array_element_type_from_expr(&mc.receiver)
                 .or_else(|| {
                     self.infer_simple_expr_type(&mc.receiver).and_then(|ty| {
-                        let peeled = self.peel_reference_paren_group_type(&ty);
-                        match peeled {
-                            syn::Type::Ptr(ptr) => Some((*ptr.elem).clone()),
-                            _ => self.extract_iter_item_type_from_type(peeled),
+                        if let Some((pointee, is_mut_ptr)) =
+                            self.extract_pointer_pointee_info_from_type(&ty)
+                        {
+                            if method == "as_ptr" {
+                                as_ptr_returns_mut = is_mut_ptr;
+                            }
+                            Some(pointee)
+                        } else {
+                            self.extract_iter_item_type_from_type(&ty)
                         }
                     })
                 })
@@ -16214,7 +16237,7 @@ impl CodeGen {
                     }
                 })
                 .unwrap_or_else(|| parse_quote!(u8));
-            if method == "as_mut_ptr" {
+            if as_ptr_returns_mut {
                 return Some(parse_quote!(*mut #pointee_ty));
             }
             return Some(parse_quote!(*const #pointee_ty));
@@ -16343,6 +16366,31 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn extract_pointer_pointee_info_from_type(&self, ty: &syn::Type) -> Option<(syn::Type, bool)> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Ptr(ptr) => Some(((*ptr.elem).clone(), ptr.mutability.is_some())),
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                let owner = last.ident.to_string();
+                let is_mut_ptr = match owner.as_str() {
+                    "NonNull" | "Unique" | "MutPtr" => true,
+                    "ConstNonNull" | "Ptr" => false,
+                    _ => return None,
+                };
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                let pointee = args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t.clone()),
+                    _ => None,
+                })?;
+                Some((pointee, is_mut_ptr))
+            }
+            _ => None,
+        }
     }
 
     fn is_u8_raw_pointer_type(&self, ty: &syn::Type) -> bool {
@@ -16477,19 +16525,25 @@ impl CodeGen {
             "as_mut_ptr" | "rusty::as_mut_ptr" | "as_ptr" | "rusty::as_ptr"
         ) && call.args.len() == 1
         {
+            let mut as_ptr_returns_mut = joined.ends_with("as_mut_ptr");
             let pointee_ty = self
                 .infer_array_element_type_from_expr(&call.args[0])
                 .or_else(|| {
                     self.infer_simple_expr_type(&call.args[0]).and_then(|ty| {
-                        let peeled = self.peel_reference_paren_group_type(&ty);
-                        match peeled {
-                            syn::Type::Ptr(ptr) => Some((*ptr.elem).clone()),
-                            _ => self.extract_iter_item_type_from_type(peeled),
+                        if let Some((pointee, is_mut_ptr)) =
+                            self.extract_pointer_pointee_info_from_type(&ty)
+                        {
+                            if joined.ends_with("as_ptr") {
+                                as_ptr_returns_mut = is_mut_ptr;
+                            }
+                            Some(pointee)
+                        } else {
+                            self.extract_iter_item_type_from_type(&ty)
                         }
                     })
                 })
                 .unwrap_or_else(|| parse_quote!(u8));
-            if joined.ends_with("as_mut_ptr") {
+            if as_ptr_returns_mut {
                 return Some(parse_quote!(*mut #pointee_ty));
             }
             return Some(parse_quote!(*const #pointee_ty));
@@ -17922,6 +17976,15 @@ impl CodeGen {
         for (scope_idx, scope) in self.local_bindings.iter().rev().enumerate() {
             if let Some(maybe_ty) = scope.get(name) {
                 if skip_current_scope_binding && scope_idx == 0 {
+                    if let Some(previous_ty) = self
+                        .local_shadowed_binding_types
+                        .last()
+                        .and_then(|shadow_scope| shadow_scope.get(name))
+                        .and_then(|stack| stack.last())
+                        .cloned()
+                    {
+                        return previous_ty;
+                    }
                     continue;
                 }
                 return maybe_ty.clone();
@@ -24784,6 +24847,7 @@ impl CodeGen {
 
     fn push_transient_statement_scope(&mut self) {
         self.local_bindings.push(HashMap::new());
+        self.local_shadowed_binding_types.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
         self.local_cpp_names_used.push(HashSet::new());
         self.local_const_bindings.push(HashMap::new());
@@ -24798,6 +24862,7 @@ impl CodeGen {
         self.local_cpp_names_used.pop();
         self.local_cpp_bindings.pop();
         self.local_bindings.pop();
+        self.local_shadowed_binding_types.pop();
     }
 
     /// Lower `let x = if let Some(y) = expr { ...?...; val } else { default };`
@@ -26450,6 +26515,7 @@ impl CodeGen {
             binding_consts.insert(rust_name.clone(), false);
         }
         inner.local_bindings.push(binding_types);
+        inner.local_shadowed_binding_types.push(HashMap::new());
         inner.local_const_bindings.push(binding_consts);
         inner
     }
@@ -46637,6 +46703,86 @@ mod tests {
         assert!(out.contains("if (len_ptr == 0)"), "{out}");
         assert!(out.contains("return len_ptr;"), "{out}");
         assert!(!out.contains("*len_ptr"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5129_nonnull_as_ptr_infers_assoc_item_pointee_type_for_copy_calls() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::{self, NonNull};
+            trait ArrayLike { type Item; }
+            struct SmallVec<A: ArrayLike> { ptr: NonNull<A::Item> }
+            impl<A: ArrayLike> SmallVec<A> {
+                fn remove_like(&mut self, index: usize, len: usize) {
+                    unsafe {
+                        let ptr = self.ptr.as_ptr().add(index);
+                        ptr::copy(ptr.add(1), ptr, len - index - 1);
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::detail::associated_item_t<A>")
+                || out.contains("typename A::Item"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("std::add_pointer_t<std::add_const_t<A>>")
+                && !out.contains("std::add_const_t<A>>"),
+            "as_ptr pointee fallback must not collapse to owner type parameter A nor force const pointee casts, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5129_nonnull_method_as_ptr_does_not_fallback_to_u8_pointer() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            fn f(mut p: NonNull<i32>) {
+                let q = p.as_ptr();
+                let _ = q;
+            }
+            "#,
+        );
+        assert!(out.contains("int32_t*"), "{out}");
+        assert!(!out.contains("const int32_t*"), "{out}");
+        assert!(!out.contains("uint8_t"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5129_shadowed_nonnull_as_ptr_recovers_previous_binding_type() {
+        let out = transpile_str(
+            r#"
+            use std::ptr::{self, NonNull};
+            trait ArrayLike { type Item; }
+            struct SmallVec<A: ArrayLike>;
+            impl<A: ArrayLike> SmallVec<A> {
+                fn triple_mut(&mut self) -> (NonNull<A::Item>, &mut usize, usize) {
+                    loop {}
+                }
+                fn remove_like(&mut self, index: usize, len: usize) {
+                    unsafe {
+                        let (ptr, _, _) = self.triple_mut();
+                        let ptr = ptr.as_ptr().add(index);
+                        ptr::copy(ptr.add(1), ptr, len - index - 1);
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::add_pointer_t<rusty::detail::associated_item_t<A>>")
+                || out.contains("std::add_pointer_t<typename A::Item>")
+                || out.contains("rusty::detail::associated_item_t<A>*")
+                || out.contains("typename A::Item*"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("std::add_pointer_t<std::add_const_t<A>>")
+                && !out.contains("std::add_const_t<A>>"),
+            "shadowed `let ptr = ptr.as_ptr().add(..)` must not collapse pointee to owner type parameter A, got:\n{out}"
+        );
     }
 
     #[test]

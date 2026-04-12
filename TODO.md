@@ -4615,6 +4615,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-28b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core codegen paths, with no crate-specific scripts and no generated-output text patching.
+        - [x] *done* Leaf 5.1.29: `smallvec` Stage D `remove` pointer-call-shape / shadowed-local pointer inference compile-head family collapse
+          - Plan/scope check: shared transpiler-only local-type/pointer inference hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - local binding registration now records overwritten same-scope shadow types so in-progress initializer inference for `let x = x...` can recover the immediately shadowed binding type instead of dropping to unresolved fallback.
+            - `as_ptr`/`as_mut_ptr` local-pointer inference now recovers pointer-wrapper pointee + mutability (`NonNull`, `ConstNonNull`, `Unique`, `Ptr`, `MutPtr`) and emits mutable raw pointers for mutable wrappers (`NonNull`/`Unique`), preventing const-pointee drift in `ptr::copy` paths.
+            - call-expression pointer inference for `as_ptr`/`as_mut_ptr` now uses the same wrapper-aware pointee/mutability recovery, keeping cast surfaces aligned between method and free-function lowering.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5129_nonnull_as_ptr_infers_assoc_item_pointee_type_for_copy_calls`
+            - `test_leaf5129_nonnull_method_as_ptr_does_not_fallback_to_u8_pointer`
+            - `test_leaf5129_shadowed_nonnull_as_ptr_recovers_previous_binding_type`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5129 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-29 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.28 first-head family at `runner.cpp:1747` (`rusty::ptr::copy` call-shape mismatch from `as_ptr` owner-type/const-pointer drift in `remove`/`swap_remove`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3016` (`invalid type argument of unary '*'` in iterator-map deref shape for boxed-byte paths), with adjacent same-family fallout at `runner.cpp:3060/3104/3148` and downstream callback-signature mismatch chain in `slice.hpp`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-29/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core local binding/pointer inference paths, with no crate-specific scripts and no generated-output text patching.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -2354,6 +2354,11 @@ Current status snapshot:
    - and recovering self-method return-type inference for tuple local bindings so reference-like deref collapse is applied in downstream unary-deref lowering.
 56. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1747` (`rusty::copy` call-shape mismatch in `remove`/`swap_remove` paths), with adjacent downstream fallout at `runner.cpp:2998` (invalid unary `*` on `std::array<rusty::Box<unsigned char>, 8>`) and iterator-map deref-shape failures (`runner.cpp:3016/3060/...`).
 57. Guardrail check against §11 remains satisfied for `Leaf 5.1.28`: fixes stayed shared and AST/type-shape-gated in core codegen paths, with no crate-specific scripts and no generated-output text patching.
+58. Focused `smallvec` repro after `Leaf 5.1.29` (`/tmp/rusty-parity-matrix-5-1-29/smallvec/...`) collapses the prior post-5.1.28 `runner.cpp:1747` `ptr::copy` call-shape first-head family by:
+   - preserving overwritten same-scope shadow binding types for in-progress initializer lookup (`let x = x...`), so shadowed `as_ptr` receiver inference still sees the previous binding type, and
+   - making `as_ptr`/`as_mut_ptr` pointer inference wrapper-aware for both pointee and mutability (`NonNull`/`ConstNonNull`/`Unique`/`Ptr`/`MutPtr`), so `NonNull::as_ptr()` lowers to mutable raw-pointer shape.
+59. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3016` (`invalid type argument of unary '*'` in iterator-map boxed-byte deref shape), with adjacent same-family fallout at `runner.cpp:3060/3104/3148` and downstream callback-signature mismatch chain in `slice.hpp`.
+60. Guardrail check against §11 remains satisfied for `Leaf 5.1.29`: fixes stayed shared and AST/type-context-gated in core local-binding/pointer inference paths, with no crate-specific scripts and no generated-output text patching.
 
 Historical active-work chain (retained for traceability):
 
