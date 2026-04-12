@@ -12510,9 +12510,10 @@ impl CodeGen {
                     };
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
-                        let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "));
-                        let visit_param = if needs_mut_param
+                        let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "))
                             || scoped.pattern_requires_mut_ref_binding(&arm.pat)
+                            || scoped.expected_type_contains_mut_reference(expected_ty);
+                        let visit_param = if needs_mut_param
                         {
                             format!("{}& _v", cpp_type)
                         } else {
@@ -12527,9 +12528,10 @@ impl CodeGen {
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
-                        let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "));
-                        let visit_param = if needs_mut_param
+                        let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "))
                             || scoped.pattern_requires_mut_ref_binding(&arm.pat)
+                            || scoped.expected_type_contains_mut_reference(expected_ty);
+                        let visit_param = if needs_mut_param
                         {
                             format!("{}& _v", cpp_type)
                         } else {
@@ -12563,27 +12565,39 @@ impl CodeGen {
                 }
                 syn::Pat::Struct(ps) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&ps.path, variant_ctx, Some("_m"));
-                    let visit_param = if scoped.pattern_requires_mut_ref_binding(&arm.pat) {
-                        format!("{}& _v", cpp_type)
-                    } else {
-                        format!("const {}& _v", cpp_type)
-                    };
                     let mut binding_stmts = Vec::new();
+                    let mut supported = true;
                     for field_pat in &ps.fields {
                         let field_name = field_pat.member.clone();
                         let field_name_str = match &field_name {
                             syn::Member::Named(ident) => ident.to_string(),
                             syn::Member::Unnamed(idx) => format!("_{}", idx.index),
                         };
-                        let binding_name = match &*field_pat.pat {
-                            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                            _ => field_name_str.clone(),
-                        };
-                        binding_stmts.push(format!(
-                            "const auto& {} = _v.{};",
-                            binding_name, field_name_str
-                        ));
+                        let field_expr = format!("_v.{}", field_name_str);
+                        if !scoped.collect_pattern_binding_stmts(
+                            &field_pat.pat,
+                            &field_expr,
+                            &mut binding_stmts,
+                        ) {
+                            supported = false;
+                            break;
+                        }
                     }
+                    if !supported {
+                        parts.push(format!(
+                            "[&](const auto&) {{ return {}; }}",
+                            scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
+                        ));
+                        scoped.pop_pattern_ref_binding_scope();
+                        continue;
+                    }
+                    let visit_param = if scoped.pattern_requires_mut_ref_binding(&arm.pat)
+                        || scoped.expected_type_contains_mut_reference(expected_ty)
+                    {
+                        format!("{}& _v", cpp_type)
+                    } else {
+                        format!("const {}& _v", cpp_type)
+                    };
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
                         parts.push(format!(
@@ -15048,7 +15062,30 @@ impl CodeGen {
                 if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
                     let name = &pi.ident;
                     let name_str = name.to_string();
+                    let previous_cpp_name_in_current_scope = self
+                        .local_cpp_bindings
+                        .last()
+                        .and_then(|scope| scope.get(&name_str).cloned());
                     let cpp_name = self.allocate_local_cpp_name(&name_str);
+                    // Match Pat::Ident shadow handling so typed shadow initializers
+                    // resolve RHS names to the previous binding (`let x: T = x;`).
+                    let has_outer_same_rust_binding = self
+                        .local_cpp_bindings
+                        .iter()
+                        .rev()
+                        .skip(1)
+                        .any(|scope| scope.contains_key(&name_str));
+                    let shadows_outer =
+                        cpp_name != escape_cpp_keyword(&name_str) || has_outer_same_rust_binding;
+                    if shadows_outer {
+                        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                            scope.remove(&name_str);
+                            if let Some(previous_cpp_name) = previous_cpp_name_in_current_scope.clone()
+                            {
+                                scope.insert(name_str.clone(), previous_cpp_name);
+                            }
+                        }
+                    }
                     let shadows_param = self
                         .param_bindings
                         .last()
@@ -15164,7 +15201,12 @@ impl CodeGen {
                     }
                     if shadows_param {
                         if let Some(scope) = self.local_cpp_bindings.last_mut() {
-                            scope.insert(name_str, cpp_name);
+                            scope.insert(name_str, cpp_name.clone());
+                        }
+                    }
+                    if shadows_outer {
+                        if let Some(scope) = self.local_cpp_bindings.last_mut() {
+                            scope.insert(name.to_string(), cpp_name);
                         }
                     }
                     if track_in_progress_initializer {
@@ -16283,6 +16325,20 @@ impl CodeGen {
                         return Some(item_ty);
                     }
                 }
+            }
+        }
+
+        // Keep tuple/assoc return-shape inference available for self-method calls
+        // so downstream local binding type tracking can collapse `*ref_like` derefs.
+        let receiver_expr = self.peel_paren_group_expr(&mc.receiver);
+        let receiver_is_self = matches!(
+            receiver_expr,
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
+        );
+        if receiver_is_self {
+            if let Some(ret_ty) = self.lookup_current_struct_method_return_type(&method) {
+                return Some(ret_ty);
             }
         }
 
@@ -20220,7 +20276,7 @@ impl CodeGen {
                         .iter()
                         .enumerate()
                         .map(|(idx, e)| {
-                            self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            self.emit_tuple_element_with_expected_type(
                                 e,
                                 expected_tuple_ty.elems.iter().nth(idx),
                             )
@@ -20532,6 +20588,68 @@ impl CodeGen {
         }
     }
 
+    fn peel_paren_group_type<'a>(&self, ty: &'a syn::Type) -> &'a syn::Type {
+        match ty {
+            syn::Type::Paren(p) => self.peel_paren_group_type(&p.elem),
+            syn::Type::Group(g) => self.peel_paren_group_type(&g.elem),
+            _ => ty,
+        }
+    }
+
+    fn type_contains_mut_reference(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_paren_group_type(ty);
+        match ty {
+            syn::Type::Reference(r) => {
+                r.mutability.is_some() || self.type_contains_mut_reference(&r.elem)
+            }
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_contains_mut_reference(elem)),
+            syn::Type::Path(tp) => tp.path.segments.iter().any(|seg| {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    args.args.iter().any(|arg| match arg {
+                        syn::GenericArgument::Type(inner) => {
+                            self.type_contains_mut_reference(inner)
+                        }
+                        _ => false,
+                    })
+                } else {
+                    false
+                }
+            }),
+            syn::Type::Array(a) => self.type_contains_mut_reference(&a.elem),
+            syn::Type::Slice(s) => self.type_contains_mut_reference(&s.elem),
+            syn::Type::Ptr(p) => self.type_contains_mut_reference(&p.elem),
+            _ => false,
+        }
+    }
+
+    fn expected_type_contains_mut_reference(&self, expected_ty: Option<&syn::Type>) -> bool {
+        expected_ty.is_some_and(|ty| self.type_contains_mut_reference(ty))
+    }
+
+    fn emit_tuple_element_with_expected_type(
+        &self,
+        elem: &syn::Expr,
+        expected_elem_ty: Option<&syn::Type>,
+    ) -> String {
+        let Some(expected_elem_ty) = expected_elem_ty else {
+            return self.emit_expr_to_string_with_expected_and_move_if_needed(elem, None);
+        };
+        let expected_elem_ty = self.peel_paren_group_type(expected_elem_ty);
+        if let syn::Type::Reference(expected_ref) = expected_elem_ty {
+            if let syn::Expr::Reference(reference_expr) = self.peel_paren_group_expr(elem) {
+                return self.emit_expr_to_string_with_expected(
+                    &reference_expr.expr,
+                    Some(expected_ref.elem.as_ref()),
+                );
+            }
+            return self.emit_expr_to_string_with_expected(elem, Some(expected_elem_ty));
+        }
+        self.emit_expr_to_string_with_expected_and_move_if_needed(elem, Some(expected_elem_ty))
+    }
+
     fn tuple_expected_needs_typed_constructor(&self, tuple_ty: &syn::TypeTuple) -> bool {
         tuple_ty
             .elems
@@ -20575,7 +20693,7 @@ impl CodeGen {
                     }
                 })
             }
-            syn::Type::Reference(r) => self.type_needs_typed_tuple_ctor(&r.elem),
+            syn::Type::Reference(_) => true,
             syn::Type::Ptr(p) => self.type_needs_typed_tuple_ctor(&p.elem),
             syn::Type::Array(a) => self.type_needs_typed_tuple_ctor(&a.elem),
             syn::Type::Slice(s) => self.type_needs_typed_tuple_ctor(&s.elem),
@@ -21713,7 +21831,7 @@ impl CodeGen {
             .iter()
             .enumerate()
             .map(|(idx, elem)| {
-                self.emit_expr_to_string_with_expected_and_move_if_needed(
+                self.emit_tuple_element_with_expected_type(
                     elem,
                     expected_tuple_ty.elems.iter().nth(idx),
                 )
@@ -42800,12 +42918,15 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("_iflet_result0 = std::make_tuple(std::make_optional("),
+            out.contains("_iflet_result0 = ") && out.contains("std::make_optional(minor)"),
             "multi-statement branch tail should assign tuple value into result temp, got:\n{}",
             out
         );
         assert!(
-            !out.contains("\n                std::make_tuple(std::make_optional("),
+            !out.contains("\n                std::make_tuple(std::make_optional(")
+                && !out.contains(
+                    "\n                std::tuple<rusty::Option<uint64_t>, std::string_view>{std::make_optional("
+                ),
             "multi-statement branch tail must not emit a bare tuple expression statement, got:\n{}",
             out
         );
@@ -44199,8 +44320,15 @@ mod tests {
         assert!(
             out.contains("[&](const ParseKind_EmptyFlag&) { return f.write_str(\"EmptyFlag\"); }")
         );
-        assert!(out.contains("[&](const ParseKind_InvalidNamedFlag& _v) { const auto& __self_0 = _v.got; return rusty::fmt::Formatter::debug_struct_field1_finish"));
-        assert!(out.contains("[&](const ParseKind_InvalidHexFlag& _v) { const auto& __self_0 = _v.got; return rusty::fmt::Formatter::debug_struct_field1_finish"));
+        assert!(out.contains("[&](const ParseKind_InvalidNamedFlag& _v) {"));
+        assert!(out.contains("__self_0 = _v.got;"));
+        assert!(out.contains(
+            "return rusty::fmt::Formatter::debug_struct_field1_finish(f, \"InvalidNamedFlag\", \"got\""
+        ));
+        assert!(out.contains("[&](const ParseKind_InvalidHexFlag& _v) {"));
+        assert!(out.contains(
+            "return rusty::fmt::Formatter::debug_struct_field1_finish(f, \"InvalidHexFlag\", \"got\""
+        ));
         assert!(
             !out.contains(
                 "[&](const auto&) { return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }"
@@ -46431,6 +46559,84 @@ mod tests {
         );
         assert!(out.contains("s.swap(1, 2);"), "{out}");
         assert!(!out.contains("rusty::mem::swap(_swap_recv["), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5128_tuple_return_with_mut_reference_uses_typed_tuple_constructor() {
+        let out = transpile_str(
+            r#"
+            fn pair_mut<'a>(len: &'a mut usize) -> (&'a mut usize, usize) {
+                (len, 1)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::tuple<size_t&, size_t>{len,"),
+            "{out}"
+        );
+        assert!(!out.contains("std::make_tuple(len"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5128_match_struct_binding_mut_scrutinee_uses_mut_visit_param() {
+        let out = transpile_str(
+            r#"
+            enum E {
+                A { len: usize },
+            }
+            fn heap_mut(e: &mut E) -> &mut usize {
+                match e {
+                    E::A { len } => len,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("[&](E_A& _v)"), "{out}");
+        assert!(out.contains("auto&& len = _v.len;"), "{out}");
+        assert!(!out.contains("[&](const E_A& _v)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5128_typed_shadow_binding_initializer_uses_outer_binding_name() {
+        let out = transpile_str(
+            r#"
+            fn shadow_typed_local() -> usize {
+                let ptr = 1usize;
+                let ptr: usize = ptr;
+                ptr
+            }
+            "#,
+        );
+        assert!(
+            out.contains("ptr_shadow1 = ptr;") || out.contains("ptr_shadow1 = std::move(ptr);"),
+            "{out}"
+        );
+        assert!(!out.contains("ptr_shadow1 = ptr_shadow1"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5128_self_method_tuple_binding_reference_deref_collapses() {
+        let out = transpile_str(
+            r#"
+            struct Demo { len: usize }
+            impl Demo {
+                fn triple_mut(&mut self) -> (&mut usize, usize) {
+                    (&mut self.len, 0)
+                }
+                fn pop_like(&mut self) -> usize {
+                    let (len_ptr, _) = self.triple_mut();
+                    if *len_ptr == 0 {
+                        return 0;
+                    }
+                    *len_ptr
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto [len_ptr, _] = this->triple_mut();"), "{out}");
+        assert!(out.contains("if (len_ptr == 0)"), "{out}");
+        assert!(out.contains("return len_ptr;"), "{out}");
+        assert!(!out.contains("*len_ptr"), "{out}");
     }
 
     #[test]

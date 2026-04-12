@@ -2348,6 +2348,12 @@ Current status snapshot:
    - recovering `SmallVec` element expected types from array-like owner args for element-taking methods (`push`/`insert` family), and
    - hardening `std::add_pointer_t<T>` const-cast lowering to use `std::add_pointer_t<std::add_const_t<T>>` without extra pointer indirection.
 54. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1730` (`SmallVec<...>` missing `swap` member in `swap_remove` path), with adjacent early fallout at `runner.cpp:1387` (`rusty::ptr::NonNull<...>::new_` missing member) and downstream `triple_mut`/iterator assertion shape errors; guardrail check against §11 remains satisfied (`Leaf 5.1.26` fixes stayed shared and AST/type-context-gated, with no crate-specific scripts and no generated-output patching).
+55. Focused `smallvec` repro after `Leaf 5.1.28` (`/tmp/rusty-parity-matrix-5-1-28b/smallvec/...`) collapses the prior post-5.1.27 `triple_mut` tuple-shape first-head family (`runner.cpp:1549/1592/1593`) by:
+   - preserving typed tuple constructor element-lowering for reference-bearing expected tuple shapes,
+   - hardening typed local shadow initializer resolution (`let x: T = x`) to avoid self-referential RHS mapping,
+   - and recovering self-method return-type inference for tuple local bindings so reference-like deref collapse is applied in downstream unary-deref lowering.
+56. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1747` (`rusty::copy` call-shape mismatch in `remove`/`swap_remove` paths), with adjacent downstream fallout at `runner.cpp:2998` (invalid unary `*` on `std::array<rusty::Box<unsigned char>, 8>`) and iterator-map deref-shape failures (`runner.cpp:3016/3060/...`).
+57. Guardrail check against §11 remains satisfied for `Leaf 5.1.28`: fixes stayed shared and AST/type-shape-gated in core codegen paths, with no crate-specific scripts and no generated-output text patching.
 
 Historical active-work chain (retained for traceability):
 

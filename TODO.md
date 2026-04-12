@@ -4588,6 +4588,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-27/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core lowering/runtime surfaces; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
+        - [x] *done* Leaf 5.1.28: `smallvec` Stage D `triple_mut` tuple-shape / typed-shadow compile-head family collapse
+          - Plan/scope check: shared transpiler-only lowering hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - tuple constructor expected-shape emission now keeps typed tuple constructor paths for reference-bearing expected tuples while preserving element-level expected-type lowering for reference elements.
+            - expression-form `match` struct-arm binding now uses shared pattern-binding collection (instead of fixed `const auto&` field binds) and upgrades visit-param mutability when expected return shape contains mutable references.
+            - typed local-pattern shadow initialization (`let x: T = x`) now uses the same shadow-safe RHS name resolution flow as untyped `let` bindings, preventing self-referential initializer emission (`x_shadow = x_shadow`).
+            - local type inference for self-method call initializers now recovers current-struct method return types, allowing tuple destructuring bindings to retain reference-like type metadata and collapse invalid unary deref emission (`*len_ptr` -> `len_ptr` when binding is reference-like).
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5128_tuple_return_with_mut_reference_uses_typed_tuple_constructor`
+            - `test_leaf5128_match_struct_binding_mut_scrutinee_uses_mut_visit_param`
+            - `test_leaf5128_typed_shadow_binding_initializer_uses_outer_binding_name`
+            - `test_leaf5128_self_method_tuple_binding_reference_deref_collapses`
+            - updated brittle assertions in:
+              - `test_leaf10519_if_let_tuple_result_assigns_multistmt_tail_value`
+              - `test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5128 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10519_if_let_tuple_result_assigns_multistmt_tail_value -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-28b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.27 first-head family at `runner.cpp:1549/1592/1593` (`triple_mut` tuple return-shape mismatch + `ptr_shadow1` self-reference + `*len_ptr` invalid deref fallout) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1747` (`rusty::copy` call-shape mismatch in `remove`/`swap_remove` paths), with adjacent downstream fallout at `runner.cpp:2998` (invalid unary `*` on `std::array<rusty::Box<unsigned char>, 8>`) and iterator-map deref shape errors (`runner.cpp:3016/3060/...`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-28b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core codegen paths, with no crate-specific scripts and no generated-output text patching.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
