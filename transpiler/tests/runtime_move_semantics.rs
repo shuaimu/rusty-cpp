@@ -530,6 +530,45 @@ fn test_leaf5154_slice_iter_accepts_option_like_next_iterators() {
 }
 
 #[test]
+fn test_leaf5164_repeat_runtime_adapter_supports_take_and_for_in() {
+    let source = r#"
+        #include <rusty/slice.hpp>
+
+        struct CloneOnly {
+            int value;
+            explicit CloneOnly(int v) : value(v) {}
+            CloneOnly(const CloneOnly&) = delete;
+            CloneOnly& operator=(const CloneOnly&) = delete;
+            CloneOnly(CloneOnly&&) noexcept = default;
+            CloneOnly& operator=(CloneOnly&&) noexcept = default;
+            CloneOnly clone() const { return CloneOnly(value); }
+        };
+
+        int main() {
+            int sum = 0;
+            for (auto&& v : rusty::for_in(rusty::take(rusty::repeat(7), 3))) {
+                sum += v;
+            }
+            if (sum != 21) {
+                return 1;
+            }
+
+            int clone_sum = 0;
+            for (auto&& item : rusty::for_in(rusty::take(rusty::repeat(CloneOnly(4)), 2))) {
+                clone_sum += item.value;
+            }
+            if (clone_sum != 8) {
+                return 2;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5164_repeat_runtime_adapter_surface");
+}
+
+#[test]
 fn test_slice_get_runtime_helper_surface() {
     let source = r#"
         #include <array>

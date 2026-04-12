@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -374,6 +375,42 @@ private:
     Iter iter_;
 };
 
+template<typename T>
+class repeat_next_iter {
+public:
+    using value_type = std::decay_t<T>;
+
+    explicit repeat_next_iter(value_type value) : value_(std::move(value)) {}
+
+    repeat_next_iter into_iter() const {
+        return *this;
+    }
+
+    rusty::Option<value_type> next() {
+        return rusty::Option<value_type>(clone_value(value_));
+    }
+
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(
+            std::numeric_limits<size_t>::max(),
+            rusty::Option<size_t>(rusty::None));
+    }
+
+private:
+    static value_type clone_value(const value_type& value) {
+        if constexpr (requires { value.clone(); }) {
+            return value.clone();
+        } else {
+            static_assert(
+                std::is_copy_constructible_v<value_type>,
+                "rusty::repeat requires copy-constructible or clone() values");
+            return value;
+        }
+    }
+
+    value_type value_;
+};
+
 template<typename Iter>
 class take_next_iter {
 public:
@@ -610,6 +647,12 @@ auto make_scan_next_iter(Iter&& iter, State&& state, Func&& func) {
         std::forward<Func>(func));
 }
 
+template<typename T>
+auto make_repeat_next_iter(T&& value) {
+    using stored_value = std::decay_t<T>;
+    return repeat_next_iter<stored_value>(std::forward<T>(value));
+}
+
 template<typename Range>
 decltype(auto) preserve_for_in_range(Range&& range) {
     if constexpr (std::is_lvalue_reference_v<Range>) {
@@ -642,6 +685,11 @@ decltype(auto) iter(Range&& range) {
             "rusty::iter requires iter(), option-like next(), data()/size(), or dereferenceable receiver"
         );
     }
+}
+
+template<typename T>
+auto repeat(T&& value) {
+    return detail::make_repeat_next_iter(std::forward<T>(value));
 }
 
 template<typename Range>

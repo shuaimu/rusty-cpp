@@ -2505,6 +2505,11 @@ Current status snapshot:
    - adding shared iterator-item normalization in `Vec::from_iter` so pointer/reference-wrapper yielded items are materialized into value-`Vec<T>` payloads (while preserving pointer-`Vec<T*>` collection unchanged),
    - keeping option-like `next()` collection generic and runtime-local (no crate-specific rewrites).
 130. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2031` (`repeat(...)` unresolved in `SmallVec::resize` extension path), with adjacent downstream iterator/string adapter/runtime-surface fallout (`runner.cpp:4890` char32_t `is_whitespace` surface and later `slice::scan/iter` fallout families). Guardrail check against §11 remains satisfied for `Leaf 5.1.63` (fixes stayed shared and shape-gated in runtime collection surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+131. Focused `smallvec` repro after `Leaf 5.1.64` (`/tmp/rusty-parity-matrix-5-1-64a-20260412/smallvec/...`) collapses the prior post-5.1.63 unresolved `repeat(...).take(...)` family by:
+   - mapping Rust `repeat` path variants (`repeat`, `iter::repeat`, `core::iter::repeat`, `std::iter::repeat`) to shared runtime `rusty::repeat(...)`,
+   - extending iterator-like receiver inference to recognize `repeat(...)` call expressions so adapter chains lower through shared helper surfaces,
+   - adding shared runtime `rusty::repeat(...)` option-like iterator adapter (`next` + `size_hint`) compatible with existing `take`/`for_in` flows.
+132. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4890` (`char32_t` receiver emitted with `.is_whitespace()` in `scan(chars(...))` lambda), with adjacent downstream callable/iterator fallout at `include/rusty/slice.hpp:552` (`std::invoke` mismatch for `scan`) and `include/rusty/slice.hpp:684` (`rusty::iter` static assertion on the derived scan iterator). Guardrail check against §11 remains satisfied for `Leaf 5.1.64` (fixes stayed shared and iterator-shape-gated in transpiler/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

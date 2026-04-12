@@ -23569,6 +23569,23 @@ impl CodeGen {
                         }
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
+                    if call.args.len() == 1
+                        && matches!(
+                            joined.as_str(),
+                            "repeat"
+                                | "iter::repeat"
+                                | "core::iter::repeat"
+                                | "std::iter::repeat"
+                                | "rusty::repeat"
+                        )
+                    {
+                        if let Some(item_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            return Some(item_ty);
+                        }
+                        if let Some(item_ty) = self.infer_hint_type_from_expr(&call.args[0]) {
+                            return Some(item_ty);
+                        }
+                    }
                     if joined == "map" || joined == "rusty::map" {
                         if call.args.len() >= 2 {
                             if let syn::Expr::Closure(closure) =
@@ -48441,6 +48458,21 @@ mod tests {
         assert!(out.contains("rusty::map((rusty::range(0, 3)),"));
         assert!(!out.contains("range.by_ref()"));
         assert!(!out.contains(".take(5)"));
+    }
+
+    #[test]
+    fn test_leaf5164_iter_repeat_take_chain_lowers_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            use core::iter::repeat;
+            fn f(value: u8) {
+                let _ = repeat(value).take(2);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::take(rusty::repeat("), "{out}");
+        assert!(!out.contains("rusty::take(repeat("), "{out}");
+        assert!(!out.contains("repeat(value).take(2)"), "{out}");
     }
 
     #[test]

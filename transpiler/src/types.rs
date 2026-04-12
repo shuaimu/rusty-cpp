@@ -142,6 +142,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "vec::from_elem" | "std::vec::from_elem" | "alloc::vec::from_elem" => {
             Some("rusty::array_repeat")
         }
+        "repeat" | "iter::repeat" | "core::iter::repeat" | "std::iter::repeat" => {
+            Some("rusty::repeat")
+        }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         "Vec::extend_from_slice"
         | "std::vec::Vec::extend_from_slice"
@@ -712,6 +715,11 @@ mod tests {
         assert_eq!(
             map_function_path("std::io::_print"),
             Some("rusty::io::_print")
+        );
+        assert_eq!(map_function_path("repeat"), Some("rusty::repeat"));
+        assert_eq!(
+            map_function_path("core::iter::repeat"),
+            Some("rusty::repeat")
         );
         assert_eq!(
             map_function_path("alloc::boxed::box_new"),

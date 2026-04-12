@@ -5416,6 +5416,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-63a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/shape-gated in runtime iterator collection surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.64: `smallvec` Stage D iterator `repeat(...).take(...)` runtime-surface compile-head family collapse
+          - Plan/scope check: shared runtime/transpiler iterator-adapter hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - function-path mapping now routes `repeat` / `iter::repeat` / `core::iter::repeat` / `std::iter::repeat` through shared runtime `rusty::repeat(...)`,
+            - iterator-like receiver inference now recognizes `repeat(...)` call expressions so adapter chains (`repeat(...).take(...)`) lower through shared helper surfaces instead of leaking unresolved member calls,
+            - shared runtime `rusty::repeat(...)` adapter now provides option-like `next()` + `size_hint()` and integrates with existing `take`/`for_in` flows.
+            - this collapses the deterministic post-5.1.63 first-head family at `runner.cpp:2031` (`repeat(...)` unresolved in `SmallVec::resize` extension path).
+          - Implemented in:
+            - `include/rusty/slice.hpp`
+            - `transpiler/src/types.rs`
+            - `transpiler/src/codegen.rs`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5164_iter_repeat_take_chain_lowers_to_runtime_helpers`
+            - `types::tests::test_leaf42_runtime_function_path_mappings` (added `repeat` path assertions)
+            - `runtime_move_semantics::test_leaf5164_repeat_runtime_adapter_supports_take_and_for_in`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5164 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-64a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.63 first-head family at `runner.cpp:2031` (unresolved `repeat(...)` in `SmallVec::resize`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4890` (`char32_t` receiver emitted with `.is_whitespace()` in `scan(chars(...))` lambda), with adjacent downstream `slice.hpp:552` callable-invoke shape fallout and `slice.hpp:684` iterator adaptation fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-64a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-shape-gated in runtime/transpiler surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.65: `smallvec` Stage D `char32_t` predicate-method lowering (`is_whitespace`) and `scan(chars(...))` callable item-shape compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
