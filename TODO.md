@@ -5466,7 +5466,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-65a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/context-gated in transpiler lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.66: `smallvec` Stage D `scan_next_iter` `size_hint` runtime-surface compile-head family collapse
+        - [x] *done* Leaf 5.1.66: `smallvec` Stage D `scan_next_iter` `size_hint` runtime-surface compile-head family collapse
+          - Plan/scope check: shared runtime iterator-adapter hardening plus focused runtime regression stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - added shared `scan_next_iter::size_hint()` surface with conservative Rust-compatible bounds (`lower=0`, upper forwarded from underlying iterator upper bound when known, or `None` when unknown),
+            - added done-state hint tightening (`(0, Some(0))`) once scan has terminated.
+            - this collapses the deterministic post-5.1.65 first-head family at `runner.cpp:2117` (`scan_next_iter<...>` missing `.size_hint()` in `SmallVec::extend`).
+          - Implemented in:
+            - `include/rusty/slice.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5166_scan_runtime_adapter_exposes_size_hint`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5166 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-66a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.65 first-head family at `runner.cpp:2117` (`scan_next_iter` missing `.size_hint()`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1879` (`std::optional<int>` emitted with Rust `Option` surface calls `.is_none()/.is_some()/.unwrap()`), with adjacent downstream method-surface/data-layout families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-66a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-surface-gated in runtime headers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.67: `smallvec` Stage D `scan` optional-surface normalization (`std::optional` vs `rusty::Option`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

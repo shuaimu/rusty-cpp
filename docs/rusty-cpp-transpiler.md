@@ -2515,6 +2515,10 @@ Current status snapshot:
    - extending scan-closure emission for `chars`-sourced iterators to track item-parameter names so untyped closure params (`|_, ch|`) can still use char-predicate lowering without blanket method rewrites,
    - extending runtime fallback helper surface with `char_runtime::is_whitespace(char32_t)` and marker detection support.
 134. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2117` (`scan_next_iter<...>` has no `size_hint()` member in `SmallVec::extend`), with adjacent downstream optional-interface and data-layout families. Guardrail check against §11 remains satisfied for `Leaf 5.1.65` (fixes stayed shared and type/context-gated in transpiler lowering, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+135. Focused `smallvec` repro after `Leaf 5.1.66` (`/tmp/rusty-parity-matrix-5-1-66a-20260412/smallvec/...`) collapses the prior post-5.1.65 `scan_next_iter` `size_hint` family by:
+   - adding shared `scan_next_iter::size_hint()` in runtime `slice` adapter surfaces with conservative scan bounds (`lower=0`) and upper-bound forwarding from underlying iterator hints when available,
+   - tightening done-state scan hints to `(0, Some(0))` to match adapter termination behavior.
+136. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1879` (`std::optional<int>` emitted with Rust `Option` member surface `.is_none()/.is_some()/.unwrap()`), with adjacent downstream method-surface/data-layout families. Guardrail check against §11 remains satisfied for `Leaf 5.1.66` (fixes stayed shared and iterator-surface-gated in runtime headers, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

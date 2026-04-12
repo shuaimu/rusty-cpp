@@ -435,6 +435,64 @@ fn test_slice_scan_runtime_adapter_surface() {
 }
 
 #[test]
+fn test_leaf5166_scan_runtime_adapter_exposes_size_hint() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+
+        int main() {
+            std::array<int, 4> values{1, 2, 3, 4};
+            auto iter = rusty::scan(
+                rusty::iter(values),
+                0,
+                [](int& state, int value) -> rusty::Option<int> {
+                    state += value;
+                    if (state > 3) {
+                        return rusty::None;
+                    }
+                    return rusty::Option<int>(state);
+                });
+
+            const auto [lower0, upper0] = iter.size_hint();
+            if (lower0 != 0) {
+                return 1;
+            }
+            if (!upper0.is_some() || upper0.unwrap() != 4) {
+                return 2;
+            }
+
+            auto first = iter.next();
+            if (!first.is_some() || first.unwrap() != 1) {
+                return 3;
+            }
+
+            auto second = iter.next();
+            if (!second.is_some() || second.unwrap() != 3) {
+                return 4;
+            }
+
+            auto stop = iter.next();
+            if (!stop.is_none()) {
+                return 5;
+            }
+
+            const auto [lower_done, upper_done] = iter.size_hint();
+            if (lower_done != 0) {
+                return 6;
+            }
+            if (!upper_done.is_some() || upper_done.unwrap() != 0) {
+                return 7;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5166_scan_size_hint_surface");
+}
+
+#[test]
 fn test_slice_filter_runtime_adapter_surface() {
     let source = r#"
         #include <rusty/array.hpp>

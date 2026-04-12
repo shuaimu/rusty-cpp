@@ -577,6 +577,40 @@ public:
         return scanned;
     }
 
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        if (done_) {
+            return std::make_tuple(0, rusty::Option<size_t>(0));
+        }
+
+        if constexpr (requires { iter_.size_hint(); }) {
+            auto hint = iter_.size_hint();
+            auto upper = std::get<1>(hint);
+
+            if constexpr (requires { upper.is_some(); upper.unwrap(); }) {
+                if (upper.is_some()) {
+                    return std::make_tuple(
+                        0,
+                        rusty::Option<size_t>(static_cast<size_t>(upper.unwrap())));
+                }
+            } else if constexpr (requires { upper.has_value(); upper.value(); }) {
+                if (upper.has_value()) {
+                    return std::make_tuple(
+                        0,
+                        rusty::Option<size_t>(static_cast<size_t>(upper.value())));
+                }
+            }
+            return std::make_tuple(0, rusty::Option<size_t>(rusty::None));
+        }
+
+        if constexpr (requires { iter_.count(); }) {
+            return std::make_tuple(
+                0,
+                rusty::Option<size_t>(static_cast<size_t>(iter_.count())));
+        }
+
+        return std::make_tuple(0, rusty::Option<size_t>(rusty::None));
+    }
+
 private:
     Iter iter_;
     State state_;
