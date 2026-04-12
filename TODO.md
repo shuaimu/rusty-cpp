@@ -5573,7 +5573,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-69a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and data-enum/variant-shape-gated in transpiler lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.70: `smallvec` Stage D `CollectionAllocErr` err-arm payload pattern lowering (`_mv2.layout`) compile-head family collapse
+        - [x] *done* Leaf 5.1.70: `smallvec` Stage D `CollectionAllocErr` err-arm payload pattern lowering (`_mv2.layout`) compile-head family collapse
+          - Plan/scope check: shared transpiler runtime-match lowering hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - added runtime match payload-pattern lowering that synthesizes binding statements and value conditions together for `Result`/`Option` unwrap payloads,
+            - when payload patterns are data-enum struct variants, runtime matching now:
+              - guards with `std::holds_alternative<Enum_Variant>(payload)` before arm body execution, and
+              - binds fields through `std::get<Enum_Variant>(payload).field` instead of direct sum-wrapper field access (`payload.field`),
+            - this collapses the deterministic post-5.1.69 first-head family at `runner.cpp:1323` (`CollectionAllocErr` err-arm payload lowered as `_mv2.layout` on the sum wrapper).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5170_runtime_result_payload_data_enum_struct_pattern_stmt_match_uses_variant_get`
+            - `codegen::tests::test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses_variant_get`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_holds_alternative`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5170 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_holds_alternative -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-70a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.69 first-head family at `runner.cpp:1323` (`_mv2.layout` direct member access on `CollectionAllocErr` sum wrapper) is collapsed from deterministic first-head slots.
+            - new first hard-error family remains at `runner.cpp:1323` but moves to runtime-match expression return-type unification fallout (`infallible` lambda deduces inconsistent return types `T` vs `void` across diverging err-arm branches), with adjacent downstream pointer/helper families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-70a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/control-flow-shape-gated in core runtime-match lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.71: `smallvec` Stage D runtime `Result` match expression diverging-arm return-type unification (`T` vs `void` in `infallible`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

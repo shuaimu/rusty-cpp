@@ -11234,13 +11234,14 @@ impl CodeGen {
         match_expr: &syn::ExprMatch,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> bool {
-        let mut arm_plans: Vec<(String, Vec<String>, Vec<String>, Vec<String>)> =
+        let mut arm_plans: Vec<(String, Vec<String>, Option<String>, Vec<String>, Option<String>)> =
             Vec::with_capacity(match_expr.arms.len());
 
         for (idx, arm) in match_expr.arms.iter().enumerate() {
             let mut arm_pre_lines = Vec::new();
+            let mut arm_payload_condition = None;
             let mut arm_binding_lines = Vec::new();
-            let mut arm_post_conditions = Vec::new();
+            let mut arm_guard_condition = None;
             let arm_condition = match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -11253,19 +11254,14 @@ impl CodeGen {
                     }
                     let matched_value = format!("_mv{}", idx);
                     let mut binding_stmts = Vec::new();
-                    let payload_condition = if !self.collect_pattern_binding_stmts(
-                        &ts.elems[0],
-                        &matched_value,
-                        &mut binding_stmts,
-                    ) {
-                        let Some(payload_condition) =
-                            self.tuple_pattern_elem_value_condition(&ts.elems[0], &matched_value)
-                        else {
-                            return false;
-                        };
-                        payload_condition
-                    } else {
-                        None
+                    let Some(payload_condition) = self
+                        .collect_runtime_match_binding_stmts_and_condition(
+                            &ts.elems[0],
+                            &matched_value,
+                            &mut binding_stmts,
+                        )
+                    else {
+                        return false;
                     };
                     let needs_payload_materialization = !binding_stmts.is_empty()
                         || payload_condition.is_some()
@@ -11277,9 +11273,7 @@ impl CodeGen {
                         ));
                     }
                     arm_binding_lines.extend(binding_stmts);
-                    if let Some(payload_condition) = payload_condition {
-                        arm_post_conditions.push(payload_condition);
-                    }
+                    arm_payload_condition = payload_condition;
                     format!("_m.{}()", cond_method)
                 }
                 syn::Pat::Path(pp) => {
@@ -11333,22 +11327,17 @@ impl CodeGen {
                                 }
 
                                 let mut case_binding_stmts = Vec::new();
-                                if !self.collect_pattern_binding_stmts(
-                                    &ts_case.elems[0],
-                                    &tuple_matched_value,
-                                    &mut case_binding_stmts,
-                                ) {
-                                    let Some(case_condition) = self
-                                        .tuple_pattern_elem_value_condition(
-                                            &ts_case.elems[0],
-                                            &tuple_matched_value,
-                                        )
-                                    else {
-                                        return false;
-                                    };
+                                let Some(case_condition) = self
+                                    .collect_runtime_match_binding_stmts_and_condition(
+                                        &ts_case.elems[0],
+                                        &tuple_matched_value,
+                                        &mut case_binding_stmts,
+                                    )
+                                else {
+                                    return false;
+                                };
+                                if case_binding_stmts.is_empty() {
                                     tuple_payload_conditions.push(case_condition);
-                                } else if case_binding_stmts.is_empty() {
-                                    tuple_payload_conditions.push(None);
                                 } else {
                                     // OR arms with runtime payload bindings require branch-scoped
                                     // binding synthesis to keep names/guards coherent.
@@ -11425,13 +11414,14 @@ impl CodeGen {
             };
 
             if let Some((_, guard)) = &arm.guard {
-                arm_post_conditions.push(self.emit_expr_to_string(guard));
+                arm_guard_condition = Some(self.emit_expr_to_string(guard));
             }
             arm_plans.push((
                 arm_condition,
                 arm_pre_lines,
+                arm_payload_condition,
                 arm_binding_lines,
-                arm_post_conditions,
+                arm_guard_condition,
             ));
         }
 
@@ -11442,7 +11432,16 @@ impl CodeGen {
         self.writeln("do {");
         self.indent += 1;
 
-        for (arm, (arm_condition, arm_pre_lines, arm_binding_lines, arm_post_conditions)) in
+        for (
+            arm,
+            (
+                arm_condition,
+                arm_pre_lines,
+                arm_payload_condition,
+                arm_binding_lines,
+                arm_guard_condition,
+            ),
+        ) in
             match_expr.arms.iter().zip(arm_plans.into_iter())
         {
             for pre_line in arm_pre_lines {
@@ -11450,12 +11449,16 @@ impl CodeGen {
             }
             self.writeln(&format!("if ({}) {{", arm_condition));
             self.indent += 1;
+            if let Some(payload_condition) = &arm_payload_condition {
+                self.writeln(&format!("if ({}) {{", payload_condition));
+                self.indent += 1;
+            }
             for binding_line in arm_binding_lines {
                 self.writeln(&binding_line);
             }
 
-            if !arm_post_conditions.is_empty() {
-                self.writeln(&format!("if ({}) {{", arm_post_conditions.join(" && ")));
+            if let Some(guard_condition) = arm_guard_condition {
+                self.writeln(&format!("if ({}) {{", guard_condition));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
                 self.writeln("break;");
@@ -11466,6 +11469,10 @@ impl CodeGen {
                 self.writeln("break;");
             }
 
+            if arm_payload_condition.is_some() {
+                self.indent -= 1;
+                self.writeln("}");
+            }
             self.indent -= 1;
             self.writeln("}");
         }
@@ -12340,6 +12347,90 @@ impl CodeGen {
             syn::Pat::Reference(r) => self.collect_pattern_binding_stmts(&r.pat, source_expr, out),
             syn::Pat::Paren(p) => self.collect_pattern_binding_stmts(&p.pat, source_expr, out),
             _ => false,
+        }
+    }
+
+    fn collect_runtime_match_binding_stmts_and_condition(
+        &self,
+        pat: &syn::Pat,
+        source_expr: &str,
+        out: &mut Vec<String>,
+    ) -> Option<Option<String>> {
+        match pat {
+            syn::Pat::Ident(_) | syn::Pat::Wild(_) => {
+                if self.collect_pattern_binding_stmts(pat, source_expr, out) {
+                    Some(None)
+                } else {
+                    None
+                }
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                let mut conditions = Vec::new();
+                for (i, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                    let elem_expr = format!("std::get<{}>({})", i, source_expr);
+                    let elem_condition = self.collect_runtime_match_binding_stmts_and_condition(
+                        elem_pat, &elem_expr, out,
+                    )?;
+                    if let Some(cond) = elem_condition {
+                        conditions.push(cond);
+                    }
+                }
+                Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::Struct(struct_pat) => {
+                let variant_cpp = self.variant_pattern_cpp_type(&struct_pat.path, None);
+                let is_data_enum_variant = self
+                    .extract_variant_pattern_enum_name(&struct_pat.path, &variant_cpp)
+                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                let field_base_expr = if is_data_enum_variant {
+                    format!("std::get<{}>({})", variant_cpp, source_expr)
+                } else {
+                    source_expr.to_string()
+                };
+                let mut conditions = Vec::new();
+                if is_data_enum_variant {
+                    conditions.push(format!(
+                        "std::holds_alternative<{}>({})",
+                        variant_cpp, source_expr
+                    ));
+                }
+                for field_pat in &struct_pat.fields {
+                    let field_name = match &field_pat.member {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(index) => format!("_{}", index.index),
+                    };
+                    let field_expr = format!("{}.{}", field_base_expr, field_name);
+                    let field_condition = self.collect_runtime_match_binding_stmts_and_condition(
+                        &field_pat.pat,
+                        &field_expr,
+                        out,
+                    )?;
+                    if let Some(cond) = field_condition {
+                        conditions.push(cond);
+                    }
+                }
+                Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::Type(pt) => self.collect_runtime_match_binding_stmts_and_condition(
+                &pt.pat, source_expr, out,
+            ),
+            syn::Pat::Reference(r) => self.collect_runtime_match_binding_stmts_and_condition(
+                &r.pat, source_expr, out,
+            ),
+            syn::Pat::Paren(p) => self.collect_runtime_match_binding_stmts_and_condition(
+                &p.pat, source_expr, out,
+            ),
+            _ => self.tuple_pattern_elem_value_condition(pat, source_expr),
+        }
+    }
+
+    fn combine_runtime_match_conditions(conditions: Vec<String>) -> Option<String> {
+        if conditions.is_empty() {
+            None
+        } else if conditions.len() == 1 {
+            Some(conditions.into_iter().next().unwrap_or_default())
+        } else {
+            Some(format!("({})", conditions.join(" && ")))
         }
     }
 
@@ -13716,15 +13807,12 @@ impl CodeGen {
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     let matched_value = format!("_mv{}", idx);
                     let mut binding_stmts = Vec::new();
-                    let payload_match_condition = if !self.collect_pattern_binding_stmts(
-                        &ts.elems[0],
-                        &matched_value,
-                        &mut binding_stmts,
-                    ) {
-                        self.tuple_pattern_elem_value_condition(&ts.elems[0], &matched_value)?
-                    } else {
-                        None
-                    };
+                    let payload_match_condition = self
+                        .collect_runtime_match_binding_stmts_and_condition(
+                            &ts.elems[0],
+                            &matched_value,
+                            &mut binding_stmts,
+                        )?;
                     let needs_payload_materialization = !binding_stmts.is_empty()
                         || payload_match_condition.is_some()
                         || arm.guard.is_some();
@@ -13734,27 +13822,25 @@ impl CodeGen {
                             matched_value, unwrap_method
                         ));
                     }
+                    if let Some(cond) = &payload_match_condition {
+                        out.push_str(&format!("if ({}) {{ ", cond));
+                    }
                     for stmt in binding_stmts {
                         out.push_str(&stmt);
                         out.push(' ');
                     }
 
-                    let mut arm_conditions = Vec::new();
-                    if let Some(cond) = payload_match_condition {
-                        arm_conditions.push(cond);
-                    }
                     if let Some((_, guard)) = &arm.guard {
-                        arm_conditions.push(self.emit_expr_to_string(guard));
-                    }
-                    if !arm_conditions.is_empty() {
+                        let guard_str = self.emit_expr_to_string(guard);
                         out.push_str(&format!(
                             "if ({}) {{ {}{}; }} ",
-                            arm_conditions.join(" && "),
-                            ret_prefix,
-                            body
+                            guard_str, ret_prefix, body
                         ));
                     } else {
                         out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    if payload_match_condition.is_some() {
+                        out.push_str("} ");
                     }
                     out.push_str("} ");
                 }
@@ -38063,6 +38149,87 @@ mod tests {
         assert!(
             !out.contains("_mv0 == E::A"),
             "data-enum unit-variant payload pattern should not lower to enum-constant equality, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_stmt_match_uses_variant_get()
+    {
+        let out = transpile_str(
+            r#"
+            enum CollectionAllocErr {
+                CapacityOverflow,
+                AllocErr { layout: usize },
+            }
+            fn f(value: Result<i32, CollectionAllocErr>) -> i32 {
+                match value {
+                    Err(CollectionAllocErr::AllocErr { layout }) => {
+                        return layout as i32;
+                    }
+                    _ => 0,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_err())"),
+            "Result payload struct-pattern statement match should use runtime is_err dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::holds_alternative<CollectionAllocErr_AllocErr>(_mv0)"),
+            "Result payload struct-pattern should guard on active variant, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("auto&& layout = std::get<CollectionAllocErr_AllocErr>(_mv0).layout;"),
+            "Result payload struct-pattern should bind fields via std::get on variant payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("_mv0.layout"),
+            "Result payload struct-pattern should not bind fields directly from sum wrapper, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses_variant_get()
+    {
+        let out = transpile_str(
+            r#"
+            enum CollectionAllocErr {
+                CapacityOverflow,
+                AllocErr { layout: usize },
+            }
+            fn f(value: Result<i32, CollectionAllocErr>) -> i32 {
+                match value {
+                    Ok(v) => v,
+                    Err(CollectionAllocErr::AllocErr { layout }) => layout as i32,
+                    Err(CollectionAllocErr::CapacityOverflow) => 0,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_err())"),
+            "Result payload struct-pattern expression match should use runtime is_err dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("std::holds_alternative<CollectionAllocErr_AllocErr>(_mv1)"),
+            "Result payload struct-pattern expression match should guard on active variant, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("auto&& layout = std::get<CollectionAllocErr_AllocErr>(_mv1).layout;"),
+            "Result payload struct-pattern expression match should bind fields via std::get on variant payload, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("_mv1.layout"),
+            "Result payload struct-pattern expression match should not bind fields directly from sum wrapper, got:\n{}",
             out
         );
     }
