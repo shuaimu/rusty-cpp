@@ -6011,7 +6011,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-90e-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated (lifetime-safe slice helpers), with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching.
-        - [ ] Leaf 5.1.91: `smallvec` Stage E `tests_test_from` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.91: `smallvec` Stage E `tests_test_from` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Implemented shared codegen/runtime hardening for tuple-match reference stability and rvalue slice ownership:
+            - `transpiler/src/codegen.rs`: tightened `is_stable_reference_lvalue_expr` for unary deref so tuple-assertion lowering materializes temporaries before taking addresses (`&*temporary` no longer emitted as a stable direct address).
+            - `include/rusty/array.hpp`: added `owned_container_slice` plus rvalue `slice_full(Container&&)` and forwarded `as_slice(Container&&)` through ownership-preserving path to avoid dangling views from temporary Vec/SmallVec-like receivers.
+            - `include/rusty/array.hpp`: added generic equality for paired slice-like containers exposing `as_slice()` so mixed assertion surfaces compare by Rust-like slice value semantics.
+            - `transpiler/src/main.rs` + `include/rusty/mem.hpp`: added `clear_all_forgotten_addresses()` and invoked it in generated parity runner between tests to isolate forgotten-address bookkeeping across wrappers.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5191_tuple_match_deref_temporary_materializes_before_address`
+            - `runtime_move_semantics::test_leaf5191_slice_full_rvalue_vec_keeps_owned_storage_alive`
+            - `runtime_move_semantics::test_leaf5191_as_slice_rvalue_vec_preserves_value_comparison_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5191 -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-smallvec-now`
+            - Stage E parity result: `Results: 62 passed, 0 failed` (`tests_test_size` and `tests_test_from` both PASS).
+          - Deterministic frontier movement:
+            - prior post-5.1.90 first Stage E failure (`tests_test_from FAILED: assertion failed`) is collapsed from deterministic first-head slots.
+            - `smallvec` parity now reaches full pass (`62/62`) on the matrix harness.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-smallvec-now/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
