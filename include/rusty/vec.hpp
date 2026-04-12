@@ -7,10 +7,14 @@
 #include <cassert>
 #include <utility>  // for std::move, std::forward
 #include <cstddef>  // for size_t
+#include <cstdint>
 #include <cstring>  // for memcpy
+#include <limits>
 #include <span>
 #include <type_traits>
+#include <rusty/alloc.hpp>
 #include <rusty/function.hpp>
+#include <rusty/mem.hpp>
 #include <rusty/option.hpp>
 
 // Vec<T> - A growable array with owned elements
@@ -31,10 +35,58 @@ private:
     T* data_;
     size_t size_;
     size_t capacity_;
+
+    static constexpr bool can_materialize_capacity(size_t capacity) noexcept {
+        return capacity <= std::numeric_limits<size_t>::max() / sizeof(T);
+    }
+
+    static constexpr rusty::alloc::Layout storage_layout(size_t capacity) noexcept {
+        return rusty::alloc::Layout::from_size_align_unchecked(
+            capacity * sizeof(T), alignof(T));
+    }
+
+    static T* allocate_storage(size_t capacity) {
+        if (capacity == 0) {
+            return nullptr;
+        }
+        if (!can_materialize_capacity(capacity)) {
+            throw std::bad_alloc();
+        }
+        const auto layout = storage_layout(capacity);
+        auto* bytes = rusty::alloc::alloc(layout);
+        if (bytes == nullptr) {
+            rusty::alloc::handle_alloc_error(layout);
+        }
+        return reinterpret_cast<T*>(bytes);
+    }
+
+    static void deallocate_storage(T* ptr, size_t capacity) noexcept {
+        if (ptr == nullptr || capacity == 0 || !can_materialize_capacity(capacity)) {
+            return;
+        }
+        rusty::alloc::dealloc(
+            reinterpret_cast<std::uint8_t*>(ptr),
+            storage_layout(capacity));
+    }
+
+    static constexpr size_t storage_byte_count(size_t capacity) noexcept {
+        if (capacity > std::numeric_limits<size_t>::max() / sizeof(T)) {
+            return std::numeric_limits<size_t>::max();
+        }
+        return capacity * sizeof(T);
+    }
+
+    void clear_forgotten_storage_marks() noexcept {
+        if (data_ == nullptr || capacity_ == 0) {
+            return;
+        }
+        rusty::mem::clear_forgotten_address_range(
+            data_, storage_byte_count(capacity_));
+    }
     
     void grow() {
         size_t new_capacity = capacity_ == 0 ? 1 : capacity_ * 2;
-        T* new_data = static_cast<T*>(::operator new(new_capacity * sizeof(T)));
+        T* new_data = allocate_storage(new_capacity);
         
         // Move existing elements
         for (size_t i = 0; i < size_; ++i) {
@@ -42,7 +94,8 @@ private:
             data_[i].~T();
         }
         
-        ::operator delete(data_);
+        clear_forgotten_storage_marks();
+        deallocate_storage(data_, capacity_);
         data_ = new_data;
         capacity_ = new_capacity;
     }
@@ -63,6 +116,7 @@ public:
     static Vec<T> from_raw_parts(T* ptr, size_t len, size_t cap) {
         assert(len <= cap);
         assert(ptr != nullptr || cap == 0);
+        assert(can_materialize_capacity(cap));
         Vec<T> v;
         v.data_ = ptr;
         v.size_ = len;
@@ -166,7 +220,7 @@ public:
     static Vec<T> with_capacity(size_t cap) {
         Vec<T> v;
         if (cap > 0) {
-            v.data_ = static_cast<T*>(::operator new(cap * sizeof(T)));
+            v.data_ = allocate_storage(cap);
             v.capacity_ = cap;
         }
         return v;
@@ -176,7 +230,7 @@ public:
     explicit Vec(size_t initial_capacity) 
         : data_(nullptr), size_(0), capacity_(0) {
         if (initial_capacity > 0) {
-            data_ = static_cast<T*>(::operator new(initial_capacity * sizeof(T)));
+            data_ = allocate_storage(initial_capacity);
             capacity_ = initial_capacity;
         }
     }
@@ -207,7 +261,8 @@ public:
         if (this != &other) {
             // Clean up existing data
             clear();
-            ::operator delete(data_);
+            clear_forgotten_storage_marks();
+            deallocate_storage(data_, capacity_);
             
             // Take ownership
             data_ = other.data_;
@@ -224,7 +279,8 @@ public:
     // Destructor
     ~Vec() noexcept(false) {
         clear();
-        ::operator delete(data_);
+        clear_forgotten_storage_marks();
+        deallocate_storage(data_, capacity_);
     }
     
     // Push element to the back
@@ -305,7 +361,7 @@ public:
     // Reserve capacity
     void reserve(size_t new_capacity) {
         if (new_capacity > capacity_) {
-            T* new_data = static_cast<T*>(::operator new(new_capacity * sizeof(T)));
+            T* new_data = allocate_storage(new_capacity);
 
             // Move existing elements
             for (size_t i = 0; i < size_; ++i) {
@@ -313,7 +369,8 @@ public:
                 data_[i].~T();
             }
 
-            ::operator delete(data_);
+            clear_forgotten_storage_marks();
+            deallocate_storage(data_, capacity_);
             data_ = new_data;
             capacity_ = new_capacity;
         }

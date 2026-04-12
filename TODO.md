@@ -5919,7 +5919,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-85a-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-shape-gated in core iterator collection helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.86: `smallvec` Stage E `tests::into_iter_drop` runtime assertion failure (`assertion failed`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.86: `smallvec` Stage E `tests::into_iter_drop` runtime assertion failure (`assertion failed`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime ownership/forget bookkeeping hardening:
+            - `include/rusty/mem.hpp`: added `clear_forgotten_address_range(base, bytes)` to remove stale forgotten-address marks for released storage regions.
+            - `include/rusty/vec.hpp`: clear forgotten-address marks before all storage release paths (`grow`, `reserve`, move-assignment teardown, destructor), preventing stale heap-address poisoning across allocator reuse.
+            - `include/rusty/vec.hpp`: normalized Vec owned-storage allocation/deallocation through shared `rusty::alloc::{alloc,dealloc}` helpers so `Vec::from_raw_parts(...)` ownership teardown follows the same runtime allocator contract used by spilled smallvec buffers.
+          - Added focused regression:
+            - `runtime_move_semantics::test_leaf5186_vec_drop_clears_forgotten_marks_for_released_storage`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics leaf518 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-86b-20260412`
+          - Deterministic frontier movement:
+            - prior post-5.1.85 first Stage E failure (`tests::into_iter_drop` runtime assertion failure with trailing allocator abort) is collapsed from deterministic first-head slots.
+            - `tests::into_iter_drop` now passes; new deterministic first Stage E failure is `tests::into_iter_rev` runtime failure (`Range end out of bounds`) with trailing allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-86b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and runtime-shape-gated in core memory/ownership helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.87: `smallvec` Stage E `tests::into_iter_rev` runtime failure (`Range end out of bounds`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

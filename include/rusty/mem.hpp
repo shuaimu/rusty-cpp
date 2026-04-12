@@ -2,8 +2,10 @@
 #define RUSTY_MEM_HPP
 
 #include <array>
+#include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -210,6 +212,31 @@ inline bool consume_forgotten_address(const void* address) noexcept {
         addresses.erase(it);
     }
     return true;
+}
+
+inline void clear_forgotten_address_range(const void* base, std::size_t bytes) noexcept {
+    if (base == nullptr || bytes == 0) {
+        return;
+    }
+
+    const auto start = reinterpret_cast<std::uintptr_t>(base);
+    std::uintptr_t end = 0;
+    if (bytes > std::numeric_limits<std::uintptr_t>::max() - start) {
+        end = std::numeric_limits<std::uintptr_t>::max();
+    } else {
+        end = start + bytes;
+    }
+
+    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    auto& addresses = detail::forgotten_addresses();
+    for (auto it = addresses.begin(); it != addresses.end();) {
+        const auto current = reinterpret_cast<std::uintptr_t>(it->first);
+        if (current >= start && current < end) {
+            it = addresses.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 template<typename T, typename U>

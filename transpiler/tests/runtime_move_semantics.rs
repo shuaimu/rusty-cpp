@@ -1488,6 +1488,28 @@ fn test_leaf5185_collect_range_next_iter_does_not_materialize_extra_owner_move()
 }
 
 #[test]
+fn test_leaf5186_vec_drop_clears_forgotten_marks_for_released_storage() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+
+        int main() {
+            int* released_ptr = nullptr;
+            {
+                auto values = rusty::Vec<int>::with_capacity(4);
+                released_ptr = rusty::as_mut_ptr(values);
+                rusty::mem::mark_forgotten_address(released_ptr);
+            }
+
+            // Marks attached to released storage addresses must be cleaned so
+            // address reuse cannot poison later object lifetimes.
+            return rusty::mem::consume_forgotten_address(released_ptr) ? 1 : 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5186_vec_drop_clears_forgotten_marks");
+}
+
+#[test]
 fn test_maybe_uninit_new_surface_initializes_value_for_assume_init() {
     let source = r#"
         #include <rusty/maybe_uninit.hpp>
