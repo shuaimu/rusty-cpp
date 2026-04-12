@@ -5246,6 +5246,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-55a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-shape-gated in runtime `Option` behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.56: `smallvec` Stage D local generic drop-guard instantiation compile-head family collapse
+          - Plan/scope check: shared transpiler-only lowering/metadata updates plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - struct-literal target emission now recovers omitted local generic owner arguments for single-segment local generic type paths in method scope (for example `DropOnPanic { ... }` -> `DropOnPanic<A>{...}` when recoverable from current type-parameter context).
+            - hoisted method-local generic type metadata now remains available during method-body emission so omitted-owner recovery works for hoisted local generic struct literals.
+            - hoisted method-local impl/drop/operator/inherent overrides now remain active during method-body emission, ensuring non-aggregate constructor lowering still applies to local Drop-bearing guard types (constructor call shape instead of invalid designated-initializer non-aggregate shape).
+            - this collapses the deterministic post-5.1.55 first-head family at `runner.cpp:1838` (`DropOnPanic` CTAD failure and immediate local-guard constructor-shape fallout in `insert_many`).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5156_local_generic_drop_guard_struct_literal_recovers_owner_type_arg`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5156 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-56a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.55 first-head family at `runner.cpp:1838` (`DropOnPanic` local generic guard CTAD/constructor-shape fallout) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2152` (`SmallVec::into_iter` emits `return typename SmallVec::IntoIter<A>(...)` parse-shape/type-surface mismatch), with downstream `iterable.into_iter()` and related iterator surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-56a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core codegen paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

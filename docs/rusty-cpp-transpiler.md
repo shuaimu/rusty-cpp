@@ -2472,6 +2472,10 @@ Current status snapshot:
    - hardening runtime `Option<T>::unwrap_or_else(F&&)` to accept void-shaped fallback callables (invoke then terminate via `std::abort`) while preserving typed fallback returns, and
    - adding focused runtime regression coverage that compiles and runs a `Some` path with a void fallback callable surface.
 114. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1838` (`DropOnPanic` class template argument deduction failure in `insert_many`), followed by downstream adapter/surface gaps (`iterable.into_iter()` at `runner.cpp:1815`, `range<int>::size_hint` surface, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.55` (fix stayed shared and type-shape-gated in runtime `Option` behavior, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+115. Focused `smallvec` repro after `Leaf 5.1.56` (`/tmp/rusty-parity-matrix-5-1-56a-20260412/smallvec/...`) collapses the prior post-5.1.55 local generic drop-guard instantiation family by:
+   - recovering omitted local generic owner arguments for method-scope struct literals (`DropOnPanic { ... }` -> `DropOnPanic<A>{...}` when recoverable), and
+   - keeping hoisted local generic type metadata plus hoisted local impl/drop override metadata active during method-body emission so local Drop-bearing guard literals lower with valid non-aggregate constructor call shapes instead of CTAD/non-aggregate designated-initializer fallout.
+116. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2152` (`SmallVec::into_iter` emits `return typename SmallVec::IntoIter<A>(...)` parse-shape/type-surface mismatch), with downstream iterator-surface fallout (`iterable.into_iter()` and related families). Guardrail check against §11 remains satisfied for `Leaf 5.1.56` (fixes stayed shared and AST/type-context-gated in core codegen paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

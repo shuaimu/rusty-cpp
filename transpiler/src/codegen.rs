@@ -6068,6 +6068,126 @@ impl CodeGen {
         }
     }
 
+    fn push_hoisted_local_generic_type_param_metadata(
+        &mut self,
+        hoisted_structs: &[syn::ItemStruct],
+    ) -> Vec<(
+        String,
+        Option<Vec<String>>,
+        Option<Vec<GenericParamKind>>,
+        Option<Vec<Option<GenericParamDefault>>>,
+    )> {
+        let mut snapshots: Vec<(
+            String,
+            Option<Vec<String>>,
+            Option<Vec<GenericParamKind>>,
+            Option<Vec<Option<GenericParamDefault>>>,
+        )> = Vec::new();
+        for struct_item in hoisted_structs {
+            let type_params: Vec<String> = struct_item
+                .generics
+                .params
+                .iter()
+                .filter_map(|param| match param {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            if type_params.is_empty() {
+                continue;
+            }
+            let param_kinds: Vec<GenericParamKind> = struct_item
+                .generics
+                .params
+                .iter()
+                .filter_map(|param| match param {
+                    syn::GenericParam::Type(_) => Some(GenericParamKind::Type),
+                    syn::GenericParam::Const(_) => Some(GenericParamKind::Const),
+                    _ => None,
+                })
+                .collect();
+            let param_defaults: Vec<Option<GenericParamDefault>> = struct_item
+                .generics
+                .params
+                .iter()
+                .filter_map(|param| match param {
+                    syn::GenericParam::Type(tp) => Some(
+                        tp.default
+                            .as_ref()
+                            .map(|default| GenericParamDefault::Type(default.clone())),
+                    ),
+                    syn::GenericParam::Const(cp) => Some(
+                        cp.default
+                            .as_ref()
+                            .map(|default| GenericParamDefault::Const(default.clone())),
+                    ),
+                    _ => None,
+                })
+                .collect();
+
+            let type_name = struct_item.ident.to_string();
+            let mut keys = vec![type_name.clone()];
+            if let Some(current_struct) = &self.current_struct {
+                keys.push(format!("{}::{}", current_struct, type_name));
+            }
+            if !self.module_stack.is_empty() {
+                let module_prefix = self.module_stack.join("::");
+                keys.push(format!("{}::{}", module_prefix, type_name));
+                if let Some(current_struct) = &self.current_struct {
+                    keys.push(format!(
+                        "{}::{}::{}",
+                        module_prefix, current_struct, type_name
+                    ));
+                }
+            }
+            keys.sort();
+            keys.dedup();
+
+            for key in keys {
+                let prev_params = self
+                    .declared_type_params
+                    .insert(key.clone(), type_params.clone());
+                let prev_kinds = self
+                    .declared_type_param_kinds
+                    .insert(key.clone(), param_kinds.clone());
+                let prev_defaults = self
+                    .declared_type_param_defaults
+                    .insert(key.clone(), param_defaults.clone());
+                snapshots.push((key, prev_params, prev_kinds, prev_defaults));
+            }
+        }
+        snapshots
+    }
+
+    fn restore_hoisted_local_generic_type_param_metadata(
+        &mut self,
+        snapshots: Vec<(
+            String,
+            Option<Vec<String>>,
+            Option<Vec<GenericParamKind>>,
+            Option<Vec<Option<GenericParamDefault>>>,
+        )>,
+    ) {
+        for (key, prev_params, prev_kinds, prev_defaults) in snapshots.into_iter().rev() {
+            if let Some(prev) = prev_params {
+                self.declared_type_params.insert(key.clone(), prev);
+            } else {
+                self.declared_type_params.remove(&key);
+            }
+            if let Some(prev) = prev_kinds {
+                self.declared_type_param_kinds.insert(key.clone(), prev);
+            } else {
+                self.declared_type_param_kinds.remove(&key);
+            }
+            if let Some(prev) = prev_defaults {
+                self.declared_type_param_defaults.insert(key.clone(), prev);
+            } else {
+                self.declared_type_param_defaults.remove(&key);
+            }
+        }
+    }
+
     fn emit_function(&mut self, f: &syn::ItemFn) {
         // Skip #[cfg(test)] functions in non-test output
         // (they'll be emitted separately as test cases)
@@ -9365,6 +9485,46 @@ impl CodeGen {
             self.pop_type_param_scope();
             return;
         }
+        let mut hoisted_impl_override_state = Some({
+            let (
+                local_impl_overrides,
+                local_drop_overrides,
+                local_operator_overrides,
+                local_inherent_method_overrides,
+            ) = self.collect_local_impl_overrides(&method.block.stmts, &hoisted_local_type_names);
+
+            let mut prev_impl_overrides: Vec<(String, Option<Vec<syn::ImplItem>>)> = Vec::new();
+            for (type_name, impl_items) in local_impl_overrides {
+                let prev = self.impl_blocks.insert(type_name.clone(), impl_items);
+                prev_impl_overrides.push((type_name, prev));
+            }
+            let mut inserted_drop_overrides: Vec<((String, String), bool)> = Vec::new();
+            for drop_key in local_drop_overrides {
+                let inserted = self.drop_trait_methods.insert(drop_key.clone());
+                inserted_drop_overrides.push((drop_key, inserted));
+            }
+            let mut prev_operator_overrides: Vec<((String, String), Option<String>)> = Vec::new();
+            for (op_key, op_value) in local_operator_overrides {
+                let prev = self.operator_renames.insert(op_key.clone(), op_value);
+                prev_operator_overrides.push((op_key, prev));
+            }
+            let mut prev_inherent_overrides: Vec<(String, Option<HashSet<String>>)> = Vec::new();
+            for (type_name, method_names) in local_inherent_method_overrides {
+                let prev = self
+                    .inherent_impl_method_names
+                    .insert(type_name.clone(), method_names);
+                prev_inherent_overrides.push((type_name, prev));
+            }
+            (
+                prev_impl_overrides,
+                inserted_drop_overrides,
+                prev_operator_overrides,
+                prev_inherent_overrides,
+            )
+        });
+        let mut hoisted_local_generic_param_metadata = Some(
+            self.push_hoisted_local_generic_type_param_metadata(&hoisted_local_generic_structs),
+        );
         if is_drop_destructor {
             self.writeln(&format!(
                 "{}({}) noexcept(false) {{",
@@ -9420,6 +9580,43 @@ impl CodeGen {
                 self.pop_return_value_scope();
                 self.indent -= 1;
                 self.writeln("}");
+                if let Some((
+                    prev_impl_overrides,
+                    inserted_drop_overrides,
+                    prev_operator_overrides,
+                    prev_inherent_overrides,
+                )) = hoisted_impl_override_state.take()
+                {
+                    for (op_key, prev) in prev_operator_overrides {
+                        if let Some(prev_value) = prev {
+                            self.operator_renames.insert(op_key, prev_value);
+                        } else {
+                            self.operator_renames.remove(&op_key);
+                        }
+                    }
+                    for (type_name, prev) in prev_inherent_overrides {
+                        if let Some(prev_names) = prev {
+                            self.inherent_impl_method_names.insert(type_name, prev_names);
+                        } else {
+                            self.inherent_impl_method_names.remove(&type_name);
+                        }
+                    }
+                    for (drop_key, inserted) in inserted_drop_overrides {
+                        if inserted {
+                            self.drop_trait_methods.remove(&drop_key);
+                        }
+                    }
+                    for (type_name, prev) in prev_impl_overrides {
+                        if let Some(prev_items) = prev {
+                            self.impl_blocks.insert(type_name, prev_items);
+                        } else {
+                            self.impl_blocks.remove(&type_name);
+                        }
+                    }
+                }
+                if let Some(metadata) = hoisted_local_generic_param_metadata.take() {
+                    self.restore_hoisted_local_generic_type_param_metadata(metadata);
+                }
                 self.pop_type_param_scope();
                 return;
             }
@@ -9438,6 +9635,43 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+        if let Some((
+            prev_impl_overrides,
+            inserted_drop_overrides,
+            prev_operator_overrides,
+            prev_inherent_overrides,
+        )) = hoisted_impl_override_state.take()
+        {
+            for (op_key, prev) in prev_operator_overrides {
+                if let Some(prev_value) = prev {
+                    self.operator_renames.insert(op_key, prev_value);
+                } else {
+                    self.operator_renames.remove(&op_key);
+                }
+            }
+            for (type_name, prev) in prev_inherent_overrides {
+                if let Some(prev_names) = prev {
+                    self.inherent_impl_method_names.insert(type_name, prev_names);
+                } else {
+                    self.inherent_impl_method_names.remove(&type_name);
+                }
+            }
+            for (drop_key, inserted) in inserted_drop_overrides {
+                if inserted {
+                    self.drop_trait_methods.remove(&drop_key);
+                }
+            }
+            for (type_name, prev) in prev_impl_overrides {
+                if let Some(prev_items) = prev {
+                    self.impl_blocks.insert(type_name, prev_items);
+                } else {
+                    self.impl_blocks.remove(&type_name);
+                }
+            }
+        }
+        if let Some(metadata) = hoisted_local_generic_param_metadata.take() {
+            self.restore_hoisted_local_generic_type_param_metadata(metadata);
+        }
         self.pop_type_param_scope();
     }
 
@@ -21348,10 +21582,21 @@ impl CodeGen {
         struct_expr: &syn::ExprStruct,
         expected_ty: Option<&syn::Type>,
     ) -> String {
-        let target_name = self
+        let mut target_name = self
             .expected_struct_literal_cpp_type(struct_expr, expected_ty)
             .or_else(|| self.try_emit_data_enum_variant_struct_literal_target(&struct_expr.path))
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
+        if !target_name.contains('<')
+            && struct_expr
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
+            && let Some(recovered) =
+                self.recover_omitted_local_generic_type_args(&struct_expr.path, &target_name)
+        {
+            target_name = recovered;
+        }
 
         let resolved_struct_name = struct_expr.path.segments.last().map(|seg| {
             let raw = seg.ident.to_string();
@@ -29043,11 +29288,70 @@ impl CodeGen {
         if !matches!(last_seg.arguments, syn::PathArguments::None) {
             return None;
         }
-        let params = self.declared_type_params_for_path(path)?;
+        let type_key = self.declared_type_key_for_path(path).or_else(|| {
+            if path.segments.len() != 1 {
+                return None;
+            }
+            let base = path.segments.first()?.ident.to_string();
+            let mut scoped_candidates: Vec<String> = Vec::new();
+            if let Some(current_struct) = &self.current_struct {
+                scoped_candidates.push(format!("{}::{}", current_struct, base));
+                if !self.module_stack.is_empty() {
+                    scoped_candidates.push(format!(
+                        "{}::{}::{}",
+                        self.module_stack.join("::"),
+                        current_struct,
+                        base
+                    ));
+                }
+            }
+            if !self.module_stack.is_empty() {
+                scoped_candidates.push(format!("{}::{}", self.module_stack.join("::"), base));
+            }
+            scoped_candidates.push(base.clone());
+            for scoped in scoped_candidates {
+                if let Some(key) = self.lookup_declared_type_key_for_base(&scoped, &base) {
+                    return Some(key);
+                }
+            }
+            None
+        })?;
+        let params = self.declared_type_params.get(&type_key)?;
         let defaults = self.declared_type_param_defaults_for_path(path);
         if params.is_empty() {
             return None;
         }
+        let declared_kinds = self.declared_type_param_kinds.get(&type_key);
+        let fallback_args_from_current_struct = self.current_struct.as_ref().and_then(|name| {
+            let current_params = self
+                .declared_type_params
+                .get(name)
+                .or_else(|| self.declared_type_params.get(&self.scoped_type_key(name)))?;
+            let current_kinds = self
+                .declared_type_param_kinds
+                .get(name)
+                .or_else(|| {
+                    self.declared_type_param_kinds
+                        .get(&self.scoped_type_key(name))
+                })?;
+            let declared_kinds = declared_kinds?;
+            if declared_kinds.len() != params.len()
+                || current_params.len() < params.len()
+                || current_kinds.len() < params.len()
+            {
+                return None;
+            }
+            if declared_kinds
+                .iter()
+                .zip(current_kinds.iter())
+                .take(params.len())
+                .all(|(declared_kind, current_kind)| declared_kind == current_kind)
+            {
+                Some(current_params[..params.len()].to_vec())
+            } else {
+                None
+            }
+        });
 
         let mut recovered_args: Vec<String> = Vec::new();
         for (idx, param) in params.iter().enumerate() {
@@ -29064,6 +29368,12 @@ impl CodeGen {
             }
             if self.is_type_param_in_scope(param) {
                 recovered_args.push(param.clone());
+                continue;
+            }
+            if let Some(fallback) = fallback_args_from_current_struct.as_ref()
+                && let Some(arg) = fallback.get(idx)
+            {
+                recovered_args.push(arg.clone());
                 continue;
             }
             return None;
@@ -35996,6 +36306,45 @@ mod tests {
         assert!(
             !out.contains("return break;"),
             "local match-break lowering must not emit return break in an expression context, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5156_local_generic_drop_guard_struct_literal_recovers_owner_type_arg() {
+        let out = transpile_str(
+            r#"
+            struct Bucket<T> {
+                item: T,
+            }
+            impl<T> Bucket<T> {
+                fn guard(&mut self, ptr: *mut T) {
+                    struct DropOnPanic<U> {
+                        start: *mut U,
+                        len: usize,
+                    }
+                    impl<U> Drop for DropOnPanic<U> {
+                        fn drop(&mut self) {}
+                    }
+                    let guard = DropOnPanic {
+                        start: ptr,
+                        len: 0,
+                    };
+                    let _ = guard;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("const auto guard = DropOnPanic<T>{")
+                || out.contains("const auto guard = DropOnPanic<T>("),
+            "local generic guard struct literal should recover explicit owner args, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto guard = DropOnPanic{")
+                && !out.contains("const auto guard = DropOnPanic("),
+            "guard construction should not rely on unspecialized CTAD path, got:\n{}",
             out
         );
     }
