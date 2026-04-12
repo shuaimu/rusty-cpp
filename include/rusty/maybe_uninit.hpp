@@ -99,11 +99,18 @@ public:
         }
     }
 
-    // Create with an initial value
-    static MaybeUninit<T> new_with(T value) {
+    // Create with an initial value.
+    // `new_` is the primary Rust-surface entrypoint (`MaybeUninit::new` in Rust),
+    // while `new_with` is kept as a compatibility alias.
+    static MaybeUninit<T> new_(T value) {
         MaybeUninit<T> mu;
         mu.write_value(std::move(value));
         return mu;
+    }
+
+    // Compatibility alias for historical runtime call-sites.
+    static MaybeUninit<T> new_with(T value) {
+        return MaybeUninit<T>::new_(std::move(value));
     }
 
     // Create uninitialized

@@ -2566,6 +2566,10 @@ Current status snapshot:
    - extending shared runtime `rusty::NonNull<T>` cast surface to support both contextual `.cast()` and explicit `.cast<U>()` forms used by transpiled reserve/growth paths,
    - preserving shared transpiler/runtime lowering (no crate-specific rewriting).
 156. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1530` (`rusty::MaybeUninit<A>::new_(...)` missing member surface in `SmallVec::from_buf`), with adjacent downstream helper/runtime families (`mem::swap` pointer-shape mismatch, iterator `size_hint` surface, `Result::map_err` payload unification). Guardrail check against §11 remains satisfied for `Leaf 5.1.76` (fixes stayed shared and AST/type-shape-gated in core lowering/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+157. Focused `smallvec` repro after `Leaf 5.1.77` (`/tmp/rusty-parity-matrix-5-1-77a-20260412/smallvec/...`) collapses the prior post-5.1.76 `MaybeUninit::new_` constructor-surface family by:
+   - adding shared runtime `rusty::MaybeUninit<T>::new_(T)` and keeping `new_with(T)` as a compatibility alias to the new canonical surface,
+   - preserving shared runtime/transpiler behavior (no crate-specific rewriting).
+158. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/mem.hpp:194` (`rusty::mem::swap` invoked as `swap(int* const&, int* const&)`), with adjacent downstream helper/runtime families (`take_next_iter::size_hint` surface at `runner.cpp:2117` and `Result::map_err` payload unification at `runner.cpp:1332`). Guardrail check against §11 remains satisfied for `Leaf 5.1.77` (fix stayed shared and runtime-surface-gated in core `MaybeUninit` API, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

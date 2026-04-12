@@ -1288,6 +1288,22 @@ fn test_mem_size_of_uses_rust_layout_for_arrayvec_like_zero_capacity_storage() {
 }
 
 #[test]
+fn test_maybe_uninit_new_surface_initializes_value_for_assume_init() {
+    let source = r#"
+        #include <rusty/maybe_uninit.hpp>
+        #include <string>
+
+        int main() {
+            auto value = rusty::MaybeUninit<std::string>::new_(std::string("ok"));
+            auto out = value.assume_init();
+            return out == "ok" ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "maybe_uninit_new_surface");
+}
+
+#[test]
 fn test_string_repeat_supports_zero_and_overflow_guard() {
     let source = r#"
         #include <limits>

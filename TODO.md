@@ -5748,7 +5748,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-76a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.77: `smallvec` Stage D `MaybeUninit` constructor surface gap in `from_buf` (`rusty::MaybeUninit<A>::new_` missing at `runner.cpp:1530`) compile-head family collapse
+        - [x] *done* Leaf 5.1.77: `smallvec` Stage D `MaybeUninit` constructor surface gap in `from_buf` (`rusty::MaybeUninit<A>::new_` missing at `runner.cpp:1530`) compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime constructor-surface hardening:
+            - `include/rusty/maybe_uninit.hpp`: added canonical Rust-surface `MaybeUninit<T>::new_(T)` constructor and kept `new_with(T)` as a compatibility alias to `new_`.
+          - Added focused regression:
+            - `runtime_move_semantics::test_maybe_uninit_new_surface_initializes_value_for_assume_init`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_maybe_uninit_new_surface_initializes_value_for_assume_init -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_ptr_nonnull_cast_supports_contextual_and_explicit_target_surfaces -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-77a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.76 first-head family at `runner.cpp:1530` (`rusty::MaybeUninit<A>::new_(...)` missing member surface in `SmallVec::from_buf`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/mem.hpp:194` (`rusty::mem::swap` invoked as `swap(int* const&, int* const&)`), with adjacent downstream helper/runtime fallout (`take_next_iter::size_hint` surface and `Result::map_err` error-payload unification families at `runner.cpp:2117` and `runner.cpp:1332`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-77a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core `MaybeUninit` API; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.78: `smallvec` Stage D `rusty::mem::swap` pointer-const call-surface mismatch (`swap(int* const&, int* const&)` at `include/rusty/mem.hpp:194`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
