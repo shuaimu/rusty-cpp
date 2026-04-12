@@ -5512,7 +5512,40 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-67c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-surface-gated in runtime headers/tests; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.68: `smallvec` Stage D clone-from slice-method surface lowering (`split_at`/`clone_from_slice`) compile-head family collapse
+        - [x] *done* Leaf 5.1.68: `smallvec` Stage D clone-from slice-method surface lowering (`split_at`/`clone_from_slice`) compile-head family collapse
+          - Plan/scope check: focused transpiler method-lowering + shared runtime helper surface + targeted regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - transpiler now lowers slice-deref method surfaces on known container receivers (`Vec`/`ArrayVec`/`SmallVec`) for:
+              - `split_at` -> `rusty::split_at(rusty::as_slice(receiver), mid)` (or direct slice/span receiver when already view-shaped),
+              - `clone_from_slice` -> `rusty::clone_from_slice(rusty::as_mut_slice(receiver), src)` (or direct mutable slice/span receiver when already view-shaped),
+            - shared runtime now provides generic slice-like `rusty::split_at(...)` helper for span/container surfaces (`(prefix, suffix)` with bounds checks),
+            - this collapses the deterministic post-5.1.67 first-head family at `runner.cpp:2162` (`SmallVec::clone_from` unresolved `split_at`/`clone_from_slice` member surfaces).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+            - `include/rusty/array.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5168_smallvec_split_at_and_clone_from_slice_lower_to_slice_helpers`
+            - `runtime_move_semantics::test_leaf5168_split_at_and_clone_from_slice_runtime_helpers`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf10517_non_string_split_at_method_is_not_rewritten`
+            - `codegen::tests::test_leaf41543333333327221_non_slice_clone_from_slice_stays_member_call`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf5168_smallvec_split_at_and_clone_from_slice_lower_to_slice_helpers -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5168_split_at_and_clone_from_slice_runtime_helpers -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10517_non_string_split_at_method_is_not_rewritten -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327221_non_slice_clone_from_slice_stays_member_call -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - parity attempt (host I/O wait in Stage D compile): `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-68b-20260412 --keep-work-dirs`
+            - deterministic bounded compile probe on generated runner:
+              - `timeout 180 g++ -std=c++20 -Wall -Wno-unused-variable -Wno-unused-but-set-variable -fmax-errors=8 -I/home/shuai/git/rusty-cpp/include -o /tmp/rusty-parity-matrix-5-1-68b-20260412/smallvec/runner.probe /tmp/rusty-parity-matrix-5-1-68b-20260412/smallvec/runner.cpp > /tmp/rusty-parity-matrix-5-1-68b-20260412/smallvec/build.probe.log 2>&1`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.67 first-head family at `runner.cpp:2162` (`split_at`/`clone_from_slice` unresolved on `SmallVec`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1426` (`SmallVecData<A>::Inline(...)` unresolved variant-constructor surface), with adjacent CTAD fallout at `runner.cpp:1438` (`SmallVecData_Heap{...}` deduction failure) and downstream data-layout/runtime helper families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-68b-20260412/smallvec/{baseline.txt,matrix.log,runner.cpp,build.probe.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and container/slice-shape-gated in transpiler/runtime paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.69: `smallvec` Stage D `SmallVecData` variant-constructor lowering (`Inline`/`Heap`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

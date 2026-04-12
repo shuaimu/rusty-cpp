@@ -19845,6 +19845,44 @@ impl CodeGen {
         }
     }
 
+    fn should_lower_slice_deref_method_call(&self, receiver: &syn::Expr) -> bool {
+        if self.expr_lowers_to_slice_or_span_view(receiver) {
+            return true;
+        }
+
+        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
+            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
+        {
+            if let Some(current_struct) = self.current_struct.as_ref() {
+                return matches!(current_struct.as_str(), "Vec" | "ArrayVec" | "SmallVec");
+            }
+        }
+
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        if self.type_is_slice_or_span_like(receiver_ty) {
+            return true;
+        }
+
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let receiver_name = if last.ident == "Self" {
+            self.current_struct
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| "Self".to_string())
+        } else {
+            last.ident.to_string()
+        };
+        matches!(receiver_name.as_str(), "Vec" | "ArrayVec" | "SmallVec")
+    }
+
     fn should_lower_swap_method_call_to_index_swap(&self, receiver: &syn::Expr) -> bool {
         if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
             if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
@@ -20621,7 +20659,7 @@ impl CodeGen {
         }
         if method_name == "clone_from_slice"
             && args.len() == 1
-            && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+            && self.should_lower_slice_deref_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -20629,7 +20667,12 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::clone_from_slice({}, {})", receiver, args[0]);
+            let dst = if self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
+                receiver
+            } else {
+                format!("rusty::as_mut_slice({})", receiver)
+            };
+            return format!("rusty::clone_from_slice({}, {})", dst, args[0]);
         }
         if method_name == "write_fmt" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -20869,6 +20912,20 @@ impl CodeGen {
                     raw_receiver
                 };
                 return format!("rusty::split_at({}, {})", receiver, args[0]);
+            }
+            if self.should_lower_slice_deref_method_call(&mc.receiver) {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                let split_receiver = if self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
+                    receiver
+                } else {
+                    format!("rusty::as_slice({})", receiver)
+                };
+                return format!("rusty::split_at({}, {})", split_receiver, args[0]);
             }
         }
         if method_name == "split" && args.len() == 1 {
@@ -44300,6 +44357,42 @@ mod tests {
         );
         assert!(out.contains("sink.clone_from_slice(1);"));
         assert!(!out.contains("rusty::clone_from_slice(sink"));
+    }
+
+    #[test]
+    fn test_leaf5168_smallvec_split_at_and_clone_from_slice_lower_to_slice_helpers() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec;
+            impl SmallVec {
+                fn clone_from(&mut self, source: &SmallVec) {
+                    let (init, tail) = source.split_at(1);
+                    self.clone_from_slice(init);
+                    let _ = tail;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::split_at(rusty::as_slice(source), 1)"),
+            "SmallVec split_at should lower via slice helper surface, got: {}",
+            out
+        );
+        assert!(
+            out.contains("rusty::clone_from_slice(rusty::as_mut_slice((*this)),"),
+            "SmallVec clone_from_slice should lower via mutable slice helper surface, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("source.split_at("),
+            "SmallVec split_at should not remain a member call, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("clone_from_slice(init)"),
+            "SmallVec clone_from_slice should not remain a member call, got: {}",
+            out
+        );
     }
 
     #[test]

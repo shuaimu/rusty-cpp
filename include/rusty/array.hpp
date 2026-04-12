@@ -871,6 +871,20 @@ auto to_vec(const Container& container) {
     return out;
 }
 
+// Split a slice-like view/container into `(prefix, suffix)` at `mid`.
+// Mirrors Rust `[T]::split_at` semantics with bounds checking.
+template<typename Elem, std::size_t Extent, typename Mid>
+auto split_at(std::span<Elem, Extent> span, Mid mid) {
+    const size_t mid_index = detail::checked_index(mid);
+    detail::validate_slice_bounds(span, 0, mid_index);
+    return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
+}
+
+template<typename Container, typename Mid>
+auto split_at(Container& container, Mid mid) {
+    return split_at(slice_full(container), std::forward<Mid>(mid));
+}
+
 // Clone elements from one slice into another.
 // Mirrors Rust `[T]::clone_from_slice` semantics with a size check.
 template<typename DstElem, std::size_t DstExtent, typename SrcElem, std::size_t SrcExtent>

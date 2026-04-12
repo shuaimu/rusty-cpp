@@ -696,6 +696,36 @@ fn test_slice_get_runtime_helper_surface() {
 }
 
 #[test]
+fn test_leaf5168_split_at_and_clone_from_slice_runtime_helpers() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+
+        int main() {
+            std::array<int, 4> src{1, 2, 3, 4};
+            std::array<int, 2> dst{0, 0};
+
+            auto [init, tail] = rusty::split_at(rusty::as_slice(src), 2);
+            if (init.size() != 2 || tail.size() != 2) {
+                return 1;
+            }
+            if (init[0] != 1 || init[1] != 2 || tail[0] != 3 || tail[1] != 4) {
+                return 2;
+            }
+
+            rusty::clone_from_slice(rusty::as_mut_slice(dst), init);
+            if (dst[0] != 1 || dst[1] != 2) {
+                return 3;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5168_split_at_clone_from_slice_surface");
+}
+
+#[test]
 fn test_array_type_level_size_helper_surface() {
     let source = r#"
         #include <array>
