@@ -2421,6 +2421,10 @@ Current status snapshot:
    - extending owner-template recovery for `Vec::from_raw_parts*` to explicit-owner and omitted-owner call shapes with pointer-driven arg recovery (including `decltype` fallback when direct type hints are weak), and
    - adding shared runtime `Vec` static surfaces in `include/rusty/vec.hpp` for `from_raw_parts`, `from_raw_parts_in`, and `from_iter` (option-like `next()` and range inputs).
 90. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4233/4252` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` equality mismatch), followed by `runner.cpp:4267` array element conversion mismatch (`std::array<int,...>` to `std::array<uint8_t,...>`) and downstream runtime/adapter gaps (`Rc::new_`, `scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.43` (fixes stayed shared and pointer/type-shape-gated in transpiler/runtime surfaces, with no crate-specific scripts and no generated-output text patching).
+91. Focused `smallvec` repro after `Leaf 5.1.44` (`/tmp/rusty-parity-matrix-5-1-44a-20260412/smallvec/...`) collapses the prior post-5.1.43 cross-type `Vec` equality family by:
+   - extending runtime `rusty::Vec` equality/inequality surfaces to support `Vec<L>` vs `Vec<R>` comparisons when element values are comparable (including symmetric fallback and empty-marker element handling), and
+   - adding runtime regression coverage for cross-numeric-element `Vec` equality in `transpiler/tests/runtime_move_semantics.rs`.
+92. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4267` (`Result::Ok(std::array{0,1})` array element conversion mismatch from `std::array<int,...>` to `std::array<uint8_t,...>`), followed by downstream runtime/adapter/type-surface gaps (`Rc::new_`, `scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.44` (fix stayed shared and container-shape-gated in runtime equality surfaces, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

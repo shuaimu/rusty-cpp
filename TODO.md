@@ -4934,6 +4934,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-43b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and pointer/type-shape-gated in core owner-template recovery plus shared runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.44: `smallvec` Stage D cross-type `Vec` equality compile-head family collapse
+          - Plan/scope check: shared runtime equality-surface hardening plus focused regression stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - runtime `rusty::Vec` now supports cross-element-type equality/inequality comparisons (`Vec<L>` vs `Vec<R>`) when element values are comparable (or both element types are empty marker types).
+            - this collapses the deterministic post-5.1.43 first-head family at `runner.cpp:4233/4252` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` has no matching `operator==`) in `test_into_vec`.
+          - Implemented in:
+            - `include/rusty/vec.hpp`:
+              - added templated `operator==` / `operator!=` overloads for `Vec<U>` peers with guarded element-comparison fallbacks.
+          - Added focused regression in `transpiler/tests/runtime_move_semantics.rs`:
+            - `test_vec_eq_supports_cross_numeric_element_types`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_vec_eq_supports_cross_numeric_element_types -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-44a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.43 first-head family at `runner.cpp:4233/4252` (`Vec<unsigned char>` vs `Vec<int>` equality mismatch) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4267` (`Result::Ok(std::array{0,1})` array element conversion mismatch from `std::array<int,...>` to `std::array<uint8_t,...>`), followed by downstream runtime/adapter/type-surface gaps (`Rc::new_`, `scan`, `filter`, `get`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-44a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and container-shape-gated in runtime equality surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -314,7 +314,30 @@ public:
         return true;
     }
 
+    template<typename U>
+    bool operator==(const Vec<U>& other) const {
+        if (size_ != other.len()) return false;
+        for (size_t i = 0; i < size_; ++i) {
+            if constexpr (requires(const T& lhs, const U& rhs) { lhs == rhs; }) {
+                if (!(data_[i] == other[i])) return false;
+            } else if constexpr (requires(const T& lhs, const U& rhs) { rhs == lhs; }) {
+                if (!(other[i] == data_[i])) return false;
+            } else if constexpr (std::is_empty_v<std::remove_cv_t<T>>
+                                 && std::is_empty_v<std::remove_cv_t<U>>) {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool operator!=(const Vec& other) const {
+        return !(*this == other);
+    }
+
+    template<typename U>
+    bool operator!=(const Vec<U>& other) const {
         return !(*this == other);
     }
 

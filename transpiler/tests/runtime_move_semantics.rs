@@ -162,6 +162,42 @@ fn test_array_eq_supports_as_slice_containers_and_vec() {
 }
 
 #[test]
+fn test_vec_eq_supports_cross_numeric_element_types() {
+    let source = r#"
+        #include <cstdint>
+        #include <rusty/vec.hpp>
+
+        int main() {
+            auto bytes = rusty::Vec<std::uint8_t>::new_();
+            bytes.push(static_cast<std::uint8_t>(0));
+            bytes.push(static_cast<std::uint8_t>(1));
+
+            auto ints = rusty::Vec<int>::new_();
+            ints.push(0);
+            ints.push(1);
+
+            if (!(bytes == ints)) {
+                return 1;
+            }
+            if (!(ints == bytes)) {
+                return 2;
+            }
+
+            auto mismatch = rusty::Vec<int>::new_();
+            mismatch.push(0);
+            mismatch.push(2);
+            if (bytes == mismatch) {
+                return 3;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "vec_eq_cross_numeric_types");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>
