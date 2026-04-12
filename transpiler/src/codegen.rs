@@ -22067,6 +22067,12 @@ impl CodeGen {
                 format!("{}[{}]", base, index)
             }
             syn::Expr::Path(path) => {
+                if self.should_coerce_self_path_to_deref(&path.path, expected_ty) {
+                    if let Some(self_name) = self.current_self_path_override() {
+                        return format!("{}.operator*()", self_name);
+                    }
+                    return "this->operator*()".to_string();
+                }
                 if self.should_coerce_self_path_to_deref_mut(&path.path, expected_ty) {
                     if let Some(self_name) = self.current_self_path_override() {
                         return format!("{}.deref_mut()", self_name);
@@ -22381,6 +22387,31 @@ impl CodeGen {
             return false;
         }
         self.lookup_current_struct_method_return_type("deref_mut")
+            .is_some()
+    }
+
+    fn should_coerce_self_path_to_deref(
+        &self,
+        path: &syn::Path,
+        expected_ty: Option<&syn::Type>,
+    ) -> bool {
+        if !Self::path_is_simple_self(path) {
+            return false;
+        }
+        let expected_ty = match expected_ty {
+            Some(ty) => self.peel_paren_group_type(ty),
+            None => return false,
+        };
+        let syn::Type::Reference(expected_ref) = expected_ty else {
+            return false;
+        };
+        if expected_ref.mutability.is_some() {
+            return false;
+        }
+        if self.type_is_current_struct_self_type(&expected_ref.elem) {
+            return false;
+        }
+        self.lookup_current_struct_method_return_type("deref")
             .is_some()
     }
 
@@ -39830,6 +39861,26 @@ mod tests {
         assert!(out.contains("std::span<int32_t> as_mut() {"), "{out}");
         assert!(out.contains("std::span<int32_t> borrow_mut() {"), "{out}");
         assert!(out.contains("Buf& alias_mut() {"), "{out}");
+        assert!(out.contains("return (*this);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5189_self_path_const_reference_expected_coerces_to_deref() {
+        let out = transpile_str(
+            r#"
+            struct Buf {}
+            impl Buf {
+                fn deref(&self) -> &[i32] { todo!() }
+                fn as_ref(&self) -> &[i32] { self }
+                fn borrow(&self) -> &[i32] { self }
+                fn alias(&self) -> &Self { self }
+            }
+        "#,
+        );
+        assert!(out.contains("return this->operator*();"), "{out}");
+        assert!(out.contains("std::span<const int32_t> as_ref() const {"), "{out}");
+        assert!(out.contains("std::span<const int32_t> borrow() const {"), "{out}");
+        assert!(out.contains("const Buf& alias() const {"), "{out}");
         assert!(out.contains("return (*this);"), "{out}");
     }
 

@@ -5971,7 +5971,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-88b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in generic method-call lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.89: `smallvec` Stage E allocator abort after `tests_test_as_mut` with single-test deterministic repro on `rusty_test_tests_test_as_ref` (`free(): double free detected in tcache 2`) failure collapse
+        - [x] *done* Leaf 5.1.89: `smallvec` Stage E allocator abort after `tests_test_as_mut` with single-test deterministic repro on `rusty_test_tests_test_as_ref` (`free(): double free detected in tcache 2`) failure collapse
+          - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared transpiler const-`self` deref-coercion hardening:
+            - root cause: `as_ref(&self) -> &[T] { self }` lowered to `return (*this);`, which in C++ is object dereference of the `this` pointer (returning `Self&`), not overloaded `operator*()`. This caused shallow `SmallVec` value copies in test scaffolding and double-free at teardown.
+            - `transpiler/src/codegen.rs`: added `should_coerce_self_path_to_deref(...)` and wired `syn::Expr::Path(self)` emission to lower immutable reference-expected `self` paths to `this->operator*()` (or `<self_override>.operator*()`), symmetric to existing mutable `deref_mut` coercion.
+          - Added focused regression:
+            - `codegen::tests::test_leaf5189_self_path_const_reference_expected_coerces_to_deref`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5189 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf5133 -- --nocapture`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-89b-20260412`
+            - single-test deterministic repro validation: `/tmp/rusty-parity-matrix-5-1-89b-20260412/runner --rusty-single-test rusty_test_tests_test_double_spill`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+          - Deterministic frontier movement:
+            - prior post-5.1.88 first Stage E failure (allocator abort on `rusty_test_tests_test_as_ref`) is collapsed from deterministic first-head slots.
+            - `tests_test_as_ref` now passes; new first deterministic Stage E failure is `tests_test_double_spill FAILED: assertion failed` (single-test runner repro returns `assertion failed`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-89b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in generic path coercion lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.90: `smallvec` Stage E `tests_test_double_spill` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
