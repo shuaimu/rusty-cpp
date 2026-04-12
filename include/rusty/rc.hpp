@@ -170,6 +170,16 @@ public:
         }
     }
 
+    // Rust-style constructor alias (`Rc::new` lowered/escaped as `new_`).
+    static Rc<T> new_(T value) {
+        return make(std::move(value));
+    }
+
+    // Support UFCS/static-style clone lowering (`Rc::clone(&rc)`).
+    static Rc<T> clone(const Rc<T>& value) {
+        return value.clone();
+    }
+
     // @safe - Copy constructor increases reference count
     Rc(const Rc& other)
         : ptr_(other.ptr_), control_(other.control_) {

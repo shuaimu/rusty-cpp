@@ -4982,6 +4982,36 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-45b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and context/shape-gated in core constructor lowering and runtime payload conversion surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.46: `smallvec` Stage D `Rc::new` owner-recovery/runtime-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime `Rc` constructor-surface hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - owner-template recovery now includes omitted-owner `Rc::new/new_` calls, inferring owner type from constructor payload value type when no explicit owner args are present.
+            - runtime `rusty::Rc<T>` now exposes Rust-surface aliases used by generated code:
+              - `Rc<T>::new_(...)` constructor alias,
+              - static UFCS-compatible `Rc<T>::clone(const Rc<T>&)`.
+            - this collapses the deterministic post-5.1.45 first-head family at `runner.cpp:4600/4642` (`Rc::new_(1)` unspecialized-owner emission and missing `Rc<int>::new_()` runtime surface).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added `Rc` inference in `infer_owner_template_args_for_call(...)` for `new/new_`.
+              - added `Rc` to owner-template recovery target sets for explicit/omitted owner handling.
+            - `include/rusty/rc.hpp`:
+              - added `Rc<T>::new_(T)` alias and static `Rc<T>::clone(const Rc<T>&)` helper.
+          - Added focused regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf5146_rc_new_omitted_owner_recovers_value_type`
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - `test_rc_new_and_static_clone_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5146 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_rc_new_and_static_clone_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-46a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.45 first-head family at `runner.cpp:4600/4642` (`Rc` unspecialized owner/missing `new_`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4864` (`rusty::str_runtime::Chars` missing `.scan(...)` adapter surface), followed by downstream gaps (`range::filter`, `SmallVec::get`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-46a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type/owner-surface-gated in transpiler/runtime; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -23392,6 +23392,28 @@ impl CodeGen {
                     None
                 }
             }
+            "Rc" => {
+                if matches!(method_name, "new" | "new_") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .map(|ty| self.map_type(&ty))
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
+                            })
+                        });
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
             "Vec" => {
                 if matches!(method_name, "from_raw_parts" | "from_raw_parts_in") {
                     let inferred_from_type = call
@@ -23485,6 +23507,7 @@ impl CodeGen {
                 | "HashMap"
                 | "MaybeUninit"
                 | "NonNull"
+                | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
         );
@@ -23496,6 +23519,7 @@ impl CodeGen {
                 | "HashMap"
                 | "MaybeUninit"
                 | "NonNull"
+                | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
         );
@@ -35893,6 +35917,28 @@ mod tests {
         assert!(
             !out.contains("NonNull::new_unchecked("),
             "NonNull::new_unchecked should not emit unspecialized owner path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5146_rc_new_omitted_owner_recovers_value_type() {
+        let out = transpile_str(
+            r#"
+            use std::rc::Rc;
+            fn f() {
+                let _one = Rc::new(1);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Rc<int32_t>::new_(1)") || out.contains("rusty::Rc<int32_t>::new_(1)"),
+            "Rc::new with omitted owner should recover template arg from payload type, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Rc::new_(") && !out.contains("rusty::Rc::new_("),
+            "Rc::new with omitted owner should not emit unspecialized owner path, got:\n{}",
             out
         );
     }

@@ -225,6 +225,30 @@ fn test_result_ok_supports_cross_numeric_array_literal_conversion() {
 }
 
 #[test]
+fn test_rc_new_and_static_clone_surface() {
+    let source = r#"
+        #include <rusty/rc.hpp>
+
+        int main() {
+            auto one = rusty::Rc<int>::new_(1);
+            auto two = rusty::Rc<int>::clone(one);
+            if (one.strong_count() != 2) {
+                return 1;
+            }
+            if (two.strong_count() != 2) {
+                return 2;
+            }
+            if (*one != 1 || *two != 1) {
+                return 3;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "rc_new_static_clone_surface");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

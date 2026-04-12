@@ -2429,6 +2429,10 @@ Current status snapshot:
    - propagating peer-result payload expected type into tuple-match peer-context `Ok(...)`/`Err(...)` argument emission in transpiler core lowering, and
    - adding shared runtime `Result::Ok(const std::array<U,N>&)` payload conversion support for array targets with convertible element types (`include/rusty/result.hpp`), plus focused regression coverage in transpiler/runtime tests.
 94. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4600/4642` (`rusty::Rc` unspecialized owner surface and missing `Rc<int>::new_()`), followed by downstream runtime/adapter/type-surface gaps (`scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.45` (fixes stayed shared and context/shape-gated in constructor lowering/runtime payload conversion surfaces, with no crate-specific scripts and no generated-output text patching).
+95. Focused `smallvec` repro after `Leaf 5.1.46` (`/tmp/rusty-parity-matrix-5-1-46a-20260412/smallvec/...`) collapses the prior post-5.1.45 `Rc::new` owner/runtime surface family by:
+   - extending omitted-owner constructor recovery to include `Rc::new/new_` payload-driven owner inference in core call lowering, and
+   - adding shared runtime `Rc<T>::new_(...)` alias plus static UFCS-compatible `Rc<T>::clone(const Rc<T>&)` surface in `include/rusty/rc.hpp`.
+96. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4864` (`rusty::str_runtime::Chars` missing `.scan(...)` adapter surface), followed by downstream runtime/adapter/type-surface gaps (`range::filter`, `SmallVec::get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.46` (fixes stayed shared and owner/type-surface-gated in transpiler/runtime changes, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
