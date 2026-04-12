@@ -249,6 +249,53 @@ fn test_rc_new_and_static_clone_surface() {
 }
 
 #[test]
+fn test_slice_scan_runtime_adapter_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+
+        int main() {
+            std::array<int, 4> values{1, 2, 3, 4};
+            auto it = rusty::scan(
+                rusty::iter(values),
+                0,
+                [](int& state, int value) -> rusty::Option<int> {
+                    state += value;
+                    if (state > 5) {
+                        return rusty::None;
+                    }
+                    return rusty::Option<int>(state);
+                });
+
+            auto first = it.next();
+            if (!first.is_some() || first.unwrap() != 1) {
+                return 1;
+            }
+
+            auto second = it.next();
+            if (!second.is_some() || second.unwrap() != 3) {
+                return 2;
+            }
+
+            auto third = it.next();
+            if (!third.is_none()) {
+                return 3;
+            }
+
+            auto after_none = it.next();
+            if (!after_none.is_none()) {
+                return 4;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_scan_runtime_surface");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

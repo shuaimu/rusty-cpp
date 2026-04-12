@@ -20020,6 +20020,16 @@ impl CodeGen {
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::skip({}, {})", receiver, count);
         }
+        if mc.method == "scan"
+            && mc.args.len() == 2
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let state = self.emit_expr_maybe_move(&mc.args[0]);
+            let scanner = self.emit_expr_maybe_move(&mc.args[1]);
+            return format!("rusty::scan({}, {}, {})", receiver, state, scanner);
+        }
         if let Some(enumerate_call) = self.try_emit_iter_enumerate_call(mc) {
             return enumerate_call;
         }
@@ -23195,6 +23205,9 @@ impl CodeGen {
                         }
                     }
                     if (joined == "take" || joined == "rusty::take") && !call.args.is_empty() {
+                        return self.infer_iter_item_type_from_expr(&call.args[0]);
+                    }
+                    if (joined == "scan" || joined == "rusty::scan") && !call.args.is_empty() {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
                 }
@@ -26976,6 +26989,7 @@ impl CodeGen {
                         | "enumerate"
                         | "rev"
                         | "take"
+                        | "scan"
                 ) || self.is_probably_iterator_receiver_expr(&mc.receiver)
             }
             syn::Expr::Call(call) => {
@@ -27004,6 +27018,7 @@ impl CodeGen {
                             | "enumerate"
                             | "rev"
                             | "take"
+                            | "scan"
                     )
                 ) {
                     return true;
@@ -27045,6 +27060,8 @@ impl CodeGen {
                         | "rusty::rev"
                         | "take"
                         | "rusty::take"
+                        | "scan"
+                        | "rusty::scan"
                 )
             }
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
@@ -47770,6 +47787,40 @@ mod tests {
         );
         assert!(out.contains("return rusty::count(rusty::skip(v.into_iter(), 1));"), "{out}");
         assert!(!out.contains(".skip(1).count()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5147_iterator_scan_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(s: &str) {
+                let _ = s.chars().scan(0usize, |state, ch| {
+                    *state = *state + (ch as usize);
+                    Some(ch)
+                });
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"), "{out}");
+        assert!(!out.contains(".chars().scan("), "{out}");
+        assert!(!out.contains(".scan(0"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5147_non_iterator_scan_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn scan(&self, n: usize, m: usize) {}
+            }
+            fn f(s: S) {
+                s.scan(1, 2);
+            }
+        "#,
+        );
+        assert!(out.contains("s.scan(1, 2)"), "{out}");
+        assert!(!out.contains("rusty::scan(s, 1, 2)"), "{out}");
     }
 
     #[test]

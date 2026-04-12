@@ -2433,6 +2433,10 @@ Current status snapshot:
    - extending omitted-owner constructor recovery to include `Rc::new/new_` payload-driven owner inference in core call lowering, and
    - adding shared runtime `Rc<T>::new_(...)` alias plus static UFCS-compatible `Rc<T>::clone(const Rc<T>&)` surface in `include/rusty/rc.hpp`.
 96. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4864` (`rusty::str_runtime::Chars` missing `.scan(...)` adapter surface), followed by downstream runtime/adapter/type-surface gaps (`range::filter`, `SmallVec::get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.46` (fixes stayed shared and owner/type-surface-gated in transpiler/runtime changes, with no crate-specific scripts and no generated-output text patching).
+97. Focused `smallvec` repro after `Leaf 5.1.47` (`/tmp/rusty-parity-matrix-5-1-47a-20260412/smallvec/...`) collapses the prior post-5.1.46 iterator `.scan(...)` adapter family by:
+   - rewriting iterator-like `.scan(state, f)` method calls to shared runtime helper form `rusty::scan(receiver, state, f)` in transpiler method-call lowering under iterator/probable-iterator receiver gating, and
+   - adding shared runtime iterator-scan surfaces in `include/rusty/slice.hpp` (`scan_next_iter`, `make_scan_next_iter`, and public `rusty::scan(...)`) with option-like next/closure-result enforcement.
+98. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4970` (`rusty::range<int>` missing `.filter(...)` adapter surface), followed by downstream runtime/type-surface gaps (`SmallVec::get`, inline-capacity static-call shape, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.47` (fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime changes, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

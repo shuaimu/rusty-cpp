@@ -5012,6 +5012,38 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-46a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type/owner-surface-gated in transpiler/runtime; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.47: `smallvec` Stage D iterator `.scan(...)` adapter-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime iterator-scan adapter hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites iterator-like `.scan(state, f)` calls to shared runtime helper form `rusty::scan(receiver, state, f)` under existing iterator/probable-iterator receiver gating.
+            - non-iterator methods named `scan` remain unchanged.
+            - runtime `include/rusty/slice.hpp` now provides shared option-like next-iterator scan surfaces (`scan_next_iter`, `make_scan_next_iter`, and public `rusty::scan(...)`).
+            - this collapses the deterministic post-5.1.46 first-head family at `runner.cpp:4864` (`rusty::str_runtime::Chars` missing `.scan(...)` adapter surface).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added iterator-gated `.scan(...)` method-call lowering to `rusty::scan(...)`.
+              - extended probable-iterator receiver detection and iterator-item inference pass-through for `scan`/`rusty::scan` call shapes.
+            - `include/rusty/slice.hpp`:
+              - added `detail::scan_next_iter` adapter.
+              - added `detail::make_scan_next_iter(...)`.
+              - added public `rusty::scan(...)` helper with iterator/into_iter fallback behavior.
+          - Added focused regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf5147_iterator_scan_lowers_to_runtime_helper`
+              - `test_leaf5147_non_iterator_scan_method_call_is_unchanged`
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - `test_slice_scan_runtime_adapter_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5147 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_slice_scan_runtime_adapter_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-47a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.46 first-head family at `runner.cpp:4864` (`Chars` missing `.scan(...)`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4970` (`rusty::range<int>` missing `.filter(...)` adapter surface), followed by downstream gaps (`SmallVec::get`, inline-capacity static-call shape, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-47a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime, with no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -383,6 +383,61 @@ private:
     size_t remaining_;
 };
 
+template<typename Iter, typename State, typename Func>
+class scan_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<Iter>>,
+        "rusty::scan requires next() to return an Option/optional-like value"
+    );
+
+    scan_next_iter(Iter iter, State state, Func func)
+        : iter_(std::forward<Iter>(iter)),
+          state_(std::move(state)),
+          func_(std::move(func)),
+          done_(false) {}
+
+    scan_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = next_item_t<std::remove_reference_t<Iter>>;
+        using scan_result = std::decay_t<decltype(std::invoke(
+            std::declval<Func&>(),
+            std::declval<State&>(),
+            deref_if_pointer(std::declval<item_type>())))>;
+        static_assert(
+            is_option_like_next_result_v<scan_result>,
+            "rusty::scan closure must return an Option/optional-like value"
+        );
+
+        if (done_) {
+            return scan_result{};
+        }
+
+        auto item = iter_.next();
+        if (!option_has_value(item)) {
+            return scan_result{};
+        }
+
+        auto scanned = std::invoke(
+            func_,
+            state_,
+            deref_if_pointer(option_take_value(item)));
+        if (!option_has_value(scanned)) {
+            done_ = true;
+        }
+        return scanned;
+    }
+
+private:
+    Iter iter_;
+    State state_;
+    Func func_;
+    bool done_;
+};
+
 template<typename NextIter>
 auto make_next_iter_range(NextIter&& iter) {
     using stored_iter = std::decay_t<NextIter>;
@@ -422,6 +477,18 @@ auto make_skip_next_iter(Iter&& iter, size_t remaining) {
     using stored_iter =
         std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
     return skip_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
+}
+
+template<typename Iter, typename State, typename Func>
+auto make_scan_next_iter(Iter&& iter, State&& state, Func&& func) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    using stored_state = std::decay_t<State>;
+    using stored_func = std::decay_t<Func>;
+    return scan_next_iter<stored_iter, stored_state, stored_func>(
+        std::forward<Iter>(iter),
+        std::forward<State>(state),
+        std::forward<Func>(func));
 }
 
 template<typename Range>
@@ -633,6 +700,31 @@ decltype(auto) skip(Range&& range, size_t remaining) {
         return skip(
             iter(std::forward<Range>(range)),
             remaining);
+    }
+}
+
+template<typename Range, typename State, typename Func>
+decltype(auto) scan(Range&& range, State&& state, Func&& func) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_scan_next_iter(
+            std::forward<Range>(range),
+            std::forward<State>(state),
+            std::forward<Func>(func));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::scan requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return scan(
+            std::forward<Range>(range).into_iter(),
+            std::forward<State>(state),
+            std::forward<Func>(func));
+    } else {
+        return scan(
+            iter(std::forward<Range>(range)),
+            std::forward<State>(state),
+            std::forward<Func>(func));
     }
 }
 
