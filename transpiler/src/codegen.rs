@@ -23386,23 +23386,38 @@ impl CodeGen {
             }
             "Vec" => {
                 if matches!(method_name, "from_raw_parts" | "from_raw_parts_in") {
-                    let inferred = call
+                    let inferred_from_type = call
                         .args
                         .first()
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
                         .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
                             syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
                             _ => None,
-                        })
-                        .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!(
-                                    "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
-                                    arg_cpp
-                                )
-                            })
                         });
+                    let inferred_from_decltype = call.args.first().map(|arg| {
+                        let arg_cpp = self.emit_expr_to_string(arg);
+                        format!(
+                            "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
+                            arg_cpp
+                        )
+                    });
+                    let inferred = match (inferred_from_type, inferred_from_decltype) {
+                        (Some(from_type), Some(from_decltype))
+                            if from_type == "auto"
+                                || from_type.contains("/* TODO")
+                                || (from_type
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase())
+                                    && from_type
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '_')) =>
+                        {
+                            Some(from_decltype)
+                        }
+                        (Some(from_type), _) => Some(from_type),
+                        (None, from_decltype) => from_decltype,
+                    };
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
                     } else {
@@ -23453,6 +23468,8 @@ impl CodeGen {
             .unwrap_or_default();
         let vec_from_raw_parts_recovery = owner_name == "Vec"
             && matches!(method_name.as_str(), "from_raw_parts" | "from_raw_parts_in");
+        let vec_from_raw_parts_explicit_recovery =
+            owner_has_explicit_args && vec_from_raw_parts_recovery;
         let owner_is_supported_explicit_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -23476,6 +23493,7 @@ impl CodeGen {
         );
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
+            && !vec_from_raw_parts_explicit_recovery
             && !(owner_args_omitted && owner_is_supported_omitted_recovery_target)
             && !(owner_args_omitted && vec_from_raw_parts_recovery)
         {
@@ -23504,6 +23522,13 @@ impl CodeGen {
                         .enumerate()
                         .filter_map(|(arg_idx, arg)| match arg {
                             syn::GenericArgument::Type(t) => {
+                                if vec_from_raw_parts_recovery {
+                                    if let Some(inferred_args) = inferred_owner_args.as_ref() {
+                                        if let Some(Some(inferred)) = inferred_args.get(arg_idx) {
+                                            return Some(inferred.clone());
+                                        }
+                                    }
+                                }
                                 if self.type_contains_infer(t) {
                                     if let Some(expected_args) = expected_owner_args.as_ref() {
                                         if let Some(expected) = expected_args.get(arg_idx) {
@@ -35792,6 +35817,53 @@ mod tests {
         assert!(
             !out.contains("Vec::from_raw_parts("),
             "Vec::from_raw_parts should not emit unspecialized owner path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5143_vec_from_raw_parts_explicit_owner_recovers_pointer_pointee_type() {
+        let out = transpile_str(
+            r#"
+            trait Arr { type Item; }
+            fn f<A: Arr>(ptr: *mut A::Item, len: usize, cap: usize) {
+                let _v = unsafe { Vec::<A>::from_raw_parts(ptr, len, cap) };
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Vec<typename A::Item>::from_raw_parts("),
+            "Vec::<A>::from_raw_parts should recover explicit owner arg from pointer pointee type, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Vec<A>::from_raw_parts("),
+            "Vec::<A>::from_raw_parts should not keep unspecialized explicit owner arg, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5143_vec_from_raw_parts_omitted_owner_prefers_decltype_recovery_for_nonnull_as_ptr()
+    {
+        let out = transpile_str(
+            r#"
+            use std::ptr::NonNull;
+            trait Arr { type Item; }
+            fn f<A: Arr>(ptr: NonNull<A::Item>, len: usize, cap: usize) {
+                let _v = unsafe { Vec::from_raw_parts(ptr.as_ptr(), len, cap) };
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Vec<typename A::Item>::from_raw_parts(")
+                || out.contains("Vec<std::remove_pointer_t<std::remove_reference_t<decltype(("),
+            "Vec::from_raw_parts with ptr.as_ptr() should recover owner type from pointer-derived item type, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Vec<A>::from_raw_parts("),
+            "Vec::from_raw_parts with ptr.as_ptr() should not collapse owner arg to outer generic A, got:\n{}",
             out
         );
     }

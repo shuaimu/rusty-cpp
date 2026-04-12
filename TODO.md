@@ -4908,6 +4908,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-42a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and iterator-shape/runtime-helper-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.43: `smallvec` Stage D `Vec::from_raw_parts`/`Vec::from_iter` owner-template/runtime-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - owner-template recovery for `Vec::from_raw_parts` / `Vec::from_raw_parts_in` now applies to both explicit-owner (`Vec::<...>::...`) and omitted-owner (`Vec::...`) calls when pointer-derived evidence is available.
+            - `Vec::from_raw_parts*` owner-arg inference now prefers pointer-derived `decltype` fallback when direct type hints are weak/generic, preventing fallback to unrelated outer generic owners.
+            - runtime `Vec` now exposes shared static surfaces for `from_raw_parts`, `from_raw_parts_in`, and `from_iter` (including `next()` option-like and range-based iterator forms).
+            - this collapses the deterministic `runner.cpp:1869/1874` missing-member family (`Vec<...>::from_raw_parts` / `Vec<...>::from_iter`) in `SmallVec::into_vec()` paths.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - extended `emit_call_func_with_owner_template_recovery(...)` gating/recovery for explicit-owner `Vec::from_raw_parts*`.
+              - hardened `infer_owner_template_args_for_call(...)` `Vec::from_raw_parts*` inference with pointer-pointee + `decltype` recovery preference.
+            - `include/rusty/vec.hpp`:
+              - added static `Vec::from_raw_parts(...)`, `Vec::from_raw_parts_in(...)`, and `Vec::from_iter(...)` runtime surfaces.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5143_vec_from_raw_parts_explicit_owner_recovers_pointer_pointee_type`
+            - `test_leaf5143_vec_from_raw_parts_omitted_owner_prefers_decltype_recovery_for_nonnull_as_ptr`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5143 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-43b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.42 first-head family at `runner.cpp:1869/1874` (`Vec<...>::from_raw_parts` / `Vec<...>::from_iter` missing surfaces) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4233/4252` (`rusty::Vec<unsigned char>` vs `rusty::Vec<int>` equality mismatch), followed by `runner.cpp:4267` array element conversion mismatch (`std::array<int,...>` to `std::array<uint8_t,...>`) and downstream gaps (`Rc::new_`, `scan`, `filter`, `get`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-43b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and pointer/type-shape-gated in core owner-template recovery plus shared runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

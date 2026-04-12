@@ -9,7 +9,9 @@
 #include <cstddef>  // for size_t
 #include <cstring>  // for memcpy
 #include <span>
+#include <type_traits>
 #include <rusty/function.hpp>
+#include <rusty/option.hpp>
 
 // Vec<T> - A growable array with owned elements
 // Equivalent to Rust's Vec<T>
@@ -53,6 +55,56 @@ public:
     // @lifetime: owned
     static Vec<T> new_() {
         return Vec<T>();
+    }
+
+    // Unsafe constructor from raw parts.
+    // Caller must guarantee `ptr` points to `cap` contiguous `T` slots with
+    // the first `len` elements fully initialized and uniquely owned.
+    static Vec<T> from_raw_parts(T* ptr, size_t len, size_t cap) {
+        assert(len <= cap);
+        assert(ptr != nullptr || cap == 0);
+        Vec<T> v;
+        v.data_ = ptr;
+        v.size_ = len;
+        v.capacity_ = cap;
+        return v;
+    }
+
+    template<typename U>
+    static Vec<U> from_raw_parts(U* ptr, size_t len, size_t cap) {
+        return Vec<U>::from_raw_parts(ptr, len, cap);
+    }
+
+    template<typename Alloc>
+    static Vec<T> from_raw_parts_in(T* ptr, size_t len, size_t cap, Alloc&&) {
+        return from_raw_parts(ptr, len, cap);
+    }
+
+    template<typename U, typename Alloc>
+    static Vec<U> from_raw_parts_in(U* ptr, size_t len, size_t cap, Alloc&&) {
+        return Vec<U>::from_raw_parts(ptr, len, cap);
+    }
+
+    template<typename Iter>
+    static Vec<T> from_iter(Iter&& iter) {
+        Vec<T> result;
+        if constexpr (requires { std::forward<Iter>(iter).next(); }) {
+            auto&& next_iter = std::forward<Iter>(iter);
+            while (true) {
+                auto item = next_iter.next();
+                if (!option_has_value(item)) {
+                    break;
+                }
+                result.push(option_take_value(item));
+            }
+        } else if constexpr (requires { std::forward<Iter>(iter).into_iter(); }) {
+            return from_iter(std::forward<Iter>(iter).into_iter());
+        } else {
+            for (auto&& item : std::forward<Iter>(iter)) {
+                result.push(std::forward<decltype(item)>(item));
+            }
+        }
+        return result;
     }
 
     // Alias for backward compatibility
