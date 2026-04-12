@@ -5487,7 +5487,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-66a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-surface-gated in runtime headers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.67: `smallvec` Stage D `scan` optional-surface normalization (`std::optional` vs `rusty::Option`) compile-head family collapse
+        - [x] *done* Leaf 5.1.67: `smallvec` Stage D iterator optional-surface normalization (`std::optional` vs `rusty::Option`) compile-head family collapse
+          - Plan/scope check: shared runtime iterator/range surface normalization plus focused runtime regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - normalized shared runtime iterator-adapter `next()` surfaces in `slice` adapters (`map`, `enumerate`, `rev`, `take`, `skip`, `filter`, `scan`) to return Rust runtime `rusty::Option<...>` while preserving option-like input compatibility,
+            - normalized shared runtime range iterator `next()` surfaces (`range`, `range_inclusive`, `range_from`) to return `rusty::Option<...>` instead of `std::optional`,
+            - this collapses the deterministic post-5.1.66 first-head family at `runner.cpp:1879` (`std::optional<int>` receiving Rust `Option` member calls `.is_none()/.is_some()/.unwrap()`).
+          - Implemented in:
+            - `include/rusty/slice.hpp`
+            - `include/rusty/array.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added/updated focused regressions:
+            - `runtime_move_semantics::test_leaf5167_scan_runtime_normalizes_optional_next_surface_to_rust_option`
+            - `runtime_move_semantics::test_slice_filter_runtime_adapter_surface`
+            - `runtime_move_semantics::test_range_size_hint_reports_remaining_bounds`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5167 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_slice_filter_runtime_adapter_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-67c-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.66 first-head family at `runner.cpp:1879` (optional-surface mismatch) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2162` (`SmallVec::clone_from` emits unresolved `split_at`/`clone_from_slice` method surfaces), with adjacent downstream data-layout/runtime helper families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-67c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-surface-gated in runtime headers/tests; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.68: `smallvec` Stage D clone-from slice-method surface lowering (`split_at`/`clone_from_slice`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

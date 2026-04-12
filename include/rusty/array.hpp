@@ -980,13 +980,13 @@ public:
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    std::optional<T> next() {
+    rusty::Option<T> next() {
         if (start == end_) {
-            return std::nullopt;
+            return rusty::None;
         }
         T current = start;
         ++start;
-        return current;
+        return rusty::Option<T>(current);
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
@@ -1046,9 +1046,9 @@ public:
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    std::optional<T> next() {
+    rusty::Option<T> next() {
         if (done_) {
-            return std::nullopt;
+            return rusty::None;
         }
         T current = start;
         if (start == end_) {
@@ -1056,7 +1056,7 @@ public:
         } else {
             ++start;
         }
-        return current;
+        return rusty::Option<T>(current);
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
@@ -1107,10 +1107,10 @@ struct range_from {
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    std::optional<T> next() {
+    rusty::Option<T> next() {
         T current = start;
         ++start;
-        return current;
+        return rusty::Option<T>(current);
     }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.

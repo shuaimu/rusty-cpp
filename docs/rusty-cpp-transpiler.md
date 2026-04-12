@@ -2519,6 +2519,10 @@ Current status snapshot:
    - adding shared `scan_next_iter::size_hint()` in runtime `slice` adapter surfaces with conservative scan bounds (`lower=0`) and upper-bound forwarding from underlying iterator hints when available,
    - tightening done-state scan hints to `(0, Some(0))` to match adapter termination behavior.
 136. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1879` (`std::optional<int>` emitted with Rust `Option` member surface `.is_none()/.is_some()/.unwrap()`), with adjacent downstream method-surface/data-layout families. Guardrail check against §11 remains satisfied for `Leaf 5.1.66` (fixes stayed shared and iterator-surface-gated in runtime headers, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+137. Focused `smallvec` repro after `Leaf 5.1.67` (`/tmp/rusty-parity-matrix-5-1-67c-20260412/smallvec/...`) collapses the prior post-5.1.66 iterator optional-surface family by:
+   - normalizing shared runtime iterator-adapter `next()` return surfaces (`map`, `enumerate`, `rev`, `take`, `skip`, `filter`, `scan`) to emit `rusty::Option<...>` while still accepting option-like upstream iterators, and
+   - normalizing shared runtime range `next()` surfaces (`range`, `range_inclusive`, `range_from`) to emit `rusty::Option<...>` instead of leaking `std::optional` into transpiled `.next()` callsites that expect Rust `Option` methods.
+138. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2162` (`SmallVec::clone_from` emits unresolved `split_at`/`clone_from_slice` method surfaces), with adjacent downstream data-layout/runtime helper families. Guardrail check against §11 remains satisfied for `Leaf 5.1.67` (fixes stayed shared and iterator/range-surface-gated in runtime headers/tests, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
@@ -4948,6 +4952,7 @@ Required approach:
 - for map adapter lowering, do not rewrite optional-like payload maps (`next()` / `next_back()` receivers) into iterator helper calls; keep `Option::map`/`Result::map` semantics when receiver shape indicates optional next-payload surfaces
 - for pointer-typed lowering, do not emit raw `Inner*` when `Inner` can be reference-shaped or dependent; prefer trait-form pointer aliases (`std::add_pointer_t<...>`) to avoid pointer-to-reference forms
 - for optional-like lowering, do not preserve Rust `Option` method names on `std::optional`; normalize by inferred container surface (`has_value`/`value` vs `is_some`/`unwrap`)
+- for shared runtime iterator/range adapters consumed by transpiled `.next()` callsites, do not leak `std::optional` return surfaces when generated code expects Rust `Option` members; normalize adapter `next()` surfaces to `rusty::Option` at the runtime boundary
 - for runtime `Option`/`Result` match lowering, do not fall back to `std::visit` for nested binding-only payload patterns (for example `Err(Type { .. })`); keep dispatch on runtime helper surfaces (`is_err`/`unwrap_err`, `is_ok`/`unwrap`)
 - for pointer helper calls (`ptr::read`, hole/reference storage APIs), do not cast value expressions directly to pointer aliases; emit address-of forms (`&expr`) before pointer-typed adaptation
 - for runtime move-transfer helpers (`ptr::read`, `mem::replace`, `ptr::write`), do not rely on copy-return or copy-assignment fallbacks that require copyable payloads; preserve move-only behavior with move-out/placement-style reconstruction in shared runtime paths

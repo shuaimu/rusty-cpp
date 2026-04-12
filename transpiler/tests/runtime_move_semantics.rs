@@ -147,7 +147,7 @@ fn test_range_size_hint_reports_remaining_bounds() {
             }
 
             auto first = r.next();
-            if (!first.has_value() || first.value() != 2) {
+            if (!first.is_some() || first.unwrap() != 2) {
                 return 2;
             }
 
@@ -493,6 +493,49 @@ fn test_leaf5166_scan_runtime_adapter_exposes_size_hint() {
 }
 
 #[test]
+fn test_leaf5167_scan_runtime_normalizes_optional_next_surface_to_rust_option() {
+    let source = r#"
+        #include <array>
+        #include <optional>
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+
+        int main() {
+            std::array<int, 3> values{1, 2, 3};
+            auto iter = rusty::scan(
+                rusty::iter(values),
+                0,
+                [](int& state, int value) -> std::optional<int> {
+                    state += value;
+                    if (state > 3) {
+                        return std::nullopt;
+                    }
+                    return std::make_optional(state);
+                });
+
+            auto first = iter.next();
+            if (!first.is_some() || first.unwrap() != 1) {
+                return 1;
+            }
+
+            auto second = iter.next();
+            if (!second.is_some() || second.unwrap() != 3) {
+                return 2;
+            }
+
+            auto stop = iter.next();
+            if (!stop.is_none()) {
+                return 3;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5167_scan_optional_surface_normalization");
+}
+
+#[test]
 fn test_slice_filter_runtime_adapter_surface() {
     let source = r#"
         #include <rusty/array.hpp>
@@ -509,22 +552,22 @@ fn test_slice_filter_runtime_adapter_surface() {
             }
 
             auto first = iter.next();
-            if (!first.has_value() || *first != 0) {
+            if (!first.is_some() || first.unwrap() != 0) {
                 return 2;
             }
 
             auto second = iter.next();
-            if (!second.has_value() || *second != 2) {
+            if (!second.is_some() || second.unwrap() != 2) {
                 return 3;
             }
 
             auto third = iter.next();
-            if (!third.has_value() || *third != 4) {
+            if (!third.is_some() || third.unwrap() != 4) {
                 return 4;
             }
 
             auto done = iter.next();
-            if (done.has_value()) {
+            if (!done.is_none()) {
                 return 5;
             }
 

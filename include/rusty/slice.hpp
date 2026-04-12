@@ -301,12 +301,13 @@ public:
         using item_type = next_item_t<Iter>;
         using mapped_type = std::decay_t<decltype(
             std::invoke(std::declval<Func&>(), deref_if_pointer(std::declval<item_type>())))>;
+        using next_result = rusty::Option<mapped_type>;
 
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
-            return std::optional<mapped_type>{};
+            return next_result(rusty::None);
         }
-        return std::optional<mapped_type>(std::invoke(
+        return next_result(std::invoke(
             func_,
             deref_if_pointer(option_like_take_value(item))));
     }
@@ -333,14 +334,14 @@ public:
     auto next() {
         using item_type = next_item_t<Iter>;
         using entry_type = std::tuple<size_t, item_type>;
+        using next_result = rusty::Option<entry_type>;
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
-            return std::optional<entry_type>{};
+            return next_result(rusty::None);
         }
-        return std::optional<entry_type>(
-            std::in_place,
+        return next_result(entry_type(
             index_++,
-            option_like_take_value(item)
+            option_like_take_value(item))
         );
     }
 
@@ -368,7 +369,14 @@ public:
     }
 
     auto next() {
-        return iter_.next_back();
+        using item_type = next_item_t<Iter>;
+        using next_result = rusty::Option<item_type>;
+
+        auto item = iter_.next_back();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
     }
 
 private:
@@ -427,16 +435,18 @@ public:
     }
 
     auto next() {
-        using next_result = decltype(iter_.next());
+        using iter_type = std::remove_reference_t<Iter>;
+        using item_type = next_item_t<iter_type>;
+        using next_result = rusty::Option<item_type>;
         if (remaining_ == 0) {
-            return next_result{};
+            return next_result(rusty::None);
         }
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
-            return item;
+            return next_result(rusty::None);
         }
         --remaining_;
-        return item;
+        return next_result(option_like_take_value(item));
     }
 
 private:
@@ -460,15 +470,23 @@ public:
     }
 
     auto next() {
+        using iter_type = std::remove_reference_t<Iter>;
+        using item_type = next_item_t<iter_type>;
+        using next_result = rusty::Option<item_type>;
+
         while (remaining_ > 0) {
             auto skipped = iter_.next();
             if (!option_like_has_value(skipped)) {
                 remaining_ = 0;
-                return skipped;
+                return next_result(rusty::None);
             }
             --remaining_;
         }
-        return iter_.next();
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
     }
 
 private:
@@ -498,13 +516,13 @@ public:
 
     auto next() {
         using iter_type = std::remove_reference_t<Iter>;
-        using next_result = next_result_t<iter_type>;
         using item_type = next_item_t<iter_type>;
+        using next_result = rusty::Option<item_type>;
 
         while (true) {
             auto item = iter_.next();
             if (!option_like_has_value(item)) {
-                return next_result{};
+                return next_result(rusty::None);
             }
             item_type candidate = option_like_take_value(item);
             if (std::invoke(pred_, deref_if_pointer(candidate))) {
@@ -553,18 +571,21 @@ public:
             std::declval<Func&>(),
             std::declval<State&>(),
             deref_if_pointer(std::declval<item_type>())))>;
+        using scan_item_type =
+            std::decay_t<decltype(option_like_take_value(std::declval<scan_result&>()))>;
+        using next_result = rusty::Option<scan_item_type>;
         static_assert(
             is_option_like_next_result_v<scan_result>,
             "rusty::scan closure must return an Option/optional-like value"
         );
 
         if (done_) {
-            return scan_result{};
+            return next_result(rusty::None);
         }
 
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
-            return scan_result{};
+            return next_result(rusty::None);
         }
 
         auto scanned = std::invoke(
@@ -573,8 +594,9 @@ public:
             deref_if_pointer(option_like_take_value(item)));
         if (!option_like_has_value(scanned)) {
             done_ = true;
+            return next_result(rusty::None);
         }
-        return scanned;
+        return next_result(option_like_take_value(scanned));
     }
 
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
