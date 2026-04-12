@@ -5,7 +5,6 @@
 /// 2. Nested pack expansions work (std::tuple<std::tuple<Args>...>)
 /// 3. Type modifiers with packs are handled (const Args&...)
 /// 4. Multiple independent packs in template arguments work
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -28,8 +27,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -27,3 +27,10 @@ compile_test*
 !cpp_module_interop/cpp_module_index.toml
 !cpp_module_interop/cpp_modules/
 !cpp_module_interop/cpp_modules/custom.math.cppm
+
+# Track committed cpp::std complex fixture assets
+!cpp_std_complex/
+!cpp_std_complex/Cargo.toml
+!cpp_std_complex/src/
+!cpp_std_complex/src/lib.rs
+!cpp_std_complex/cpp_module_index.toml

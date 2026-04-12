@@ -17,6 +17,9 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 
 # Run parity matrix for one crate
 ./run_parity_matrix.sh --crate either
+
+# Run cpp::std complex compile-stage fixture check
+./run_cpp_std_complex_compile.sh
 ```
 
 ## Test Crates
@@ -39,6 +42,13 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 |-------|--------------|
 | `semver` | Structs, enums, Display, FromStr, comparison operators |
 | `bitflags` | Operator overloading, derive-like patterns, macros |
+
+### Tier 4: Complex (~1500+ LOC / heavier feature mix)
+| Crate | What it tests |
+|-------|--------------|
+| `smallvec` | Const generics, inline storage, unsafe internals, drop/move semantics |
+| `itertools` | Iterator adapter chains, closures, trait-heavy generic APIs |
+| `once_cell` | Static initialization, interior mutability, sync and thread-safe paths |
 
 ## What the tests check
 

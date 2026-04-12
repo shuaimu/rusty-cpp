@@ -4,7 +4,6 @@
 /// 1. PackExpansionExpr is detected in function calls
 /// 2. Operation types are correctly identified (move, forward, use)
 /// 3. Pack expansions with different operations are tracked
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -27,8 +26,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

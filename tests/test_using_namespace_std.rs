@@ -2,7 +2,6 @@
 ///
 /// Verifies that functions called without std:: prefix are correctly
 /// recognized when "using namespace std;" is active.
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -155,9 +154,9 @@ void test_unsafe_call() {
 
     // Should still catch non-safe function calls (unannotated = @unsafe in two-state model)
     assert!(
-        output.contains("non-safe") ||
-        output.contains("@unsafe") ||
-        output.contains("my_custom_function"),
+        output.contains("non-safe")
+            || output.contains("@unsafe")
+            || output.contains("my_custom_function"),
         "Should still detect non-safe functions even with 'using namespace std;'. Output:\n{}",
         output
     );

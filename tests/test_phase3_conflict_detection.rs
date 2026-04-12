@@ -46,9 +46,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &[]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect conflict between two mutable borrows");
-    assert!(output.contains("already mutably borrowed") || output.contains("already borrowed"),
-        "Error message should mention already borrowed");
+    assert!(
+        has_violation,
+        "Should detect conflict between two mutable borrows"
+    );
+    assert!(
+        output.contains("already mutably borrowed") || output.contains("already borrowed"),
+        "Error message should mention already borrowed"
+    );
 }
 
 #[test]
@@ -77,7 +82,10 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &[]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect conflict between immutable and mutable borrows");
+    assert!(
+        has_violation,
+        "Should detect conflict between immutable and mutable borrows"
+    );
 }
 
 #[test]
@@ -103,7 +111,10 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &[]);
     println!("Output: {}", output);
 
-    assert!(!has_violation, "Multiple immutable borrows should be allowed");
+    assert!(
+        !has_violation,
+        "Multiple immutable borrows should be allowed"
+    );
 }
 
 #[test]
@@ -131,7 +142,10 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &[]);
     println!("Output: {}", output);
 
-    assert!(!has_violation, "Sequential mutable borrows in different scopes should be allowed");
+    assert!(
+        !has_violation,
+        "Sequential mutable borrows in different scopes should be allowed"
+    );
 }
 
 #[test]
@@ -156,9 +170,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &["include"]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect conflict between two mutable borrows via operator*");
-    assert!(output.contains("already mutably borrowed") || output.contains("already borrowed"),
-        "Error message should mention already borrowed");
+    assert!(
+        has_violation,
+        "Should detect conflict between two mutable borrows via operator*"
+    );
+    assert!(
+        output.contains("already mutably borrowed") || output.contains("already borrowed"),
+        "Error message should mention already borrowed"
+    );
 }
 
 #[test]
@@ -183,7 +202,10 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &[]);
     println!("Output: {}", output);
 
-    assert!(!has_violation, "Borrowing different objects should not conflict");
+    assert!(
+        !has_violation,
+        "Borrowing different objects should not conflict"
+    );
 }
 
 #[test]

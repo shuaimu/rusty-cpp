@@ -1,13 +1,12 @@
+use std::io::Write;
+use std::path::Path;
 /// Tests for rusty::move - Rust-like move semantics for C++
 ///
 /// rusty::move differs from std::move in how references are handled:
 /// - For values: Same as std::move - transfers ownership
 /// - For mutable references: Invalidates the reference variable itself
 /// - For const references: Compile error (use = to copy)
-
 use std::process::Command;
-use std::io::Write;
-use std::path::Path;
 use tempfile::Builder;
 
 fn run_checker(code: &str) -> String {
@@ -26,9 +25,7 @@ fn run_checker_with_name(code: &str, test_name: &str) -> String {
     test_file
         .write_all(code.as_bytes())
         .expect("Failed to write test source");
-    test_file
-        .flush()
-        .expect("Failed to flush test source");
+    test_file.flush().expect("Failed to flush test source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-checker"))
         .arg(test_file.path())
@@ -37,8 +34,7 @@ fn run_checker_with_name(code: &str, test_name: &str) -> String {
         .output()
         .expect("Failed to run checker");
 
-    String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr)
+    String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr)
 }
 
 // ============================================================================
@@ -61,7 +57,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "Basic rusty::move on value should work. Output: {}", output
+        "Basic rusty::move on value should work. Output: {}",
+        output
     );
 }
 
@@ -81,8 +78,11 @@ void test() {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("use after move") || output.contains("Use after move") || output.contains("moved"),
-        "Should detect use after rusty::move. Output: {}", output
+        output.contains("use after move")
+            || output.contains("Use after move")
+            || output.contains("moved"),
+        "Should detect use after rusty::move. Output: {}",
+        output
     );
 }
 
@@ -107,7 +107,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "Basic rusty::move on mutable ref should work. Output: {}", output
+        "Basic rusty::move on mutable ref should work. Output: {}",
+        output
     );
 }
 
@@ -129,8 +130,12 @@ void test() {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("use after move") || output.contains("Use after move") || output.contains("moved") || output.contains("move"),
-        "Should detect use of moved reference. Output: {}", output
+        output.contains("use after move")
+            || output.contains("Use after move")
+            || output.contains("moved")
+            || output.contains("move"),
+        "Should detect use of moved reference. Output: {}",
+        output
     );
 }
 
@@ -153,7 +158,8 @@ void take_rvalue(int&& rr) {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "rusty::move on rvalue ref should work. Output: {}", output
+        "rusty::move on rvalue ref should work. Output: {}",
+        output
     );
 }
 
@@ -181,7 +187,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "Copying const ref with = should work. Output: {}", output
+        "Copying const ref with = should work. Output: {}",
+        output
     );
 }
 
@@ -204,7 +211,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "rusty::copy should not invalidate source. Output: {}", output
+        "rusty::copy should not invalidate source. Output: {}",
+        output
     );
 }
 
@@ -234,7 +242,8 @@ void test() {
     // std::move should also trigger move detection
     assert!(
         output.contains("no violations") || !output.contains("error") || output.contains("@unsafe"),
-        "std::move should still be recognized. Output: {}", output
+        "std::move should still be recognized. Output: {}",
+        output
     );
 }
 
@@ -260,7 +269,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "rusty::move on temporary should work. Output: {}", output
+        "rusty::move on temporary should work. Output: {}",
+        output
     );
 }
 
@@ -281,7 +291,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "Chained rusty::move should work. Output: {}", output
+        "Chained rusty::move should work. Output: {}",
+        output
     );
 }
 
@@ -307,7 +318,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("std::move on reference") || output.contains("forbidden"),
-        "Should detect std::move on reference in @safe code. Output: {}", output
+        "Should detect std::move on reference in @safe code. Output: {}",
+        output
     );
 }
 
@@ -326,7 +338,8 @@ void take(int&& rr) {
     let output = run_checker(code);
     assert!(
         output.contains("std::move on reference") || output.contains("forbidden"),
-        "Should detect std::move on rvalue ref parameter in @safe code. Output: {}", output
+        "Should detect std::move on rvalue ref parameter in @safe code. Output: {}",
+        output
     );
 }
 
@@ -347,7 +360,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("std::move on reference"),
-        "rusty::move on reference should be allowed. Output: {}", output
+        "rusty::move on reference should be allowed. Output: {}",
+        output
     );
 }
 
@@ -373,7 +387,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         !output.contains("std::move on reference"),
-        "std::move on value should be allowed. Output: {}", output
+        "std::move on value should be allowed. Output: {}",
+        output
     );
 }
 
@@ -397,7 +412,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         !output.contains("std::move on reference") || output.contains("no violations"),
-        "std::move on reference in unsafe block should be allowed. Output: {}", output
+        "std::move on reference in unsafe block should be allowed. Output: {}",
+        output
     );
 }
 
@@ -421,7 +437,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("moved") || output.contains("invalid") || output.contains("borrow"),
-        "Should detect use after move of mutable reference. Output: {}", output
+        "Should detect use after move of mutable reference. Output: {}",
+        output
     );
 }
 
@@ -440,7 +457,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("error"),
-        "Target of mutable ref assignment should be valid. Output: {}", output
+        "Target of mutable ref assignment should be valid. Output: {}",
+        output
     );
 }
 
@@ -461,7 +479,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("moved"),
-        "Const ref assignment should copy, not move. Output: {}", output
+        "Const ref assignment should copy, not move. Output: {}",
+        output
     );
 }
 
@@ -485,7 +504,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("moved"),
-        "Multiple const ref copies should all be valid. Output: {}", output
+        "Multiple const ref copies should all be valid. Output: {}",
+        output
     );
 }
 
@@ -505,6 +525,7 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("moved") || output.contains("invalid"),
-        "Should detect use of moved reference in chain. Output: {}", output
+        "Should detect use of moved reference in chain. Output: {}",
+        output
     );
 }

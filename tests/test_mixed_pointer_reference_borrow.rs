@@ -2,8 +2,8 @@
 // Verifies that borrow rules are enforced uniformly for both pointers and references,
 // even in @unsafe code.
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 fn run_checker(code: &str) -> String {
     let unique_id = std::time::SystemTime::now()
@@ -42,7 +42,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("violation"),
-        "Should detect pointer-reference conflict. Output: {}", output
+        "Should detect pointer-reference conflict. Output: {}",
+        output
     );
 }
 
@@ -60,7 +61,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("violation"),
-        "Should detect reference-pointer conflict. Output: {}", output
+        "Should detect reference-pointer conflict. Output: {}",
+        output
     );
 }
 
@@ -77,9 +79,11 @@ void test() {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("already mutably borrowed") || output.contains("immutable reference") ||
-        output.contains("violation"),
-        "Should detect const pointer conflict with mutable ref. Output: {}", output
+        output.contains("already mutably borrowed")
+            || output.contains("immutable reference")
+            || output.contains("violation"),
+        "Should detect const pointer conflict with mutable ref. Output: {}",
+        output
     );
 }
 
@@ -97,7 +101,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already") || output.contains("borrowed") || output.contains("violation"),
-        "Should detect mutable pointer conflict with const ref. Output: {}", output
+        "Should detect mutable pointer conflict with const ref. Output: {}",
+        output
     );
 }
 
@@ -120,7 +125,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("borrow"),
-        "Multiple const borrows should be allowed. Output: {}", output
+        "Multiple const borrows should be allowed. Output: {}",
+        output
     );
 }
 
@@ -139,7 +145,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("borrow"),
-        "Multiple const pointers should be allowed. Output: {}", output
+        "Multiple const pointers should be allowed. Output: {}",
+        output
     );
 }
 
@@ -161,7 +168,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("already borrowed"),
-        "Should detect double mutable reference. Output: {}", output
+        "Should detect double mutable reference. Output: {}",
+        output
     );
 }
 
@@ -179,7 +187,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("violation"),
-        "Should detect double mutable pointer. Output: {}", output
+        "Should detect double mutable pointer. Output: {}",
+        output
     );
 }
 
@@ -204,7 +213,8 @@ void test() {
     // May have other errors but not borrow conflicts
     assert!(
         output.contains("no violations") || !output.contains("already"),
-        "Borrow should end at scope exit. Output: {}", output
+        "Borrow should end at scope exit. Output: {}",
+        output
     );
 }
 
@@ -226,7 +236,8 @@ void test_unsafe() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "@unsafe functions should skip borrow checking. Output: {}", output
+        "@unsafe functions should skip borrow checking. Output: {}",
+        output
     );
 }
 
@@ -248,6 +259,7 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("already mutably borrowed") || output.contains("violation"),
-        "@unsafe block in @safe function should still check borrow conflicts. Output: {}", output
+        "@unsafe block in @safe function should still check borrow conflicts. Output: {}",
+        output
     );
 }

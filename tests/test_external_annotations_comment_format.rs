@@ -1,11 +1,13 @@
+use std::path::Path;
 /// Test that external annotations in C++ comments are properly parsed
 /// This test verifies the exact format used in coordinator.cc
-
 use std::process::Command;
-use std::path::Path;
 use tempfile::TempDir;
 
-fn run_analyzer_with_compile_commands(cpp_file: &Path, compile_commands_dir: &Path) -> (bool, String) {
+fn run_analyzer_with_compile_commands(
+    cpp_file: &Path,
+    compile_commands_dir: &Path,
+) -> (bool, String) {
     let z3_header = if cfg!(target_os = "macos") {
         "/opt/homebrew/include/z3.h"
     } else {
@@ -14,12 +16,17 @@ fn run_analyzer_with_compile_commands(cpp_file: &Path, compile_commands_dir: &Pa
 
     let mut cmd = Command::new("cargo");
     cmd.args(&[
-        "run", "--quiet", "--",
+        "run",
+        "--quiet",
+        "--",
         cpp_file.to_str().unwrap(),
         "--compile-commands",
-        compile_commands_dir.join("compile_commands.json").to_str().unwrap()
+        compile_commands_dir
+            .join("compile_commands.json")
+            .to_str()
+            .unwrap(),
     ])
-        .env("Z3_SYS_Z3_HEADER", z3_header);
+    .env("Z3_SYS_Z3_HEADER", z3_header);
 
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -27,8 +34,7 @@ fn run_analyzer_with_compile_commands(cpp_file: &Path, compile_commands_dir: &Pa
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -64,13 +70,18 @@ void test_function() {
     std::fs::write(&source_path, source_content).unwrap();
 
     // Create compile_commands.json
-    let compile_commands = format!(r#"[
+    let compile_commands = format!(
+        r#"[
   {{
     "directory": "{}",
     "file": "{}",
     "command": "g++ -std=c++17 -c {}"
   }}
-]"#, temp_dir.path().display(), source_path.display(), source_path.display());
+]"#,
+        temp_dir.path().display(),
+        source_path.display(),
+        source_path.display()
+    );
 
     let compile_commands_path = temp_dir.path().join("compile_commands.json");
     std::fs::write(&compile_commands_path, compile_commands).unwrap();
@@ -86,7 +97,10 @@ void test_function() {
     } else if success {
         println!("SUCCESS: Comment block annotations are being parsed correctly");
     } else {
-        println!("Other error (not related to external annotations): {}", output);
+        println!(
+            "Other error (not related to external annotations): {}",
+            output
+        );
     }
 
     // For now, this test documents the bug
@@ -118,13 +132,18 @@ void test_function() {
     std::fs::write(&source_path, source_content).unwrap();
 
     // Create compile_commands.json
-    let compile_commands = format!(r#"[
+    let compile_commands = format!(
+        r#"[
   {{
     "directory": "{}",
     "file": "{}",
     "command": "g++ -std=c++17 -c {}"
   }}
-]"#, temp_dir.path().display(), source_path.display(), source_path.display());
+]"#,
+        temp_dir.path().display(),
+        source_path.display(),
+        source_path.display()
+    );
 
     let compile_commands_path = temp_dir.path().join("compile_commands.json");
     std::fs::write(&compile_commands_path, compile_commands).unwrap();

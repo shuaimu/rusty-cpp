@@ -24,6 +24,14 @@ fn cpp_module_interop_index() -> PathBuf {
     repo_root().join("tests/transpile_tests/cpp_module_interop/cpp_module_index.toml")
 }
 
+fn cpp_std_complex_manifest() -> PathBuf {
+    repo_root().join("tests/transpile_tests/cpp_std_complex/Cargo.toml")
+}
+
+fn cpp_std_complex_index() -> PathBuf {
+    repo_root().join("tests/transpile_tests/cpp_std_complex/cpp_module_index.toml")
+}
+
 fn target_artifacts_root(work_dir: &Path) -> PathBuf {
     work_dir.join("targets")
 }
@@ -1180,6 +1188,100 @@ fn test_cpp_module_interop_dry_run_transpile_reports_missing_index_shape() {
     assert!(stdout.contains(
         "[dry-run] transpile cpp_module_interop as module 'cpp_module_interop' (cpp index: <none>)"
     ));
+    assert!(stdout.contains("Stopped after transpile stage."));
+    assert!(!stdout.contains("Stage D: Building with C++ compiler..."));
+}
+
+#[test]
+fn test_cpp_std_complex_stop_after_transpile_emits_std_import_and_calls() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(cpp_std_complex_manifest())
+        .arg("--cpp-module-index")
+        .arg(cpp_std_complex_index())
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "cpp_std_complex"))
+        .expect("failed to read transpiled cpp std complex fixture");
+    assert!(cppm.contains("import std;"));
+    assert!(cppm.contains("std::min("));
+    assert!(cppm.contains("std::max("));
+    assert!(cppm.contains("std::clamp("));
+    assert!(cppm.contains("std::abs("));
+}
+
+#[test]
+fn test_cpp_std_complex_stop_after_transpile_requires_symbol_index() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(cpp_std_complex_manifest())
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no C++ module symbol index is configured"));
+    assert!(stderr.contains("--cpp-module-index"));
+}
+
+#[test]
+fn test_cpp_std_complex_dry_run_transpile_reports_indexed_stage_shapes() {
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(cpp_std_complex_manifest())
+        .arg("--cpp-module-index")
+        .arg(cpp_std_complex_index())
+        .arg("--no-baseline")
+        .arg("--dry-run")
+        .arg("--stop-after")
+        .arg("transpile")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Target: cpp_std_complex (Lib)"));
+    assert!(stdout.contains("Stage B: Running cargo expand per target..."));
+    assert!(stdout.contains("[dry-run] cargo expand --lib --tests"));
+    assert!(stdout.contains("Stage C: Transpiling to C++..."));
+    assert!(
+        stdout.contains(
+            "[dry-run] transpile cpp_std_complex as module 'cpp_std_complex' (cpp index: "
+        )
+    );
+    assert!(stdout.contains("cpp_module_index.toml"));
     assert!(stdout.contains("Stopped after transpile stage."));
     assert!(!stdout.contains("Stage D: Building with C++ compiler..."));
 }

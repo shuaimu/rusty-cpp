@@ -1,10 +1,9 @@
+use std::fs;
 /// Tests for @safe class copy semantics
 ///
 /// @safe classes should not have copy operations (like Rust's move-by-default).
 /// This enforces Rust-like ownership semantics where types are moved, not copied.
-
 use std::process::Command;
-use std::fs;
 
 fn run_checker(code: &str) -> (bool, String) {
     run_checker_with_name(code, "test")
@@ -31,8 +30,8 @@ fn run_checker_with_name(code: &str, test_name: &str) -> (bool, String) {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = stdout + &stderr;
 
-    let success = output.status.success() &&
-                  (combined.contains("no violations") || !combined.contains("error"));
+    let success = output.status.success()
+        && (combined.contains("no violations") || !combined.contains("error"));
 
     (success, combined)
 }
@@ -57,11 +56,13 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         !success,
-        "@safe class with copy constructor should be rejected. Output: {}", output
+        "@safe class with copy constructor should be rejected. Output: {}",
+        output
     );
     assert!(
         output.contains("copy constructor") || output.contains("cannot have"),
-        "Error should mention copy constructor. Output: {}", output
+        "Error should mention copy constructor. Output: {}",
+        output
     );
 }
 
@@ -84,11 +85,13 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         !success,
-        "@safe class with copy assignment should be rejected. Output: {}", output
+        "@safe class with copy assignment should be rejected. Output: {}",
+        output
     );
     assert!(
         output.contains("copy assignment") || output.contains("cannot have"),
-        "Error should mention copy assignment. Output: {}", output
+        "Error should mention copy assignment. Output: {}",
+        output
     );
 }
 
@@ -113,7 +116,8 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         success,
-        "@safe class with deleted copy operations should be allowed. Output: {}", output
+        "@safe class with deleted copy operations should be allowed. Output: {}",
+        output
     );
 }
 
@@ -141,7 +145,8 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         success,
-        "@safe class with move-only semantics should be allowed. Output: {}", output
+        "@safe class with move-only semantics should be allowed. Output: {}",
+        output
     );
 }
 
@@ -169,7 +174,8 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         success,
-        "@unsafe class can have copy operations. Output: {}", output
+        "@unsafe class can have copy operations. Output: {}",
+        output
     );
 }
 
@@ -189,7 +195,8 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         success,
-        "Unannotated class can have copy operations. Output: {}", output
+        "Unannotated class can have copy operations. Output: {}",
+        output
     );
 }
 
@@ -213,7 +220,8 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         success,
-        "@safe class with no copy operations should be allowed. Output: {}", output
+        "@safe class with no copy operations should be allowed. Output: {}",
+        output
     );
 }
 
@@ -241,11 +249,13 @@ int main() { return 0; }
     let (success, output) = run_checker(code);
     assert!(
         !success,
-        "@safe class with both copy operations should be rejected. Output: {}", output
+        "@safe class with both copy operations should be rejected. Output: {}",
+        output
     );
     // Should mention both
     assert!(
         output.contains("copy constructor") || output.contains("copy"),
-        "Error should mention copy operations. Output: {}", output
+        "Error should mention copy operations. Output: {}",
+        output
     );
 }

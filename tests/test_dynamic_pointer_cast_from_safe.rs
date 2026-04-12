@@ -1,7 +1,6 @@
 /// Test dynamic_pointer_cast called from @safe function without @unsafe block
 ///
 /// This reproduces the user's scenario more accurately
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -50,8 +49,8 @@ void test() {
     // But dynamic_pointer_cast is UNDECLARED (not marked @safe or @unsafe)
     // So @safe CANNOT call undeclared
 
-    let has_undeclared_error = output.contains("undeclared") ||
-                               output.contains("must be explicitly marked");
+    let has_undeclared_error =
+        output.contains("undeclared") || output.contains("must be explicitly marked");
 
     if has_undeclared_error {
         println!("Expected: @safe cannot call undeclared function");
@@ -85,8 +84,8 @@ void test() {
     println!("=== TEST: @safe calls dynamic_pointer_cast (unqualified) ===");
     println!("{}", output);
 
-    let has_undeclared_error = output.contains("undeclared") ||
-                               output.contains("must be explicitly marked");
+    let has_undeclared_error =
+        output.contains("undeclared") || output.contains("must be explicitly marked");
 
     if has_undeclared_error {
         println!("Expected: @safe cannot call undeclared function");
@@ -141,12 +140,18 @@ void test() {
     println!("\n=== COMPARISON ===");
 
     // Extract just the error messages
-    let errors1: Vec<&str> = output1.lines()
-        .filter(|line| line.contains("violation") || line.contains("undeclared") || line.contains("Calling"))
+    let errors1: Vec<&str> = output1
+        .lines()
+        .filter(|line| {
+            line.contains("violation") || line.contains("undeclared") || line.contains("Calling")
+        })
         .collect();
 
-    let errors2: Vec<&str> = output2.lines()
-        .filter(|line| line.contains("violation") || line.contains("undeclared") || line.contains("Calling"))
+    let errors2: Vec<&str> = output2
+        .lines()
+        .filter(|line| {
+            line.contains("violation") || line.contains("undeclared") || line.contains("Calling")
+        })
         .collect();
 
     println!("Qualified errors:");
@@ -160,8 +165,8 @@ void test() {
     }
 
     // Check if both report undeclared or if there's a difference
-    let both_undeclared = errors1.iter().any(|e| e.contains("undeclared")) &&
-                         errors2.iter().any(|e| e.contains("undeclared"));
+    let both_undeclared = errors1.iter().any(|e| e.contains("undeclared"))
+        && errors2.iter().any(|e| e.contains("undeclared"));
 
     if both_undeclared {
         println!("\n✅ Both treated the same (both report undeclared)");

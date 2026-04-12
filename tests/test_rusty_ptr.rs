@@ -6,9 +6,9 @@
 //
 // In @safe code, both require @unsafe for dereference and address-of operations.
 
-use std::process::Command;
-use std::fs;
 use std::env;
+use std::fs;
+use std::process::Command;
 
 fn create_temp_file(name: &str, code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();

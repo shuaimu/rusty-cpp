@@ -3,8 +3,8 @@
 // 1. A variable is moved via std::move
 // 2. The moved variable is passed to a function call (not just assigned)
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 /// Test that use-after-move is detected when passing moved std::string to a function
 #[test]
@@ -34,8 +34,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect use after move when passing to function
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved"),
-            "Should detect use after move when passing to function. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move") || stdout.contains("has been moved"),
+        "Should detect use after move when passing to function. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_string_move_fn.cpp");
@@ -69,8 +73,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect use after move when passing to function
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved"),
-            "Should detect use after move for vector. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move") || stdout.contains("has been moved"),
+        "Should detect use after move for vector. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_vector_move_fn.cpp");
@@ -105,8 +113,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect use after move
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved"),
-            "Should detect use after move from function arg. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move") || stdout.contains("has been moved"),
+        "Should detect use after move from function arg. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_move_in_arg.cpp");
@@ -139,8 +151,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect use after move for copy
-    assert!(!stdout.contains("Use after move") || stdout.contains("calling unsafe function"),
-            "Should NOT detect use after move for copy. Output: {}", stdout);
+    assert!(
+        !stdout.contains("Use after move") || stdout.contains("calling unsafe function"),
+        "Should NOT detect use after move for copy. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_string_copy.cpp");
@@ -176,8 +191,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect at least one use after move
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved"),
-            "Should detect use after move. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move") || stdout.contains("has been moved"),
+        "Should detect use after move. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_multiple_uses.cpp");
@@ -211,8 +230,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Tool should complete (may or may not detect errors for other reasons like unsafe calls)
-    assert!(output.status.code().is_some(),
-            "Tool should complete. Output: {}", stdout);
+    assert!(
+        output.status.code().is_some(),
+        "Tool should complete. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_reassign_use.cpp");
@@ -244,9 +266,14 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect use after move when calling method on moved object
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved") ||
-            stdout.contains("cannot call method"),
-            "Should detect use after move when calling method. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move")
+            || stdout.contains("has been moved")
+            || stdout.contains("cannot call method"),
+        "Should detect use after move when calling method. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_method_on_moved.cpp");

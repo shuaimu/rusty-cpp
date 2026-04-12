@@ -4,8 +4,8 @@
 
 use assert_cmd::Command;
 use std::fs;
-use tempfile::{NamedTempFile, TempDir};
 use std::io::Write;
+use tempfile::{NamedTempFile, TempDir};
 
 fn run_analyzer_on_code(code: &str, include_paths: &[&str]) -> (String, bool) {
     let mut file = NamedTempFile::new().unwrap();
@@ -22,9 +22,9 @@ fn run_analyzer_on_code(code: &str, include_paths: &[&str]) -> (String, bool) {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let full_output = format!("{}\n{}", stdout, stderr);
 
-    let has_violations = full_output.contains("violation") ||
-                        full_output.contains("Error") ||
-                        full_output.contains("unsafe function");
+    let has_violations = full_output.contains("violation")
+        || full_output.contains("Error")
+        || full_output.contains("unsafe function");
     (full_output, has_violations)
 }
 
@@ -67,8 +67,11 @@ int main() {
 
     // Container::safe_method should be recognized as safe
     // use_container calling it should be OK
-    assert!(!has_violations || !output.contains("safe_method"),
-        "Should allow safe function to call safe method. Output: {}", output);
+    assert!(
+        !has_violations || !output.contains("safe_method"),
+        "Should allow safe function to call safe method. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -109,8 +112,11 @@ int main() {
     // The function `c->some_method()` involves dereferencing raw pointer c,
     // which is unsafe and should be caught BEFORE we check for undeclared method call.
     // Pointer dereference in safe context is the primary violation.
-    assert!(has_violations && output.contains("dereference"),
-        "Should detect pointer dereference in safe context. Output: {}", output);
+    assert!(
+        has_violations && output.contains("dereference"),
+        "Should detect pointer dereference in safe context. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -143,8 +149,11 @@ int main() { return 0; }
     println!("Output: {}", output);
 
     // Full definition annotation should be used
-    assert!(!has_violations || !output.contains("safe_method"),
-        "Should recognize full definition annotation. Output: {}", output);
+    assert!(
+        !has_violations || !output.contains("safe_method"),
+        "Should recognize full definition annotation. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -175,8 +184,11 @@ int main() { return 0; }
     println!("Output: {}", output);
 
     // Both unmarked means Undeclared - calling from safe should fail
-    assert!(has_violations && output.contains("some_method"),
-        "Should detect call to undeclared method. Output: {}", output);
+    assert!(
+        has_violations && output.contains("some_method"),
+        "Should detect call to undeclared method. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -208,8 +220,11 @@ int main() { return 0; }
     println!("Output: {}", output);
 
     // Full definition annotation should be used
-    assert!(!has_violations || !output.contains("safe_method"),
-        "Should use full definition annotation. Output: {}", output);
+    assert!(
+        !has_violations || !output.contains("safe_method"),
+        "Should use full definition annotation. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -222,7 +237,9 @@ fn test_header_forward_source_full() {
 
     // Create header with forward declaration
     let header_path = temp_dir.path().join("container.h");
-    fs::write(&header_path, r#"
+    fs::write(
+        &header_path,
+        r#"
 #ifndef CONTAINER_H
 #define CONTAINER_H
 
@@ -232,11 +249,15 @@ class Container;
 void use_container(Container* c);
 
 #endif
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Create source with full definition
     let source_path = temp_dir.path().join("container.cpp");
-    fs::write(&source_path, r#"
+    fs::write(
+        &source_path,
+        r#"
 #include "container.h"
 
 // Full definition with @safe
@@ -252,7 +273,9 @@ void use_container(Container* c) {
 }
 
 int main() { return 0; }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("rusty-cpp-checker").unwrap();
     cmd.arg(&source_path);
@@ -265,11 +288,14 @@ int main() { return 0; }
 
     println!("Output: {}", full_output);
 
-    let has_violations = full_output.contains("violation") ||
-                        full_output.contains("unsafe function");
+    let has_violations =
+        full_output.contains("violation") || full_output.contains("unsafe function");
 
-    assert!(!has_violations || !full_output.contains("safe_method"),
-        "Should use source file's full definition annotation. Output: {}", full_output);
+    assert!(
+        !has_violations || !full_output.contains("safe_method"),
+        "Should use source file's full definition annotation. Output: {}",
+        full_output
+    );
 }
 
 // ============================================================================
@@ -282,7 +308,9 @@ fn test_header_safe_forward_source_unmarked_full() {
 
     // Create header with @safe forward declaration
     let header_path = temp_dir.path().join("container.h");
-    fs::write(&header_path, r#"
+    fs::write(
+        &header_path,
+        r#"
 #ifndef CONTAINER_H
 #define CONTAINER_H
 
@@ -291,11 +319,15 @@ fn test_header_safe_forward_source_unmarked_full() {
 class Container;
 
 #endif
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Create source with unmarked full definition
     let source_path = temp_dir.path().join("container.cpp");
-    fs::write(&source_path, r#"
+    fs::write(
+        &source_path,
+        r#"
 #include "container.h"
 
 // Full definition without annotation
@@ -310,7 +342,9 @@ void use_it(Container* c) {
 }
 
 int main() { return 0; }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("rusty-cpp-checker").unwrap();
     cmd.arg(&source_path);
@@ -323,15 +357,18 @@ int main() { return 0; }
 
     println!("Output: {}", full_output);
 
-    let has_violations = full_output.contains("violation") ||
-                        full_output.contains("unsafe function");
+    let has_violations =
+        full_output.contains("violation") || full_output.contains("unsafe function");
 
     // Header's forward decl annotation should be ignored (no braces)
     // The function `c->some_method()` involves dereferencing raw pointer c,
     // which is unsafe and should be caught BEFORE we check for undeclared method call.
     // Pointer dereference in safe context is the primary violation.
-    assert!(has_violations && full_output.contains("dereference"),
-        "Should detect pointer dereference in safe context. Output: {}", full_output);
+    assert!(
+        has_violations && full_output.contains("dereference"),
+        "Should detect pointer dereference in safe context. Output: {}",
+        full_output
+    );
 }
 
 // ============================================================================
@@ -370,8 +407,11 @@ int main() { return 0; }
     println!("Output: {}", output);
 
     // Only the full definition annotation should matter
-    assert!(!has_violations || !output.contains("safe_method"),
-        "Should use only full definition annotation. Output: {}", output);
+    assert!(
+        !has_violations || !output.contains("safe_method"),
+        "Should use only full definition annotation. Output: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -384,18 +424,24 @@ fn test_forward_and_full_in_different_files() {
 
     // File 1: Just forward declaration
     let file1_path = temp_dir.path().join("file1.h");
-    fs::write(&file1_path, r#"
+    fs::write(
+        &file1_path,
+        r#"
 #ifndef FILE1_H
 #define FILE1_H
 
 class Container;  // Just forward, no annotation
 
 #endif
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // File 2: Full definition
     let file2_path = temp_dir.path().join("file2.h");
-    fs::write(&file2_path, r#"
+    fs::write(
+        &file2_path,
+        r#"
 #ifndef FILE2_H
 #define FILE2_H
 
@@ -406,11 +452,15 @@ public:
 };
 
 #endif
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Main file that includes both
     let main_path = temp_dir.path().join("main.cpp");
-    fs::write(&main_path, r#"
+    fs::write(
+        &main_path,
+        r#"
 #include "file1.h"  // Forward declaration first
 #include "file2.h"  // Full definition second
 
@@ -420,7 +470,9 @@ void use_it(Container* c) {
 }
 
 int main() { return 0; }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("rusty-cpp-checker").unwrap();
     cmd.arg(&main_path);
@@ -433,11 +485,14 @@ int main() { return 0; }
 
     println!("Output: {}", full_output);
 
-    let has_violations = full_output.contains("violation") ||
-                        full_output.contains("unsafe function");
+    let has_violations =
+        full_output.contains("violation") || full_output.contains("unsafe function");
 
-    assert!(!has_violations || !full_output.contains("safe_method"),
-        "Should recognize full definition annotation across files. Output: {}", full_output);
+    assert!(
+        !has_violations || !full_output.contains("safe_method"),
+        "Should recognize full definition annotation across files. Output: {}",
+        full_output
+    );
 }
 
 // ============================================================================
@@ -450,7 +505,9 @@ fn test_header_safe_forward_source_safe_full() {
 
     // Header with @safe forward (should be ignored)
     let header_path = temp_dir.path().join("container.h");
-    fs::write(&header_path, r#"
+    fs::write(
+        &header_path,
+        r#"
 #ifndef CONTAINER_H
 #define CONTAINER_H
 
@@ -458,11 +515,15 @@ fn test_header_safe_forward_source_safe_full() {
 class Container;  // Forward with annotation (ignored - no braces)
 
 #endif
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     // Source with @safe full definition
     let source_path = temp_dir.path().join("container.cpp");
-    fs::write(&source_path, r#"
+    fs::write(
+        &source_path,
+        r#"
 #include "container.h"
 
 // @safe
@@ -477,7 +538,9 @@ void use_it(Container* c) {
 }
 
 int main() { return 0; }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("rusty-cpp-checker").unwrap();
     cmd.arg(&source_path);
@@ -490,9 +553,12 @@ int main() { return 0; }
 
     println!("Output: {}", full_output);
 
-    let has_violations = full_output.contains("violation") ||
-                        full_output.contains("unsafe function");
+    let has_violations =
+        full_output.contains("violation") || full_output.contains("unsafe function");
 
-    assert!(!has_violations || !full_output.contains("safe_method"),
-        "Should work - source has safe full definition. Output: {}", full_output);
+    assert!(
+        !has_violations || !full_output.contains("safe_method"),
+        "Should work - source has safe full definition. Output: {}",
+        full_output
+    );
 }

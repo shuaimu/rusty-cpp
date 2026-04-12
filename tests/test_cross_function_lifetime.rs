@@ -10,7 +10,6 @@
 /// 4. Output parameter lifetime violations
 /// 5. Method returns reference to dying object
 /// 6. Chained function calls with lifetime issues
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;

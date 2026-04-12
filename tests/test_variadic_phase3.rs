@@ -5,7 +5,6 @@
 /// 2. Template parameters including packs are extracted
 /// 3. Member fields with pack types are detected
 /// 4. Base class packs are recognized
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -28,8 +27,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -238,8 +236,5 @@ fn test_phase3_nested_template_class() {
     let (success, _output) = run_analyzer(temp_file.path());
 
     // Should handle nested template classes (may have limitations)
-    assert!(
-        success,
-        "Should handle nested template classes"
-    );
+    assert!(success, "Should handle nested template classes");
 }

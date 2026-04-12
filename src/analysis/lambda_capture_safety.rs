@@ -1,3 +1,6 @@
+use crate::debug_println;
+use crate::parser::ast_visitor::LambdaCaptureKind;
+use crate::parser::safety_annotations::SafetyMode;
 /// Lambda capture safety checking for @safe code with escape analysis
 ///
 /// In @safe code:
@@ -11,11 +14,7 @@
 /// - Lambda is returned from function
 /// - Lambda is stored in a variable/container that outlives captured variables
 /// - Lambda is passed to a function that takes ownership (stores it)
-
-use crate::parser::{Function, Statement, Expression};
-use crate::parser::ast_visitor::LambdaCaptureKind;
-use crate::parser::safety_annotations::SafetyMode;
-use crate::debug_println;
+use crate::parser::{Expression, Function, Statement};
 use std::collections::{HashMap, HashSet};
 
 /// Context for tracking lambdas and their escape status
@@ -58,13 +57,17 @@ impl LambdaContext {
     }
 
     fn register_variable(&mut self, name: &str) {
-        self.variable_scopes.insert(name.to_string(), self.scope_depth);
+        self.variable_scopes
+            .insert(name.to_string(), self.scope_depth);
     }
 
     fn register_lambda(&mut self, name: &str, ref_captures: Vec<String>, has_default_ref: bool) {
-        self.lambda_ref_captures.insert(name.to_string(), ref_captures);
-        self.lambda_has_default_ref.insert(name.to_string(), has_default_ref);
-        self.lambda_scopes.insert(name.to_string(), self.scope_depth);
+        self.lambda_ref_captures
+            .insert(name.to_string(), ref_captures);
+        self.lambda_has_default_ref
+            .insert(name.to_string(), has_default_ref);
+        self.lambda_scopes
+            .insert(name.to_string(), self.scope_depth);
     }
 
     fn mark_escaped(&mut self, name: &str) {
@@ -99,24 +102,37 @@ pub fn check_lambda_capture_safety(
 
     // Only check @safe functions
     if function_safety != SafetyMode::Safe {
-        debug_println!("DEBUG LAMBDA: Skipping function '{}' (not @safe)", function.name);
+        debug_println!(
+            "DEBUG LAMBDA: Skipping function '{}' (not @safe)",
+            function.name
+        );
         return errors;
     }
 
-    debug_println!("DEBUG LAMBDA: Checking function '{}' for lambda capture safety", function.name);
+    debug_println!(
+        "DEBUG LAMBDA: Checking function '{}' for lambda capture safety",
+        function.name
+    );
 
     // Track if we're inside an @unsafe block
     let mut unsafe_depth = 0;
     let mut lambda_context = LambdaContext::new();
 
     // First pass: collect all lambda definitions and track escapes
-    collect_lambdas_and_escapes(&function.body, &function.name, &mut lambda_context, &mut unsafe_depth);
+    collect_lambdas_and_escapes(
+        &function.body,
+        &function.name,
+        &mut lambda_context,
+        &mut unsafe_depth,
+    );
 
     // Check for 'this' captures (always forbidden)
     check_this_captures_errors(&function.body, &function.name, &mut errors, &mut 0);
 
     // Report errors for escaped lambdas with reference captures
-    for (lambda_name, ref_captures, has_default_ref) in lambda_context.get_escaped_lambdas_with_ref_captures() {
+    for (lambda_name, ref_captures, has_default_ref) in
+        lambda_context.get_escaped_lambdas_with_ref_captures()
+    {
         if has_default_ref {
             errors.push(format!(
                 "Reference capture in @safe code: Lambda '{}' escapes but uses default reference capture [&] which can create dangling references - use copy capture [=] instead",
@@ -167,7 +183,11 @@ fn collect_lambdas_and_escapes(
                         // Extract variable name from lhs expression
                         if let Some(lhs_name) = extract_variable_name(lhs) {
                             ctx.register_lambda(&lhs_name, ref_captures, has_default_ref);
-                            debug_println!("DEBUG LAMBDA: Registered lambda '{}' in function '{}'", lhs_name, function_name);
+                            debug_println!(
+                                "DEBUG LAMBDA: Registered lambda '{}' in function '{}'",
+                                lhs_name,
+                                function_name
+                            );
                         }
                     }
                 }
@@ -177,7 +197,11 @@ fn collect_lambdas_and_escapes(
                 if *unsafe_depth == 0 {
                     if let Some(var_name) = extract_variable_name(expr) {
                         ctx.mark_escaped(&var_name);
-                        debug_println!("DEBUG LAMBDA: Lambda '{}' escapes via return in '{}'", var_name, function_name);
+                        debug_println!(
+                            "DEBUG LAMBDA: Lambda '{}' escapes via return in '{}'",
+                            var_name,
+                            function_name
+                        );
                     }
                     // Check if returning a lambda expression directly
                     if let Some((ref_captures, has_default_ref)) = extract_lambda_captures(expr) {
@@ -185,7 +209,10 @@ fn collect_lambdas_and_escapes(
                         let lambda_name = format!("_anon_lambda_{}", statements.len());
                         ctx.register_lambda(&lambda_name, ref_captures, has_default_ref);
                         ctx.mark_escaped(&lambda_name);
-                        debug_println!("DEBUG LAMBDA: Anonymous lambda escapes via return in '{}'", function_name);
+                        debug_println!(
+                            "DEBUG LAMBDA: Anonymous lambda escapes via return in '{}'",
+                            function_name
+                        );
                     }
                 }
             }
@@ -195,7 +222,11 @@ fn collect_lambdas_and_escapes(
                     check_for_escape_via_call(expr, ctx, function_name);
                 }
             }
-            Statement::If { then_branch, else_branch, .. } => {
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 collect_lambdas_and_escapes(then_branch, function_name, ctx, unsafe_depth);
                 if let Some(else_stmts) = else_branch {
                     collect_lambdas_and_escapes(else_stmts, function_name, ctx, unsafe_depth);
@@ -242,10 +273,19 @@ fn check_this_captures_errors(
                         line: 0,
                         column: 0,
                     };
-                    check_expression_for_this_capture(expr, function_name, &default_location, errors);
+                    check_expression_for_this_capture(
+                        expr,
+                        function_name,
+                        &default_location,
+                        errors,
+                    );
                 }
             }
-            Statement::If { then_branch, else_branch, .. } => {
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 check_this_captures_errors(then_branch, function_name, errors, unsafe_depth);
                 if let Some(else_stmts) = else_branch {
                     check_this_captures_errors(else_stmts, function_name, errors, unsafe_depth);
@@ -281,9 +321,9 @@ fn check_expression_for_this_capture(
                 check_expression_for_this_capture(arg, _function_name, location, errors);
             }
         }
-        Expression::Move { inner, .. } |
-        Expression::Dereference(inner) |
-        Expression::AddressOf(inner) => {
+        Expression::Move { inner, .. }
+        | Expression::Dereference(inner)
+        | Expression::AddressOf(inner) => {
             check_expression_for_this_capture(inner, _function_name, location, errors);
         }
         Expression::BinaryOp { left, right, .. } => {
@@ -297,16 +337,20 @@ fn check_expression_for_this_capture(
     }
 }
 
-fn check_for_escape_via_call(
-    expr: &Expression,
-    ctx: &mut LambdaContext,
-    function_name: &str,
-) {
+fn check_for_escape_via_call(expr: &Expression, ctx: &mut LambdaContext, function_name: &str) {
     if let Expression::FunctionCall { name, args, .. } = expr {
         // Check if passing a lambda to a function that stores it
         // For now, we consider push_back, emplace_back, insert, etc. as escaping
-        let storing_methods = ["push_back", "emplace_back", "push_front", "emplace_front",
-                              "insert", "emplace", "assign", "store"];
+        let storing_methods = [
+            "push_back",
+            "emplace_back",
+            "push_front",
+            "emplace_front",
+            "insert",
+            "emplace",
+            "assign",
+            "store",
+        ];
 
         let method_name = name.split("::").last().unwrap_or(name);
         let method_name = method_name.split('.').last().unwrap_or(method_name);
@@ -315,8 +359,12 @@ fn check_for_escape_via_call(
             for arg in args {
                 if let Some(var_name) = extract_variable_name(arg) {
                     ctx.mark_escaped(&var_name);
-                    debug_println!("DEBUG LAMBDA: Lambda '{}' potentially escapes via {} in '{}'",
-                        var_name, name, function_name);
+                    debug_println!(
+                        "DEBUG LAMBDA: Lambda '{}' potentially escapes via {} in '{}'",
+                        var_name,
+                        name,
+                        function_name
+                    );
                 }
             }
         }

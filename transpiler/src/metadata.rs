@@ -382,8 +382,11 @@ mod tests {
         let root_manifest = fixture.path().join("Cargo.toml");
         let xtask_manifest = fixture.path().join("xtask").join("Cargo.toml");
         std::fs::create_dir_all(xtask_manifest.parent().unwrap()).unwrap();
-        std::fs::write(&root_manifest, "[package]\nname = \"root_pkg\"\nversion = \"0.1.0\"\n")
-            .unwrap();
+        std::fs::write(
+            &root_manifest,
+            "[package]\nname = \"root_pkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         std::fs::write(
             &xtask_manifest,
             "[package]\nname = \"xtask\"\nversion = \"0.1.0\"\n",

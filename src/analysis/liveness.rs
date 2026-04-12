@@ -9,17 +9,17 @@
 // - Variables that escape scope → live (returned, stored, etc.)
 // - When uncertain → assume live (safe default)
 
-use crate::ir::{IrStatement, IrFunction};
+use crate::ir::{IrFunction, IrStatement};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UseType {
-    Read,           // Simple read: int x = r
-    Write,          // Assignment: r = ...
-    Escape,         // Returned, might escape scope
-    FunctionArg,    // Passed to function (might be stored)
-    InLoop,         // Used inside loop body
-    InCondition,    // Used in if/else condition
+    Read,        // Simple read: int x = r
+    Write,       // Assignment: r = ...
+    Escape,      // Returned, might escape scope
+    FunctionArg, // Passed to function (might be stored)
+    InLoop,      // Used inside loop body
+    InCondition, // Used in if/else condition
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,10 @@ impl LivenessAnalyzer {
         let first_block = function.cfg.node_weights().next();
 
         if let Some(block) = first_block {
-            debug_println!("LIVENESS: Analyzing function with {} statements", block.statements.len());
+            debug_println!(
+                "LIVENESS: Analyzing function with {} statements",
+                block.statements.len()
+            );
 
             // First pass: collect all uses
             self.collect_uses(&block.statements);
@@ -68,7 +71,10 @@ impl LivenessAnalyzer {
         // Second pass: determine last uses (conservatively)
         let last_uses = self.compute_last_uses();
 
-        debug_println!("LIVENESS: Found {} variables with determinable last use", last_uses.len());
+        debug_println!(
+            "LIVENESS: Found {} variables with determinable last use",
+            last_uses.len()
+        );
         for (var, idx) in &last_uses {
             debug_println!("LIVENESS:   '{}' last used at statement {}", var, idx);
         }
@@ -184,7 +190,10 @@ impl LivenessAnalyzer {
                 }
             }
 
-            IrStatement::If { then_branch, else_branch } => {
+            IrStatement::If {
+                then_branch,
+                else_branch,
+            } => {
                 self.in_conditional_depth += 1;
 
                 // Analyze then branch
@@ -198,31 +207,38 @@ impl LivenessAnalyzer {
                 self.in_conditional_depth -= 1;
             }
 
-            IrStatement::PackExpansion { pack_name, operation } => {
+            IrStatement::PackExpansion {
+                pack_name,
+                operation,
+            } => {
                 // Phase 4: Pack expansion uses the pack variable
                 let use_type = if operation == "move" || operation == "forward" {
-                    UseType::Read  // Moving/forwarding reads the pack
+                    UseType::Read // Moving/forwarding reads the pack
                 } else {
-                    UseType::Read  // Regular use also reads
+                    UseType::Read // Regular use also reads
                 };
                 self.record_use(pack_name, use_type);
             }
 
-            IrStatement::StructBorrow { struct_var, borrowed_from, .. } => {
+            IrStatement::StructBorrow {
+                struct_var,
+                borrowed_from,
+                ..
+            } => {
                 // Struct is being created (written to) and borrows from another variable (read)
                 self.record_use(struct_var, UseType::Write);
                 self.record_use(borrowed_from, UseType::Read);
             }
 
             // These don't use variables
-            IrStatement::EnterScope |
-            IrStatement::ExitScope |
-            IrStatement::EnterUnsafe |
-            IrStatement::ExitUnsafe |
-            IrStatement::Drop(_) |
-            IrStatement::ImplicitDrop { .. } |
-            IrStatement::LambdaCapture { .. } |
-            IrStatement::VarDecl { .. } => {}
+            IrStatement::EnterScope
+            | IrStatement::ExitScope
+            | IrStatement::EnterUnsafe
+            | IrStatement::ExitUnsafe
+            | IrStatement::Drop(_)
+            | IrStatement::ImplicitDrop { .. }
+            | IrStatement::LambdaCapture { .. }
+            | IrStatement::VarDecl { .. } => {}
         }
     }
 
@@ -232,8 +248,12 @@ impl LivenessAnalyzer {
             return;
         }
 
-        debug_println!("LIVENESS: Recording use of '{}' at index {} (type: {:?})",
-                      var, self.current_idx, use_type);
+        debug_println!(
+            "LIVENESS: Recording use of '{}' at index {} (type: {:?})",
+            var,
+            self.current_idx,
+            use_type
+        );
 
         let use_info = UseInfo {
             statement_idx: self.current_idx,
@@ -262,19 +282,27 @@ impl LivenessAnalyzer {
             }
 
             // 3. Variable passed to function (might be stored)
-            if uses.iter().any(|u| matches!(u.use_type, UseType::FunctionArg)) {
+            if uses
+                .iter()
+                .any(|u| matches!(u.use_type, UseType::FunctionArg))
+            {
                 debug_println!("LIVENESS: '{}' passed to function - not clearing", var);
                 continue;
             }
 
             // Conservative: find the LAST read/use
-            let last_read_or_use = uses.iter()
+            let last_read_or_use = uses
+                .iter()
                 .filter(|u| matches!(u.use_type, UseType::Read | UseType::InCondition))
                 .map(|u| u.statement_idx)
                 .max();
 
             if let Some(last_idx) = last_read_or_use {
-                debug_println!("LIVENESS: '{}' has last use (read) at statement {}", var, last_idx);
+                debug_println!(
+                    "LIVENESS: '{}' has last use (read) at statement {}",
+                    var,
+                    last_idx
+                );
                 last_uses.insert(var.clone(), last_idx);
             }
             // Note: Variables that are only written (never read) don't get a last use
@@ -347,11 +375,11 @@ mod tests {
         let mut analyzer = LivenessAnalyzer::new();
 
         analyzer.current_idx = 2;
-        analyzer.record_use("r", UseType::Write);  // Created
+        analyzer.record_use("r", UseType::Write); // Created
         analyzer.current_idx = 3;
-        analyzer.record_use("r", UseType::Read);   // Used
+        analyzer.record_use("r", UseType::Read); // Used
         analyzer.current_idx = 4;
-        analyzer.record_use("r", UseType::Read);   // Last use
+        analyzer.record_use("r", UseType::Read); // Last use
 
         let last_uses = analyzer.compute_last_uses();
 

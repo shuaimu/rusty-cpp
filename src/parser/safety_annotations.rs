@@ -1,8 +1,8 @@
-use std::path::Path;
+use crate::debug_println;
+use clang::Entity;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use clang::Entity;
-use crate::debug_println;
+use std::path::Path;
 
 /// Helper function to check if a string starts with a safety annotation
 /// Accepts annotations with any suffix: @safe, @safe-XXX, @safe: note, etc.
@@ -40,16 +40,16 @@ pub enum SafetyMode {
 /// Class annotation types for inheritance safety
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClassAnnotation {
-    Interface,  // @interface - pure virtual class (like Rust trait)
-    Safe,       // @safe - class methods are safe by default
-    Unsafe,     // @unsafe - class methods are unsafe by default
+    Interface, // @interface - pure virtual class (like Rust trait)
+    Safe,      // @safe - class methods are safe by default
+    Unsafe,    // @unsafe - class methods are unsafe by default
 }
 
 /// Function signature for disambiguating overloaded functions
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
     pub name: String,
-    pub param_types: Option<Vec<String>>,  // None means match by name only
+    pub param_types: Option<Vec<String>>, // None means match by name only
 }
 
 impl FunctionSignature {
@@ -58,7 +58,10 @@ impl FunctionSignature {
     }
 
     fn from_name_only(name: String) -> Self {
-        Self { name, param_types: None }
+        Self {
+            name,
+            param_types: None,
+        }
     }
 
     /// Check if this signature matches another (handles partial matches)
@@ -83,7 +86,6 @@ pub struct SafetyContext {
     pub source_file: Option<String>, // The source file where annotations were parsed from
 }
 
-
 impl SafetyContext {
     pub fn new() -> Self {
         Self {
@@ -92,7 +94,7 @@ impl SafetyContext {
             source_file: None,
         }
     }
-    
+
     /// Merge safety annotations from headers into this context
     pub fn merge_header_annotations(&mut self, header_cache: &super::header_cache::HeaderCache) {
         // For each function that has a safety annotation in a header,
@@ -100,20 +102,26 @@ impl SafetyContext {
         for (func_name, &safety_mode) in header_cache.safety_annotations.iter() {
             // Check if we already have an override for this function
             // Need to check both exact match and qualified/unqualified variations
-            let already_has_override = self.function_overrides.iter()
-                .any(|(sig, _)| {
-                    sig.name == *func_name ||
-                    sig.name.ends_with(&format!("::{}", func_name)) ||
-                    func_name.ends_with(&format!("::{}", sig.name))
-                });
+            let already_has_override = self.function_overrides.iter().any(|(sig, _)| {
+                sig.name == *func_name
+                    || sig.name.ends_with(&format!("::{}", func_name))
+                    || func_name.ends_with(&format!("::{}", sig.name))
+            });
 
             if !already_has_override {
                 // Add the header's safety annotation (name only, no param types from header)
-                debug_println!("DEBUG SAFETY: Adding header annotation for '{}': {:?}", func_name, safety_mode);
+                debug_println!(
+                    "DEBUG SAFETY: Adding header annotation for '{}': {:?}",
+                    func_name,
+                    safety_mode
+                );
                 let signature = FunctionSignature::from_name_only(func_name.clone());
                 self.function_overrides.push((signature, safety_mode));
             } else {
-                debug_println!("DEBUG SAFETY: Function '{}' already has annotation, keeping source file version", func_name);
+                debug_println!(
+                    "DEBUG SAFETY: Function '{}' already has annotation, keeping source file version",
+                    func_name
+                );
             }
             // If we already have an override from the source file, it takes precedence
         }
@@ -167,7 +175,9 @@ impl SafetyContext {
             //       This is stricter but prevents false matches from unqualified external function calls.
             if sig_is_qualified && func_is_qualified {
                 // Both are qualified - allow suffix matching on either side
-                if sig.name.ends_with(&format!("::{}", func_name)) || func_name.ends_with(&format!("::{}", sig.name)) {
+                if sig.name.ends_with(&format!("::{}", func_name))
+                    || func_name.ends_with(&format!("::{}", sig.name))
+                {
                     return *mode;
                 }
             }
@@ -196,7 +206,9 @@ impl SafetyContext {
                     // Note: If sig_is_qualified && !class_is_qualified, we DON'T match anymore.
                     // This prevents an unqualified "Node" from matching "yaml::Node" annotation.
                     if sig_is_qualified && class_is_qualified {
-                        if sig.name.ends_with(&format!("::{}", class_name)) || class_name.ends_with(&format!("::{}", sig.name)) {
+                        if sig.name.ends_with(&format!("::{}", class_name))
+                            || class_name.ends_with(&format!("::{}", sig.name))
+                        {
                             return *mode;
                         }
                     }
@@ -219,12 +231,20 @@ impl SafetyContext {
     pub fn get_class_safety_for_file(&self, class_name: &str, class_file: &str) -> SafetyMode {
         let query = FunctionSignature::from_name_only(class_name.to_string());
 
-        debug_println!("DEBUG SAFETY: Looking up class '{}' from file '{}'", class_name, class_file);
+        debug_println!(
+            "DEBUG SAFETY: Looking up class '{}' from file '{}'",
+            class_name,
+            class_file
+        );
 
         // Check for explicit annotation (exact match or qualified match)
         for (sig, mode) in &self.function_overrides {
             if sig.matches(&query) {
-                debug_println!("DEBUG SAFETY: Exact match for class '{}' -> {:?}", class_name, mode);
+                debug_println!(
+                    "DEBUG SAFETY: Exact match for class '{}' -> {:?}",
+                    class_name,
+                    mode
+                );
                 return *mode;
             }
 
@@ -233,12 +253,20 @@ impl SafetyContext {
 
             if sig_is_qualified && class_is_qualified {
                 if sig.name.ends_with(&format!("::{}", class_name)) {
-                    debug_println!("DEBUG SAFETY: Suffix match for class '{}' -> {:?}", class_name, mode);
+                    debug_println!(
+                        "DEBUG SAFETY: Suffix match for class '{}' -> {:?}",
+                        class_name,
+                        mode
+                    );
                     return *mode;
                 }
 
                 if class_name.ends_with(&format!("::{}", sig.name)) {
-                    debug_println!("DEBUG SAFETY: Prefix match for class '{}' -> {:?}", class_name, mode);
+                    debug_println!(
+                        "DEBUG SAFETY: Prefix match for class '{}' -> {:?}",
+                        class_name,
+                        mode
+                    );
                     return *mode;
                 }
             }
@@ -247,14 +275,20 @@ impl SafetyContext {
         // No explicit annotation found
         // Only apply file_default if the class is from the source file
         if self.is_from_source_file(class_file) {
-            debug_println!("DEBUG SAFETY: Class '{}' is from source file, using file default: {:?}",
-                class_name, self.file_default);
+            debug_println!(
+                "DEBUG SAFETY: Class '{}' is from source file, using file default: {:?}",
+                class_name,
+                self.file_default
+            );
             self.file_default
         } else {
             // Class is from another file (header, system library, etc.)
             // Treat as Undeclared - user must explicitly annotate external types
-            debug_println!("DEBUG SAFETY: Class '{}' is NOT from source file '{}', treating as Undeclared",
-                class_name, class_file);
+            debug_println!(
+                "DEBUG SAFETY: Class '{}' is NOT from source file '{}', treating as Undeclared",
+                class_name,
+                class_file
+            );
             SafetyMode::Unsafe
         }
     }
@@ -263,8 +297,8 @@ impl SafetyContext {
 /// Parse safety annotations from a C++ file using the unified rule:
 /// @safe/@unsafe attaches to the next statement/block/function/namespace
 pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
-    let file = File::open(path)
-        .map_err(|e| format!("Failed to open file for safety parsing: {}", e))?;
+    let file =
+        File::open(path).map_err(|e| format!("Failed to open file for safety parsing: {}", e))?;
 
     let reader = BufReader::new(file);
     let mut context = SafetyContext::new();
@@ -283,12 +317,12 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
     // Bug #8 fix: Track class context for method annotations
     let mut class_context_stack: Vec<String> = Vec::new();
     let mut brace_depth = 0;
-    
+
     for line_result in reader.lines() {
         _current_line += 1;
         let line = line_result.map_err(|e| format!("Failed to read line: {}", e))?;
         let trimmed = line.trim();
-        
+
         // Handle multi-line comments
         if in_comment_block {
             if trimmed.contains("*/") {
@@ -303,7 +337,7 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
             continue;
         }
-        
+
         // Check for comment start
         if trimmed.starts_with("/*") {
             in_comment_block = true;
@@ -319,7 +353,7 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
             continue;
         }
-        
+
         // Check single-line comments
         if trimmed.starts_with("//") {
             // Only look for annotations that are word boundaries (not part of other text)
@@ -331,7 +365,7 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
             continue;
         }
-        
+
         // Skip empty lines and preprocessor directives
         if trimmed.is_empty() || trimmed.starts_with("#") {
             continue;
@@ -355,12 +389,13 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         // NOTE: Only push non-annotated classes here; annotated classes are pushed
         // in the annotation handling section below
         let is_class_line = is_class_declaration(trimmed);
-        let needs_class_tracking = is_class_line && pending_annotation.is_none() && !accumulating_for_annotation;
+        let needs_class_tracking =
+            is_class_line && pending_annotation.is_none() && !accumulating_for_annotation;
         if needs_class_tracking {
             if let Some(class_name) = extract_class_name(trimmed) {
                 // Calculate brace depth for this class declaration
-                let class_brace_depth = trimmed.matches('{').count() as i32
-                            - trimmed.matches('}').count() as i32;
+                let class_brace_depth =
+                    trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
                 // Only push class to context if it's NOT complete on the same line
                 // A class complete on one line (like `struct Foo { int x; };`) has brace_depth == 0
                 // and should not be pushed to context stack
@@ -373,17 +408,19 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
 
         // Track namespace declarations (even without annotations) for qualified name building
         // This ensures function annotations inside namespaces get the proper qualified name
-        let is_namespace_line = (trimmed.starts_with("namespace ") || trimmed.contains(" namespace "))
-                                && !trimmed.contains("using ")
-                                && trimmed.contains('{');
-        let needs_namespace_tracking = is_namespace_line && pending_annotation.is_none() && !accumulating_for_annotation;
+        let is_namespace_line = (trimmed.starts_with("namespace ")
+            || trimmed.contains(" namespace "))
+            && !trimmed.contains("using ")
+            && trimmed.contains('{');
+        let needs_namespace_tracking =
+            is_namespace_line && pending_annotation.is_none() && !accumulating_for_annotation;
         if needs_namespace_tracking {
             if let Some(ns_name) = extract_namespace_name(trimmed) {
                 debug_println!("DEBUG SAFETY: Entering namespace '{}' for context", ns_name);
                 class_context_stack.push(ns_name);
                 // Reset brace depth to track this namespace's scope
-                brace_depth = trimmed.matches('{').count() as i32
-                            - trimmed.matches('}').count() as i32;
+                brace_depth =
+                    trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
             }
         }
 
@@ -392,26 +429,26 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             accumulated_line.clear();
             accumulating_for_annotation = true;
         }
-        
+
         // Only accumulate if we're looking for annotation target
         if accumulating_for_annotation {
             if !accumulated_line.is_empty() {
                 accumulated_line.push(' ');
             }
             accumulated_line.push_str(trimmed);
-            
+
             // Check if we have a complete declaration to apply annotation to
             // For namespaces: just needs to start with "namespace" and have opening brace
             // For classes: needs "class"/"struct" keyword and opening brace
             // For functions: needs parentheses
-            let is_namespace_decl = accumulated_line.starts_with("namespace") ||
-                                   (accumulated_line.contains("namespace") && !accumulated_line.contains("using"));
+            let is_namespace_decl = accumulated_line.starts_with("namespace")
+                || (accumulated_line.contains("namespace") && !accumulated_line.contains("using"));
             let is_class_decl = is_class_declaration(&accumulated_line);
             let should_check_annotation = if is_namespace_decl || is_class_decl {
                 accumulated_line.contains('{')
             } else {
-                accumulated_line.contains('(') &&
-                (accumulated_line.contains(')') || accumulated_line.contains('{'))
+                accumulated_line.contains('(')
+                    && (accumulated_line.contains(')') || accumulated_line.contains('{'))
             };
 
             // CRITICAL FIX: Check if this is a forward declaration
@@ -423,30 +460,44 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                 // Forward declarations should NOT have annotations (they have no body)
                 // Consume the annotation without applying it to prevent it from affecting
                 // subsequent declarations (especially the full class definition)
-                debug_println!("DEBUG SAFETY: Ignoring annotation on forward declaration: {}",
-                               &accumulated_line);
-                pending_annotation.take();  // Consume the annotation
+                debug_println!(
+                    "DEBUG SAFETY: Ignoring annotation on forward declaration: {}",
+                    &accumulated_line
+                );
+                pending_annotation.take(); // Consume the annotation
                 accumulated_line.clear();
                 accumulating_for_annotation = false;
-                continue;  // Skip to next line
+                continue; // Skip to next line
             }
 
             // If we have a pending annotation and a complete declaration, apply it
             if should_check_annotation {
                 if let Some(annotation) = pending_annotation.take() {
-                    debug_println!("DEBUG SAFETY: Applying {:?} annotation to: {}", annotation, &accumulated_line);
+                    debug_println!(
+                        "DEBUG SAFETY: Applying {:?} annotation to: {}",
+                        annotation,
+                        &accumulated_line
+                    );
                     // Check what kind of code element follows
-                    if accumulated_line.starts_with("namespace") ||
-                       (accumulated_line.contains("namespace") && !accumulated_line.contains("using")) {
+                    if accumulated_line.starts_with("namespace")
+                        || (accumulated_line.contains("namespace")
+                            && !accumulated_line.contains("using"))
+                    {
                         // Namespace declaration - applies to whole namespace contents
                         context.file_default = annotation;
-                        debug_println!("DEBUG SAFETY: Set file default to {:?} (namespace)", annotation);
+                        debug_println!(
+                            "DEBUG SAFETY: Set file default to {:?} (namespace)",
+                            annotation
+                        );
                         // Also push namespace to context stack for qualifying nested function annotations
                         if let Some(ns_name) = extract_namespace_name(&accumulated_line) {
-                            debug_println!("DEBUG SAFETY: Entering annotated namespace '{}' for context", ns_name);
+                            debug_println!(
+                                "DEBUG SAFETY: Entering annotated namespace '{}' for context",
+                                ns_name
+                            );
                             class_context_stack.push(ns_name);
                             brace_depth = accumulated_line.matches('{').count() as i32
-                                        - accumulated_line.matches('}').count() as i32;
+                                - accumulated_line.matches('}').count() as i32;
                         }
                     } else if is_class_declaration(&accumulated_line) {
                         // Class/struct declaration - extract class name and store annotation
@@ -457,14 +508,19 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                             } else {
                                 format!("{}::{}", class_context_stack.join("::"), class_name)
                             };
-                            let signature = FunctionSignature::from_name_only(qualified_name.clone());
+                            let signature =
+                                FunctionSignature::from_name_only(qualified_name.clone());
                             context.function_overrides.push((signature, annotation));
-                            debug_println!("DEBUG SAFETY: Set class '{}' to {:?}", qualified_name, annotation);
+                            debug_println!(
+                                "DEBUG SAFETY: Set class '{}' to {:?}",
+                                qualified_name,
+                                annotation
+                            );
 
                             // Push class to context for nested methods
                             // Only push if the class is NOT complete on the same line
                             let class_brace_depth = accumulated_line.matches('{').count() as i32
-                                        - accumulated_line.matches('}').count() as i32;
+                                - accumulated_line.matches('}').count() as i32;
                             if class_brace_depth > 0 {
                                 class_context_stack.push(class_name.clone());
                                 brace_depth = class_brace_depth;
@@ -480,20 +536,32 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                                 format!("{}::{}", class_context_stack.join("::"), func_name)
                             };
                             let param_types = extract_parameter_types(&accumulated_line);
-                            let signature = FunctionSignature::new(qualified_name.clone(), param_types.clone());
+                            let signature =
+                                FunctionSignature::new(qualified_name.clone(), param_types.clone());
                             context.function_overrides.push((signature, annotation));
 
                             if let Some(ref params) = param_types {
-                                debug_println!("DEBUG SAFETY: Set function '{}({})' to {:?}",
-                                             qualified_name, params.join(", "), annotation);
+                                debug_println!(
+                                    "DEBUG SAFETY: Set function '{}({})' to {:?}",
+                                    qualified_name,
+                                    params.join(", "),
+                                    annotation
+                                );
                             } else {
-                                debug_println!("DEBUG SAFETY: Set function '{}' to {:?}", qualified_name, annotation);
+                                debug_println!(
+                                    "DEBUG SAFETY: Set function '{}' to {:?}",
+                                    qualified_name,
+                                    annotation
+                                );
                             }
                         }
                     } else {
                         // Any other code - annotation was consumed but doesn't apply to whole file
                         // It only applied to this single statement/declaration
-                        debug_println!("DEBUG SAFETY: Annotation consumed by single statement: {}", &accumulated_line);
+                        debug_println!(
+                            "DEBUG SAFETY: Annotation consumed by single statement: {}",
+                            &accumulated_line
+                        );
                     }
                     accumulated_line.clear();
                     accumulating_for_annotation = false;
@@ -501,15 +569,17 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             }
         }
     }
-    
+
     Ok(context)
 }
 
 /// Check if a line looks like a class/struct declaration
 fn is_class_declaration(line: &str) -> bool {
     // Check if line contains class/struct keyword (at start or with space before)
-    let has_class = line.starts_with("class ") || line.starts_with("struct ") ||
-                    line.contains(" class ") || line.contains(" struct ");
+    let has_class = line.starts_with("class ")
+        || line.starts_with("struct ")
+        || line.contains(" class ")
+        || line.contains(" struct ");
     // Check if line contains opening brace (may be after newlines in accumulated_line)
     let has_brace = line.contains('{');
     has_class && has_brace
@@ -518,8 +588,10 @@ fn is_class_declaration(line: &str) -> bool {
 /// Check if a line is a forward declaration (class/struct with ; but no {)
 /// Forward declarations should not have annotations applied to them
 fn is_forward_declaration(line: &str) -> bool {
-    let has_class_or_struct = line.starts_with("class ") || line.starts_with("struct ") ||
-                              line.contains(" class ") || line.contains(" struct ");
+    let has_class_or_struct = line.starts_with("class ")
+        || line.starts_with("struct ")
+        || line.contains(" class ")
+        || line.contains(" struct ");
     let has_semicolon = line.trim_end().ends_with(';');
     let has_brace = line.contains('{');
 
@@ -536,10 +608,10 @@ fn extract_class_name(line: &str) -> Option<String> {
     // Try to find "class " or "struct " - prioritize start of line to avoid matching "friend class"
     // Check patterns in priority order: start first, then middle
     let class_patterns = [
-        ("class ", "class "),      // "class " at the start (highest priority)
-        ("struct ", "struct "),    // "struct " at the start
-        (" class ", " class "),    // " class " in the middle (lower priority)
-        (" struct ", " struct "),  // " struct " in the middle
+        ("class ", "class "),     // "class " at the start (highest priority)
+        ("struct ", "struct "),   // "struct " at the start
+        (" class ", " class "),   // " class " in the middle (lower priority)
+        (" struct ", " struct "), // " struct " in the middle
     ];
 
     for (search_pattern, keyword) in &class_patterns {
@@ -622,21 +694,25 @@ fn is_function_declaration(line: &str) -> bool {
     // Simple heuristic - contains parentheses and common return types
     // This is simplified and could be improved
     let has_parens = line.contains('(') && line.contains(')');
-    let has_type = line.contains("void") || line.contains("int") ||
-                   line.contains("bool") || line.contains("auto") ||
-                   line.contains("const") || line.contains("static");
+    let has_type = line.contains("void")
+        || line.contains("int")
+        || line.contains("bool")
+        || line.contains("auto")
+        || line.contains("const")
+        || line.contains("static");
 
     // Also recognize template functions: they start with a template parameter like "T " or "U "
     // or contain template syntax
     let is_template_function = {
         // Check if line starts with a single capital letter followed by space (template param)
         let trimmed = line.trim_start();
-        let starts_with_template_param = trimmed.len() >= 2 &&
-            trimmed.chars().next().map_or(false, |c| c.is_uppercase()) &&
-            trimmed.chars().nth(1) == Some(' ');
+        let starts_with_template_param = trimmed.len() >= 2
+            && trimmed.chars().next().map_or(false, |c| c.is_uppercase())
+            && trimmed.chars().nth(1) == Some(' ');
 
         // Or contains template-related keywords/syntax
-        let has_template_syntax = line.contains("template") || line.contains('<') || line.contains('>');
+        let has_template_syntax =
+            line.contains("template") || line.contains('<') || line.contains('>');
 
         starts_with_template_param || (has_template_syntax && has_parens)
     };
@@ -772,11 +848,17 @@ fn normalize_param_type(param: &str) -> String {
 
         // If last token looks like a variable name (no special chars) and
         // second-to-last has type characters, drop the last token
-        if !last.contains('<') && !last.contains('>') && !last.contains("::") &&
-           !last.contains('*') && !last.contains('&') &&
-           (second_last.contains('<') || second_last.contains('>') ||
-            second_last.contains("::") || second_last.contains('*') ||
-            second_last.contains('&')) {
+        if !last.contains('<')
+            && !last.contains('>')
+            && !last.contains("::")
+            && !last.contains('*')
+            && !last.contains('&')
+            && (second_last.contains('<')
+                || second_last.contains('>')
+                || second_last.contains("::")
+                || second_last.contains('*')
+                || second_last.contains('&'))
+        {
             &tokens[..tokens.len() - 1]
         } else {
             &tokens[..]
@@ -1020,9 +1102,9 @@ pub fn check_method_safety_annotation(entity: &Entity) -> Option<SafetyMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
-    
+    use tempfile::NamedTempFile;
+
     #[test]
     fn test_namespace_safe_annotation() {
         let code = r#"
@@ -1040,7 +1122,7 @@ namespace myapp {
         let context = parse_safety_annotations(file.path()).unwrap();
         assert_eq!(context.file_default, SafetyMode::Safe);
     }
-    
+
     #[test]
     fn test_function_safe_annotation() {
         let code = r#"
@@ -1055,18 +1137,18 @@ void safe_func() {
 // @unsafe
 void explicit_unsafe() {}
 "#;
-        
+
         let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
         file.write_all(code.as_bytes()).unwrap();
         file.flush().unwrap();
-        
+
         let context = parse_safety_annotations(file.path()).unwrap();
-        
+
         assert!(!context.should_check_function("unsafe_func"));
         assert!(context.should_check_function("safe_func"));
         assert!(!context.should_check_function("explicit_unsafe"));
     }
-    
+
     #[test]
     fn test_first_code_element_annotation() {
         let code = r#"
@@ -1075,11 +1157,11 @@ int global_var = 42;
 
 void func() {}
 "#;
-        
+
         let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
         file.write_all(code.as_bytes()).unwrap();
         file.flush().unwrap();
-        
+
         let context = parse_safety_annotations(file.path()).unwrap();
         // @safe only applies to the next element (global_var), not the whole file
         assert_eq!(context.file_default, SafetyMode::Unsafe);

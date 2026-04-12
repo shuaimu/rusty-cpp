@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use crate::ir::BorrowKind;
 use crate::parser::MethodQualifier;
+use std::collections::{HashMap, HashSet};
 
 /// Tracks the state of member fields within a method based on 'this' pointer semantics
 ///
@@ -37,7 +37,10 @@ impl ThisPointerTracker {
     /// - Cannot read moved fields
     pub fn can_read_member(&self, field: &str) -> Result<(), String> {
         if self.moved_fields.contains(field) {
-            return Err(format!("Cannot read field '{}': field has been moved", field));
+            return Err(format!(
+                "Cannot read field '{}': field has been moved",
+                field
+            ));
         }
         Ok(())
     }
@@ -52,7 +55,10 @@ impl ThisPointerTracker {
     /// - Cannot modify immutably borrowed fields
     pub fn can_modify_member(&self, field: &str) -> Result<(), String> {
         if self.moved_fields.contains(field) {
-            return Err(format!("Cannot modify field '{}': field has been moved", field));
+            return Err(format!(
+                "Cannot modify field '{}': field has been moved",
+                field
+            ));
         }
 
         // Check method qualifier
@@ -84,7 +90,10 @@ impl ThisPointerTracker {
     /// - Cannot move borrowed fields
     pub fn can_move_member(&self, field: &str) -> Result<(), String> {
         if self.moved_fields.contains(field) {
-            return Err(format!("Cannot move field '{}': field has already been moved", field));
+            return Err(format!(
+                "Cannot move field '{}': field has already been moved",
+                field
+            ));
         }
 
         // Check if field is borrowed
@@ -97,18 +106,14 @@ impl ThisPointerTracker {
 
         // Check method qualifier - this is the key restriction
         match self.method_qualifier {
-            Some(MethodQualifier::Const) => {
-                Err(format!(
-                    "Cannot move field '{}' from const method (requires && method for self ownership)",
-                    field
-                ))
-            }
-            Some(MethodQualifier::NonConst) => {
-                Err(format!(
-                    "Cannot move field '{}' from &mut self method (use && qualified method for self ownership)",
-                    field
-                ))
-            }
+            Some(MethodQualifier::Const) => Err(format!(
+                "Cannot move field '{}' from const method (requires && method for self ownership)",
+                field
+            )),
+            Some(MethodQualifier::NonConst) => Err(format!(
+                "Cannot move field '{}' from &mut self method (use && qualified method for self ownership)",
+                field
+            )),
             Some(MethodQualifier::RvalueRef) => {
                 // && methods have full ownership - can move
                 Ok(())
@@ -130,7 +135,10 @@ impl ThisPointerTracker {
     /// - Respect existing borrows (no mutable + immutable, no multiple mutable)
     pub fn can_borrow_member(&self, field: &str, kind: BorrowKind) -> Result<(), String> {
         if self.moved_fields.contains(field) {
-            return Err(format!("Cannot borrow field '{}': field has been moved", field));
+            return Err(format!(
+                "Cannot borrow field '{}': field has been moved",
+                field
+            ));
         }
 
         // Const methods can only create immutable borrows

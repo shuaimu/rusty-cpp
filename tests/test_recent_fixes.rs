@@ -1,7 +1,6 @@
 /// Integration tests for recent fixes:
 /// 1. Commit 442b600: Fix parsing - skip alive check for function call results (temporaries)
 /// 2. Commit 403d39f: Support unsafe_type as member variable for safe type
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -24,8 +23,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -49,9 +47,18 @@ fn compile_and_check(source: &str) -> (bool, String) {
     let project_root = get_project_root();
     // Replace relative include paths with absolute paths
     let source_with_abs_path = source
-        .replace("#include \"include/rusty/box.hpp\"", &format!("#include \"{}/include/rusty/box.hpp\"", project_root))
-        .replace("#include \"include/rusty/option.hpp\"", &format!("#include \"{}/include/rusty/option.hpp\"", project_root))
-        .replace("#include \"include/rusty/function.hpp\"", &format!("#include \"{}/include/rusty/function.hpp\"", project_root));
+        .replace(
+            "#include \"include/rusty/box.hpp\"",
+            &format!("#include \"{}/include/rusty/box.hpp\"", project_root),
+        )
+        .replace(
+            "#include \"include/rusty/option.hpp\"",
+            &format!("#include \"{}/include/rusty/option.hpp\"", project_root),
+        )
+        .replace(
+            "#include \"include/rusty/function.hpp\"",
+            &format!("#include \"{}/include/rusty/function.hpp\"", project_root),
+        );
 
     let temp_file = create_temp_cpp_file(&source_with_abs_path);
     let (success, output) = run_analyzer(temp_file.path());

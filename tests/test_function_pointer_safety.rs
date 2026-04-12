@@ -55,7 +55,8 @@ void test() {
     // Should not have any SafeFn-specific errors for just declaration
     assert!(
         !output.contains("SafeFn") || output.contains("no violations found"),
-        "SafeFn declaration should be allowed. Output: {}", output
+        "SafeFn declaration should be allowed. Output: {}",
+        output
     );
 }
 
@@ -85,7 +86,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         !output.contains("UnsafeFn") || output.contains("no violations found"),
-        "UnsafeFn declaration should be allowed. Output: {}", output
+        "UnsafeFn declaration should be allowed. Output: {}",
+        output
     );
 }
 
@@ -118,7 +120,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("call_unsafe") && output.contains("requires @unsafe"),
-        "call_unsafe outside @unsafe should be flagged. Output: {}", output
+        "call_unsafe outside @unsafe should be flagged. Output: {}",
+        output
     );
 }
 
@@ -150,7 +153,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found") || !output.contains("call_unsafe"),
-        "call_unsafe in @unsafe block should be allowed. Output: {}", output
+        "call_unsafe in @unsafe block should be allowed. Output: {}",
+        output
     );
 }
 
@@ -185,7 +189,8 @@ void test() {
     // SafeFn::operator() should be allowed in @safe code
     assert!(
         !output.contains("error") || output.contains("no violations found"),
-        "SafeFn::operator() should be safe to call. Output: {}", output
+        "SafeFn::operator() should be safe to call. Output: {}",
+        output
     );
 }
 
@@ -219,7 +224,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         !output.contains("SafeMemFn") || output.contains("no violations found"),
-        "SafeMemFn declaration should be allowed. Output: {}", output
+        "SafeMemFn declaration should be allowed. Output: {}",
+        output
     );
 }
 
@@ -239,7 +245,8 @@ void test() {
     // Raw pointer declaration should be allowed (calling is checked)
     assert!(
         output.contains("no violations found") || !output.contains("function pointer"),
-        "Raw function pointer declaration should be allowed. Output: {}", output
+        "Raw function pointer declaration should be allowed. Output: {}",
+        output
     );
 }
 
@@ -281,6 +288,7 @@ void test() {
     // Converting SafeFn to UnsafeFn should be allowed
     assert!(
         !output.contains("error") || output.contains("no violations found"),
-        "SafeFn should be convertible to UnsafeFn. Output: {}", output
+        "SafeFn should be convertible to UnsafeFn. Output: {}",
+        output
     );
 }

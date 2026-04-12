@@ -1,7 +1,6 @@
 /// Test dynamic_pointer_cast in @unsafe blocks with qualified vs unqualified names
 ///
 /// The user might be reporting that unqualified names don't work even in @unsafe blocks
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -51,12 +50,18 @@ void test() {
 
     // Should be fine - @unsafe allows calling undeclared functions
     // Check for actual violations (not just "no violations found")
-    let has_violations = output.contains("violation(s):") ||
-                        (output.contains("Found") && output.contains("violation") && !output.contains("no violations"));
+    let has_violations = output.contains("violation(s):")
+        || (output.contains("Found")
+            && output.contains("violation")
+            && !output.contains("no violations"));
 
     if has_violations {
         println!("❌ ERROR: Should work in @unsafe block");
-        assert!(false, "std::dynamic_pointer_cast should work in @unsafe block. Output:\n{}", output);
+        assert!(
+            false,
+            "std::dynamic_pointer_cast should work in @unsafe block. Output:\n{}",
+            output
+        );
     } else {
         println!("✅ Works as expected");
     }
@@ -94,13 +99,19 @@ void test() {
 
     // Should also be fine - @unsafe allows calling undeclared functions
     // Check for actual violations (not just "no violations found")
-    let has_violations = output.contains("violation(s):") ||
-                        (output.contains("Found") && output.contains("violation") && !output.contains("no violations"));
+    let has_violations = output.contains("violation(s):")
+        || (output.contains("Found")
+            && output.contains("violation")
+            && !output.contains("no violations"));
 
     if has_violations {
         println!("❌ BUG CONFIRMED: Unqualified doesn't work in @unsafe block");
         println!("This is the issue the user reported!");
-        assert!(false, "dynamic_pointer_cast should work in @unsafe block. Output:\n{}", output);
+        assert!(
+            false,
+            "dynamic_pointer_cast should work in @unsafe block. Output:\n{}",
+            output
+        );
     } else {
         println!("✅ Works as expected");
     }
@@ -140,13 +151,14 @@ void test() {
     println!("{}", output);
 
     // Count violations
-    let violation_lines: Vec<&str> = output.lines()
+    let violation_lines: Vec<&str> = output
+        .lines()
         .filter(|line| line.contains("Calling") && line.contains("undeclared"))
         .collect();
 
     println!("Violations found: {}", violation_lines.len());
     for (i, line) in violation_lines.iter().enumerate() {
-        println!("  {}. {}", i+1, line);
+        println!("  {}. {}", i + 1, line);
     }
 
     if violation_lines.is_empty() {

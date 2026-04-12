@@ -7,9 +7,9 @@
 //   3. MutPtr<T> p = &rusty::move(mut_ref) - moves the ref, valid (should work)
 //   4. Reference borrowing same variable as Ptr/MutPtr
 
-use std::process::Command;
-use std::fs;
 use std::env;
+use std::fs;
+use std::process::Command;
 
 fn create_temp_file(name: &str, code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();
@@ -57,7 +57,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "const ref then Ptr should be allowed (both immutable). Output: {}", output
+        "const ref then Ptr should be allowed (both immutable). Output: {}",
+        output
     );
 }
 
@@ -81,7 +82,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Ptr then const ref should be allowed (both immutable). Output: {}", output
+        "Ptr then const ref should be allowed (both immutable). Output: {}",
+        output
     );
 }
 
@@ -111,7 +113,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "mut ref then MutPtr should fail (double mutable). Output: {}", output
+        "mut ref then MutPtr should fail (double mutable). Output: {}",
+        output
     );
 }
 
@@ -135,7 +138,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "MutPtr then mut ref should fail (double mutable). Output: {}", output
+        "MutPtr then mut ref should fail (double mutable). Output: {}",
+        output
     );
 }
 
@@ -165,7 +169,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "mut ref then Ptr should fail. Output: {}", output
+        "mut ref then Ptr should fail. Output: {}",
+        output
     );
 }
 
@@ -189,7 +194,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Ptr then mut ref should fail. Output: {}", output
+        "Ptr then mut ref should fail. Output: {}",
+        output
     );
 }
 
@@ -217,7 +223,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "const ref then MutPtr should fail. Output: {}", output
+        "const ref then MutPtr should fail. Output: {}",
+        output
     );
 }
 
@@ -241,7 +248,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "MutPtr then const ref should fail. Output: {}", output
+        "MutPtr then const ref should fail. Output: {}",
+        output
     );
 }
 
@@ -296,9 +304,10 @@ void test() {
 
     // Can detect as double borrow OR as "borrowed by" conflict
     assert!(
-        (output.contains("already") && output.contains("borrow")) ||
-        (output.contains("borrowed by") && output.contains("violation")),
-        "MutPtr from mut_ref should fail (would create 2 mutable borrows). Output: {}", output
+        (output.contains("already") && output.contains("borrow"))
+            || (output.contains("borrowed by") && output.contains("violation")),
+        "MutPtr from mut_ref should fail (would create 2 mutable borrows). Output: {}",
+        output
     );
 }
 
@@ -353,7 +362,8 @@ void test() {
 
     assert!(
         output.contains("moved") || output.contains("invalid"),
-        "Using moved reference should fail. Output: {}", output
+        "Using moved reference should fail. Output: {}",
+        output
     );
 }
 
@@ -383,7 +393,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Ref scope end should allow MutPtr. Output: {}", output
+        "Ref scope end should allow MutPtr. Output: {}",
+        output
     );
 }
 
@@ -409,7 +420,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Ptr scope end should allow mut ref. Output: {}", output
+        "Ptr scope end should allow mut ref. Output: {}",
+        output
     );
 }
 
@@ -440,7 +452,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Multiple immutable borrows (refs and Ptrs) should be allowed. Output: {}", output
+        "Multiple immutable borrows (refs and Ptrs) should be allowed. Output: {}",
+        output
     );
 }
 
@@ -465,7 +478,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Cannot have mutable borrow through both ref and MutPtr. Output: {}", output
+        "Cannot have mutable borrow through both ref and MutPtr. Output: {}",
+        output
     );
 }
 
@@ -498,6 +512,7 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Independent borrows to different vars should work. Output: {}", output
+        "Independent borrows to different vars should work. Output: {}",
+        output
     );
 }

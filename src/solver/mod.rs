@@ -1,5 +1,5 @@
-use z3::Solver;
 use std::collections::HashMap;
+use z3::Solver;
 
 #[allow(dead_code)]
 pub struct ConstraintSolver {
@@ -12,20 +12,26 @@ impl ConstraintSolver {
         let solver = Solver::new();
         Self { solver }
     }
-    
+
     #[allow(dead_code)]
     pub fn add_lifetime_constraint(&mut self, constraint: LifetimeConstraint) {
         // Convert lifetime constraints to Z3 assertions
         match constraint {
-            LifetimeConstraint::Outlives { longer: _, shorter: _ } => {
+            LifetimeConstraint::Outlives {
+                longer: _,
+                shorter: _,
+            } => {
                 // Add SMT constraint: longer >= shorter
             }
-            LifetimeConstraint::MustBeValid { lifetime: _, point: _ } => {
+            LifetimeConstraint::MustBeValid {
+                lifetime: _,
+                point: _,
+            } => {
                 // Add SMT constraint: lifetime.start <= point <= lifetime.end
             }
         }
     }
-    
+
     #[allow(dead_code)]
     pub fn solve(&self) -> Result<Solution, String> {
         match self.solver.check() {
@@ -35,12 +41,8 @@ impl ConstraintSolver {
                     lifetimes: HashMap::new(),
                 })
             }
-            z3::SatResult::Unsat => {
-                Err("Lifetime constraints are unsatisfiable".to_string())
-            }
-            z3::SatResult::Unknown => {
-                Err("Could not determine satisfiability".to_string())
-            }
+            z3::SatResult::Unsat => Err("Lifetime constraints are unsatisfiable".to_string()),
+            z3::SatResult::Unknown => Err("Could not determine satisfiability".to_string()),
         }
     }
 }

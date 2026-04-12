@@ -9,13 +9,13 @@
 // NOTE: The distinction is about programmer audit, not tool verification.
 // [safe] external functions can be called directly from @safe code.
 
-use std::collections::HashMap;
 use regex::Regex;
+use std::collections::HashMap;
 
 #[cfg(test)]
-use std::path::Path;
-#[cfg(test)]
 use std::fs;
+#[cfg(test)]
+use std::path::Path;
 
 /// Safety level for external functions.
 /// - Safe: Programmer has audited and confirmed the function follows safety rules.
@@ -23,8 +23,8 @@ use std::fs;
 /// - Unsafe: Function may have unsafe behavior. Must be called from @unsafe context.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalSafety {
-    Safe,    // Programmer audited, safe to call from @safe code
-    Unsafe,  // Must be called from @unsafe block
+    Safe,   // Programmer audited, safe to call from @safe code
+    Unsafe, // Must be called from @unsafe block
 }
 
 #[derive(Debug, Clone)]
@@ -89,14 +89,14 @@ impl ExternalAnnotations {
         annotations.parse_content(&content)?;
         Ok(annotations)
     }
-    
+
     fn extract_from_comments(&self, content: &str) -> String {
         let mut result = String::new();
         let mut in_comment_block = false;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             // Check for C++ comment with @external
             if trimmed.starts_with("//") {
                 let comment = &trimmed[2..].trim();
@@ -104,7 +104,7 @@ impl ExternalAnnotations {
                     // Remove the // prefix and add to result
                     result.push_str(comment);
                     result.push('\n');
-                    
+
                     // Track if we're in a multi-line block
                     if comment.contains('{') {
                         in_comment_block = true;
@@ -132,13 +132,12 @@ impl ExternalAnnotations {
                 if trimmed.contains('{') {
                     in_comment_block = true;
                 }
-            }
-            else if in_comment_block && !trimmed.starts_with("//") {
+            } else if in_comment_block && !trimmed.starts_with("//") {
                 // We've left the comment block
                 in_comment_block = false;
             }
         }
-        
+
         // If no annotations found in comments, return original content
         if result.is_empty() {
             content.to_string()
@@ -146,45 +145,45 @@ impl ExternalAnnotations {
             result
         }
     }
-    
+
     pub fn parse_content(&mut self, content: &str) -> Result<(), String> {
         // First, try to extract annotations from C++ comments
         let processed_content = self.extract_from_comments(content);
-        
+
         // Parse unified @external blocks (primary syntax)
         self.parse_unified_blocks(&processed_content)?;
-        
+
         // Parse @external_function blocks (detailed syntax)
         self.parse_external_function_blocks(&processed_content)?;
-        
+
         // Parse @external_unsafe for classes/namespaces
         self.parse_unsafe_scopes(&processed_content)?;
-        
+
         // Parse @external_whitelist
         self.parse_whitelist(&processed_content)?;
-        
+
         // Parse @external_blacklist
         self.parse_blacklist(&processed_content)?;
-        
+
         // Parse @external_profile blocks
         self.parse_profiles(&processed_content)?;
-        
+
         Ok(())
     }
-    
+
     fn parse_unified_blocks(&mut self, content: &str) -> Result<(), String> {
         // Parse @external: { func: [safety, lifetime] } blocks
         let unified_re = Regex::new(r"@external:\s*\{([^}]+)\}").unwrap();
-        
+
         for cap in unified_re.captures_iter(content) {
             if let Some(block) = cap.get(1) {
                 self.parse_unified_entries(block.as_str())?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn parse_unified_entries(&mut self, block: &str) -> Result<(), String> {
         // First, split block into individual entries
         // Entries can be on separate lines OR separated by commas on the same line
@@ -203,11 +202,11 @@ impl ExternalAnnotations {
             // So we look for ": [" which is the separator between name and spec
             if let Some(sep_pos) = entry.find(": [") {
                 let name = entry[..sep_pos].trim().to_string();
-                let spec_str = entry[sep_pos + 2..].trim();  // Skip ": " to get "[...]"
+                let spec_str = entry[sep_pos + 2..].trim(); // Skip ": " to get "[...]"
 
                 // Parse [safety, lifetime] or [unsafe_type] array
                 if spec_str.starts_with('[') && spec_str.ends_with(']') {
-                    let inner = &spec_str[1..spec_str.len()-1];
+                    let inner = &spec_str[1..spec_str.len() - 1];
                     let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
 
                     if !parts.is_empty() {
@@ -223,9 +222,8 @@ impl ExternalAnnotations {
                             _ => continue,
                         };
 
-                        self.functions.insert(name, ExternalFunctionAnnotation {
-                            safety,
-                        });
+                        self.functions
+                            .insert(name, ExternalFunctionAnnotation { safety });
                     }
                 }
             }
@@ -311,9 +309,8 @@ impl ExternalAnnotations {
                     ExternalSafety::Unsafe
                 };
 
-                self.functions.insert(func_name, ExternalFunctionAnnotation {
-                    safety,
-                });
+                self.functions
+                    .insert(func_name, ExternalFunctionAnnotation { safety });
             }
         }
 
@@ -323,16 +320,17 @@ impl ExternalAnnotations {
     fn parse_unsafe_scopes(&mut self, content: &str) -> Result<(), String> {
         // Parse @external_unsafe: namespace::* or @external_unsafe: class::*
         let unsafe_scope_re = Regex::new(r"@external_unsafe:\s*([^\s]+)").unwrap();
-        
+
         for cap in unsafe_scope_re.captures_iter(content) {
             if let Some(scope) = cap.get(1) {
                 self.unsafe_scopes.push(scope.as_str().to_string());
             }
         }
-        
+
         // Also parse block syntax: @external_unsafe: { scopes: [...] }
-        let unsafe_block_re = Regex::new(r"@external_unsafe:\s*\{[^}]*scopes:\s*\[([^\]]+)\]").unwrap();
-        
+        let unsafe_block_re =
+            Regex::new(r"@external_unsafe:\s*\{[^}]*scopes:\s*\[([^\]]+)\]").unwrap();
+
         if let Some(cap) = unsafe_block_re.captures(content) {
             if let Some(scopes) = cap.get(1) {
                 for scope in scopes.as_str().split(',') {
@@ -343,13 +341,14 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn parse_whitelist(&mut self, content: &str) -> Result<(), String> {
-        let whitelist_re = Regex::new(r"@external_whitelist:\s*\{[^}]*patterns:\s*\[([^\]]+)\]").unwrap();
-        
+        let whitelist_re =
+            Regex::new(r"@external_whitelist:\s*\{[^}]*patterns:\s*\[([^\]]+)\]").unwrap();
+
         if let Some(cap) = whitelist_re.captures(content) {
             if let Some(patterns) = cap.get(1) {
                 for pattern in patterns.as_str().split(',') {
@@ -360,13 +359,14 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn parse_blacklist(&mut self, content: &str) -> Result<(), String> {
-        let blacklist_re = Regex::new(r"@external_blacklist:\s*\{[^}]*patterns:\s*\[([^\]]+)\]").unwrap();
-        
+        let blacklist_re =
+            Regex::new(r"@external_blacklist:\s*\{[^}]*patterns:\s*\[([^\]]+)\]").unwrap();
+
         if let Some(cap) = blacklist_re.captures(content) {
             if let Some(patterns) = cap.get(1) {
                 for pattern in patterns.as_str().split(',') {
@@ -377,13 +377,13 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn parse_profiles(&mut self, content: &str) -> Result<(), String> {
         let profile_re = Regex::new(r"@external_profile:\s*(\w+)\s*\{([^}]+)\}").unwrap();
-        
+
         for cap in profile_re.captures_iter(content) {
             if let (Some(name), Some(block)) = (cap.get(1), cap.get(2)) {
                 let mut profile = ExternalProfile {
@@ -391,11 +391,11 @@ impl ExternalAnnotations {
                     safe_patterns: Vec::new(),
                     unsafe_patterns: Vec::new(),
                 };
-                
+
                 // Parse safe and unsafe patterns in the profile
                 let safe_re = Regex::new(r"safe:\s*\[([^\]]+)\]").unwrap();
                 let unsafe_re = Regex::new(r"unsafe:\s*\[([^\]]+)\]").unwrap();
-                
+
                 if let Some(safe_cap) = safe_re.captures(block.as_str()) {
                     if let Some(patterns) = safe_cap.get(1) {
                         for pattern in patterns.as_str().split(',') {
@@ -406,7 +406,7 @@ impl ExternalAnnotations {
                         }
                     }
                 }
-                
+
                 if let Some(unsafe_cap) = unsafe_re.captures(block.as_str()) {
                     if let Some(patterns) = unsafe_cap.get(1) {
                         for pattern in patterns.as_str().split(',') {
@@ -417,14 +417,14 @@ impl ExternalAnnotations {
                         }
                     }
                 }
-                
+
                 self.profiles.insert(profile.name.clone(), profile);
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn load_defaults(&mut self) {
         // Load common C standard library functions (unsafe)
         self.add_c_stdlib_defaults();
@@ -457,7 +457,6 @@ impl ExternalAnnotations {
             "_Hashtable*".to_string(),
             "_Hash_node*".to_string(),
             "_ReuseOrAllocNode*".to_string(),
-
             // Other STL containers with complex internals
             "std::map*".to_string(),
             "std::set*".to_string(),
@@ -466,16 +465,13 @@ impl ExternalAnnotations {
             "std::list*".to_string(),
             "std::forward_list*".to_string(),
             "std::deque*".to_string(),
-
             // Smart pointers
             "std::shared_ptr*".to_string(),
             "std::weak_ptr*".to_string(),
             "std::unique_ptr*".to_string(),
-
             // Function wrappers
             "std::function*".to_string(),
             "std::move_only_function*".to_string(),
-
             // Other STL internals that may have mutable fields
             "_Rb_tree*".to_string(),
             "_List_node*".to_string(),
@@ -483,7 +479,7 @@ impl ExternalAnnotations {
             "__weak_ptr*".to_string(),
         ]);
     }
-    
+
     fn add_c_stdlib_defaults(&mut self) {
         // All C standard library functions are marked [unsafe] because:
         // - They are external code not verified by RustyCpp
@@ -491,16 +487,20 @@ impl ExternalAnnotations {
         // - This is the correct semantic: unsafe = programmer-audited, safe = tool-verified
 
         // Common C I/O functions and memory/string functions
-        for func in &["printf", "fprintf", "snprintf", "puts", "fputs", "fgets",
-                      "strcmp", "strncmp", "strlen", "atoi", "atof", "exit",
-                      "malloc", "free", "strcpy", "calloc", "realloc", "memcpy",
-                      "memmove", "memset", "strcat", "sprintf", "gets"] {
-            self.functions.insert(func.to_string(), ExternalFunctionAnnotation {
-                safety: ExternalSafety::Unsafe,
-            });
+        for func in &[
+            "printf", "fprintf", "snprintf", "puts", "fputs", "fgets", "strcmp", "strncmp",
+            "strlen", "atoi", "atof", "exit", "malloc", "free", "strcpy", "calloc", "realloc",
+            "memcpy", "memmove", "memset", "strcat", "sprintf", "gets",
+        ] {
+            self.functions.insert(
+                func.to_string(),
+                ExternalFunctionAnnotation {
+                    safety: ExternalSafety::Unsafe,
+                },
+            );
         }
     }
-    
+
     /// Check if a type is marked as unsafe_type (internal structure should not be analyzed)
     pub fn is_type_unsafe(&self, type_name: &str) -> bool {
         for pattern in &self.unsafe_types {
@@ -515,7 +515,7 @@ impl ExternalAnnotations {
         // First check if function is in an unsafe scope
         for scope in &self.unsafe_scopes {
             if Self::matches_pattern(func_name, scope) {
-                return Some(false);  // Entire scope is unsafe
+                return Some(false); // Entire scope is unsafe
             }
         }
 
@@ -537,14 +537,16 @@ impl ExternalAnnotations {
                 return Some(annotation.safety == ExternalSafety::Safe);
             }
         }
-        
+
         // Then check active profile
         if let Some(profile_name) = &self.active_profile {
             if let Some(profile) = self.profiles.get(profile_name) {
                 #[cfg(test)]
                 {
-                    println!("Checking {} against profile {} with safe patterns: {:?}", 
-                        func_name, profile_name, profile.safe_patterns);
+                    println!(
+                        "Checking {} against profile {} with safe patterns: {:?}",
+                        func_name, profile_name, profile.safe_patterns
+                    );
                 }
                 // Check unsafe patterns first (they have higher priority)
                 if Self::matches_any_pattern(func_name, &profile.unsafe_patterns) {
@@ -555,21 +557,21 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         // Check blacklist (higher priority)
         if Self::matches_any_pattern(func_name, &self.blacklist_patterns) {
             return Some(false);
         }
-        
+
         // Check whitelist
         if Self::matches_any_pattern(func_name, &self.whitelist_patterns) {
             return Some(true);
         }
-        
+
         // No annotation found
         None
     }
-    
+
     fn matches_any_pattern(name: &str, patterns: &[String]) -> bool {
         for pattern in patterns {
             #[cfg(test)]
@@ -582,30 +584,29 @@ impl ExternalAnnotations {
         }
         false
     }
-    
+
     fn matches_pattern(name: &str, pattern: &str) -> bool {
         // Simple glob-like pattern matching
         // * matches any sequence of characters
         // ? matches any single character
-        
+
         if pattern == "*" {
             return true;
         }
-        
+
         // Special case for patterns like "*::functionName"
         if pattern.starts_with("*::") && !pattern[3..].contains('*') {
             // Match any class/namespace prefix
             let suffix = &pattern[3..];
-            return name.ends_with(&format!("::{}", suffix)) || 
-                   name == suffix;
+            return name.ends_with(&format!("::{}", suffix)) || name == suffix;
         }
-        
+
         // Special case for patterns ending with * but no other wildcards
         if pattern.ends_with("*") && pattern.matches('*').count() == 1 {
-            let prefix = &pattern[..pattern.len()-1];
+            let prefix = &pattern[..pattern.len() - 1];
             return name.starts_with(prefix);
         }
-        
+
         // General wildcard patterns - use regex
         if pattern.contains('*') || pattern.contains('?') {
             // Convert glob pattern to regex
@@ -621,17 +622,23 @@ impl ExternalAnnotations {
                 .replace("$", r"\$")
                 .replace("*", ".*")
                 .replace("?", ".");
-            
+
             #[cfg(test)]
             {
-                println!("Pattern '{}' converted to regex: ^{}$", pattern, regex_pattern);
+                println!(
+                    "Pattern '{}' converted to regex: ^{}$",
+                    pattern, regex_pattern
+                );
             }
-            
+
             if let Ok(re) = Regex::new(&format!("^{}$", regex_pattern)) {
                 let result = re.is_match(name);
                 #[cfg(test)]
                 {
-                    println!("Matching '{}' against pattern '{}': {}", name, pattern, result);
+                    println!(
+                        "Matching '{}' against pattern '{}': {}",
+                        name, pattern, result
+                    );
                 }
                 return result;
             } else {
@@ -641,7 +648,7 @@ impl ExternalAnnotations {
                 }
             }
         }
-        
+
         // Handle case where pattern is unqualified but name is qualified
         // e.g., pattern "make_unique" should match name "std::make_unique"
         if !pattern.contains("::") && name.contains("::") {
@@ -668,7 +675,7 @@ impl ExternalAnnotations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_qualified_name_matching() {
         // Test that unqualified names match qualified annotations
@@ -683,10 +690,10 @@ mod tests {
         annotations.parse_content(content).unwrap();
 
         // Unqualified name should match qualified annotation
-        assert_eq!(annotations.is_function_safe("swap"), Some(true));  // safe
-        assert_eq!(annotations.is_function_safe("helper"), Some(false));  // unsafe
+        assert_eq!(annotations.is_function_safe("swap"), Some(true)); // safe
+        assert_eq!(annotations.is_function_safe("helper"), Some(false)); // unsafe
         // Qualified name should still work
-        assert_eq!(annotations.is_function_safe("std::swap"), Some(true));  // safe
+        assert_eq!(annotations.is_function_safe("std::swap"), Some(true)); // safe
     }
 
     #[test]
@@ -702,11 +709,17 @@ mod tests {
         annotations.parse_content(content).unwrap();
 
         // Safe functions return Some(true)
-        assert_eq!(annotations.is_function_safe("std::string::length"), Some(true));
+        assert_eq!(
+            annotations.is_function_safe("std::string::length"),
+            Some(true)
+        );
         assert_eq!(annotations.is_function_safe("length"), Some(true));
 
         // Unsafe functions return Some(false)
-        assert_eq!(annotations.is_function_safe("std::string::c_str"), Some(false));
+        assert_eq!(
+            annotations.is_function_safe("std::string::c_str"),
+            Some(false)
+        );
         assert_eq!(annotations.is_function_safe("c_str"), Some(false));
     }
 
@@ -728,18 +741,21 @@ mod tests {
         assert_eq!(annotations.is_function_safe("printf"), Some(false));
         assert_eq!(annotations.is_function_safe("custom_func"), Some(false));
     }
-    
+
     #[test]
     fn test_pattern_matching() {
         let mut annotations = ExternalAnnotations::new();
         annotations.whitelist_patterns.push("std::*".to_string());
         annotations.blacklist_patterns.push("*::malloc".to_string());
-        
-        assert_eq!(annotations.is_function_safe("std::vector::push_back"), Some(true));
+
+        assert_eq!(
+            annotations.is_function_safe("std::vector::push_back"),
+            Some(true)
+        );
         assert_eq!(annotations.is_function_safe("custom::malloc"), Some(false));
         assert_eq!(annotations.is_function_safe("unknown_func"), None);
     }
-    
+
     #[test]
     fn test_profiles() {
         let content = r#"
@@ -748,45 +764,58 @@ mod tests {
         //   unsafe: ["*::connect"]
         // }
         "#;
-        
+
         let mut annotations = ExternalAnnotations::new();
         annotations.parse_content(content).unwrap();
-        
+
         // Debug: check if profile was parsed
-        println!("Profiles parsed: {:?}", annotations.profiles.keys().collect::<Vec<_>>());
-        
+        println!(
+            "Profiles parsed: {:?}",
+            annotations.profiles.keys().collect::<Vec<_>>()
+        );
+
         annotations.set_active_profile("qt").unwrap();
-        
+
         // Debug: check pattern matching
         println!("Checking QWidget::show");
         let result1 = annotations.is_function_safe("QWidget::show");
         println!("Result: {:?}", result1);
-        
+
         println!("Checking QObject::connect");
         let result2 = annotations.is_function_safe("QObject::connect");
         println!("Result: {:?}", result2);
-        
+
         assert_eq!(result1, Some(true));
         assert_eq!(result2, Some(false));
     }
-    
+
     #[test]
     fn test_wildcard_patterns() {
-        assert!(ExternalAnnotations::matches_pattern("std::vector::size", "*::size"));
+        assert!(ExternalAnnotations::matches_pattern(
+            "std::vector::size",
+            "*::size"
+        ));
         assert!(ExternalAnnotations::matches_pattern("malloc", "malloc"));
         assert!(ExternalAnnotations::matches_pattern("my_malloc", "*malloc"));
-        assert!(ExternalAnnotations::matches_pattern("malloc_wrapper", "malloc*"));
+        assert!(ExternalAnnotations::matches_pattern(
+            "malloc_wrapper",
+            "malloc*"
+        ));
         assert!(!ExternalAnnotations::matches_pattern("free", "malloc"));
     }
-    
+
     #[test]
     fn test_qt_pattern() {
         // Test the specific pattern that's failing
         let pattern = "Q*::*";
         let name = "QWidget::show";
         println!("Testing if '{}' matches pattern '{}'", name, pattern);
-        assert!(ExternalAnnotations::matches_pattern(name, pattern),
-            "Pattern '{}' should match '{}'", pattern, name);
+        assert!(
+            ExternalAnnotations::matches_pattern(name, pattern),
+            "Pattern '{}' should match '{}'",
+            pattern,
+            name
+        );
     }
 
     #[test]

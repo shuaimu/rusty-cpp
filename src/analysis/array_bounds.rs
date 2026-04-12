@@ -19,8 +19,8 @@
 //! arr[10];  // ERROR: Index 10 out of bounds [0, 10)
 //! ```
 
-use crate::parser::{Statement, Expression, Function};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, Statement};
 use std::collections::HashMap;
 
 /// Bounds information for an array or pointer
@@ -169,7 +169,13 @@ pub fn check_array_bounds(function: &Function, function_safety: SafetyMode) -> V
         }
 
         // Skip checking in unsafe blocks, but still track bounds
-        analyze_statement_bounds(stmt, &mut tracker, &function.name, &mut errors, unsafe_depth > 0);
+        analyze_statement_bounds(
+            stmt,
+            &mut tracker,
+            &function.name,
+            &mut errors,
+            unsafe_depth > 0,
+        );
     }
 
     errors
@@ -220,7 +226,12 @@ fn analyze_statement_bounds(
             }
         }
 
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             if !in_unsafe {
                 check_expr_bounds(condition, tracker, func_name, errors);
             }
@@ -392,9 +403,7 @@ fn extract_array_size(type_name: &str) -> Option<usize> {
 /// Extract constant value from an expression
 fn extract_constant_value(expr: &Expression) -> Option<i64> {
     match expr {
-        Expression::Literal(lit) => {
-            lit.parse::<i64>().ok()
-        }
+        Expression::Literal(lit) => lit.parse::<i64>().ok(),
         _ => None,
     }
 }

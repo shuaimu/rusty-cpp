@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 // ============================================================================
 // POINTER LIFETIME ANNOTATION TESTS
@@ -41,7 +41,8 @@ void caller() {
     assert!(
         !stdout.contains("lifetime") || stdout.contains("no violations"),
         "Pointer identity function should not have lifetime violations. stdout: {} stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     // Clean up

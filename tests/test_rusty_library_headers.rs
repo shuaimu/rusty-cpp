@@ -6,13 +6,12 @@
 //! 2. But they should still be valid when checked directly
 //! 3. This catches issues like missing @unsafe blocks in Cell::set()
 
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn get_project_root() -> PathBuf {
     // The CARGO_MANIFEST_DIR is set to the package root during testing
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR not set");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     PathBuf::from(manifest_dir)
 }
 
@@ -25,8 +24,9 @@ fn run_analyzer_on_header(header_path: &str) -> (bool, String, String) {
     // With relative paths like "include/rusty/cell.hpp", the file gets analyzed
     let mut cmd = Command::new(&binary_path);
     cmd.args(&[
-        header_path,          // Use relative path
-        "-I", "include"       // Use relative include path
+        header_path, // Use relative path
+        "-I",
+        "include", // Use relative include path
     ])
     .current_dir(&project_root);
 
@@ -37,8 +37,7 @@ fn run_analyzer_on_header(header_path: &str) -> (bool, String, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -54,15 +53,13 @@ fn check_header_passes(header_path: &str) {
     let has_violations = combined.contains("Found") && combined.contains("violation(s)");
 
     if has_violations {
-        panic!(
-            "Header {} has violations:\n{}",
-            header_path, combined
-        );
+        panic!("Header {} has violations:\n{}", header_path, combined);
     }
 
     // Exit code 0 means success (no violations)
     // Exit code 1 means violations found
-    assert!(success,
+    assert!(
+        success,
         "Header {} check failed (exit code != 0):\nstdout: {}\nstderr: {}",
         header_path, stdout, stderr
     );
@@ -73,12 +70,14 @@ fn check_header_has_expected_violations(header_path: &str, expected_count: usize
     let combined = format!("{}{}", stdout, stderr);
 
     // Count violations - look in both stdout and stderr
-    let violation_line = combined.lines()
+    let violation_line = combined
+        .lines()
         .find(|l| l.contains("Found") && l.contains("violation"));
 
     if let Some(line) = violation_line {
         // Extract number from "Found N violation(s)"
-        let count: usize = line.split_whitespace()
+        let count: usize = line
+            .split_whitespace()
             .find_map(|w| w.parse().ok())
             .unwrap_or(0);
 

@@ -1190,8 +1190,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // Create work directory and canonicalize
     std::fs::create_dir_all(&args.work_dir)
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
-    let work_dir = std::fs::canonicalize(&args.work_dir)
-        .unwrap_or_else(|_| args.work_dir.clone());
+    let work_dir = std::fs::canonicalize(&args.work_dir).unwrap_or_else(|_| args.work_dir.clone());
     if !args.dry_run {
         clear_stage_outputs(&work_dir)?;
     }
@@ -1483,7 +1482,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
         runner_src.push_str("#include <functional>\n#include <span>\n#include <cstdlib>\n");
         runner_src.push_str("#include <rusty/rusty.hpp>\n");
-        runner_src.push_str("#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n#include <rusty/try.hpp>\n\n");
+        runner_src.push_str(
+            "#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n#include <rusty/try.hpp>\n\n",
+        );
         runner_src.push_str("// Overloaded visitor helper\n");
         runner_src.push_str(
             "template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n",
@@ -1658,8 +1659,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // Generate main() that runs all tests
         runner_src.push_str("\n// ── Test runner ──\n");
         runner_src.push_str("int main(int argc, char** argv) {\n");
-        runner_src.push_str("    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n");
+        runner_src
+            .push_str("    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n");
         runner_src.push_str("        const std::string test_name = argv[2];\n");
+        runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
         runner_src.push_str("        try {\n");
         for entry in &test_entries {
             runner_src.push_str(&format!(
@@ -1689,7 +1692,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 ));
             } else {
                 runner_src.push_str(&format!(
-                    "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
                     fn_name, label
                 ));
                 runner_src.push_str(&format!(

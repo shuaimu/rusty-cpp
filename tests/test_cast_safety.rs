@@ -7,9 +7,9 @@
 //! - static_cast is generally safe for numeric conversions
 //! - dynamic_cast is runtime-checked and safe
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -50,7 +50,9 @@ void process() {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("reinterpret_cast") || output.contains("violation") || output.contains("unsafe"),
+        output.contains("reinterpret_cast")
+            || output.contains("violation")
+            || output.contains("unsafe"),
         "Expected error for reinterpret_cast in @safe code. Output: {}",
         output
     );

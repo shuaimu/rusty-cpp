@@ -4,8 +4,8 @@
 #[macro_use]
 pub mod debug_macros;
 
-pub mod parser;
-pub mod ir;
 pub mod analysis;
-pub mod solver;
 pub mod diagnostics;
+pub mod ir;
+pub mod parser;
+pub mod solver;

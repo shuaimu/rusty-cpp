@@ -1,5 +1,5 @@
-use crate::parser::{Statement, Expression, Function, MoveKind};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, MoveKind, Statement};
 use std::collections::HashSet;
 
 /// Check if a type is a safe rusty pointer type (Ptr<T> or MutPtr<T>)
@@ -87,14 +87,19 @@ fn is_char_pointer_type(type_name: &str) -> bool {
 
 /// Check for unsafe pointer operations in a function's AST
 #[allow(dead_code)]
-pub fn check_function_for_pointers(_function: &crate::ir::IrFunction) -> Result<Vec<String>, String> {
+pub fn check_function_for_pointers(
+    _function: &crate::ir::IrFunction,
+) -> Result<Vec<String>, String> {
     // For now, return empty - we need to check at AST level
     // The IR doesn't preserve all the pointer operations
     Ok(Vec::new())
 }
 
 /// Check for unsafe pointer operations in a parsed function
-pub fn check_parsed_function_for_pointers(function: &Function, function_safety: SafetyMode) -> Vec<String> {
+pub fn check_parsed_function_for_pointers(
+    function: &Function,
+    function_safety: SafetyMode,
+) -> Vec<String> {
     let mut errors = Vec::new();
     let mut unsafe_depth = 0;
 
@@ -172,7 +177,10 @@ pub fn check_parsed_function_for_pointers(function: &Function, function_safety: 
 
 /// Check if a pointer variable is declared without initialization
 /// In @safe code, pointers must be initialized to prevent use of garbage values
-fn check_uninitialized_pointer(current_stmt: &Statement, next_stmt: Option<&Statement>) -> Option<String> {
+fn check_uninitialized_pointer(
+    current_stmt: &Statement,
+    next_stmt: Option<&Statement>,
+) -> Option<String> {
     use crate::parser::Statement;
 
     // Check if current statement is a pointer variable declaration
@@ -224,7 +232,10 @@ fn check_uninitialized_pointer(current_stmt: &Statement, next_stmt: Option<&Stat
 /// - Users should use rusty::move for Rust-like reference move semantics
 ///
 /// This check tracks reference variables and reports errors when std::move is called on them.
-pub fn check_std_move_on_references(function: &Function, function_safety: SafetyMode) -> Vec<String> {
+pub fn check_std_move_on_references(
+    function: &Function,
+    function_safety: SafetyMode,
+) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Only check @safe functions
@@ -299,18 +310,26 @@ fn check_statements_for_std_move_on_ref(
                 // The initialization is handled via Assignment or ReferenceBinding statements
             }
             Statement::Assignment { rhs, location, .. } => {
-                if let Some(error) = check_expression_for_std_move_on_ref(rhs, reference_vars, location.line) {
+                if let Some(error) =
+                    check_expression_for_std_move_on_ref(rhs, reference_vars, location.line)
+                {
                     errors.push(format!("In function '{}': {}", function_name, error));
                 }
             }
-            Statement::ReferenceBinding { target, location, .. } => {
-                if let Some(error) = check_expression_for_std_move_on_ref(target, reference_vars, location.line) {
+            Statement::ReferenceBinding {
+                target, location, ..
+            } => {
+                if let Some(error) =
+                    check_expression_for_std_move_on_ref(target, reference_vars, location.line)
+                {
                     errors.push(format!("In function '{}': {}", function_name, error));
                 }
             }
             Statement::FunctionCall { args, location, .. } => {
                 for arg in args {
-                    if let Some(error) = check_expression_for_std_move_on_ref(arg, reference_vars, location.line) {
+                    if let Some(error) =
+                        check_expression_for_std_move_on_ref(arg, reference_vars, location.line)
+                    {
                         errors.push(format!("In function '{}': {}", function_name, error));
                     }
                 }
@@ -321,23 +340,50 @@ fn check_statements_for_std_move_on_ref(
                     errors.push(format!("In function '{}': {}", function_name, error));
                 }
             }
-            Statement::If { condition, then_branch, else_branch, .. } => {
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 // Check condition
-                if let Some(error) = check_expression_for_std_move_on_ref(condition, reference_vars, 0) {
+                if let Some(error) =
+                    check_expression_for_std_move_on_ref(condition, reference_vars, 0)
+                {
                     errors.push(format!("In function '{}': {}", function_name, error));
                 }
 
                 // Check branches
-                check_statements_for_std_move_on_ref(then_branch, function_name, reference_vars, unsafe_depth, errors);
+                check_statements_for_std_move_on_ref(
+                    then_branch,
+                    function_name,
+                    reference_vars,
+                    unsafe_depth,
+                    errors,
+                );
                 if let Some(else_stmts) = else_branch {
-                    check_statements_for_std_move_on_ref(else_stmts, function_name, reference_vars, unsafe_depth, errors);
+                    check_statements_for_std_move_on_ref(
+                        else_stmts,
+                        function_name,
+                        reference_vars,
+                        unsafe_depth,
+                        errors,
+                    );
                 }
             }
             Statement::Block(statements) => {
-                check_statements_for_std_move_on_ref(statements, function_name, reference_vars, unsafe_depth, errors);
+                check_statements_for_std_move_on_ref(
+                    statements,
+                    function_name,
+                    reference_vars,
+                    unsafe_depth,
+                    errors,
+                );
             }
             Statement::ExpressionStatement { expr, location } => {
-                if let Some(error) = check_expression_for_std_move_on_ref(expr, reference_vars, location.line) {
+                if let Some(error) =
+                    check_expression_for_std_move_on_ref(expr, reference_vars, location.line)
+                {
                     errors.push(format!("In function '{}': {}", function_name, error));
                 }
             }
@@ -372,7 +418,8 @@ fn check_expression_for_std_move_on_ref(
         }
         Expression::FunctionCall { args, .. } => {
             for arg in args {
-                if let Some(error) = check_expression_for_std_move_on_ref(arg, reference_vars, line) {
+                if let Some(error) = check_expression_for_std_move_on_ref(arg, reference_vars, line)
+                {
                     return Some(error);
                 }
             }
@@ -424,7 +471,9 @@ fn check_statements_for_pointers_with_unsafe_tracking(
 
         let in_unsafe_scope = unsafe_depth > 0;
 
-        if let Some(error) = check_parsed_statement_for_pointers(stmt, in_unsafe_scope, safe_pointer_vars) {
+        if let Some(error) =
+            check_parsed_statement_for_pointers(stmt, in_unsafe_scope, safe_pointer_vars)
+        {
             errors.push(error);
         }
     }
@@ -448,7 +497,8 @@ fn is_unsafe_memory_function(name: &str) -> bool {
     // Get the base function name (strip namespace qualifiers)
     let base_name = name.rsplit("::").next().unwrap_or(name);
 
-    matches!(base_name,
+    matches!(
+        base_name,
         // C memory functions
         "malloc" | "calloc" | "realloc" | "free" |
         // C aligned memory functions
@@ -466,7 +516,12 @@ pub fn check_parsed_statement_for_pointers(
     in_unsafe_scope: bool,
     safe_pointer_vars: &HashSet<String>,
 ) -> Option<String> {
-    check_parsed_statement_for_pointers_with_return_type(stmt, in_unsafe_scope, safe_pointer_vars, None)
+    check_parsed_statement_for_pointers_with_return_type(
+        stmt,
+        in_unsafe_scope,
+        safe_pointer_vars,
+        None,
+    )
 }
 
 /// Check statement for pointer operations, with optional return type info for return statements
@@ -563,7 +618,12 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
             }
             return None;
         }
-        Statement::FunctionCall { name, args, location, .. } => {
+        Statement::FunctionCall {
+            name,
+            args,
+            location,
+            ..
+        } => {
             // Check for safe rusty pointer functions first (allow them)
             if is_rusty_safe_pointer_function(name) {
                 return None;
@@ -609,7 +669,8 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
             if is_null_pointer_expr(expr) {
                 return Some(
                     "Cannot return nullptr in @safe code: null pointers are forbidden. \
-                     Use Option<T*> for nullable pointers.".to_string()
+                     Use Option<T*> for nullable pointers."
+                        .to_string(),
                 );
             }
 
@@ -639,7 +700,12 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
                 ));
             }
         }
-        Statement::If { condition, then_branch, else_branch, location } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            location,
+        } => {
             if let Some(op) = contains_pointer_operation(condition, safe_pointer_vars) {
                 return Some(format!(
                     "Unsafe pointer {} in condition at line {}: pointer operations require unsafe context",
@@ -648,13 +714,21 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
             }
 
             // Recursively check branches with proper unsafe depth tracking
-            let then_errors = check_statements_for_pointers_with_unsafe_tracking(then_branch, 0, safe_pointer_vars);
+            let then_errors = check_statements_for_pointers_with_unsafe_tracking(
+                then_branch,
+                0,
+                safe_pointer_vars,
+            );
             if !then_errors.is_empty() {
                 return Some(then_errors.into_iter().next().unwrap());
             }
 
             if let Some(else_stmts) = else_branch {
-                let else_errors = check_statements_for_pointers_with_unsafe_tracking(else_stmts, 0, safe_pointer_vars);
+                let else_errors = check_statements_for_pointers_with_unsafe_tracking(
+                    else_stmts,
+                    0,
+                    safe_pointer_vars,
+                );
                 if !else_errors.is_empty() {
                     return Some(else_errors.into_iter().next().unwrap());
                 }
@@ -662,7 +736,11 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
         }
         Statement::Block(statements) => {
             // Check all statements in the block with proper unsafe depth tracking
-            let block_errors = check_statements_for_pointers_with_unsafe_tracking(statements, 0, safe_pointer_vars);
+            let block_errors = check_statements_for_pointers_with_unsafe_tracking(
+                statements,
+                0,
+                safe_pointer_vars,
+            );
             if !block_errors.is_empty() {
                 return Some(block_errors.into_iter().next().unwrap());
             }
@@ -682,7 +760,10 @@ pub fn check_parsed_statement_for_pointers_with_return_type(
     None
 }
 
-fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<String>) -> Option<&'static str> {
+fn contains_pointer_operation(
+    expr: &Expression,
+    safe_pointer_vars: &HashSet<String>,
+) -> Option<&'static str> {
     use crate::parser::Expression;
 
     match expr {
@@ -690,11 +771,11 @@ fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<Str
             // *this is safe in member functions - this pointer is guaranteed valid
             if let Expression::Variable(name) = inner.as_ref() {
                 if name == "this" {
-                    return None;  // *this is safe
+                    return None; // *this is safe
                 }
                 // Check if this is a safe pointer variable (rusty::Ptr<T> or rusty::MutPtr<T>)
                 if safe_pointer_vars.contains(name) {
-                    return None;  // Dereferencing safe pointer is allowed
+                    return None; // Dereferencing safe pointer is allowed
                 }
             }
             Some("dereference")
@@ -705,12 +786,14 @@ fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<Str
                 // For MemberAccess, recursively check if the object contains unsafe operations
                 // e.g., &(ptr->field) has a Dereference inside which is unsafe
                 // e.g., &(static_cast<T*>(p)->field) has both Cast and Dereference
-                Expression::MemberAccess { object, .. } => contains_pointer_operation(object, safe_pointer_vars),
+                Expression::MemberAccess { object, .. } => {
+                    contains_pointer_operation(object, safe_pointer_vars)
+                }
                 // &ClassName::method often appears as Variable("ClassName::method")
                 // due to how C++ qualified names are parsed - this is safe (member function pointer)
                 Expression::Variable(name) if name.contains("::") => None,
                 // &variable - taking address of a local variable is unsafe (could create dangling pointers)
-                _ => Some("address-of")
+                _ => Some("address-of"),
             }
         }
         Expression::Variable(name) if name == "this" => {
@@ -741,7 +824,7 @@ fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<Str
             // ptr->field (dereference through pointer) is handled by the parser wrapping object in Dereference
             if let Expression::Variable(name) = object.as_ref() {
                 if name == "this" {
-                    return None;  // this->member is safe
+                    return None; // this->member is safe
                 }
             }
             // For other cases, check object for pointer operations
@@ -820,7 +903,7 @@ fn contains_pointer_operation(expr: &Expression, safe_pointer_vars: &HashSet<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{Expression, Statement, SourceLocation, Variable};
+    use crate::parser::{Expression, SourceLocation, Statement, Variable};
 
     /// Helper to create empty safe pointer vars set
     fn empty_safe_vars() -> HashSet<String> {
@@ -830,13 +913,19 @@ mod tests {
     #[test]
     fn test_detect_dereference() {
         let expr = Expression::Dereference(Box::new(Expression::Variable("ptr".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("dereference"));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("dereference")
+        );
     }
 
     #[test]
     fn test_detect_address_of() {
         let expr = Expression::AddressOf(Box::new(Expression::Variable("x".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("address-of"));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("address-of")
+        );
     }
 
     #[test]
@@ -844,7 +933,7 @@ mod tests {
         let expr = Expression::Variable("x".to_string());
         assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None);
     }
-    
+
     #[test]
     fn test_pointer_in_assignment() {
         let stmt = Statement::Assignment {
@@ -883,9 +972,9 @@ mod tests {
     fn test_pointer_in_function_call() {
         let stmt = Statement::FunctionCall {
             name: "process".to_string(),
-            args: vec![
-                Expression::Dereference(Box::new(Expression::Variable("ptr".to_string())))
-            ],
+            args: vec![Expression::Dereference(Box::new(Expression::Variable(
+                "ptr".to_string(),
+            )))],
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 15,
@@ -903,20 +992,28 @@ mod tests {
     #[test]
     fn test_nested_pointer_operations() {
         // Test *(&x) - dereference of address-of
-        let expr = Expression::Dereference(Box::new(
-            Expression::AddressOf(Box::new(Expression::Variable("x".to_string())))
-        ));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("dereference"));
+        let expr = Expression::Dereference(Box::new(Expression::AddressOf(Box::new(
+            Expression::Variable("x".to_string()),
+        ))));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("dereference")
+        );
     }
 
     #[test]
     fn test_pointer_in_binary_op() {
         let expr = Expression::BinaryOp {
-            left: Box::new(Expression::Dereference(Box::new(Expression::Variable("p1".to_string())))),
+            left: Box::new(Expression::Dereference(Box::new(Expression::Variable(
+                "p1".to_string(),
+            )))),
             op: "+".to_string(),
             right: Box::new(Expression::Variable("x".to_string())),
         };
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("dereference"));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("dereference")
+        );
     }
 
     #[test]
@@ -942,7 +1039,10 @@ mod tests {
         });
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
-        assert!(error.is_some(), "Raw pointer declaration should be forbidden");
+        assert!(
+            error.is_some(),
+            "Raw pointer declaration should be forbidden"
+        );
         assert!(error.unwrap().contains("raw pointers are forbidden"));
     }
 
@@ -968,8 +1068,11 @@ mod tests {
             pack_element_type: None,
         });
 
-        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars());  // in_unsafe_scope = true
-        assert!(error.is_none(), "Raw pointer declaration should be allowed in @unsafe");
+        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true
+        assert!(
+            error.is_none(),
+            "Raw pointer declaration should be allowed in @unsafe"
+        );
     }
 
     #[test]
@@ -977,9 +1080,7 @@ mod tests {
         // Passing 'this' as an argument should be flagged as unsafe
         let stmt = Statement::FunctionCall {
             name: "register".to_string(),
-            args: vec![
-                Expression::Variable("this".to_string())
-            ],
+            args: vec![Expression::Variable("this".to_string())],
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 25,
@@ -988,23 +1089,36 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
-        assert!(error.is_some(), "Passing 'this' as argument should be flagged");
+        assert!(
+            error.is_some(),
+            "Passing 'this' as argument should be flagged"
+        );
         let error_msg = error.unwrap();
-        assert!(error_msg.contains("'this' pointer"), "Error should mention 'this' pointer");
+        assert!(
+            error_msg.contains("'this' pointer"),
+            "Error should mention 'this' pointer"
+        );
     }
 
     #[test]
     fn test_this_dereference_is_safe() {
         // *this is safe - dereferencing this in a member function is valid
         let expr = Expression::Dereference(Box::new(Expression::Variable("this".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None, "*this should be safe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            None,
+            "*this should be safe"
+        );
     }
 
     #[test]
     fn test_this_as_variable_is_unsafe() {
         // 'this' by itself (passed as pointer) is unsafe
         let expr = Expression::Variable("this".to_string());
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("'this' pointer"));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("'this' pointer")
+        );
     }
 
     #[test]
@@ -1014,7 +1128,11 @@ mod tests {
             object: Box::new(Expression::Variable("this".to_string())),
             field: "value_".to_string(),
         };
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None, "this->member should be safe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            None,
+            "this->member should be safe"
+        );
     }
 
     #[test]
@@ -1025,22 +1143,36 @@ mod tests {
             object: Box::new(Expression::Variable("TestService".to_string())),
             field: "echo_wrapper".to_string(),
         }));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None, "&ClassName::method (MemberAccess) should be safe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            None,
+            "&ClassName::method (MemberAccess) should be safe"
+        );
     }
 
     #[test]
     fn test_qualified_member_function_pointer_is_safe() {
         // &ClassName::method as Variable("ClassName::method") is safe
         // The parser produces this form for qualified member function pointers
-        let expr = Expression::AddressOf(Box::new(Expression::Variable("TestService::echo_wrapper".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None, "&ClassName::method (qualified Variable) should be safe");
+        let expr = Expression::AddressOf(Box::new(Expression::Variable(
+            "TestService::echo_wrapper".to_string(),
+        )));
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            None,
+            "&ClassName::method (qualified Variable) should be safe"
+        );
     }
 
     #[test]
     fn test_address_of_variable_is_unsafe() {
         // &x is unsafe - taking address of a local variable
         let expr = Expression::AddressOf(Box::new(Expression::Variable("x".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("address-of"), "&variable should be unsafe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("address-of"),
+            "&variable should be unsafe"
+        );
     }
 
     // Tests for is_char_pointer_type
@@ -1079,19 +1211,31 @@ mod tests {
     #[test]
     fn test_string_literal_expression_is_safe() {
         let expr = Expression::StringLiteral("hello".to_string());
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), None, "String literal should be safe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            None,
+            "String literal should be safe"
+        );
     }
 
     #[test]
     fn test_new_expression_is_unsafe() {
         let expr = Expression::New(Box::new(Expression::Literal("int".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("new"), "new expression should be unsafe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("new"),
+            "new expression should be unsafe"
+        );
     }
 
     #[test]
     fn test_delete_expression_is_unsafe() {
         let expr = Expression::Delete(Box::new(Expression::Variable("ptr".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("delete"), "delete expression should be unsafe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("delete"),
+            "delete expression should be unsafe"
+        );
     }
 
     #[test]
@@ -1123,7 +1267,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "delete in statement should be detected");
-        assert!(error.unwrap().contains("delete"), "Error should mention 'delete'");
+        assert!(
+            error.unwrap().contains("delete"),
+            "Error should mention 'delete'"
+        );
     }
 
     #[test]
@@ -1138,7 +1285,7 @@ mod tests {
             },
         };
 
-        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars());  // in_unsafe_scope = true
+        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true
         assert!(error.is_none(), "new should be allowed in unsafe context");
 
         // delete in unsafe context should be allowed
@@ -1151,8 +1298,11 @@ mod tests {
             },
         };
 
-        let error2 = check_parsed_statement_for_pointers(&stmt2, true, &empty_safe_vars());  // in_unsafe_scope = true
-        assert!(error2.is_none(), "delete should be allowed in unsafe context");
+        let error2 = check_parsed_statement_for_pointers(&stmt2, true, &empty_safe_vars()); // in_unsafe_scope = true
+        assert!(
+            error2.is_none(),
+            "delete should be allowed in unsafe context"
+        );
     }
 
     #[test]
@@ -1161,7 +1311,11 @@ mod tests {
             pointer: Box::new(Expression::Variable("ptr".to_string())),
             op: "+".to_string(),
         };
-        assert_eq!(contains_pointer_operation(&expr, &empty_safe_vars()), Some("pointer arithmetic"), "Pointer arithmetic should be unsafe");
+        assert_eq!(
+            contains_pointer_operation(&expr, &empty_safe_vars()),
+            Some("pointer arithmetic"),
+            "Pointer arithmetic should be unsafe"
+        );
     }
 
     #[test]
@@ -1180,7 +1334,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "Pointer arithmetic should be detected");
-        assert!(error.unwrap().contains("pointer arithmetic"), "Error should mention pointer arithmetic");
+        assert!(
+            error.unwrap().contains("pointer arithmetic"),
+            "Error should mention pointer arithmetic"
+        );
     }
 
     #[test]
@@ -1197,8 +1354,11 @@ mod tests {
             },
         };
 
-        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars());  // in_unsafe_scope = true
-        assert!(error.is_none(), "Pointer arithmetic should be allowed in unsafe context");
+        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true
+        assert!(
+            error.is_none(),
+            "Pointer arithmetic should be allowed in unsafe context"
+        );
     }
 
     #[test]
@@ -1215,7 +1375,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "malloc should be detected as unsafe");
-        assert!(error.unwrap().contains("malloc"), "Error should mention malloc");
+        assert!(
+            error.unwrap().contains("malloc"),
+            "Error should mention malloc"
+        );
     }
 
     #[test]
@@ -1252,7 +1415,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "calloc should be detected as unsafe");
-        assert!(error.unwrap().contains("calloc"), "Error should mention calloc");
+        assert!(
+            error.unwrap().contains("calloc"),
+            "Error should mention calloc"
+        );
     }
 
     #[test]
@@ -1272,7 +1438,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "realloc should be detected as unsafe");
-        assert!(error.unwrap().contains("realloc"), "Error should mention realloc");
+        assert!(
+            error.unwrap().contains("realloc"),
+            "Error should mention realloc"
+        );
     }
 
     #[test]
@@ -1287,8 +1456,11 @@ mod tests {
             },
         };
 
-        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars());  // in_unsafe_scope = true
-        assert!(error.is_none(), "malloc should be allowed in unsafe context");
+        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true
+        assert!(
+            error.is_none(),
+            "malloc should be allowed in unsafe context"
+        );
     }
 
     #[test]
@@ -1309,8 +1481,8 @@ mod tests {
         // Test non-memory functions
         assert!(!is_unsafe_memory_function("printf"));
         assert!(!is_unsafe_memory_function("std::vector::push_back"));
-        assert!(!is_unsafe_memory_function("new_function"));  // Not "new"
-        assert!(!is_unsafe_memory_function("allocate"));  // Similar but not a memory function
+        assert!(!is_unsafe_memory_function("new_function")); // Not "new"
+        assert!(!is_unsafe_memory_function("allocate")); // Similar but not a memory function
     }
 
     // ========== Tests for safe pointer type detection ==========
@@ -1345,7 +1517,7 @@ mod tests {
         assert!(!is_rusty_safe_pointer_type("const int*"));
         assert!(!is_rusty_safe_pointer_type("std::unique_ptr<int>"));
         assert!(!is_rusty_safe_pointer_type("int"));
-        assert!(!is_rusty_safe_pointer_type("Pointer<int>"));  // Not Ptr
+        assert!(!is_rusty_safe_pointer_type("Pointer<int>")); // Not Ptr
     }
 
     #[test]
@@ -1362,9 +1534,9 @@ mod tests {
         assert!(is_rusty_safe_pointer_function("rusty::as_const"));
 
         // NOT safe pointer functions
-        assert!(!is_rusty_safe_pointer_function("rusty::as_mut"));  // as_mut is unsafe
-        assert!(!is_rusty_safe_pointer_function("addr_of"));  // Must be in rusty namespace
-        assert!(!is_rusty_safe_pointer_function("std::addr_of"));  // Wrong namespace
+        assert!(!is_rusty_safe_pointer_function("rusty::as_mut")); // as_mut is unsafe
+        assert!(!is_rusty_safe_pointer_function("addr_of")); // Must be in rusty namespace
+        assert!(!is_rusty_safe_pointer_function("std::addr_of")); // Wrong namespace
         assert!(!is_rusty_safe_pointer_function("malloc"));
     }
 
@@ -1391,18 +1563,24 @@ mod tests {
         safe_vars.insert("safe_ptr".to_string());
 
         let expr = Expression::Dereference(Box::new(Expression::Variable("safe_ptr".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &safe_vars), None,
-                   "Dereferencing safe pointer should be allowed");
+        assert_eq!(
+            contains_pointer_operation(&expr, &safe_vars),
+            None,
+            "Dereferencing safe pointer should be allowed"
+        );
     }
 
     #[test]
     fn test_raw_pointer_dereference_is_forbidden() {
         // Dereferencing a raw pointer (not in safe_pointer_vars) is forbidden
-        let safe_vars = HashSet::new();  // Empty - no safe pointers
+        let safe_vars = HashSet::new(); // Empty - no safe pointers
 
         let expr = Expression::Dereference(Box::new(Expression::Variable("raw_ptr".to_string())));
-        assert_eq!(contains_pointer_operation(&expr, &safe_vars), Some("dereference"),
-                   "Dereferencing raw pointer should be forbidden");
+        assert_eq!(
+            contains_pointer_operation(&expr, &safe_vars),
+            Some("dereference"),
+            "Dereferencing raw pointer should be forbidden"
+        );
     }
 
     #[test]
@@ -1419,7 +1597,10 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
-        assert!(error.is_none(), "rusty::addr_of should be allowed in @safe code");
+        assert!(
+            error.is_none(),
+            "rusty::addr_of should be allowed in @safe code"
+        );
     }
 
     #[test]
@@ -1436,7 +1617,10 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
-        assert!(error.is_none(), "rusty::addr_of_mut should be allowed in @safe code");
+        assert!(
+            error.is_none(),
+            "rusty::addr_of_mut should be allowed in @safe code"
+        );
     }
 
     #[test]
@@ -1454,7 +1638,10 @@ mod tests {
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
         assert!(error.is_some(), "rusty::as_mut should require @unsafe");
-        assert!(error.unwrap().contains("as_mut"), "Error should mention as_mut");
+        assert!(
+            error.unwrap().contains("as_mut"),
+            "Error should mention as_mut"
+        );
     }
 
     #[test]
@@ -1470,8 +1657,11 @@ mod tests {
             },
         };
 
-        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars());  // in_unsafe_scope = true
-        assert!(error.is_none(), "rusty::as_mut should be allowed in @unsafe code");
+        let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true
+        assert!(
+            error.is_none(),
+            "rusty::as_mut should be allowed in @unsafe code"
+        );
     }
 
     #[test]
@@ -1492,15 +1682,17 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &safe_vars);
-        assert!(error.is_none(),
-                "Address-of should be allowed when assigning to safe pointer variable");
+        assert!(
+            error.is_none(),
+            "Address-of should be allowed when assigning to safe pointer variable"
+        );
     }
 
     #[test]
     fn test_address_of_still_forbidden_for_raw_pointer() {
         // When assigning to a variable NOT in safe_pointer_vars,
         // address-of is still forbidden
-        let safe_vars = HashSet::new();  // Empty - no safe pointers
+        let safe_vars = HashSet::new(); // Empty - no safe pointers
 
         let stmt = Statement::Assignment {
             lhs: Expression::Variable("raw_ptr".to_string()),
@@ -1513,10 +1705,14 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &safe_vars);
-        assert!(error.is_some(),
-                "Address-of should be forbidden when NOT assigning to safe pointer variable");
-        assert!(error.unwrap().contains("address-of"),
-                "Error should mention address-of");
+        assert!(
+            error.is_some(),
+            "Address-of should be forbidden when NOT assigning to safe pointer variable"
+        );
+        assert!(
+            error.unwrap().contains("address-of"),
+            "Error should mention address-of"
+        );
     }
 
     #[test]
@@ -1529,9 +1725,9 @@ mod tests {
 
         let stmt = Statement::Assignment {
             lhs: Expression::Variable("safe_ptr".to_string()),
-            rhs: Expression::AddressOf(Box::new(
-                Expression::Dereference(Box::new(Expression::Variable("raw_ptr".to_string())))
-            )),
+            rhs: Expression::AddressOf(Box::new(Expression::Dereference(Box::new(
+                Expression::Variable("raw_ptr".to_string()),
+            )))),
             location: SourceLocation {
                 file: "test.cpp".to_string(),
                 line: 10,
@@ -1540,9 +1736,13 @@ mod tests {
         };
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &safe_vars);
-        assert!(error.is_some(),
-                "Dereference inside address-of should still be caught even when assigning to safe pointer");
-        assert!(error.unwrap().contains("dereference"),
-                "Error should mention dereference");
+        assert!(
+            error.is_some(),
+            "Dereference inside address-of should still be caught even when assigning to safe pointer"
+        );
+        assert!(
+            error.unwrap().contains("dereference"),
+            "Error should mention dereference"
+        );
     }
 }

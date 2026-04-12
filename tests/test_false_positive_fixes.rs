@@ -2,7 +2,6 @@
 ///
 /// This test suite ensures that overly broad string matching doesn't
 /// cause false positives in move detection, operator detection, etc.
-
 use std::fs;
 use std::io::Write;
 use std::process::Command;
@@ -271,9 +270,9 @@ void test_comparisons() {
     let (output, _) = run_checker(code);
 
     assert!(
-        !output.contains("operator=") ||
-        output.contains("operator<=") ||
-        output.contains("operator>="),
+        !output.contains("operator=")
+            || output.contains("operator<=")
+            || output.contains("operator>="),
         "operator<= and operator>= should not be confused with operator=. Output: {}",
         output
     );
@@ -440,10 +439,10 @@ void test_with_common_names(int schema, int vv, int rhs) {
     // Should NOT report undeclared function errors for parameter names
     // The old bug would report things like "Calling undeclared function 'rhs'"
     assert!(
-        !output.contains("Calling undeclared function 'rhs'") &&
-        !output.contains("Calling undeclared function 'schema'") &&
-        !output.contains("Calling undeclared function 'vv'") &&
-        !output.contains("Calling undeclared function 'src'"),
+        !output.contains("Calling undeclared function 'rhs'")
+            && !output.contains("Calling undeclared function 'schema'")
+            && !output.contains("Calling undeclared function 'vv'")
+            && !output.contains("Calling undeclared function 'src'"),
         "Parameter names should not be detected as function calls. Output: {}",
         output
     );
@@ -502,8 +501,8 @@ void process_container(const Container& values) {
     // Should NOT report "unknown" function errors for template-dependent calls
     // in free template functions
     assert!(
-        !output.contains("Calling unsafe function 'unknown") &&
-        !output.contains("Calling undeclared function 'unknown"),
+        !output.contains("Calling unsafe function 'unknown")
+            && !output.contains("Calling undeclared function 'unknown"),
         "Template-dependent member calls in free template functions should not cause 'unknown' errors. Output: {}",
         output
     );
@@ -543,9 +542,9 @@ Node& get_node_alias(Container& c) {
 
     // Should NOT report "returning reference to local variable" for reference aliases
     assert!(
-        !output.contains("return reference to local variable") &&
-        !output.contains("Returning reference to local variable") &&
-        !output.contains("Cannot return reference to local variable"),
+        !output.contains("return reference to local variable")
+            && !output.contains("Returning reference to local variable")
+            && !output.contains("Cannot return reference to local variable"),
         "Reference alias return should not be flagged as returning local. Output: {}",
         output
     );

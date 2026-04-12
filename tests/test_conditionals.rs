@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_if_else_move_in_both_branches() {
@@ -32,20 +32,23 @@ void test() {
     UniquePtr c = move(ptr);  // Error: use after move
 }
 "#;
-    
+
     fs::write("test_if_both.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_both.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect use-after-move
-    assert!(stdout.contains("moved") || stdout.contains("violation"),
-            "Should detect use-after-move when moved in both branches. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("moved") || stdout.contains("violation"),
+        "Should detect use-after-move when moved in both branches. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_if_both.cpp");
 }
@@ -83,20 +86,23 @@ void test() {
     int* p = ptr.ptr;  // ERROR: should detect use after move
 }
 "#;
-    
+
     fs::write("test_if_one.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_one.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should report error (Rust's aggressive analysis)
-    assert!(stdout.contains("moved") || stdout.contains("violation"),
-            "Should report use-after-move when moved in one branch (Rust's aggressive approach). Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("moved") || stdout.contains("violation"),
+        "Should report use-after-move when moved in one branch (Rust's aggressive approach). Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_if_one.cpp");
 }
@@ -132,20 +138,23 @@ void test() {
     int* p = ptr.ptr;  // ERROR: should detect use after move
 }
 "#;
-    
+
     fs::write("test_if_no_else.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_no_else.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should report error (Rust's aggressive analysis)
-    assert!(stdout.contains("moved") || stdout.contains("violation"),
-            "Should report error for if without else (Rust's aggressive approach). Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("moved") || stdout.contains("violation"),
+        "Should report error for if without else (Rust's aggressive approach). Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_if_no_else.cpp");
 }
@@ -167,20 +176,23 @@ void test() {
     }
 }
 "#;
-    
+
     fs::write("test_nested_if.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_nested_if.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect borrow conflict
-    assert!(stdout.contains("already mutably borrowed") || stdout.contains("violation"),
-            "Should detect borrow conflict in nested if. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("already mutably borrowed") || stdout.contains("violation"),
+        "Should detect borrow conflict in nested if. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_nested_if.cpp");
 }
@@ -206,20 +218,23 @@ void test() {
     int& ref3 = value;  // Should be OK
 }
 "#;
-    
+
     fs::write("test_if_else_borrows.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_if_else_borrows.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should NOT report errors
-    assert!(!stdout.contains("already") || stdout.contains("✓"),
-            "Should allow different borrows in different branches. Output: {}", stdout);
-    
+    assert!(
+        !stdout.contains("already") || stdout.contains("✓"),
+        "Should allow different borrows in different branches. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_if_else_borrows.cpp");
 }

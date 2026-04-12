@@ -12,6 +12,9 @@ declare -a MATRIX_CRATES=(
     "arrayvec"
     "semver"
     "bitflags"
+    "smallvec"
+    "itertools"
+    "once_cell"
 )
 
 declare -A CRATE_REPO=(
@@ -22,6 +25,9 @@ declare -A CRATE_REPO=(
     ["arrayvec"]="https://github.com/bluss/arrayvec.git"
     ["semver"]="https://github.com/dtolnay/semver.git"
     ["bitflags"]="https://github.com/bitflags/bitflags.git"
+    ["smallvec"]="https://github.com/servo/rust-smallvec.git"
+    ["itertools"]="https://github.com/rust-itertools/itertools.git"
+    ["once_cell"]="https://github.com/matklad/once_cell.git"
 )
 
 declare -A CRATE_REF=(
@@ -32,6 +38,9 @@ declare -A CRATE_REF=(
     ["arrayvec"]="0.7.6"
     ["semver"]="1.0.24"
     ["bitflags"]="2.6.0"
+    ["smallvec"]="v1.15.1"
+    ["itertools"]="v0.14.0"
+    ["once_cell"]="v1.21.4"
 )
 
 TARGET_CRATE=""
@@ -47,7 +56,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Run parity matrix across crate set:
-  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags
+  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell
 
 Options:
   --crate <name>      Run only one matrix crate

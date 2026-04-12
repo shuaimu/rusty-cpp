@@ -1,0 +1,8 @@
+[package]
+name = "cpp_std_complex"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cpp_std_complex"
+path = "src/lib.rs"

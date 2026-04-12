@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 // ============================================================================
 // NEW/DELETE DETECTION TESTS
@@ -25,10 +25,16 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect new as unsafe operation
-    assert!(stdout.contains("new"),
-            "Should detect 'new' in @safe code. Output: {}", stdout);
-    assert!(stdout.contains("unsafe") || stdout.contains("pointer operations"),
-            "Should report pointer operations require unsafe. Output: {}", stdout);
+    assert!(
+        stdout.contains("new"),
+        "Should detect 'new' in @safe code. Output: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("unsafe") || stdout.contains("pointer operations"),
+        "Should report pointer operations require unsafe. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_new_safe.cpp");
@@ -54,10 +60,16 @@ void test(int* p) {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect delete as unsafe operation
-    assert!(stdout.contains("delete"),
-            "Should detect 'delete' in @safe code. Output: {}", stdout);
-    assert!(stdout.contains("unsafe") || stdout.contains("pointer operations"),
-            "Should report pointer operations require unsafe. Output: {}", stdout);
+    assert!(
+        stdout.contains("delete"),
+        "Should detect 'delete' in @safe code. Output: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("unsafe") || stdout.contains("pointer operations"),
+        "Should report pointer operations require unsafe. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_delete_safe.cpp");
@@ -83,8 +95,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect new as unsafe operation
-    assert!(stdout.contains("new"),
-            "Should detect 'new[]' in @safe code. Output: {}", stdout);
+    assert!(
+        stdout.contains("new"),
+        "Should detect 'new[]' in @safe code. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_new_array_safe.cpp");
@@ -111,8 +126,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect any violations
-    assert!(stdout.contains("no violations") || stdout.contains("✓"),
-            "new/delete should be allowed in @unsafe functions. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations") || stdout.contains("✓"),
+        "new/delete should be allowed in @unsafe functions. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_new_unsafe_func.cpp");
@@ -142,8 +160,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect any violations
-    assert!(stdout.contains("no violations") || stdout.contains("✓"),
-            "new/delete should be allowed in @unsafe blocks. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations") || stdout.contains("✓"),
+        "new/delete should be allowed in @unsafe blocks. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_new_unsafe_block.cpp");
@@ -190,8 +211,11 @@ void test4(int* arr) {
     // - test3: raw pointer declaration + new = 2
     // - test4: delete = 1
     // Total = 6
-    assert!(stdout.contains("6 violation"),
-            "Should detect 6 violations (2 raw ptr decl, 2 new, 2 delete). Output: {}", stdout);
+    assert!(
+        stdout.contains("6 violation"),
+        "Should detect 6 violations (2 raw ptr decl, 2 new, 2 delete). Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_multiple_new_delete.cpp");

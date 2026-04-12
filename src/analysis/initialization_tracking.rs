@@ -12,8 +12,8 @@
 //! - Taking address of uninitialized variable is flagged
 //! - Dereferencing pointer to uninitialized memory is an error
 
-use crate::parser::{Statement, Expression, Function};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, Statement};
 use std::collections::HashMap;
 
 /// Represents the initialization state of a variable
@@ -60,7 +60,11 @@ impl InitTracker {
 
     /// Declare a variable (initially uninitialized unless has initializer)
     pub fn declare(&mut self, var: &str, initialized: bool) {
-        let state = if initialized { InitState::Initialized } else { InitState::Uninitialized };
+        let state = if initialized {
+            InitState::Initialized
+        } else {
+            InitState::Uninitialized
+        };
         self.states.insert(var.to_string(), state);
     }
 
@@ -71,7 +75,10 @@ impl InitTracker {
 
     /// Get the initialization state of a variable
     pub fn get_state(&self, var: &str) -> InitState {
-        self.states.get(var).copied().unwrap_or(InitState::Initialized)
+        self.states
+            .get(var)
+            .copied()
+            .unwrap_or(InitState::Initialized)
     }
 
     /// Record that a pointer points to a variable
@@ -115,7 +122,10 @@ impl InitTracker {
 }
 
 /// Check for initialization safety violations in a parsed function
-pub fn check_initialization_safety(function: &Function, function_safety: SafetyMode) -> Vec<String> {
+pub fn check_initialization_safety(
+    function: &Function,
+    function_safety: SafetyMode,
+) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Only check @safe functions
@@ -178,10 +188,10 @@ fn analyze_statement_init(
             // Class/struct types are considered initialized because their constructor is called
             // even for `Container c;` declarations. Only primitive types without initializers
             // are truly uninitialized in C++.
-            let is_initialized = var.is_reference ||
-                                 var.type_name.contains('=') ||
-                                 (!var.type_name.is_empty() && var.is_const) ||
-                                 is_class_or_struct_type(&var.type_name);
+            let is_initialized = var.is_reference
+                || var.type_name.contains('=')
+                || (!var.type_name.is_empty() && var.is_const)
+                || is_class_or_struct_type(&var.type_name);
 
             tracker.declare(&var.name, is_initialized);
         }
@@ -231,7 +241,12 @@ fn analyze_statement_init(
             check_expr_init(expr, tracker, func_name, errors);
         }
 
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             check_expr_init(condition, tracker, func_name, errors);
 
             // Analyze branches
@@ -386,18 +401,38 @@ fn is_class_or_struct_type(type_name: &str) -> bool {
 
     // Primitive types that are NOT initialized by default
     let primitives = [
-        "int", "unsigned int", "signed int",
-        "short", "unsigned short", "signed short",
-        "long", "unsigned long", "signed long",
-        "long long", "unsigned long long", "signed long long",
-        "char", "unsigned char", "signed char",
-        "float", "double", "long double",
+        "int",
+        "unsigned int",
+        "signed int",
+        "short",
+        "unsigned short",
+        "signed short",
+        "long",
+        "unsigned long",
+        "signed long",
+        "long long",
+        "unsigned long long",
+        "signed long long",
+        "char",
+        "unsigned char",
+        "signed char",
+        "float",
+        "double",
+        "long double",
         "bool",
         "void",
-        "size_t", "ssize_t",
-        "int8_t", "int16_t", "int32_t", "int64_t",
-        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-        "intptr_t", "uintptr_t",
+        "size_t",
+        "ssize_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "intptr_t",
+        "uintptr_t",
         "ptrdiff_t",
     ];
 
@@ -418,7 +453,12 @@ fn is_class_or_struct_type(type_name: &str) -> bool {
 
     // If it starts with an uppercase letter, likely a user-defined type
     // This is a heuristic - most C++ class names start with uppercase
-    if clean_type.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+    if clean_type
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_uppercase())
+        .unwrap_or(false)
+    {
         return true;
     }
 
@@ -438,9 +478,18 @@ mod tests {
 
     #[test]
     fn test_init_state_merge() {
-        assert_eq!(InitState::Initialized.merge(InitState::Initialized), InitState::Initialized);
-        assert_eq!(InitState::Uninitialized.merge(InitState::Uninitialized), InitState::Uninitialized);
-        assert_eq!(InitState::Initialized.merge(InitState::Uninitialized), InitState::MaybeUninitialized);
+        assert_eq!(
+            InitState::Initialized.merge(InitState::Initialized),
+            InitState::Initialized
+        );
+        assert_eq!(
+            InitState::Uninitialized.merge(InitState::Uninitialized),
+            InitState::Uninitialized
+        );
+        assert_eq!(
+            InitState::Initialized.merge(InitState::Uninitialized),
+            InitState::MaybeUninitialized
+        );
     }
 
     #[test]

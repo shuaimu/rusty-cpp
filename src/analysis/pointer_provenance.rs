@@ -11,8 +11,8 @@
 //! Each allocation (stack variable, array, new expression) gets a unique ID
 //! that is tracked through pointer assignments and arithmetic.
 
-use crate::parser::{Statement, Expression, Function};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, Statement};
 use std::collections::HashMap;
 
 /// Unique identifier for an allocation
@@ -48,19 +48,22 @@ impl ProvenanceTracker {
 
     /// Record that a pointer points to a stack variable
     pub fn set_stack_provenance(&mut self, ptr: &str, var: &str) {
-        self.provenance.insert(ptr.to_string(), AllocationId::StackVar(var.to_string()));
+        self.provenance
+            .insert(ptr.to_string(), AllocationId::StackVar(var.to_string()));
     }
 
     /// Record that a pointer points to an array
     pub fn set_array_provenance(&mut self, ptr: &str, array: &str) {
-        self.provenance.insert(ptr.to_string(), AllocationId::Array(array.to_string()));
+        self.provenance
+            .insert(ptr.to_string(), AllocationId::Array(array.to_string()));
     }
 
     /// Record that a pointer comes from a new expression
     pub fn set_heap_provenance(&mut self, ptr: &str) -> usize {
         let id = self.heap_counter;
         self.heap_counter += 1;
-        self.provenance.insert(ptr.to_string(), AllocationId::Heap(id));
+        self.provenance
+            .insert(ptr.to_string(), AllocationId::Heap(id));
         id
     }
 
@@ -177,7 +180,12 @@ fn analyze_statement_provenance(
             check_expr_provenance(expr, tracker, func_name, errors);
         }
 
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             check_expr_provenance(condition, tracker, func_name, errors);
 
             tracker.enter_scope();
@@ -256,7 +264,9 @@ fn check_expr_provenance(
             if op == "-" || op == "pointer difference" {
                 if let (Some(p1), Some(p2)) = (extract_var_name(left), extract_var_name(right)) {
                     // Check if both are pointers with tracked provenance
-                    if tracker.get_provenance(&p1).is_some() && tracker.get_provenance(&p2).is_some() {
+                    if tracker.get_provenance(&p1).is_some()
+                        && tracker.get_provenance(&p2).is_some()
+                    {
                         if !tracker.same_provenance(&p1, &p2) {
                             errors.push(format!(
                                 "In function '{}': Pointer subtraction between '{}' and '{}' with different allocations is undefined behavior",
@@ -270,7 +280,9 @@ fn check_expr_provenance(
             // Check for relational comparisons
             if op == "<" || op == ">" || op == "<=" || op == ">=" {
                 if let (Some(p1), Some(p2)) = (extract_var_name(left), extract_var_name(right)) {
-                    if tracker.get_provenance(&p1).is_some() && tracker.get_provenance(&p2).is_some() {
+                    if tracker.get_provenance(&p1).is_some()
+                        && tracker.get_provenance(&p2).is_some()
+                    {
                         if !tracker.same_provenance(&p1, &p2) {
                             errors.push(format!(
                                 "In function '{}': Relational comparison between pointers '{}' and '{}' with different allocations is undefined behavior",

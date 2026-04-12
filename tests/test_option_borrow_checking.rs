@@ -20,9 +20,9 @@ fn run_analyzer_on_code(code: &str, include_paths: &[&str]) -> (String, bool) {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let full_output = format!("{}\n{}", stdout, stderr);
 
-    let has_borrow_violation = full_output.contains("borrowed") ||
-                                full_output.contains("Cannot move") ||
-                                full_output.contains("Cannot create");
+    let has_borrow_violation = full_output.contains("borrowed")
+        || full_output.contains("Cannot move")
+        || full_output.contains("Cannot create");
     (full_output, has_borrow_violation)
 }
 
@@ -48,9 +48,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &["include"]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect conflict between two as_mut() calls");
-    assert!(output.contains("already mutably borrowed"),
-        "Error should mention 'already mutably borrowed'");
+    assert!(
+        has_violation,
+        "Should detect conflict between two as_mut() calls"
+    );
+    assert!(
+        output.contains("already mutably borrowed"),
+        "Error should mention 'already mutably borrowed'"
+    );
 }
 
 #[test]
@@ -75,9 +80,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &["include"]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect conflict between as_mut() and as_ref()");
-    assert!(output.contains("already mutably borrowed") || output.contains("already borrowed"),
-        "Error should mention already borrowed");
+    assert!(
+        has_violation,
+        "Should detect conflict between as_mut() and as_ref()"
+    );
+    assert!(
+        output.contains("already mutably borrowed") || output.contains("already borrowed"),
+        "Error should mention already borrowed"
+    );
 }
 
 #[test]
@@ -108,8 +118,10 @@ int main() {
     // Should NOT detect borrow violations for multiple immutable borrows
     // (may have other violations from Option implementation, but not borrow conflicts in main)
     if has_violation {
-        assert!(!output.contains("Cannot create immutable reference to 'opt'"),
-            "Multiple immutable borrows (as_ref) should be allowed");
+        assert!(
+            !output.contains("Cannot create immutable reference to 'opt'"),
+            "Multiple immutable borrows (as_ref) should be allowed"
+        );
     }
 }
 
@@ -140,9 +152,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &["include"]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect that opt1 is already borrowed by ref1");
-    assert!(output.contains("opt1") || output.contains("borrowed"),
-        "Error should reference opt1 being borrowed");
+    assert!(
+        has_violation,
+        "Should detect that opt1 is already borrowed by ref1"
+    );
+    assert!(
+        output.contains("opt1") || output.contains("borrowed"),
+        "Error should reference opt1 being borrowed"
+    );
 }
 
 #[test]

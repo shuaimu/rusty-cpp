@@ -1,9 +1,9 @@
+use std::env;
+use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use tempfile::{NamedTempFile, TempDir};
-use std::io::Write;
-use std::fs;
-use std::env;
 
 fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     // Set Z3 header path based on platform
@@ -12,25 +12,24 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     } else {
         "/usr/include/z3.h"
     };
-    
+
     let mut cmd = Command::new("cargo");
     cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
         .env("Z3_SYS_Z3_HEADER", z3_header);
-    
+
     // Set library paths based on platform
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
     } else {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
-    
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
-    
+
+    let output = cmd.output().expect("Failed to execute analyzer");
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let full_output = format!("{}{}", stdout, stderr);
-    
+
     (output.status.success(), full_output)
 }
 
@@ -54,11 +53,15 @@ fn test_valid_cpp_code_passes() {
         return 0;
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
-    assert!(success, "Valid code should pass analysis. Output: {}", output);
+
+    assert!(
+        success,
+        "Valid code should pass analysis. Output: {}",
+        output
+    );
     assert!(output.contains("no violations found"));
 }
 
@@ -69,10 +72,10 @@ fn test_simple_function_analysis() {
         return a + b;
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
+
     assert!(success, "Simple function should pass. Output: {}", output);
 }
 
@@ -92,11 +95,15 @@ fn test_multiple_functions() {
         func2();
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
-    assert!(success, "Multiple functions should be handled. Output: {}", output);
+
+    assert!(
+        success,
+        "Multiple functions should be handled. Output: {}",
+        output
+    );
 }
 
 // These tests would fail with proper implementation but pass with current skeleton
@@ -112,10 +119,10 @@ fn test_use_after_move_with_unique_ptr() {
         *ptr1 = 10;  // Should be detected as use-after-move (requires dereference tracking)
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
+
     assert!(!success, "Use-after-move should fail analysis");
     assert!(output.contains("use") && output.contains("move"));
 }
@@ -131,13 +138,17 @@ fn test_multiple_mutable_borrows() {
         ref2 = 20;
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
+
     assert!(output.contains("violation"), "Should detect violations");
-    assert!(output.contains("Cannot create mutable reference") && output.contains("already mutably borrowed"), 
-            "Should detect multiple mutable borrows. Output: {}", output);
+    assert!(
+        output.contains("Cannot create mutable reference")
+            && output.contains("already mutably borrowed"),
+        "Should detect multiple mutable borrows. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -149,10 +160,10 @@ fn test_dangling_reference_lifetime() {
         return local;  // Should be detected as returning reference to local
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
+
     assert!(!success, "Dangling reference should fail");
     assert!(output.contains("lifetime") || output.contains("dangling"));
 }
@@ -167,11 +178,15 @@ fn test_const_references_allowed() {
         const int& ref3 = value;  // Multiple const refs should be OK
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
-    assert!(success, "Multiple const references should be allowed. Output: {}", output);
+
+    assert!(
+        success,
+        "Multiple const references should be allowed. Output: {}",
+        output
+    );
     assert!(output.contains("no violations found"));
 }
 
@@ -184,13 +199,20 @@ fn test_mixed_const_and_mutable_refs() {
         int& mut_ref = value;  // Should fail - can't have mutable with const
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
-    assert!(output.contains("violation"), "Should detect mixed reference violation");
-    assert!(output.contains("Cannot create mutable reference") && output.contains("already immutably borrowed"),
-            "Should detect mixed borrows. Output: {}", output);
+
+    assert!(
+        output.contains("violation"),
+        "Should detect mixed reference violation"
+    );
+    assert!(
+        output.contains("Cannot create mutable reference")
+            && output.contains("already immutably borrowed"),
+        "Should detect mixed borrows. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -202,13 +224,20 @@ fn test_mutable_then_const_refs() {
         const int& const_ref = value;  // Should fail - can't have const with mutable
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
-    assert!(output.contains("violation"), "Should detect mixed reference violation");
-    assert!(output.contains("Cannot create immutable reference") && output.contains("already mutably borrowed"),
-            "Should detect mixed borrows. Output: {}", output);
+
+    assert!(
+        output.contains("violation"),
+        "Should detect mixed reference violation"
+    );
+    assert!(
+        output.contains("Cannot create immutable reference")
+            && output.contains("already mutably borrowed"),
+        "Should detect mixed borrows. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -220,10 +249,10 @@ fn test_reference_to_reference() {
         int& ref2 = ref1;  // Should work with our current implementation
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
+
     // This will likely show violations with current implementation
     // but documents expected behavior
     println!("Reference to reference output: {}", output);
@@ -239,11 +268,15 @@ fn test_const_ref_assignment_detection() {
         // const_ref = 100;  // Would be a compile error in C++
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
-    
-    assert!(success, "Valid const reference should pass. Output: {}", output);
+
+    assert!(
+        success,
+        "Valid const reference should pass. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -265,15 +298,15 @@ fn test_simulated_move_semantics() {
         *r1.data = 10;  // Currently won't be detected without annotations
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
+
     // Document current behavior - this passes because we don't track raw pointers yet
     println!("Move semantics test output: {}", output);
 }
 
-#[test] 
+#[test]
 fn test_reference_invalidation() {
     // Test that we detect when references become invalid
     let code = r#"// @safe
@@ -286,12 +319,18 @@ fn test_reference_invalidation() {
         ref2 = 30;
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
-    assert!(output.contains("violation"), "Should detect reference violations");
-    assert!(output.contains("already mutably borrowed"), "Should detect multiple mutable refs");
+
+    assert!(
+        output.contains("violation"),
+        "Should detect reference violations"
+    );
+    assert!(
+        output.contains("already mutably borrowed"),
+        "Should detect multiple mutable refs"
+    );
 }
 
 #[test]
@@ -307,14 +346,17 @@ fn test_const_after_mutable() {
         int x = const_ref;  // Would read stale value
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
+
     assert!(output.contains("violation"), "Should detect violation");
-    assert!(output.contains("Cannot create immutable reference") && 
-            output.contains("already mutably borrowed"),
-            "Should enforce Rust's borrowing rules. Output: {}", output);
+    assert!(
+        output.contains("Cannot create immutable reference")
+            && output.contains("already mutably borrowed"),
+        "Should enforce Rust's borrowing rules. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -332,21 +374,24 @@ fn test_complex_reference_pattern() {
         const int& ref_b = b;   // ERROR - can't have both
     }
     "#;
-    
+
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
-    
+
     // Should only error on 'b', not 'a'
     assert!(output.contains("violation"), "Should detect violation");
-    assert!(output.contains("'b'") && output.contains("already mutably borrowed"),
-            "Should only error on variable b. Output: {}", output);
+    assert!(
+        output.contains("'b'") && output.contains("already mutably borrowed"),
+        "Should only error on variable b. Output: {}",
+        output
+    );
 }
 
 #[test]
 fn test_cross_file_header_parsing() {
     // Create a temporary directory for our test files
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create a header file with lifetime annotations
     let header_content = r#"
 #ifndef TEST_H
@@ -363,10 +408,10 @@ int getValue();
 
 #endif
 "#;
-    
+
     let header_path = temp_dir.path().join("test.h");
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create a C++ file that includes the header
     let cpp_content = r#"
 #include "test.h"
@@ -377,24 +422,31 @@ void test_function() {
     const int& ref2 = identity(ref);
 }
 "#;
-    
+
     let cpp_path = temp_dir.path().join("test.cpp");
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     // Run the analyzer
     let (success, output) = run_analyzer(&cpp_path);
-    
+
     // Should succeed - no borrow violations
-    assert!(success, "Should successfully analyze file with header. Output: {}", output);
-    assert!(output.contains("no violations found"), 
-            "Should find no violations. Output: {}", output);
+    assert!(
+        success,
+        "Should successfully analyze file with header. Output: {}",
+        output
+    );
+    assert!(
+        output.contains("no violations found"),
+        "Should find no violations. Output: {}",
+        output
+    );
 }
 
 #[test]
 fn test_lifetime_annotation_parsing() {
     // Create a temporary directory
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create header with various lifetime annotations
     let header_content = r#"
 #ifndef LIFETIME_H
@@ -414,10 +466,10 @@ char* copyString(const char* src);
 
 #endif
 "#;
-    
+
     let header_path = temp_dir.path().join("lifetime.h");
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create C++ file using the header
     let cpp_content = r#"
 #include "lifetime.h"
@@ -434,14 +486,18 @@ void test_lifetimes() {
     *mut_str = 'x';
 }
 "#;
-    
+
     let cpp_path = temp_dir.path().join("test_lifetime.cpp");
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     let (success, output) = run_analyzer(&cpp_path);
-    
+
     // This should pass as there are no borrow violations
-    assert!(success, "Should handle lifetime annotations. Output: {}", output);
+    assert!(
+        success,
+        "Should handle lifetime annotations. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -450,7 +506,7 @@ fn test_env_include_paths() {
     let temp_dir = TempDir::new().unwrap();
     let include_dir = temp_dir.path().join("include");
     fs::create_dir(&include_dir).unwrap();
-    
+
     // Create header with annotations
     let header_content = r#"
 #ifndef TEST_ENV_H
@@ -464,10 +520,10 @@ int getEnvValue();
 
 #endif
 "#;
-    
+
     let header_path = include_dir.join("test_env.h");
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create C++ file that uses the header
     let cpp_content = r#"
 #include <test_env.h>
@@ -477,10 +533,10 @@ void test_env() {
     int value = getEnvValue();
 }
 "#;
-    
+
     let cpp_path = temp_dir.path().join("test_env.cpp");
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     // Run analyzer with environment variable set
     // Set Z3 header path based on platform
     let z3_header = if cfg!(target_os = "macos") {
@@ -488,28 +544,33 @@ void test_env() {
     } else {
         "/usr/include/z3.h"
     };
-    
+
     let mut cmd = Command::new("cargo");
     cmd.args(&["run", "--quiet", "--", cpp_path.to_str().unwrap()])
         .env("CPLUS_INCLUDE_PATH", include_dir.to_str().unwrap())
         .env("Z3_SYS_Z3_HEADER", z3_header);
-    
+
     // Set library paths based on platform
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
     } else {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
-    
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
-    
+
+    let output = cmd.output().expect("Failed to execute analyzer");
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let full_output = format!("{}{}", stdout, stderr);
-    
-    assert!(output.status.success(), 
-            "Should successfully use environment include paths. Output: {}", full_output);
-    assert!(full_output.contains("Found 1 include path(s) from environment"),
-            "Should report finding environment paths. Output: {}", full_output);
+
+    assert!(
+        output.status.success(),
+        "Should successfully use environment include paths. Output: {}",
+        full_output
+    );
+    assert!(
+        full_output.contains("Found 1 include path(s) from environment"),
+        "Should report finding environment paths. Output: {}",
+        full_output
+    );
 }

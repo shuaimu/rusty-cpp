@@ -7,7 +7,6 @@
 ///
 /// Our analyzer follows Rust's safer semantics, even though C++ allows
 /// std::move(reference) which is dangerous.
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -30,8 +29,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -138,9 +136,9 @@ fn test_cannot_move_from_const_reference() {
 
     // May be caught by our analyzer OR by C++ type system
     assert!(
-        output.contains("Cannot move") ||
-        output.contains("deleted") ||
-        output.contains("reference"),
+        output.contains("Cannot move")
+            || output.contains("deleted")
+            || output.contains("reference"),
         "Should detect move from const reference. Output: {}",
         output
     );

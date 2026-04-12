@@ -10,9 +10,9 @@
 //   2. Cannot return Ptr/MutPtr to a local variable
 //   3. Cannot store Ptr/MutPtr to a local in a longer-lived container
 
-use std::process::Command;
-use std::fs;
 use std::env;
+use std::fs;
+use std::process::Command;
 
 fn create_temp_file(name: &str, code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();
@@ -56,7 +56,8 @@ rusty::Ptr<int> bad_return() {
 
     assert!(
         output.contains("local") || output.contains("dangling") || output.contains("lifetime"),
-        "Should detect returning Ptr to local variable. Output: {}", output
+        "Should detect returning Ptr to local variable. Output: {}",
+        output
     );
 }
 
@@ -78,7 +79,8 @@ rusty::MutPtr<int> bad_return() {
 
     assert!(
         output.contains("local") || output.contains("dangling") || output.contains("lifetime"),
-        "Should detect returning MutPtr to local variable. Output: {}", output
+        "Should detect returning MutPtr to local variable. Output: {}",
+        output
     );
 }
 
@@ -99,8 +101,10 @@ rusty::Ptr<int> ok_return(int& x) {
     cleanup(&temp_file);
 
     assert!(
-        !output.contains("dangling") && !output.contains("lifetime") || output.contains("no violations"),
-        "Should allow returning Ptr to parameter. Output: {}", output
+        !output.contains("dangling") && !output.contains("lifetime")
+            || output.contains("no violations"),
+        "Should allow returning Ptr to parameter. Output: {}",
+        output
     );
 }
 
@@ -129,8 +133,12 @@ void bad() {
     cleanup(&temp_file);
 
     assert!(
-        output.contains("outlive") || output.contains("dangling") || output.contains("scope") || output.contains("lifetime"),
-        "Should detect Ptr outliving local. Output: {}", output
+        output.contains("outlive")
+            || output.contains("dangling")
+            || output.contains("scope")
+            || output.contains("lifetime"),
+        "Should detect Ptr outliving local. Output: {}",
+        output
     );
 }
 
@@ -155,8 +163,12 @@ void bad() {
     cleanup(&temp_file);
 
     assert!(
-        output.contains("outlive") || output.contains("dangling") || output.contains("scope") || output.contains("lifetime"),
-        "Should detect MutPtr outliving local. Output: {}", output
+        output.contains("outlive")
+            || output.contains("dangling")
+            || output.contains("scope")
+            || output.contains("lifetime"),
+        "Should detect MutPtr outliving local. Output: {}",
+        output
     );
 }
 
@@ -178,8 +190,10 @@ void ok() {
     cleanup(&temp_file);
 
     assert!(
-        !output.contains("dangling") && !output.contains("outlive") || output.contains("no violations"),
-        "Same scope Ptr should be allowed. Output: {}", output
+        !output.contains("dangling") && !output.contains("outlive")
+            || output.contains("no violations"),
+        "Same scope Ptr should be allowed. Output: {}",
+        output
     );
 }
 
@@ -203,8 +217,10 @@ void ok() {
     cleanup(&temp_file);
 
     assert!(
-        !output.contains("dangling") && !output.contains("outlive") || output.contains("no violations"),
-        "Ptr dying before pointee should be allowed. Output: {}", output
+        !output.contains("dangling") && !output.contains("outlive")
+            || output.contains("no violations"),
+        "Ptr dying before pointee should be allowed. Output: {}",
+        output
     );
 }
 
@@ -257,8 +273,12 @@ void bad() {
     cleanup(&temp_file);
 
     assert!(
-        output.contains("dangling") || output.contains("outlive") || output.contains("scope") || output.contains("lifetime"),
-        "Should detect Ptr to loop-local outliving loop. Output: {}", output
+        output.contains("dangling")
+            || output.contains("outlive")
+            || output.contains("scope")
+            || output.contains("lifetime"),
+        "Should detect Ptr to loop-local outliving loop. Output: {}",
+        output
     );
 }
 
@@ -294,10 +314,14 @@ void bad() {
     // Any of these correctly flags the problematic code
     println!("Store Ptr in vector output: {}", output);
     assert!(
-        output.contains("dangling") || output.contains("outlive") ||
-        output.contains("local") || output.contains("container") ||
-        output.contains("address-of") || output.contains("non-safe"),
-        "Should detect issue with storing Ptr to local in vector. Output: {}", output
+        output.contains("dangling")
+            || output.contains("outlive")
+            || output.contains("local")
+            || output.contains("container")
+            || output.contains("address-of")
+            || output.contains("non-safe"),
+        "Should detect issue with storing Ptr to local in vector. Output: {}",
+        output
     );
 }
 
@@ -392,7 +416,8 @@ void bad() {
 
     assert!(
         output.contains("dangling") || output.contains("outlive") || output.contains("scope"),
-        "Should detect Ptr dangling through multiple scopes. Output: {}", output
+        "Should detect Ptr dangling through multiple scopes. Output: {}",
+        output
     );
 }
 
@@ -454,8 +479,11 @@ void ok() {
     // This test checks for lifetime violations, not null safety.
     // The null safety checker may warn about potential null dereference, but that's a separate concern.
     assert!(
-        !output.contains("dangling") && !output.contains("outlive") && !output.contains("lifetime violation"),
-        "Ptr to static should not have lifetime violations. Output: {}", output
+        !output.contains("dangling")
+            && !output.contains("outlive")
+            && !output.contains("lifetime violation"),
+        "Ptr to static should not have lifetime violations. Output: {}",
+        output
     );
 }
 

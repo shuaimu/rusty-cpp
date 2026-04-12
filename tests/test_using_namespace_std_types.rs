@@ -2,7 +2,6 @@
 ///
 /// Verifies that STL lifetime annotations work correctly when types
 /// are used without std:: prefix (e.g., vector instead of std::vector).
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;

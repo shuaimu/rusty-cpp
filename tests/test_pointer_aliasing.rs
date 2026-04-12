@@ -1,7 +1,7 @@
 // Integration tests for Phase 4: Pointer Aliasing Tracking
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 fn run_checker(code: &str) -> String {
     let unique_id = std::time::SystemTime::now()
@@ -42,7 +42,8 @@ void test() {
     // Should pass - mutable ref assignment moves the borrow
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Mutable ref assignment should move borrow. Output: {}", output
+        "Mutable ref assignment should move borrow. Output: {}",
+        output
     );
 }
 
@@ -61,7 +62,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("moved"),
-        "Should detect use of moved mutable reference. Output: {}", output
+        "Should detect use of moved mutable reference. Output: {}",
+        output
     );
 }
 
@@ -84,7 +86,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Const ref assignment should copy borrow. Output: {}", output
+        "Const ref assignment should copy borrow. Output: {}",
+        output
     );
 }
 
@@ -104,7 +107,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("Cannot create"),
-        "Multiple const refs should be allowed. Output: {}", output
+        "Multiple const refs should be allowed. Output: {}",
+        output
     );
 }
 
@@ -127,7 +131,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Pointer aliasing in unsafe should be allowed. Output: {}", output
+        "Pointer aliasing in unsafe should be allowed. Output: {}",
+        output
     );
 }
 
@@ -151,7 +156,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Mutable ref chain should work. Output: {}", output
+        "Mutable ref chain should work. Output: {}",
+        output
     );
 }
 
@@ -171,7 +177,8 @@ void test() {
     let output = run_checker(code);
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Const ref chain should work. Output: {}", output
+        "Const ref chain should work. Output: {}",
+        output
     );
 }
 
@@ -194,6 +201,7 @@ void test(int* p) {
     // (and because we're in @unsafe context)
     assert!(
         output.contains("no violations") || !output.contains("violation"),
-        "Pointer param aliasing should not cause deep tracking issues. Output: {}", output
+        "Pointer param aliasing should not cause deep tracking issues. Output: {}",
+        output
     );
 }

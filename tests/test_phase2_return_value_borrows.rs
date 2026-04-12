@@ -2,8 +2,8 @@
 // Tests that lifetime annotations on return values create proper borrow relationships
 
 use assert_cmd::Command;
-use std::fs;
 use std::env;
+use std::fs;
 
 fn create_temp_cpp_file(code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();

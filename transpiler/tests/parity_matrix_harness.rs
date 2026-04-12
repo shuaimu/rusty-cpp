@@ -16,6 +16,10 @@ fn cpp_module_interop_compile_script() -> PathBuf {
     repo_root().join("tests/transpile_tests/run_cpp_module_interop_compile.sh")
 }
 
+fn cpp_std_complex_compile_script() -> PathBuf {
+    repo_root().join("tests/transpile_tests/run_cpp_std_complex_compile.sh")
+}
+
 fn ci_workflow_file() -> PathBuf {
     repo_root().join(".github/workflows/ci.yml")
 }
@@ -48,7 +52,16 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for crate_name in [
-        "either", "tap", "cfg-if", "take_mut", "arrayvec", "semver", "bitflags",
+        "either",
+        "tap",
+        "cfg-if",
+        "take_mut",
+        "arrayvec",
+        "semver",
+        "bitflags",
+        "smallvec",
+        "itertools",
+        "once_cell",
     ] {
         assert!(
             stdout.contains(&format!("crate: {}", crate_name)),
@@ -89,10 +102,59 @@ fn test_cpp_module_interop_compile_script_dry_run_reports_expected_commands() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("parity-test"), "stdout:\n{}", stdout);
-    assert!(stdout.contains("--stop-after transpile"), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("--stop-after transpile"),
+        "stdout:\n{}",
+        stdout
+    );
     assert!(stdout.contains("--cpp-module-index"), "stdout:\n{}", stdout);
     assert!(stdout.contains("custom.math.cppm"), "stdout:\n{}", stdout);
-    assert!(stdout.contains("cpp_module_interop.cppm"), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("cpp_module_interop.cppm"),
+        "stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cpp_std_complex_compile_script_dry_run_reports_expected_commands() {
+    let script = cpp_std_complex_compile_script();
+    assert!(
+        script.exists(),
+        "missing cpp-std-complex compile script: {}",
+        script.display()
+    );
+
+    let work_root = tempfile::tempdir().unwrap();
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--dry-run")
+        .arg("--work-dir")
+        .arg(work_root.path())
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to run cpp-std-complex compile script");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("parity-test"), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("--stop-after transpile"),
+        "stdout:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("--cpp-module-index"), "stdout:\n{}", stdout);
+    assert!(
+        stdout.contains("cpp_std_complex.cppm"),
+        "stdout:\n{}",
+        stdout
+    );
 }
 
 #[test]
@@ -219,6 +281,14 @@ fn test_ci_workflow_defines_cpp_module_interop_compile_job() {
 }
 
 #[test]
+fn test_ci_workflow_defines_cpp_std_complex_compile_job() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("cpp-std-complex-compile:"));
+    assert!(workflow.contains("./tests/transpile_tests/run_cpp_std_complex_compile.sh"));
+    assert!(workflow.contains("--work-dir \"${RUNNER_TEMP}/rusty-cpp-std-complex\""));
+}
+
+#[test]
 fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
     let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
     assert!(workflow.contains("Upload parity matrix artifacts on failure"));
@@ -226,7 +296,16 @@ fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
     assert!(workflow.contains("actions/upload-artifact@v4"));
 
     for crate_name in [
-        "either", "tap", "cfg-if", "take_mut", "arrayvec", "semver", "bitflags",
+        "either",
+        "tap",
+        "cfg-if",
+        "take_mut",
+        "arrayvec",
+        "semver",
+        "bitflags",
+        "smallvec",
+        "itertools",
+        "once_cell",
     ] {
         assert!(
             workflow.contains(&format!(
@@ -246,4 +325,13 @@ fn test_ci_workflow_uploads_cpp_module_interop_artifacts_on_failure() {
     assert!(workflow.contains("if: failure()"));
     assert!(workflow.contains("actions/upload-artifact@v4"));
     assert!(workflow.contains("${{ runner.temp }}/rusty-cpp-module-interop/**"));
+}
+
+#[test]
+fn test_ci_workflow_uploads_cpp_std_complex_artifacts_on_failure() {
+    let workflow = std::fs::read_to_string(ci_workflow_file()).expect("read ci workflow");
+    assert!(workflow.contains("Upload cpp std complex artifacts on failure"));
+    assert!(workflow.contains("if: failure()"));
+    assert!(workflow.contains("actions/upload-artifact@v4"));
+    assert!(workflow.contains("${{ runner.temp }}/rusty-cpp-std-complex/**"));
 }

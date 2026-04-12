@@ -1,13 +1,13 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::fs;
-use regex::Regex;
-use clang::{Clang, Index};
 use crate::debug_println;
+use clang::{Clang, Index};
+use regex::Regex;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::annotations::{FunctionSignature, extract_annotations};
-use super::safety_annotations::{SafetyMode, parse_entity_safety};
 use super::external_annotations::ExternalAnnotations;
+use super::safety_annotations::{SafetyMode, parse_entity_safety};
 
 /// Cache for storing function signatures from header files
 #[derive(Debug)]
@@ -43,12 +43,12 @@ impl HeaderCache {
             external_annotations: ExternalAnnotations::new(),
         }
     }
-    
+
     /// Set the include paths for header file resolution
     pub fn set_include_paths(&mut self, paths: Vec<PathBuf>) {
         self.include_paths = paths;
     }
-    
+
     /// Get a function signature by name
     pub fn get_signature(&self, func_name: &str) -> Option<&FunctionSignature> {
         self.signatures.get(func_name)
@@ -56,25 +56,37 @@ impl HeaderCache {
 
     /// Parse a header file and extract all annotated function signatures
     pub fn parse_header(&mut self, header_path: &Path) -> Result<(), String> {
-        debug_println!("DEBUG HEADER: Parsing header file: {}", header_path.display());
+        debug_println!(
+            "DEBUG HEADER: Parsing header file: {}",
+            header_path.display()
+        );
 
         // Skip if already processed
         if self.processed_headers.iter().any(|p| p == header_path) {
             debug_println!("DEBUG HEADER: Already processed, skipping");
             return Ok(());
         }
-        
+
         // Parse safety annotations directly from the header file (before libclang parsing)
         // This ensures we get regular C++ comments (// and /* */) not just Doxygen comments
         // Store temporarily - we'll qualify the names after LibClang parsing
         let mut unqualified_annotations = HashMap::new();
-        if let Ok(header_safety_context) = super::safety_annotations::parse_safety_annotations(header_path) {
+        if let Ok(header_safety_context) =
+            super::safety_annotations::parse_safety_annotations(header_path)
+        {
             // Store unqualified annotations temporarily
             for (func_sig, safety_mode) in &header_safety_context.function_overrides {
-                debug_println!("DEBUG HEADER: Found unqualified annotation for '{}': {:?}", func_sig.name, safety_mode);
+                debug_println!(
+                    "DEBUG HEADER: Found unqualified annotation for '{}': {:?}",
+                    func_sig.name,
+                    safety_mode
+                );
                 unqualified_annotations.insert(func_sig.name.clone(), *safety_mode);
             }
-            debug_println!("DEBUG HEADER: Parsed {} unqualified safety annotations from header file", header_safety_context.function_overrides.len());
+            debug_println!(
+                "DEBUG HEADER: Parsed {} unqualified safety annotations from header file",
+                header_safety_context.function_overrides.len()
+            );
         }
 
         // Also parse external annotations from the header file
@@ -87,29 +99,28 @@ impl HeaderCache {
                 debug_println!("DEBUG HEADER: Parsed external annotations from header");
             }
         }
-        
+
         // Initialize Clang
-        let clang = Clang::new()
-            .map_err(|e| format!("Failed to initialize Clang: {:?}", e))?;
+        let clang = Clang::new().map_err(|e| format!("Failed to initialize Clang: {:?}", e))?;
         let index = Index::new(&clang, false, false);
-        
+
         // Build arguments with include paths
         let mut args = vec![
-            "-std=c++17".to_string(), 
+            "-std=c++17".to_string(),
             "-xc++".to_string(),
-            "-fparse-all-comments".to_string(),  // Essential for getting comments from headers
+            "-fparse-all-comments".to_string(), // Essential for getting comments from headers
         ];
         for include_path in &self.include_paths {
             args.push(format!("-I{}", include_path.display()));
         }
-        
+
         // Parse the header file
         let tu = index
             .parser(header_path)
             .arguments(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
             .parse()
             .map_err(|e| format!("Failed to parse header {}: {:?}", header_path.display(), e))?;
-        
+
         // Extract function signatures with annotations
         let root = tu.get_entity();
         self.visit_entity_for_signatures(&root);
@@ -128,28 +139,47 @@ impl HeaderCache {
         }
 
         // Now qualify the unqualified annotations
-        debug_println!("DEBUG HEADER: Qualifying {} unqualified annotations", unqualified_annotations.len());
+        debug_println!(
+            "DEBUG HEADER: Qualifying {} unqualified annotations",
+            unqualified_annotations.len()
+        );
         for (simple_name, safety_mode) in &unqualified_annotations {
-            debug_println!("DEBUG HEADER: Processing unqualified '{}': {:?}", simple_name, safety_mode);
+            debug_println!(
+                "DEBUG HEADER: Processing unqualified '{}': {:?}",
+                simple_name,
+                safety_mode
+            );
             // Check if this simple name has qualified versions from LibClang
             if let Some(qualified_names) = simple_to_qualified.get(simple_name) {
                 // This is a method - add annotation for all qualified versions
                 for qualified in qualified_names {
-                    debug_println!("DEBUG HEADER: Qualifying '{}' -> '{}': {:?}",
-                                 simple_name, qualified, safety_mode);
+                    debug_println!(
+                        "DEBUG HEADER: Qualifying '{}' -> '{}': {:?}",
+                        simple_name,
+                        qualified,
+                        safety_mode
+                    );
                     // Update the annotation (LibClang may have found it too, but comment annotation takes precedence)
-                    self.safety_annotations.insert(qualified.clone(), *safety_mode);
+                    self.safety_annotations
+                        .insert(qualified.clone(), *safety_mode);
                 }
             } else {
                 // Not a method (no qualified name found), just a plain function
                 // Keep the simple name
-                debug_println!("DEBUG HEADER: Adding plain function annotation for '{}': {:?}",
-                             simple_name, safety_mode);
-                self.safety_annotations.insert(simple_name.clone(), *safety_mode);
+                debug_println!(
+                    "DEBUG HEADER: Adding plain function annotation for '{}': {:?}",
+                    simple_name,
+                    safety_mode
+                );
+                self.safety_annotations
+                    .insert(simple_name.clone(), *safety_mode);
             }
         }
 
-        debug_println!("DEBUG HEADER: Found {} safety annotations in header (after qualification)", self.safety_annotations.len());
+        debug_println!(
+            "DEBUG HEADER: Found {} safety annotations in header (after qualification)",
+            self.safety_annotations.len()
+        );
         for (name, mode) in &self.safety_annotations {
             debug_println!("DEBUG HEADER:   - {} : {:?}", name, mode);
         }
@@ -180,33 +210,38 @@ impl HeaderCache {
 
         Ok(())
     }
-    
+
     /// Parse headers from a C++ source file's includes
     pub fn parse_includes_from_source(&mut self, cpp_file: &Path) -> Result<(), String> {
         let content = fs::read_to_string(cpp_file)
             .map_err(|e| format!("Failed to read {}: {}", cpp_file.display(), e))?;
-        
+
         let (quoted_includes, angle_includes) = extract_includes(&content);
-        
+
         // Process quoted includes (search relative to source file first)
         for include_path in quoted_includes {
             if let Some(resolved) = self.resolve_include(&include_path, cpp_file, true) {
                 self.parse_header(&resolved)?;
             }
         }
-        
+
         // Process angle bracket includes (search include paths only)
         for include_path in angle_includes {
             if let Some(resolved) = self.resolve_include(&include_path, cpp_file, false) {
                 self.parse_header(&resolved)?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Resolve an include path using standard C++ include resolution rules
-    fn resolve_include(&self, include_path: &str, source_file: &Path, search_source_dir: bool) -> Option<PathBuf> {
+    fn resolve_include(
+        &self,
+        include_path: &str,
+        source_file: &Path,
+        search_source_dir: bool,
+    ) -> Option<PathBuf> {
         // For quoted includes, first try relative to the source file
         if search_source_dir {
             if let Some(parent) = source_file.parent() {
@@ -216,7 +251,7 @@ impl HeaderCache {
                 }
             }
         }
-        
+
         // Search in include paths
         for include_dir in &self.include_paths {
             let full_path = include_dir.join(include_path);
@@ -224,16 +259,16 @@ impl HeaderCache {
                 return Some(full_path);
             }
         }
-        
+
         // Try as absolute or relative to current directory
         let path = PathBuf::from(include_path);
         if path.exists() {
             return Some(path);
         }
-        
+
         None
     }
-    
+
     fn visit_entity_for_signatures(&mut self, entity: &clang::Entity) {
         self.visit_entity_with_context(entity, None, None);
     }
@@ -257,24 +292,35 @@ impl HeaderCache {
             if let Some(safety) = parse_entity_safety(entity) {
                 current_namespace_safety = Some(safety);
                 if let Some(name) = entity.get_name() {
-                    debug_println!("DEBUG SAFETY: Found namespace '{}' with {:?} annotation", name, safety);
+                    debug_println!(
+                        "DEBUG SAFETY: Found namespace '{}' with {:?} annotation",
+                        name,
+                        safety
+                    );
                 }
             } else {
                 // IMPORTANT: Reset namespace safety when entering a namespace without annotation
                 // This prevents safety from leaking from one namespace to another
                 // (e.g., user's @safe namespace shouldn't apply to std::)
                 current_namespace_safety = None;
-                debug_println!("DEBUG SAFETY: Entering namespace {:?} without annotation - resetting namespace safety",
-                    entity.get_name());
+                debug_println!(
+                    "DEBUG SAFETY: Entering namespace {:?} without annotation - resetting namespace safety",
+                    entity.get_name()
+                );
             }
         }
 
         // Check if this is a class/struct with safety annotation
-        if entity.get_kind() == EntityKind::ClassDecl || entity.get_kind() == EntityKind::StructDecl {
+        if entity.get_kind() == EntityKind::ClassDecl || entity.get_kind() == EntityKind::StructDecl
+        {
             if let Some(safety) = parse_entity_safety(entity) {
                 current_class_safety = Some(safety);
                 if let Some(name) = entity.get_name() {
-                    debug_println!("DEBUG SAFETY: Found class '{}' with {:?} annotation in header", name, safety);
+                    debug_println!(
+                        "DEBUG SAFETY: Found class '{}' with {:?} annotation in header",
+                        name,
+                        safety
+                    );
                 }
             } else if current_namespace_safety.is_some() {
                 // If class has no explicit annotation, DON'T inherit from namespace
@@ -284,8 +330,10 @@ impl HeaderCache {
         }
 
         match entity.get_kind() {
-            EntityKind::FunctionDecl | EntityKind::Method | EntityKind::Constructor | EntityKind::FunctionTemplate => {
-
+            EntityKind::FunctionDecl
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::FunctionTemplate => {
                 // Extract lifetime annotations
                 if let Some(mut sig) = extract_annotations(entity) {
                     // Always use qualified name for all functions to avoid namespace collisions
@@ -309,7 +357,10 @@ impl HeaderCache {
                     } else {
                         safety = current_namespace_safety;
                         if safety.is_some() {
-                            debug_println!("DEBUG SAFETY: Function inheriting {:?} from namespace", safety);
+                            debug_println!(
+                                "DEBUG SAFETY: Function inheriting {:?} from namespace",
+                                safety
+                            );
                         }
                     }
                 }
@@ -324,7 +375,11 @@ impl HeaderCache {
                     let name = strip_template_params(&raw_name);
 
                     self.safety_annotations.insert(name.clone(), safety_mode);
-                    debug_println!("DEBUG SAFETY: Found function '{}' with {:?} annotation in header", name, safety_mode);
+                    debug_println!(
+                        "DEBUG SAFETY: Found function '{}' with {:?} annotation in header",
+                        name,
+                        safety_mode
+                    );
                 }
             }
             _ => {}
@@ -333,17 +388,19 @@ impl HeaderCache {
         // Recursively visit children, passing down context
         // For class children, pass current_class_safety
         // For namespace children (not inside a class), pass None for class_safety
-        let child_class_safety = if entity.get_kind() == EntityKind::ClassDecl || entity.get_kind() == EntityKind::StructDecl {
+        let child_class_safety = if entity.get_kind() == EntityKind::ClassDecl
+            || entity.get_kind() == EntityKind::StructDecl
+        {
             current_class_safety
         } else {
-            class_safety  // Keep parent's class safety for nested entities
+            class_safety // Keep parent's class safety for nested entities
         };
 
         for child in entity.get_children() {
             self.visit_entity_with_context(&child, current_namespace_safety, child_class_safety);
         }
     }
-    
+
     /// Check if any signatures are cached
     pub fn has_signatures(&self) -> bool {
         !self.signatures.is_empty()
@@ -354,7 +411,7 @@ impl HeaderCache {
 fn extract_includes(content: &str) -> (Vec<String>, Vec<String>) {
     let mut quoted_includes = Vec::new();
     let mut angle_includes = Vec::new();
-    
+
     // Match quoted includes: #include "file.h"
     let quoted_re = Regex::new(r#"#include\s*"([^"]+)""#).unwrap();
     for cap in quoted_re.captures_iter(content) {
@@ -362,7 +419,7 @@ fn extract_includes(content: &str) -> (Vec<String>, Vec<String>) {
             quoted_includes.push(path.as_str().to_string());
         }
     }
-    
+
     // Match angle bracket includes: #include <file.h>
     let angle_re = Regex::new(r#"#include\s*<([^>]+)>"#).unwrap();
     for cap in angle_re.captures_iter(content) {
@@ -370,14 +427,14 @@ fn extract_includes(content: &str) -> (Vec<String>, Vec<String>) {
             angle_includes.push(path.as_str().to_string());
         }
     }
-    
+
     (quoted_includes, angle_includes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_extract_includes() {
         let content = r#"
@@ -387,13 +444,13 @@ mod tests {
 #include <vector>
 #include "utils/helper.h"
         "#;
-        
+
         let (quoted, angle) = extract_includes(content);
         assert_eq!(quoted.len(), 3);
         assert_eq!(quoted[0], "user.h");
         assert_eq!(quoted[1], "data.h");
         assert_eq!(quoted[2], "utils/helper.h");
-        
+
         assert_eq!(angle.len(), 2);
         assert_eq!(angle[0], "iostream");
         assert_eq!(angle[1], "vector");
@@ -419,7 +476,10 @@ mod tests {
         // Qualified names with templates
         assert_eq!(strip_template_params("rusty::Option<T>"), "rusty::Option");
         assert_eq!(strip_template_params("std::vector<int>"), "std::vector");
-        assert_eq!(strip_template_params("ns::inner::Class<T, U>"), "ns::inner::Class");
+        assert_eq!(
+            strip_template_params("ns::inner::Class<T, U>"),
+            "ns::inner::Class"
+        );
     }
 
     #[test]

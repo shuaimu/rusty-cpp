@@ -7,8 +7,8 @@
 //! - Lambda escape issues
 //! - new/delete tracking
 
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn get_project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -104,8 +104,11 @@ fn test_lambda_capture_basic() {
     // or escaped lambdas with reference captures.
     // The test file has 'this' capture in bad_lambda_captures_this which should
     // still be caught. Check that the analysis runs without crashing.
-    assert!(output.contains("Analyzing:") || output.contains("violation"),
-        "Analysis should run on the file. Got: {}", output);
+    assert!(
+        output.contains("Analyzing:") || output.contains("violation"),
+        "Analysis should run on the file. Got: {}",
+        output
+    );
 }
 
 // =============================================================================
@@ -114,7 +117,7 @@ fn test_lambda_capture_basic() {
 
 #[cfg(test)]
 mod raii_tracker_tests {
-    use rusty_cpp::analysis::raii_tracking::{RaiiTracker, IteratorBorrow, MemberBorrow};
+    use rusty_cpp::analysis::raii_tracking::{IteratorBorrow, MemberBorrow, RaiiTracker};
 
     #[test]
     fn test_container_type_detection() {
@@ -130,8 +133,12 @@ mod raii_tracker_tests {
     #[test]
     fn test_iterator_type_detection() {
         assert!(RaiiTracker::is_iterator_type("std::vector<int>::iterator"));
-        assert!(RaiiTracker::is_iterator_type("std::map<int,int>::const_iterator"));
-        assert!(RaiiTracker::is_iterator_type("std::list<int>::reverse_iterator"));
+        assert!(RaiiTracker::is_iterator_type(
+            "std::map<int,int>::const_iterator"
+        ));
+        assert!(RaiiTracker::is_iterator_type(
+            "std::list<int>::reverse_iterator"
+        ));
         assert!(!RaiiTracker::is_iterator_type("int*"));
         assert!(!RaiiTracker::is_iterator_type("std::string"));
     }
@@ -284,7 +291,11 @@ mod raii_tracker_tests {
         tracker.mark_lambda_escaped("lambda1");
 
         // Verify lambda is marked as escaped
-        let capture = tracker.lambda_captures.iter().find(|c| c.lambda_var == "lambda1").unwrap();
+        let capture = tracker
+            .lambda_captures
+            .iter()
+            .find(|c| c.lambda_var == "lambda1")
+            .unwrap();
         assert!(capture.has_escaped);
         assert!(capture.ref_captures.contains(&"x".to_string()));
     }
@@ -305,7 +316,10 @@ mod raii_tracker_tests {
 
         // Exit scope - should NOT error because both die together
         let errors = tracker.exit_scope();
-        assert!(errors.is_empty(), "Should not have errors for same-scope borrows");
+        assert!(
+            errors.is_empty(),
+            "Should not have errors for same-scope borrows"
+        );
     }
 
     #[test]
@@ -377,7 +391,10 @@ mod raii_tracker_tests {
 
         // Exit scope - should NOT error because both die together
         let errors = tracker.exit_scope();
-        assert!(errors.is_empty(), "Should not have errors when reference and object in same scope");
+        assert!(
+            errors.is_empty(),
+            "Should not have errors when reference and object in same scope"
+        );
     }
 
     #[test]
@@ -416,12 +433,20 @@ mod raii_tracker_tests {
 
         // Exit inner scope - local_ref dies, borrow should be cleaned
         let errors = tracker.exit_scope();
-        assert!(errors.is_empty(), "Local reference dying with inner scope should not error");
+        assert!(
+            errors.is_empty(),
+            "Local reference dying with inner scope should not error"
+        );
 
         // Verify the member borrow was cleaned up
-        assert!(tracker.member_borrows.is_empty() ||
-                tracker.member_borrows.iter().all(|b| b.reference != "local_ref"),
-                "Member borrow should be cleaned up after scope exit");
+        assert!(
+            tracker.member_borrows.is_empty()
+                || tracker
+                    .member_borrows
+                    .iter()
+                    .all(|b| b.reference != "local_ref"),
+            "Member borrow should be cleaned up after scope exit"
+        );
     }
 
     // ==========================================================================
@@ -548,17 +573,28 @@ mod raii_tracker_tests {
 
         // Original invalidation info should be preserved
         let info = tracker.get_invalidation_info("it").unwrap();
-        assert_eq!(info.invalidation_line, 15);  // First modification's line
-        assert_eq!(info.method, "push_back");    // First modification's method
+        assert_eq!(info.invalidation_line, 15); // First modification's line
+        assert_eq!(info.method, "push_back"); // First modification's method
     }
 
     #[test]
     fn test_iterator_invalidation_various_modifying_methods() {
         // Test that all modifying methods correctly invalidate
         let methods = vec![
-            "push_back", "push_front", "pop_back", "pop_front",
-            "insert", "emplace", "emplace_back", "emplace_front",
-            "erase", "clear", "resize", "reserve", "assign", "swap"
+            "push_back",
+            "push_front",
+            "pop_back",
+            "pop_front",
+            "insert",
+            "emplace",
+            "emplace_back",
+            "emplace_front",
+            "erase",
+            "clear",
+            "resize",
+            "reserve",
+            "assign",
+            "swap",
         ];
 
         for method in methods {

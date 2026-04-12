@@ -34,14 +34,9 @@ impl fmt::Display for BorrowCheckDiagnostic {
             Severity::Warning => "warning".yellow().bold(),
             Severity::Note => "note".blue().bold(),
         };
-        
-        writeln!(
-            f,
-            "{}: {}",
-            severity_str,
-            self.message.bold()
-        )?;
-        
+
+        writeln!(f, "{}: {}", severity_str, self.message.bold())?;
+
         writeln!(
             f,
             "  {} {}:{}:{}",
@@ -50,15 +45,15 @@ impl fmt::Display for BorrowCheckDiagnostic {
             self.location.line,
             self.location.column
         )?;
-        
+
         if let Some(ref help) = self.help {
             writeln!(f, "{}: {}", "help".green().bold(), help)?;
         }
-        
+
         for note in &self.notes {
             writeln!(f, "{}: {}", "note".blue(), note)?;
         }
-        
+
         Ok(())
     }
 }
@@ -86,9 +81,7 @@ pub fn format_double_borrow(var_name: &str, location: Location) -> BorrowCheckDi
         message: format!("cannot borrow `{}` as mutable more than once", var_name),
         location,
         help: Some("consider using a shared reference instead".to_string()),
-        notes: vec![
-            "only one mutable borrow is allowed at a time".to_string(),
-        ],
+        notes: vec!["only one mutable borrow is allowed at a time".to_string()],
     }
 }
 
@@ -121,7 +114,7 @@ mod tests {
             help: Some("Try this instead".to_string()),
             notes: vec!["Note 1".to_string()],
         };
-        
+
         assert!(matches!(diag.severity, Severity::Error));
         assert_eq!(diag.message, "Test error");
         assert_eq!(diag.location.line, 10);
@@ -137,9 +130,9 @@ mod tests {
             column: 8,
             span: None,
         };
-        
+
         let diag = format_use_after_move("ptr", location);
-        
+
         assert!(matches!(diag.severity, Severity::Error));
         assert!(diag.message.contains("ptr"));
         assert!(diag.message.contains("moved"));
@@ -155,9 +148,9 @@ mod tests {
             column: 3,
             span: None,
         };
-        
+
         let diag = format_double_borrow("value", location);
-        
+
         assert!(matches!(diag.severity, Severity::Error));
         assert!(diag.message.contains("value"));
         assert!(diag.message.contains("mutable"));
@@ -172,12 +165,9 @@ mod tests {
             column: 10,
             span: Some((200, 210)),
         };
-        
-        let diag = format_lifetime_error(
-            "Reference outlives its source".to_string(),
-            location
-        );
-        
+
+        let diag = format_lifetime_error("Reference outlives its source".to_string(), location);
+
         assert!(matches!(diag.severity, Severity::Error));
         assert_eq!(diag.message, "Reference outlives its source");
         assert!(diag.help.is_some());
@@ -197,7 +187,7 @@ mod tests {
             help: None,
             notes: vec![],
         };
-        
+
         let output = format!("{}", diag);
         assert!(output.contains("error"));
         assert!(output.contains("Test error message"));

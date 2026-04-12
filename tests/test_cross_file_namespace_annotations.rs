@@ -81,7 +81,13 @@ namespace myapp {
 
     // Analyze file1
     let mut cmd1 = Command::new("cargo");
-    cmd1.args(&["run", "--quiet", "--", file1_path.to_str().unwrap(), &include_arg]);
+    cmd1.args(&[
+        "run",
+        "--quiet",
+        "--",
+        file1_path.to_str().unwrap(),
+        &include_arg,
+    ]);
     if cfg!(target_os = "macos") {
         cmd1.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
         cmd1.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -96,7 +102,13 @@ namespace myapp {
 
     // Analyze file2
     let mut cmd2 = Command::new("cargo");
-    cmd2.args(&["run", "--quiet", "--", file2_path.to_str().unwrap(), &include_arg]);
+    cmd2.args(&[
+        "run",
+        "--quiet",
+        "--",
+        file2_path.to_str().unwrap(),
+        &include_arg,
+    ]);
     if cfg!(target_os = "macos") {
         cmd2.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
         cmd2.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -349,9 +361,13 @@ void unsafe_function() {
 
     // Analyze each implementation file separately
     let mut cmd_safe = Command::new("cargo");
-    cmd_safe.args(&["run", "--quiet", "--",
-                    temp_dir.path().join("safe_part.cpp").to_str().unwrap(),
-                    &include_arg]);
+    cmd_safe.args(&[
+        "run",
+        "--quiet",
+        "--",
+        temp_dir.path().join("safe_part.cpp").to_str().unwrap(),
+        &include_arg,
+    ]);
     if cfg!(target_os = "macos") {
         cmd_safe.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
         cmd_safe.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -362,9 +378,13 @@ void unsafe_function() {
     let output_safe = cmd_safe.output().expect("Failed to execute");
 
     let mut cmd_unsafe = Command::new("cargo");
-    cmd_unsafe.args(&["run", "--quiet", "--",
-                      temp_dir.path().join("unsafe_part.cpp").to_str().unwrap(),
-                      &include_arg]);
+    cmd_unsafe.args(&[
+        "run",
+        "--quiet",
+        "--",
+        temp_dir.path().join("unsafe_part.cpp").to_str().unwrap(),
+        &include_arg,
+    ]);
     if cfg!(target_os = "macos") {
         cmd_unsafe.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
         cmd_unsafe.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -374,8 +394,14 @@ void unsafe_function() {
     }
     let output_unsafe = cmd_unsafe.output().expect("Failed to execute");
 
-    println!("Safe implementation output: {}", String::from_utf8_lossy(&output_safe.stdout));
-    println!("Unsafe implementation output: {}", String::from_utf8_lossy(&output_unsafe.stdout));
+    println!(
+        "Safe implementation output: {}",
+        String::from_utf8_lossy(&output_safe.stdout)
+    );
+    println!(
+        "Unsafe implementation output: {}",
+        String::from_utf8_lossy(&output_unsafe.stdout)
+    );
 
     // Each file should be analyzed independently based on its own annotations
     assert!(

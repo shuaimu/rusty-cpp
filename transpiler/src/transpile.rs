@@ -69,8 +69,13 @@ pub fn load_cpp_module_symbol_index_files(
 ) -> Result<CppModuleSymbolIndex, String> {
     let mut merged = CppModuleSymbolIndex::default();
     for path in index_paths {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read C++ module symbol index {}: {}", path.display(), e))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            format!(
+                "Failed to read C++ module symbol index {}: {}",
+                path.display(),
+                e
+            )
+        })?;
         let file = parse_cpp_module_symbol_index_file(path, &content)?;
         merge_cpp_module_symbol_index_file(&mut merged, path, file)?;
     }
@@ -455,7 +460,10 @@ impl CppForeignCallSafetyVisitor {
             return;
         };
         let binding_name = first_segment.ident.to_string();
-        let Some(module_path) = self.lookup_cpp_binding(&binding_name).map(ToOwned::to_owned) else {
+        let Some(module_path) = self
+            .lookup_cpp_binding(&binding_name)
+            .map(ToOwned::to_owned)
+        else {
             return;
         };
         self.record_safe_context_cpp_call_violation(call, &binding_name, &module_path);
@@ -600,19 +608,11 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         detail: &str,
     ) {
         let context = self.current_context_label();
-        let key = format!(
-            "{}|{}|{}|{}",
-            context, module_path, symbol_name, detail
-        );
+        let key = format!("{}|{}|{}|{}", context, module_path, symbol_name, detail);
         if self.diagnostic_keys.insert(key) {
             self.diagnostics.push(format!(
                 "{} (module `{}`, symbol `{}`, index source `{}`, call `{}`, context `{}`)",
-                detail,
-                module_path,
-                symbol_name,
-                self.index_source_label,
-                site,
-                context
+                detail, module_path, symbol_name, self.index_source_label, site, context
             ));
         }
     }
@@ -642,10 +642,12 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         module: &'b CppModuleIndexModule,
         symbol_name: &str,
     ) -> Option<&'b CppModuleIndexSymbol> {
-        module
-            .symbols
-            .get(symbol_name)
-            .or_else(|| symbol_name.rsplit("::").next().and_then(|tail| module.symbols.get(tail)))
+        module.symbols.get(symbol_name).or_else(|| {
+            symbol_name
+                .rsplit("::")
+                .next()
+                .and_then(|tail| module.symbols.get(tail))
+        })
     }
 
     fn symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
@@ -717,7 +719,9 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
             return;
         }
 
-        let Some(symbol) = self.validate_cpp_module_symbol_access(&call_site, &module_path, &symbol_name) else {
+        let Some(symbol) =
+            self.validate_cpp_module_symbol_access(&call_site, &module_path, &symbol_name)
+        else {
             return;
         };
         if Self::symbol_is_macro(&symbol) {
@@ -886,7 +890,9 @@ impl<'ast> Visit<'ast> for CppForeignCallResolutionVisitor<'_> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         self.validate_cpp_call_symbol(call);
         let cpp_bound_call_path = match call.func.as_ref() {
-            syn::Expr::Path(path_expr) => self.resolve_cpp_symbol_for_path(&path_expr.path).is_some(),
+            syn::Expr::Path(path_expr) => {
+                self.resolve_cpp_symbol_for_path(&path_expr.path).is_some()
+            }
             _ => false,
         };
         if !cpp_bound_call_path {
@@ -953,7 +959,11 @@ fn parse_callable_signature_arity(signature: &str) -> Option<usize> {
             ']' => bracket_depth = bracket_depth.saturating_sub(1),
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
-            ',' if paren_depth == 0 && angle_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+            ',' if paren_depth == 0
+                && angle_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
                 arity += 1;
             }
             _ => {}
@@ -1816,7 +1826,9 @@ fn f(v: i32) -> i32 {
         .expect_err("template-only symbol without callable shape should fail");
 
         assert!(err.contains("TODO(leaf22.7)"));
-        assert!(err.contains("template-only export without indexed callable signatures is unsupported"));
+        assert!(
+            err.contains("template-only export without indexed callable signatures is unsupported")
+        );
         assert!(err.contains("symbol `sort`"));
         assert!(err.contains("/tmp/cpp-index.toml"));
     }

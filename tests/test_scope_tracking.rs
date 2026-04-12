@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_scope_tracking_eliminates_false_positives() {
@@ -21,22 +21,23 @@ void test() {
     }  // ref2 out of scope
 }
 "#;
-    
+
     fs::write("test_scopes.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_scopes.cpp"])
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should find NO violations
-    assert!(stdout.contains("no violations found") || 
-            stdout.contains("✓"),
-            "Should not report false positives for scoped references. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Should not report false positives for scoped references. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_scopes.cpp");
 }
@@ -51,21 +52,23 @@ void test() {
     int& ref2 = value;  // ERROR: double mutable borrow
 }
 "#;
-    
+
     fs::write("test_double_borrow.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_double_borrow.cpp"])
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should find the violation
-    assert!(stdout.contains("violation") || stdout.contains("already mutably borrowed"),
-            "Should still catch real double borrows. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("violation") || stdout.contains("already mutably borrowed"),
+        "Should still catch real double borrows. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_double_borrow.cpp");
 }
@@ -89,23 +92,25 @@ void test() {
     mref = 100;
 }
 "#;
-    
+
     fs::write("test_nested.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_nested.cpp"])
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should find NO violations
-    assert!(stdout.contains("no violations found") || 
-            stdout.contains("✓") ||
-            !stdout.contains("violation"),
-            "Nested scopes should work correctly. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("no violations found")
+            || stdout.contains("✓")
+            || !stdout.contains("violation"),
+        "Nested scopes should work correctly. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_nested.cpp");
 }

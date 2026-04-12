@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 // ============================================================================
 // Basic loop tests - detect use-after-move across iterations
@@ -39,8 +39,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should find the use-after-move error in loop
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect use-after-move in loop. stdout: {}, stderr: {}", stdout, stderr);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect use-after-move in loop. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_loop_move.cpp");
@@ -70,10 +74,13 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") ||
-            stdout.contains("✓") ||
-            !stdout.contains("violation"),
-            "Loop without moves should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found")
+            || stdout.contains("✓")
+            || !stdout.contains("violation"),
+        "Loop without moves should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_loop_ok.cpp");
@@ -112,8 +119,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should find the use-after-move error in loop
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect use-after-move in while loop. Output: {}", stdout);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect use-after-move in while loop. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_while_move.cpp");
@@ -134,20 +144,23 @@ void test() {
     }
 }
 "#;
-    
+
     fs::write("test_nested_loops.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_nested_loops.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should find borrow checking violation
-    assert!(stdout.contains("already mutably borrowed") || stdout.contains("violation"),
-            "Should detect borrow conflicts in nested loops. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("already mutably borrowed") || stdout.contains("violation"),
+        "Should detect borrow conflicts in nested loops. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_nested_loops.cpp");
 }
@@ -190,8 +203,11 @@ void test() {
 
     // Outer variable `ptr` is moved in the loop (inside conditional).
     // The 2-iteration simulation should detect this as a use-after-move on second iteration.
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect outer variable moved in conditional inside loop. Output: {}", stdout);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect outer variable moved in conditional inside loop. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_conditional_move.cpp");
@@ -236,8 +252,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations - loop-local variables are fresh each iteration
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Loop-local variable move should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Loop-local variable move should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_loop_local_ok.cpp");
@@ -276,8 +295,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "While loop with local variable should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "While loop with local variable should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_while_local_ok.cpp");
@@ -321,8 +343,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Nested loops with local variables should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Nested loops with local variables should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nested_local_ok.cpp");
@@ -360,8 +385,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // SHOULD find violation - outer variable is moved in loop
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect outer variable moved in loop. Output: {}", stdout);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect outer variable moved in loop. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_outer_move_error.cpp");
@@ -401,8 +429,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Multiple moves in loop should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Multiple moves in loop should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_multi_move_loop_ok.cpp");
@@ -441,8 +472,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Do-while loop with local variable should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Do-while loop with local variable should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_do_while_local_ok.cpp");
@@ -482,8 +516,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Loop-local with conditional move should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Loop-local with conditional move should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_loop_conditional_local_ok.cpp");
@@ -520,8 +557,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Loop-local reassignment should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Loop-local reassignment should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_loop_reassign_ok.cpp");
@@ -566,8 +606,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations - variable is loop-local in nested block
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Variable in nested if block should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Variable in nested if block should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nested_if_local_ok.cpp");
@@ -607,8 +650,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Variable in else block should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Variable in else block should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nested_else_local_ok.cpp");
@@ -646,8 +692,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // SHOULD find violation - outer variable is moved in loop
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect outer variable moved in nested if. Output: {}", stdout);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect outer variable moved in nested if. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_outer_in_if_error.cpp");
@@ -687,8 +736,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Variable in deeply nested blocks should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Variable in deeply nested blocks should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_deeply_nested_local_ok.cpp");
@@ -728,8 +780,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should find violation for outer, but not for local
-    assert!(stdout.contains("Use after move in loop"),
-            "Should detect outer variable error but not nested local. Output: {}", stdout);
+    assert!(
+        stdout.contains("Use after move in loop"),
+        "Should detect outer variable error but not nested local. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_mixed_outer_nested.cpp");
@@ -769,8 +824,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT find any violations
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "While loop with nested if local should be OK. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "While loop with nested if local should be OK. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_while_nested_if_ok.cpp");

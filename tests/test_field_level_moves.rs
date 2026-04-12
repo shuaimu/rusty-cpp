@@ -21,8 +21,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -56,12 +55,13 @@ fn analyze_cpp_code(code: &str, expected_errors: &[&str], should_have_errors: bo
     } else {
         // Check for any error indicators
         // Don't match "no violations found!"
-        if output.contains("✗") || output.contains("violation(s)") ||
-           (output.contains("violation") && !output.contains("no violations found")) {
+        if output.contains("✗")
+            || output.contains("violation(s)")
+            || (output.contains("violation") && !output.contains("no violations found"))
+        {
             panic!(
                 "Expected no errors but got output:\n{}\nCode:\n{}",
-                output,
-                code
+                output, code
             );
         }
     }

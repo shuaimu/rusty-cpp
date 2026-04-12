@@ -12,9 +12,9 @@
 //   4. Cannot move while borrowed by Ptr/MutPtr
 //   5. Borrows end at scope exit
 
-use std::process::Command;
-use std::fs;
 use std::env;
+use std::fs;
+use std::process::Command;
 
 fn create_temp_file(name: &str, code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();
@@ -58,7 +58,8 @@ void test() {
 
     assert!(
         !output.contains("already") && !output.contains("Cannot"),
-        "Single Ptr borrow should be allowed. Output: {}", output
+        "Single Ptr borrow should be allowed. Output: {}",
+        output
     );
 }
 
@@ -80,7 +81,8 @@ void test() {
 
     assert!(
         !output.contains("already") && !output.contains("Cannot"),
-        "Single MutPtr borrow should be allowed. Output: {}", output
+        "Single MutPtr borrow should be allowed. Output: {}",
+        output
     );
 }
 
@@ -108,7 +110,8 @@ void test() {
 
     assert!(
         !output.contains("already") && !output.contains("Cannot"),
-        "Multiple Ptr borrows should be allowed. Output: {}", output
+        "Multiple Ptr borrows should be allowed. Output: {}",
+        output
     );
 }
 
@@ -136,7 +139,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Double MutPtr borrow should fail. Output: {}", output
+        "Double MutPtr borrow should fail. Output: {}",
+        output
     );
 }
 
@@ -163,7 +167,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Ptr then MutPtr should fail. Output: {}", output
+        "Ptr then MutPtr should fail. Output: {}",
+        output
     );
 }
 
@@ -186,7 +191,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "MutPtr then Ptr should fail. Output: {}", output
+        "MutPtr then Ptr should fail. Output: {}",
+        output
     );
 }
 
@@ -216,7 +222,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Ptr borrow should end at scope exit. Output: {}", output
+        "Ptr borrow should end at scope exit. Output: {}",
+        output
     );
 }
 
@@ -242,7 +249,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "MutPtr borrow should end at scope exit. Output: {}", output
+        "MutPtr borrow should end at scope exit. Output: {}",
+        output
     );
 }
 
@@ -270,7 +278,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Nested scope borrows should be cleaned up. Output: {}", output
+        "Nested scope borrows should be cleaned up. Output: {}",
+        output
     );
 }
 
@@ -302,7 +311,8 @@ void test() {
 
     assert!(
         output.contains("Cannot move") || output.contains("borrowed"),
-        "Should not allow move while Ptr borrowed. Output: {}", output
+        "Should not allow move while Ptr borrowed. Output: {}",
+        output
     );
 }
 
@@ -330,7 +340,8 @@ void test() {
 
     assert!(
         output.contains("Cannot move") || output.contains("borrowed"),
-        "Should not allow move while MutPtr borrowed. Output: {}", output
+        "Should not allow move while MutPtr borrowed. Output: {}",
+        output
     );
 }
 
@@ -361,7 +372,8 @@ void test() {
 
     assert!(
         output.contains("no violations") || !output.contains("Cannot move"),
-        "Should allow move after Ptr scope ends. Output: {}", output
+        "Should allow move after Ptr scope ends. Output: {}",
+        output
     );
 }
 
@@ -398,7 +410,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Sequential Ptr borrows in scopes should work. Output: {}", output
+        "Sequential Ptr borrows in scopes should work. Output: {}",
+        output
     );
 }
 
@@ -430,7 +443,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Sequential MutPtr borrows in scopes should work. Output: {}", output
+        "Sequential MutPtr borrows in scopes should work. Output: {}",
+        output
     );
 }
 
@@ -462,7 +476,8 @@ void test(bool condition) {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Conditional Ptr borrow should be cleaned up. Output: {}", output
+        "Conditional Ptr borrow should be cleaned up. Output: {}",
+        output
     );
 }
 
@@ -492,7 +507,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Loop Ptr should conflict with MutPtr. Output: {}", output
+        "Loop Ptr should conflict with MutPtr. Output: {}",
+        output
     );
 }
 
@@ -518,7 +534,8 @@ void test() {
 
     assert!(
         output.contains("already") && output.contains("borrow"),
-        "Loop double MutPtr should fail. Output: {}", output
+        "Loop double MutPtr should fail. Output: {}",
+        output
     );
 }
 
@@ -554,7 +571,8 @@ void test() {
 
     assert!(
         output.contains("Cannot move") || output.contains("borrowed"),
-        "Multiple Ptr borrowers should prevent move. Output: {}", output
+        "Multiple Ptr borrowers should prevent move. Output: {}",
+        output
     );
 }
 
@@ -585,7 +603,8 @@ void test() {
 
     assert!(
         !output.contains("already") || output.contains("no violations"),
-        "Independent variable borrows should be allowed. Output: {}", output
+        "Independent variable borrows should be allowed. Output: {}",
+        output
     );
 }
 
@@ -619,7 +638,8 @@ void test() {
 
     assert!(
         output.contains("moved") || output.contains("violation"),
-        "Ptr borrow after move should fail. Output: {}", output
+        "Ptr borrow after move should fail. Output: {}",
+        output
     );
 }
 

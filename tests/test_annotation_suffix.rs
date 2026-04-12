@@ -142,7 +142,10 @@ void safe_func() {
 
     let (success, _output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Multiline comment annotations with suffix should be recognized");
+    assert!(
+        success,
+        "Multiline comment annotations with suffix should be recognized"
+    );
 }
 
 #[test]
@@ -169,7 +172,10 @@ void safe_func() {
 
     let (success, _output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Block comment annotations with suffix should be recognized");
+    assert!(
+        success,
+        "Block comment annotations with suffix should be recognized"
+    );
 }
 
 #[test]
@@ -193,7 +199,10 @@ namespace myapp {
 
     let (success, _output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Namespace annotation @safe-XXX should be recognized");
+    assert!(
+        success,
+        "Namespace annotation @safe-XXX should be recognized"
+    );
 }
 
 #[test]
@@ -219,7 +228,10 @@ void safe_func() {
     // The function should_be_undeclared should NOT be treated as @safe
     // If we uncommented the call, it would be an error
     // For now, just verify it doesn't crash
-    assert!(!output.contains("panic"), "Should not panic on @safety comment");
+    assert!(
+        !output.contains("panic"),
+        "Should not panic on @safety comment"
+    );
 }
 
 #[test]

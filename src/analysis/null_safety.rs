@@ -12,8 +12,8 @@
 //! - Dereferencing a MaybeNull pointer is an error in @safe code
 //! - Null checks (if (ptr != nullptr)) narrow the state to NonNull in the true branch
 
-use crate::parser::{Statement, Expression, Function};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, Statement};
 use std::collections::HashMap;
 
 /// Represents the null state of a pointer variable
@@ -63,7 +63,10 @@ impl NullStateTracker {
 
     /// Get the null state for a variable
     pub fn get_state(&self, var: &str) -> NullState {
-        self.states.get(var).copied().unwrap_or(NullState::MaybeNull)
+        self.states
+            .get(var)
+            .copied()
+            .unwrap_or(NullState::MaybeNull)
     }
 
     /// Enter a new scope (save current state)
@@ -197,7 +200,12 @@ fn analyze_statement_null_safety(
             check_expr_null_safety(expr, tracker, func_name, errors);
         }
 
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             // Check condition for null checks that narrow state
             let (narrowed_var, narrowed_to_nonnull) = check_null_narrowing(condition);
 
@@ -433,9 +441,7 @@ fn check_null_narrowing(condition: &Expression) -> (Option<String>, bool) {
 
         // Just a variable as condition: if (ptr) { ... }
         // This is equivalent to ptr != nullptr
-        Expression::Variable(name) => {
-            (Some(name.clone()), true)
-        }
+        Expression::Variable(name) => (Some(name.clone()), true),
 
         _ => (None, false),
     }
@@ -483,12 +489,12 @@ fn extract_var_name_from_expr(expr: &Expression) -> Option<String> {
 /// Check if a function is known to return non-null
 fn is_known_nonnull_function(name: &str) -> bool {
     // Functions that are known to return non-null (or throw on failure)
-    name.contains("make_unique") ||
-    name.contains("make_shared") ||
-    name.contains("make_box") ||
-    name.contains("make_arc") ||
-    name == "operator new" ||
-    name == "operator new[]"
+    name.contains("make_unique")
+        || name.contains("make_shared")
+        || name.contains("make_box")
+        || name.contains("make_arc")
+        || name == "operator new"
+        || name == "operator new[]"
 }
 
 #[cfg(test)]
@@ -497,11 +503,23 @@ mod tests {
 
     #[test]
     fn test_null_state_merge() {
-        assert_eq!(NullState::NonNull.merge(NullState::NonNull), NullState::NonNull);
+        assert_eq!(
+            NullState::NonNull.merge(NullState::NonNull),
+            NullState::NonNull
+        );
         assert_eq!(NullState::Null.merge(NullState::Null), NullState::Null);
-        assert_eq!(NullState::NonNull.merge(NullState::Null), NullState::MaybeNull);
-        assert_eq!(NullState::NonNull.merge(NullState::MaybeNull), NullState::MaybeNull);
-        assert_eq!(NullState::Null.merge(NullState::MaybeNull), NullState::MaybeNull);
+        assert_eq!(
+            NullState::NonNull.merge(NullState::Null),
+            NullState::MaybeNull
+        );
+        assert_eq!(
+            NullState::NonNull.merge(NullState::MaybeNull),
+            NullState::MaybeNull
+        );
+        assert_eq!(
+            NullState::Null.merge(NullState::MaybeNull),
+            NullState::MaybeNull
+        );
     }
 
     #[test]

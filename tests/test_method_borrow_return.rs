@@ -3,9 +3,9 @@
 // Case 2: &self -> &T (const method returning const ref) - double call should be OK
 // Case 3: &self -> &mut T (forbidden signature) - const method returning mutable ref is DANGEROUS
 
-use std::process::Command;
-use std::fs;
 use std::env;
+use std::fs;
+use std::process::Command;
 
 fn create_temp_file(name: &str, code: &str) -> std::path::PathBuf {
     let temp_dir = env::temp_dir();
@@ -241,10 +241,10 @@ void test_case3_dangerous() {
     // Either: detect the const_cast as unsafe, or detect the signature mismatch,
     // or detect two mutable borrows through what looks like shared borrows
     assert!(
-        output.contains("const_cast") ||
-        output.contains("unsafe") ||
-        output.contains("borrow") ||
-        output.contains("violation"),
+        output.contains("const_cast")
+            || output.contains("unsafe")
+            || output.contains("borrow")
+            || output.contains("violation"),
         "Case 3: Should detect forbidden signature or const_cast. Output: {}",
         output
     );

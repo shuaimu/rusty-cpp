@@ -3,9 +3,9 @@
 //! In @safe code, const should propagate through pointer members.
 //! If you have `const Outer*`, accessing `ptr` member should give const semantics.
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

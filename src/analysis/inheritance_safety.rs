@@ -15,10 +15,10 @@
 //! 2. Inherit the safety annotation (if not explicitly annotated)
 //! 3. Be validated for safety if marked @safe
 
-use std::collections::{HashMap, HashSet};
+use crate::debug_println;
 use crate::parser::ast_visitor::Class;
 use crate::parser::safety_annotations::SafetyMode;
-use crate::debug_println;
+use std::collections::{HashMap, HashSet};
 
 /// Validate that a class marked as @interface is truly a pure interface
 pub fn validate_interface(class: &Class) -> Vec<String> {
@@ -31,14 +31,10 @@ pub fn validate_interface(class: &Class) -> Vec<String> {
     debug_println!("INHERITANCE: Validating @interface '{}'", class.name);
 
     // Check 1: No data members (excluding static members)
-    let non_static_members: Vec<_> = class.members.iter()
-        .filter(|m| !m.is_static)
-        .collect();
+    let non_static_members: Vec<_> = class.members.iter().filter(|m| !m.is_static).collect();
 
     if !non_static_members.is_empty() {
-        let member_names: Vec<_> = non_static_members.iter()
-            .map(|m| m.name.as_str())
-            .collect();
+        let member_names: Vec<_> = non_static_members.iter().map(|m| m.name.as_str()).collect();
         errors.push(format!(
             "@interface '{}' cannot have data members: {:?}",
             class.name, member_names
@@ -83,10 +79,7 @@ pub fn validate_interface(class: &Class) -> Vec<String> {
 }
 
 /// Check that @interface classes only inherit from other @interfaces
-pub fn validate_interface_inheritance(
-    class: &Class,
-    interfaces: &HashSet<String>,
-) -> Vec<String> {
+pub fn validate_interface_inheritance(class: &Class, interfaces: &HashSet<String>) -> Vec<String> {
     let mut errors = Vec::new();
 
     if !class.is_interface {
@@ -127,7 +120,10 @@ pub fn check_safe_inheritance(
         return errors;
     }
 
-    debug_println!("INHERITANCE: Checking safe inheritance for class '{}'", class.name);
+    debug_println!(
+        "INHERITANCE: Checking safe inheritance for class '{}'",
+        class.name
+    );
 
     for base in &class.base_classes {
         // Strip template parameters for lookup
@@ -166,15 +162,21 @@ pub fn check_method_safety_contracts(
             None => continue, // Not an interface, skip
         };
 
-        debug_println!("INHERITANCE: Checking method safety contracts for '{}' implementing '{}'",
-            class.name, base_name);
+        debug_println!(
+            "INHERITANCE: Checking method safety contracts for '{}' implementing '{}'",
+            class.name,
+            base_name
+        );
 
         // For each method in the interface, find the implementation and check safety
         for interface_method in &interface.methods {
             // Skip destructors and constructors
             // A destructor starts with ~ or contains ::~
             // A constructor has the same name as the class (after stripping prefix)
-            let method_name_only = interface_method.name.split("::").last()
+            let method_name_only = interface_method
+                .name
+                .split("::")
+                .last()
                 .unwrap_or(&interface_method.name);
 
             if method_name_only.starts_with('~') || method_name_only == interface.name {
@@ -184,41 +186,53 @@ pub fn check_method_safety_contracts(
             // Find the implementation in the derived class
             // Match by method name (strip class prefix if present) AND parameter types
             // This correctly handles overloaded methods like __reg_to__(Server&, size_t) vs __reg_to__(Server&)
-            let interface_method_name = interface_method.name.split("::").last()
+            let interface_method_name = interface_method
+                .name
+                .split("::")
+                .last()
                 .unwrap_or(&interface_method.name);
 
             // Extract parameter types from interface method for matching
-            let interface_param_types: Vec<&str> = interface_method.parameters.iter()
+            let interface_param_types: Vec<&str> = interface_method
+                .parameters
+                .iter()
                 .map(|p| p.type_name.as_str())
                 .collect();
 
-            let impl_method = class.methods.iter()
-                .find(|m| {
-                    let impl_name = m.name.split("::").last().unwrap_or(&m.name);
-                    if impl_name != interface_method_name {
-                        return false;
-                    }
-                    // For overloaded methods, also check parameter count and types
-                    if m.parameters.len() != interface_method.parameters.len() {
-                        return false;
-                    }
-                    // Compare parameter types (normalize by stripping namespaces)
-                    m.parameters.iter().zip(interface_param_types.iter()).all(|(impl_param, iface_type)| {
+            let impl_method = class.methods.iter().find(|m| {
+                let impl_name = m.name.split("::").last().unwrap_or(&m.name);
+                if impl_name != interface_method_name {
+                    return false;
+                }
+                // For overloaded methods, also check parameter count and types
+                if m.parameters.len() != interface_method.parameters.len() {
+                    return false;
+                }
+                // Compare parameter types (normalize by stripping namespaces)
+                m.parameters.iter().zip(interface_param_types.iter()).all(
+                    |(impl_param, iface_type)| {
                         let impl_type = impl_param.type_name.as_str();
                         // Normalize types for comparison (strip leading namespace qualifiers)
                         let impl_type_base = impl_type.split("::").last().unwrap_or(impl_type);
                         let iface_type_base = iface_type.split("::").last().unwrap_or(iface_type);
                         impl_type_base == iface_type_base || impl_type == *iface_type
-                    })
-                });
+                    },
+                )
+            });
 
-            let Some(impl_method) = impl_method else { continue };
+            let Some(impl_method) = impl_method else {
+                continue;
+            };
 
-            debug_println!("INHERITANCE: Found implementation of '{}' in '{}'",
-                interface_method.name, class.name);
+            debug_println!(
+                "INHERITANCE: Found implementation of '{}' in '{}'",
+                interface_method.name,
+                class.name
+            );
 
             // Get interface method's safety (explicit or default to @unsafe)
-            let interface_safety = interface_method.safety_annotation
+            let interface_safety = interface_method
+                .safety_annotation
                 .unwrap_or(SafetyMode::Unsafe);
 
             // Check 1: If implementation has EXPLICIT annotation, it must match
@@ -242,7 +256,7 @@ pub fn check_method_safety_contracts(
             let effective_safety = if impl_method.has_explicit_safety_annotation {
                 impl_method.safety_annotation.unwrap_or(SafetyMode::Unsafe)
             } else {
-                interface_safety  // Inherited
+                interface_safety // Inherited
             };
 
             // Check 3: If effective safety is @safe, validate the method body
@@ -296,44 +310,87 @@ fn check_statement_safety(
 
     match stmt {
         Statement::ExpressionStatement { expr, .. } => {
-            let expr_errors = check_expression_safety(expr, method_name, class_name, interface_name);
+            let expr_errors =
+                check_expression_safety(expr, method_name, class_name, interface_name);
             errors.extend(expr_errors);
         }
         Statement::VariableDecl(_) => {
             // Variable declarations themselves are safe
         }
         Statement::Assignment { lhs, rhs, .. } => {
-            errors.extend(check_expression_safety(lhs, method_name, class_name, interface_name));
-            errors.extend(check_expression_safety(rhs, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                lhs,
+                method_name,
+                class_name,
+                interface_name,
+            ));
+            errors.extend(check_expression_safety(
+                rhs,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Statement::ReferenceBinding { target, .. } => {
-            errors.extend(check_expression_safety(target, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                target,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Statement::Return(Some(expr)) => {
-            let expr_errors = check_expression_safety(expr, method_name, class_name, interface_name);
+            let expr_errors =
+                check_expression_safety(expr, method_name, class_name, interface_name);
             errors.extend(expr_errors);
         }
         Statement::Return(None) => {}
         Statement::FunctionCall { args, .. } => {
             for arg in args {
-                errors.extend(check_expression_safety(arg, method_name, class_name, interface_name));
+                errors.extend(check_expression_safety(
+                    arg,
+                    method_name,
+                    class_name,
+                    interface_name,
+                ));
             }
         }
-        Statement::If { condition, then_branch, else_branch, .. } => {
-            let cond_errors = check_expression_safety(condition, method_name, class_name, interface_name);
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let cond_errors =
+                check_expression_safety(condition, method_name, class_name, interface_name);
             errors.extend(cond_errors);
             for s in then_branch {
-                errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+                errors.extend(check_statement_safety(
+                    s,
+                    method_name,
+                    class_name,
+                    interface_name,
+                ));
             }
             if let Some(else_stmts) = else_branch {
                 for s in else_stmts {
-                    errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+                    errors.extend(check_statement_safety(
+                        s,
+                        method_name,
+                        class_name,
+                        interface_name,
+                    ));
                 }
             }
         }
         Statement::Block(stmts) => {
             for s in stmts {
-                errors.extend(check_statement_safety(s, method_name, class_name, interface_name));
+                errors.extend(check_statement_safety(
+                    s,
+                    method_name,
+                    class_name,
+                    interface_name,
+                ));
             }
         }
         Statement::LambdaExpr { .. } => {
@@ -343,9 +400,12 @@ fn check_statement_safety(
             // Pack expansions are safe by themselves
         }
         // Scope and loop markers are not expressions
-        Statement::EnterScope | Statement::ExitScope |
-        Statement::EnterLoop | Statement::ExitLoop |
-        Statement::EnterUnsafe | Statement::ExitUnsafe => {}
+        Statement::EnterScope
+        | Statement::ExitScope
+        | Statement::EnterLoop
+        | Statement::ExitLoop
+        | Statement::EnterUnsafe
+        | Statement::ExitUnsafe => {}
     }
 
     errors
@@ -370,7 +430,12 @@ fn check_expression_safety(
                 class_name, method_name, strip_template_params(interface_name)
             ));
             // Also check inner expression
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::AddressOf(inner) => {
             // Taking address is unsafe
@@ -378,28 +443,63 @@ fn check_expression_safety(
                 "Method '{}::{}' violates @safe contract from interface '{}': address-of operator in @safe context",
                 class_name, method_name, strip_template_params(interface_name)
             ));
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::FunctionCall { args, .. } => {
             // Check arguments for unsafe operations
             for arg in args {
-                errors.extend(check_expression_safety(arg, method_name, class_name, interface_name));
+                errors.extend(check_expression_safety(
+                    arg,
+                    method_name,
+                    class_name,
+                    interface_name,
+                ));
             }
         }
         Expression::BinaryOp { left, right, .. } => {
-            errors.extend(check_expression_safety(left, method_name, class_name, interface_name));
-            errors.extend(check_expression_safety(right, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                left,
+                method_name,
+                class_name,
+                interface_name,
+            ));
+            errors.extend(check_expression_safety(
+                right,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::MemberAccess { object, .. } => {
-            errors.extend(check_expression_safety(object, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                object,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::Cast { inner, .. } => {
             // Cast operations could be unsafe depending on the cast type
             // For now, just check the inner expression
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::Move { inner, .. } => {
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::Lambda { .. } => {
             // Lambda captures are checked elsewhere
@@ -410,7 +510,12 @@ fn check_expression_safety(
                 "Method '{}::{}' violates @safe contract from interface '{}': 'new' operator in @safe context",
                 class_name, method_name, strip_template_params(interface_name)
             ));
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::Delete(inner) => {
             // delete expression is unsafe
@@ -418,7 +523,12 @@ fn check_expression_safety(
                 "Method '{}::{}' violates @safe contract from interface '{}': 'delete' operator in @safe context",
                 class_name, method_name, strip_template_params(interface_name)
             ));
-            errors.extend(check_expression_safety(inner, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                inner,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::PointerArithmetic { pointer, .. } => {
             // Pointer arithmetic is unsafe
@@ -426,17 +536,35 @@ fn check_expression_safety(
                 "Method '{}::{}' violates @safe contract from interface '{}': pointer arithmetic in @safe context",
                 class_name, method_name, strip_template_params(interface_name)
             ));
-            errors.extend(check_expression_safety(pointer, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                pointer,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         Expression::ArraySubscript { array, index } => {
             // Check both array and index for unsafe operations
-            errors.extend(check_expression_safety(array, method_name, class_name, interface_name));
-            errors.extend(check_expression_safety(index, method_name, class_name, interface_name));
+            errors.extend(check_expression_safety(
+                array,
+                method_name,
+                class_name,
+                interface_name,
+            ));
+            errors.extend(check_expression_safety(
+                index,
+                method_name,
+                class_name,
+                interface_name,
+            ));
         }
         // Variable references, literals, string literals, and nullptr are safe expressions
         // String literals have static lifetime and cannot dangle
         // Nullptr is a literal value (null check is done separately)
-        Expression::Variable(_) | Expression::Literal(_) | Expression::StringLiteral(_) | Expression::Nullptr => {}
+        Expression::Variable(_)
+        | Expression::Literal(_)
+        | Expression::StringLiteral(_)
+        | Expression::Nullptr => {}
     }
 
     errors
@@ -444,7 +572,8 @@ fn check_expression_safety(
 
 /// Build a set of interface class names from the parsed classes
 pub fn collect_interfaces(classes: &[Class]) -> HashSet<String> {
-    classes.iter()
+    classes
+        .iter()
         .filter(|c| c.is_interface)
         .map(|c| c.name.clone())
         .collect()
@@ -452,7 +581,8 @@ pub fn collect_interfaces(classes: &[Class]) -> HashSet<String> {
 
 /// Build a map of interface classes for method safety checking
 pub fn collect_interface_map(classes: &[Class]) -> HashMap<String, Class> {
-    classes.iter()
+    classes
+        .iter()
         .filter(|c| c.is_interface)
         .map(|c| (c.name.clone(), c.clone()))
         .collect()
@@ -466,8 +596,11 @@ pub fn check_inheritance_safety(classes: &[Class]) -> Vec<String> {
     let interfaces = collect_interfaces(classes);
     let interface_map = collect_interface_map(classes);
 
-    debug_println!("INHERITANCE: Found {} @interface classes: {:?}",
-        interfaces.len(), interfaces);
+    debug_println!(
+        "INHERITANCE: Found {} @interface classes: {:?}",
+        interfaces.len(),
+        interfaces
+    );
 
     // Step 2: Validate all @interface annotations
     for class in classes {
@@ -528,7 +661,7 @@ fn resolve_qualified_name(base_name: &str, derived_class_name: &str) -> String {
     // "myapp::Circle" -> "myapp::"
     // "myapp::inner::Circle" -> "myapp::inner::"
     if let Some(pos) = derived_class_name.rfind("::") {
-        let namespace_prefix = &derived_class_name[..=pos+1]; // Include "::"
+        let namespace_prefix = &derived_class_name[..=pos + 1]; // Include "::"
         format!("{}{}", namespace_prefix, base_name)
     } else {
         // Derived class has no namespace, so base stays unqualified
@@ -580,7 +713,10 @@ pub fn check_safe_class_copy_semantics(class: &Class) -> Vec<String> {
         return errors;
     }
 
-    debug_println!("COPY CHECK: Checking copy semantics for @safe class '{}'", class.name);
+    debug_println!(
+        "COPY CHECK: Checking copy semantics for @safe class '{}'",
+        class.name
+    );
 
     // Check for non-deleted copy constructor
     if class.has_copy_constructor && !class.copy_constructor_deleted {
@@ -676,20 +812,22 @@ mod tests {
     #[test]
     fn test_interface_with_data_member() {
         let mut interface = make_interface("IBadInterface");
-        interface.members.push(crate::parser::ast_visitor::Variable {
-            name: "data".to_string(),
-            type_name: "int".to_string(),
-            is_reference: false,
-            is_pointer: false,
-            is_const: false,
-            is_unique_ptr: false,
-            is_shared_ptr: false,
-            is_static: false,
-            is_mutable: false,
-            location: make_location(),
-            is_pack: false,
-            pack_element_type: None,
-        });
+        interface
+            .members
+            .push(crate::parser::ast_visitor::Variable {
+                name: "data".to_string(),
+                type_name: "int".to_string(),
+                is_reference: false,
+                is_pointer: false,
+                is_const: false,
+                is_unique_ptr: false,
+                is_shared_ptr: false,
+                is_static: false,
+                is_mutable: false,
+                location: make_location(),
+                is_pack: false,
+                pack_element_type: None,
+            });
 
         let errors = validate_interface(&interface);
         assert_eq!(errors.len(), 1);
@@ -742,7 +880,10 @@ mod tests {
         let interfaces: HashSet<String> = vec!["IDrawable".to_string()].into_iter().collect();
 
         let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
-        assert!(errors.is_empty(), "Safe inheritance from interface should be allowed");
+        assert!(
+            errors.is_empty(),
+            "Safe inheritance from interface should be allowed"
+        );
     }
 
     #[test]
@@ -792,10 +933,7 @@ mod tests {
     #[test]
     fn test_resolve_qualified_name_no_namespace() {
         // If derived class has no namespace, base stays unqualified
-        assert_eq!(
-            resolve_qualified_name("IDrawable", "Circle"),
-            "IDrawable"
-        );
+        assert_eq!(resolve_qualified_name("IDrawable", "Circle"), "IDrawable");
     }
 
     #[test]
@@ -803,28 +941,45 @@ mod tests {
         let interfaces: HashSet<String> = vec![
             "myapp::IDrawable".to_string(),
             "myapp::ISerializable".to_string(),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
 
         // Unqualified base resolved to same namespace -> matches
         assert!(is_interface_base("IDrawable", &interfaces, "myapp::Circle"));
-        assert!(is_interface_base("ISerializable", &interfaces, "myapp::Widget"));
+        assert!(is_interface_base(
+            "ISerializable",
+            &interfaces,
+            "myapp::Widget"
+        ));
 
         // Non-existent interface -> no match
-        assert!(!is_interface_base("NonExistent", &interfaces, "myapp::Circle"));
+        assert!(!is_interface_base(
+            "NonExistent",
+            &interfaces,
+            "myapp::Circle"
+        ));
     }
 
     #[test]
     fn test_is_interface_base_wrong_namespace_no_match() {
-        let interfaces: HashSet<String> = vec![
-            "myapp::IDrawable".to_string(),
-        ].into_iter().collect();
+        let interfaces: HashSet<String> =
+            vec!["myapp::IDrawable".to_string()].into_iter().collect();
 
         // Same unqualified name but different namespace context -> no match
         // "IDrawable" in "other::Circle" resolves to "other::IDrawable", not "myapp::IDrawable"
-        assert!(!is_interface_base("IDrawable", &interfaces, "other::Circle"));
+        assert!(!is_interface_base(
+            "IDrawable",
+            &interfaces,
+            "other::Circle"
+        ));
 
         // Explicitly qualified with wrong namespace -> no match
-        assert!(!is_interface_base("other::IDrawable", &interfaces, "myapp::Circle"));
+        assert!(!is_interface_base(
+            "other::IDrawable",
+            &interfaces,
+            "myapp::Circle"
+        ));
     }
 
     #[test]
@@ -836,10 +991,15 @@ mod tests {
         let mut derived = make_class("myapp::Circle", vec!["IDrawable".to_string()]);
         derived.safety_annotation = Some(SafetyMode::Safe);
 
-        let interfaces: HashSet<String> = vec!["myapp::IDrawable".to_string()].into_iter().collect();
+        let interfaces: HashSet<String> =
+            vec!["myapp::IDrawable".to_string()].into_iter().collect();
 
         let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
-        assert!(errors.is_empty(), "Safe inheritance from namespaced interface should be allowed. Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Safe inheritance from namespaced interface should be allowed. Errors: {:?}",
+            errors
+        );
     }
 
     #[test]
@@ -852,10 +1012,15 @@ mod tests {
         derived.safety_annotation = Some(SafetyMode::Safe);
 
         // Only myapp::IDrawable exists, not other::IDrawable
-        let interfaces: HashSet<String> = vec!["myapp::IDrawable".to_string()].into_iter().collect();
+        let interfaces: HashSet<String> =
+            vec!["myapp::IDrawable".to_string()].into_iter().collect();
 
         let errors = check_safe_inheritance(&derived, &interfaces, SafetyMode::Safe);
-        assert_eq!(errors.len(), 1, "Should fail: IDrawable resolves to other::IDrawable which is not an interface");
+        assert_eq!(
+            errors.len(),
+            1,
+            "Should fail: IDrawable resolves to other::IDrawable which is not an interface"
+        );
         assert!(errors[0].contains("not an @interface"));
     }
 
@@ -868,9 +1033,15 @@ mod tests {
         let interfaces: HashSet<String> = vec![
             "myapp::IDrawable".to_string(),
             "myapp::IExtendedDrawable".to_string(),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
 
         let errors = validate_interface_inheritance(&child_interface, &interfaces);
-        assert!(errors.is_empty(), "Interface inheritance from namespaced interface should be allowed. Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Interface inheritance from namespaced interface should be allowed. Errors: {:?}",
+            errors
+        );
     }
 }

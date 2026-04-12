@@ -9,7 +9,6 @@
 ///
 /// This follows Rust's approach where closures capturing by reference have
 /// strict lifetime requirements.
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;

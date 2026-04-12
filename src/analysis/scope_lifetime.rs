@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use crate::ir::{IrFunction, IrStatement, IrProgram, BasicBlock};
+use crate::ir::{BasicBlock, IrFunction, IrProgram, IrStatement};
 use crate::parser::HeaderCache;
 use crate::parser::annotations::{FunctionSignature, LifetimeAnnotation};
 use crate::parser::safety_annotations::SafetyContext;
-use petgraph::graph::NodeIndex;
 use petgraph::Direction;
+use petgraph::graph::NodeIndex;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Represents a scope in the program (function, block, loop, etc.)
 #[derive(Debug, Clone)]
@@ -75,25 +75,28 @@ impl ScopedLifetimeTracker {
             next_scope_id: 0,
         }
     }
-    
+
     /// Create a new scope
     pub fn push_scope(&mut self, kind: ScopeKind, parent: Option<usize>) -> usize {
         let id = self.next_scope_id;
         self.next_scope_id += 1;
-        
-        self.scopes.insert(id, Scope {
+
+        self.scopes.insert(
             id,
-            parent,
-            kind,
-            local_variables: HashSet::new(),
-            local_references: HashSet::new(),
-            entry_block: None,
-            exit_blocks: Vec::new(),
-        });
-        
+            Scope {
+                id,
+                parent,
+                kind,
+                local_variables: HashSet::new(),
+                local_references: HashSet::new(),
+                entry_block: None,
+                exit_blocks: Vec::new(),
+            },
+        );
+
         id
     }
-    
+
     /// Add a variable to the current scope
     pub fn declare_variable(&mut self, var: String, scope_id: usize) {
         if let Some(scope) = self.scopes.get_mut(&scope_id) {
@@ -101,7 +104,7 @@ impl ScopedLifetimeTracker {
             self.variable_scope.insert(var, scope_id);
         }
     }
-    
+
     /// Add a reference to the current scope
     pub fn declare_reference(&mut self, ref_name: String, scope_id: usize) {
         if let Some(scope) = self.scopes.get_mut(&scope_id) {
@@ -109,13 +112,13 @@ impl ScopedLifetimeTracker {
             self.variable_scope.insert(ref_name, scope_id);
         }
     }
-    
+
     /// Check if a lifetime outlives another considering scopes
     pub fn check_outlives(&self, longer: &str, shorter: &str) -> bool {
         // Get the scope ranges for both lifetimes
         let longer_range = self.lifetime_scopes.get(longer);
         let shorter_range = self.lifetime_scopes.get(shorter);
-        
+
         match (longer_range, shorter_range) {
             (Some((l_start, l_end)), Some((s_start, s_end))) => {
                 // longer outlives shorter if it starts before or at the same time
@@ -128,7 +131,7 @@ impl ScopedLifetimeTracker {
             }
         }
     }
-    
+
     /// Check if a variable is still alive in a given scope
     pub fn is_alive_in_scope(&self, var: &str, scope_id: usize) -> bool {
         if let Some(var_scope) = self.variable_scope.get(var) {
@@ -138,13 +141,13 @@ impl ScopedLifetimeTracker {
             false
         }
     }
-    
+
     /// Check if scope_a is an ancestor of scope_b
     fn is_ancestor_scope(&self, scope_a: usize, scope_b: usize) -> bool {
         if scope_a == scope_b {
             return true;
         }
-        
+
         let mut current = scope_b;
         while let Some(scope) = self.scopes.get(&current) {
             if let Some(parent) = scope.parent {
@@ -156,19 +159,19 @@ impl ScopedLifetimeTracker {
                 break;
             }
         }
-        
+
         false
     }
-    
+
     /// Add a lifetime constraint
     pub fn add_constraint(&mut self, constraint: LifetimeConstraint) {
         self.constraints.push(constraint);
     }
-    
+
     /// Validate all lifetime constraints
     pub fn validate_constraints(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        
+
         for constraint in &self.constraints {
             match &constraint.kind {
                 ConstraintKind::Outlives { longer, shorter } => {
@@ -203,7 +206,8 @@ impl ScopedLifetimeTracker {
                 }
                 ConstraintKind::MustLiveUntil { lifetime, scope_id } => {
                     if let Some((_, end_scope)) = self.lifetime_scopes.get(lifetime) {
-                        if !self.is_ancestor_scope(*end_scope, *scope_id) && *end_scope != *scope_id {
+                        if !self.is_ancestor_scope(*end_scope, *scope_id) && *end_scope != *scope_id
+                        {
                             errors.push(format!(
                                 "Lifetime '{}' must live until scope {} but ends at scope {} at {}",
                                 lifetime, scope_id, end_scope, constraint.location
@@ -214,7 +218,7 @@ impl ScopedLifetimeTracker {
                 _ => {}
             }
         }
-        
+
         errors
     }
 }
@@ -226,7 +230,7 @@ pub fn analyze_function_scopes(
 ) -> Result<Vec<String>, String> {
     let mut tracker = ScopedLifetimeTracker::new();
     let mut errors = Vec::new();
-    
+
     // Create function scope
     let func_scope = tracker.push_scope(ScopeKind::Function, None);
 
@@ -238,56 +242,61 @@ pub fn analyze_function_scopes(
     // Initialize function parameters
     for (name, var_info) in &function.variables {
         tracker.declare_variable(name.clone(), func_scope);
-        
+
         // If it's a reference, track its lifetime
         match &var_info.ty {
-            crate::ir::VariableType::Reference(_) |
-            crate::ir::VariableType::MutableReference(_) => {
+            crate::ir::VariableType::Reference(_)
+            | crate::ir::VariableType::MutableReference(_) => {
                 tracker.declare_reference(name.clone(), func_scope);
                 // Assign a lifetime based on the parameter position
                 let lifetime = format!("'param_{}", name);
-                tracker.lifetime_scopes.insert(lifetime, (func_scope, func_scope));
+                tracker
+                    .lifetime_scopes
+                    .insert(lifetime, (func_scope, func_scope));
             }
             _ => {}
         }
     }
-    
+
     // Analyze each block in the CFG
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
-    
+
     // Start with entry blocks
     for node in function.cfg.node_indices() {
-        if function.cfg.edges_directed(node, Direction::Incoming).count() == 0 {
+        if function
+            .cfg
+            .edges_directed(node, Direction::Incoming)
+            .count()
+            == 0
+        {
             queue.push_back((node, func_scope));
         }
     }
-    
+
     while let Some((node_idx, current_scope)) = queue.pop_front() {
         if visited.contains(&node_idx) {
             continue;
         }
         visited.insert(node_idx);
-        
+
         let block = &function.cfg[node_idx];
-        let block_errors = analyze_block(
-            block,
-            current_scope,
-            &mut tracker,
-            function,
-            header_cache,
-        )?;
+        let block_errors =
+            analyze_block(block, current_scope, &mut tracker, function, header_cache)?;
         errors.extend(block_errors);
-        
+
         // Queue successor blocks
-        for neighbor in function.cfg.neighbors_directed(node_idx, Direction::Outgoing) {
+        for neighbor in function
+            .cfg
+            .neighbors_directed(node_idx, Direction::Outgoing)
+        {
             queue.push_back((neighbor, current_scope));
         }
     }
-    
+
     // Validate all constraints
     errors.extend(tracker.validate_constraints());
-    
+
     Ok(errors)
 }
 
@@ -299,7 +308,7 @@ fn analyze_block(
     header_cache: &HeaderCache,
 ) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
-    
+
     for statement in &block.statements {
         match statement {
             IrStatement::Borrow { from, to, .. } => {
@@ -328,12 +337,12 @@ fn analyze_block(
                         },
                         location: format!("borrow of {} from {}", to, from),
                     });
-                    
+
                     // Track the new reference
                     tracker.declare_reference(to.clone(), scope_id);
                 }
             }
-            
+
             IrStatement::Return { value, .. } => {
                 if let Some(val) = value {
                     // Check for dangling references
@@ -343,10 +352,11 @@ fn analyze_block(
                         if *var_scope != 0 && !is_parameter(val, function) {
                             // Check if this is an OWNED local variable (not a reference alias)
                             if let Some(var_info) = function.variables.get(val) {
-                                if !var_info.is_static {  // Static variables are safe to return
+                                if !var_info.is_static {
+                                    // Static variables are safe to return
                                     match var_info.ty {
-                                        crate::ir::VariableType::Reference(_) |
-                                        crate::ir::VariableType::MutableReference(_) => {
+                                        crate::ir::VariableType::Reference(_)
+                                        | crate::ir::VariableType::MutableReference(_) => {
                                             // Variable is a reference alias - it's NOT a local object
                                             // The reference inherits the lifetime of what it was bound to
                                             // We rely on dependency tracking for these cases
@@ -367,8 +377,10 @@ fn analyze_block(
                     }
                 }
             }
-            
-            IrStatement::CallExpr { func, args, result, .. } => {
+
+            IrStatement::CallExpr {
+                func, args, result, ..
+            } => {
                 // Check function signature if available
                 if let Some(signature) = header_cache.get_signature(func) {
                     let call_errors = check_call_lifetimes(
@@ -382,11 +394,11 @@ fn analyze_block(
                     errors.extend(call_errors);
                 }
             }
-            
+
             _ => {}
         }
     }
-    
+
     Ok(errors)
 }
 
@@ -399,7 +411,7 @@ fn check_call_lifetimes(
     tracker: &mut ScopedLifetimeTracker,
 ) -> Vec<String> {
     let errors = Vec::new();
-    
+
     // Check lifetime bounds from signature
     for bound in &signature.lifetime_bounds {
         // For each bound like 'a: 'b, ensure the constraint is satisfied
@@ -412,7 +424,7 @@ fn check_call_lifetimes(
             location: format!("call to {}", func_name),
         });
     }
-    
+
     // Check return lifetime
     if let (Some(result_var), Some(return_lifetime)) = (result, &signature.return_lifetime) {
         match return_lifetime {
@@ -427,7 +439,7 @@ fn check_call_lifetimes(
             _ => {}
         }
     }
-    
+
     errors
 }
 
@@ -435,12 +447,13 @@ fn is_parameter(var_name: &str, function: &IrFunction) -> bool {
     // Check if this variable was declared as a parameter
     // In a real implementation, we'd track this properly
     // For now, use a heuristic
-    var_name.starts_with("param") || var_name.starts_with("arg") || 
-    (function.variables.get(var_name).map_or(false, |info| {
-        // If it's in the variables map but not initialized in the function body,
-        // it's likely a parameter
-        matches!(info.ownership, crate::ir::OwnershipState::Owned)
-    }))
+    var_name.starts_with("param")
+        || var_name.starts_with("arg")
+        || (function.variables.get(var_name).map_or(false, |info| {
+            // If it's in the variables map but not initialized in the function body,
+            // it's likely a parameter
+            matches!(info.ownership, crate::ir::OwnershipState::Owned)
+        }))
 }
 
 /// Check lifetimes for the entire program with scope tracking
@@ -462,11 +475,12 @@ fn is_system_header(file_path: &str) -> bool {
     }
 
     // STL and system library patterns (works for relative paths too)
-    if file_path.contains("/include/c++/") ||
-       file_path.contains("/bits/") ||
-       file_path.contains("/ext/") ||
-       file_path.contains("stl_") ||
-       file_path.contains("/lib/gcc/") {
+    if file_path.contains("/include/c++/")
+        || file_path.contains("/bits/")
+        || file_path.contains("/ext/")
+        || file_path.contains("stl_")
+        || file_path.contains("/lib/gcc/")
+    {
         return true;
     }
 
@@ -507,29 +521,29 @@ pub fn check_scoped_lifetimes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_scope_tracking() {
         let mut tracker = ScopedLifetimeTracker::new();
-        
+
         let func_scope = tracker.push_scope(ScopeKind::Function, None);
         let block_scope = tracker.push_scope(ScopeKind::Block, Some(func_scope));
-        
+
         tracker.declare_variable("x".to_string(), func_scope);
         tracker.declare_variable("y".to_string(), block_scope);
-        
+
         assert!(tracker.is_alive_in_scope("x", block_scope));
         assert!(tracker.is_alive_in_scope("y", block_scope));
         assert!(!tracker.is_alive_in_scope("y", func_scope));
     }
-    
+
     #[test]
     fn test_outlives_checking() {
         let mut tracker = ScopedLifetimeTracker::new();
-        
+
         tracker.lifetime_scopes.insert("'a".to_string(), (0, 2));
         tracker.lifetime_scopes.insert("'b".to_string(), (1, 2));
-        
+
         assert!(tracker.check_outlives("'a", "'b"));
         assert!(!tracker.check_outlives("'b", "'a"));
     }

@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_unsafe_by_default() {
@@ -12,22 +12,23 @@ void test() {
     *ptr2 = 100;  // Use after free - but should NOT be caught (unsafe by default)
 }
 "#;
-    
+
     fs::write("test_unsafe_default.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_default.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should NOT detect any violations (unsafe by default)
-    assert!(stdout.contains("no violations found") || stdout.contains("✓"),
-            "Should not check unsafe code by default. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("no violations found") || stdout.contains("✓"),
+        "Should not check unsafe code by default. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_unsafe_default.cpp");
 }
@@ -57,22 +58,23 @@ void test() {
 
 }  // namespace myapp
 "#;
-    
+
     fs::write("test_safe_namespace.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_safe_namespace.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect use-after-move with @safe annotation
-    assert!(stdout.contains("moved") || stdout.contains("violation"),
-            "Should detect errors with @safe namespace annotation. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("moved") || stdout.contains("violation"),
+        "Should detect errors with @safe namespace annotation. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_safe_namespace.cpp");
 }
@@ -107,22 +109,23 @@ void safe_func() {
     UniquePtr again = move(ptr);  // Error: use after move - should be caught
 }
 "#;
-    
+
     fs::write("test_safe_func.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_safe_func.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect error in safe_func but not unsafe_func
-    assert!(stdout.contains("moved") || stdout.contains("violation"),
-            "Should detect errors in @safe function. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("moved") || stdout.contains("violation"),
+        "Should detect errors in @safe function. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_safe_func.cpp");
 }
@@ -161,26 +164,30 @@ void safe_func() {
 
 }  // namespace myapp
 "#;
-    
+
     fs::write("test_unsafe_func.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_func.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect error in safe_func but not unsafe_func
-    assert!(stdout.contains("already mutably borrowed") || stdout.contains("violation"),
-            "Should detect errors in safe function but not @unsafe. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("already mutably borrowed") || stdout.contains("violation"),
+        "Should detect errors in safe function but not @unsafe. Output: {}",
+        stdout
+    );
+
     // Should NOT detect the move error in unsafe_func
-    assert!(!stdout.contains("again"),
-            "Should not check @unsafe function. Output: {}", stdout);
-    
+    assert!(
+        !stdout.contains("again"),
+        "Should not check @unsafe function. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_unsafe_func.cpp");
 }
@@ -203,22 +210,23 @@ void unchecked_function() {
     int& ref2 = value;  // Not caught - function is unsafe
 }
 "#;
-    
+
     fs::write("test_mixed.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_mixed.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect error only in checked_function
-    assert!(stdout.contains("already mutably borrowed") || stdout.contains("violation"),
-            "Should detect errors in @safe function. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("already mutably borrowed") || stdout.contains("violation"),
+        "Should detect errors in @safe function. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_mixed.cpp");
 }

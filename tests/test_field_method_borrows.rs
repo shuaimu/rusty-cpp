@@ -2,8 +2,8 @@
 // Phase 2: Check for conflicts when calling methods on borrowed fields
 // Phase 3: Track return value borrows from method calls on fields
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 /// Test that calling a method on a field that's borrowed causes an error
 #[test]
@@ -41,8 +41,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect that inner is borrowed
-    assert!(stdout.contains("borrowed") || stdout.contains("Cannot call method"),
-            "Should detect borrow conflict. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("borrowed") || stdout.contains("Cannot call method"),
+        "Should detect borrow conflict. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_field_borrow1.cpp");
@@ -81,8 +85,11 @@ void test() {
 
     // Should NOT detect borrow conflict between consecutive calls
     // (May have other errors like unsafe function calls, but not borrow conflicts)
-    assert!(!stdout.contains("field is borrowed"),
-            "Should NOT detect borrow conflict for consecutive calls. Output: {}", stdout);
+    assert!(
+        !stdout.contains("field is borrowed"),
+        "Should NOT detect borrow conflict for consecutive calls. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_field_borrow2.cpp");
@@ -124,8 +131,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect borrow conflict
-    assert!(stdout.contains("borrowed") || stdout.contains("Cannot call method"),
-            "Should detect borrow conflict. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("borrowed") || stdout.contains("Cannot call method"),
+        "Should detect borrow conflict. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_field_borrow3.cpp");
@@ -166,8 +177,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect borrow conflict (borrow ended with scope)
-    assert!(!stdout.contains("field is borrowed"),
-            "Should NOT detect borrow conflict after scope exit. Output: {}", stdout);
+    assert!(
+        !stdout.contains("field is borrowed"),
+        "Should NOT detect borrow conflict after scope exit. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_field_borrow4.cpp");
@@ -213,8 +227,12 @@ void test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Should detect borrow conflict on nested field
-    assert!(stdout.contains("borrowed") || stdout.contains("Cannot call method"),
-            "Should detect borrow conflict on nested field. Output: {}\nError: {}", stdout, stderr);
+    assert!(
+        stdout.contains("borrowed") || stdout.contains("Cannot call method"),
+        "Should detect borrow conflict on nested field. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
 
     // Clean up
     let _ = fs::remove_file("test_field_borrow5.cpp");

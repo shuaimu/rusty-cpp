@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_std_move_basic() {
@@ -17,21 +17,25 @@ void test() {
     *ptr = 100;
 }
 "#;
-    
+
     fs::write("test_move_basic.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_move_basic.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Should detect use after move
-    assert!(stdout.contains("Use after move") || stderr.contains("Use after move"),
-            "Should detect use after move. Output: {}\nError: {}", stdout, stderr);
-    
+    assert!(
+        stdout.contains("Use after move") || stderr.contains("Use after move"),
+        "Should detect use after move. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
+
     // Clean up
     let _ = fs::remove_file("test_move_basic.cpp");
 }
@@ -55,22 +59,28 @@ void test() {
     }
 }
 "#;
-    
+
     fs::write("test_move_call.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_move_call.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Should detect use after move
-    assert!(stdout.contains("Use after move") || stdout.contains("has been moved") || 
-            stderr.contains("Use after move") || stderr.contains("has been moved"),
-            "Should detect use after move in function call. Output: {}\nError: {}", stdout, stderr);
-    
+    assert!(
+        stdout.contains("Use after move")
+            || stdout.contains("has been moved")
+            || stderr.contains("Use after move")
+            || stderr.contains("has been moved"),
+        "Should detect use after move in function call. Output: {}\nError: {}",
+        stdout,
+        stderr
+    );
+
     // Clean up
     let _ = fs::remove_file("test_move_call.cpp");
 }
@@ -92,21 +102,24 @@ void test() {
     *ptr = 200;
 }
 "#;
-    
+
     fs::write("test_move_reassign.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_move_reassign.cpp"])
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // This is a limitation - we might incorrectly flag the last use
     // For now, we just check that the tool runs without crashing
-    assert!(output.status.code().is_some(), 
-            "Tool should complete. Output: {}", stdout);
-    
+    assert!(
+        output.status.code().is_some(),
+        "Tool should complete. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_move_reassign.cpp");
 }

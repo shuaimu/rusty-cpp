@@ -1,7 +1,6 @@
 /// Test to verify if STL lifetime annotations are actually enforced
 ///
 /// This tests whether the iterator invalidation detection actually works.
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -48,9 +47,9 @@ void test() {
 
     // Check if we get a borrow/lifetime violation (not a parse error!)
     // Must NOT be a fatal error or file not found error
-    let has_borrow_violation = (output.contains("violation") || output.contains("borrow")) &&
-                               !output.contains("Fatal error") &&
-                               !output.contains("file not found");
+    let has_borrow_violation = (output.contains("violation") || output.contains("borrow"))
+        && !output.contains("Fatal error")
+        && !output.contains("file not found");
 
     if has_borrow_violation {
         println!("✅ STL annotations ARE enforced (qualified names)");
@@ -87,9 +86,9 @@ void test() {
     println!("{}", output);
     println!("======================================================");
 
-    let has_borrow_violation = (output.contains("violation") || output.contains("borrow")) &&
-                               !output.contains("Fatal error") &&
-                               !output.contains("file not found");
+    let has_borrow_violation = (output.contains("violation") || output.contains("borrow"))
+        && !output.contains("Fatal error")
+        && !output.contains("file not found");
 
     if has_borrow_violation {
         println!("✅ STL annotations ARE enforced with 'using namespace std'");

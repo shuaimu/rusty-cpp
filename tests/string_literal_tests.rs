@@ -44,7 +44,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "String literal passed directly should be safe. Output: {}", output
+        "String literal passed directly should be safe. Output: {}",
+        output
     );
 }
 
@@ -62,7 +63,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "Multiple string literals should be safe. Output: {}", output
+        "Multiple string literals should be safe. Output: {}",
+        output
     );
 }
 
@@ -77,7 +79,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("Cannot declare 'ptr' with type"),
-        "char* variable declaration should be flagged. Output: {}", output
+        "char* variable declaration should be flagged. Output: {}",
+        output
     );
 }
 
@@ -99,7 +102,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "char* in @unsafe block should be OK. Output: {}", output
+        "char* in @unsafe block should be OK. Output: {}",
+        output
     );
 }
 
@@ -124,7 +128,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "Safe wrapper pattern should work. Output: {}", output
+        "Safe wrapper pattern should work. Output: {}",
+        output
     );
 }
 
@@ -139,7 +144,8 @@ void test() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("Cannot declare 'wide' with type"),
-        "wchar_t* variable declaration should be flagged. Output: {}", output
+        "wchar_t* variable declaration should be flagged. Output: {}",
+        output
     );
 }
 
@@ -154,6 +160,7 @@ void unsafe_function() {
     let (_, output) = run_checker(code);
     assert!(
         output.contains("no violations found"),
-        "char* in @unsafe function should be OK. Output: {}", output
+        "char* in @unsafe function should be OK. Output: {}",
+        output
     );
 }

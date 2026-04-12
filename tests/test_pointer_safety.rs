@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_pointer_dereference_in_safe_function() {
@@ -12,22 +12,23 @@ void test() {
     int y = *ptr;  // ERROR: pointer dereference requires unsafe
 }
 "#;
-    
+
     fs::write("test_pointer_deref.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_pointer_deref.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect unsafe pointer operation
-    assert!(stdout.contains("pointer") && stdout.contains("dereference"),
-            "Should detect pointer dereference as unsafe. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("pointer") && stdout.contains("dereference"),
+        "Should detect pointer dereference as unsafe. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_pointer_deref.cpp");
 }
@@ -42,22 +43,23 @@ void test() {
     int* ptr = &x;  // ERROR: address-of requires unsafe
 }
 "#;
-    
+
     fs::write("test_address_of.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_address_of.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect unsafe pointer operation
-    assert!(stdout.contains("pointer") && stdout.contains("address-of"),
-            "Should detect address-of as unsafe. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("pointer") && stdout.contains("address-of"),
+        "Should detect address-of as unsafe. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_address_of.cpp");
 }
@@ -74,22 +76,23 @@ void test() {
     *ptr = 100;     // OK: function is unsafe
 }
 "#;
-    
+
     fs::write("test_unsafe_pointers.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_unsafe_pointers.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should NOT detect any violations (unsafe function is not checked)
-    assert!(!stdout.contains("violation") || stdout.contains("✓"),
-            "Should not check unsafe functions. Output: {}", stdout);
-    
+    assert!(
+        !stdout.contains("violation") || stdout.contains("✓"),
+        "Should not check unsafe functions. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_unsafe_pointers.cpp");
 }
@@ -106,22 +109,23 @@ void test() {
     const int& cref = x;  // OK: const reference is safe
 }
 "#;
-    
+
     fs::write("test_references_safe.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_references_safe.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should NOT detect pointer violations for references
-    assert!(!stdout.contains("pointer") || stdout.contains("✓"),
-            "References should be safe. Output: {}", stdout);
-    
+    assert!(
+        !stdout.contains("pointer") || stdout.contains("✓"),
+        "References should be safe. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_references_safe.cpp");
 }
@@ -139,22 +143,23 @@ namespace myapp {
     }
 }
 "#;
-    
+
     fs::write("test_namespace_pointers.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_namespace_pointers.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect unsafe pointer operations
-    assert!(stdout.contains("pointer") && stdout.contains("violation"),
-            "Should detect pointer operations in safe namespace. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("pointer") && stdout.contains("violation"),
+        "Should detect pointer operations in safe namespace. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_namespace_pointers.cpp");
 }
@@ -176,24 +181,28 @@ void unsafe_func() {
     int y = *ptr;   // OK: pointer in unsafe function
 }
 "#;
-    
+
     fs::write("test_mixed_pointers.cpp", test_code).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", "test_mixed_pointers.cpp"])
-        
-        
         .output()
         .expect("Failed to run borrow checker");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Should detect violation only in safe_func
-    assert!(stdout.contains("safe_func") && stdout.contains("pointer"),
-            "Should detect pointer in safe_func. Output: {}", stdout);
-    assert!(!stdout.contains("unsafe_func") || !stdout.contains("unsafe_func.*pointer"),
-            "Should not report pointer errors in unsafe_func. Output: {}", stdout);
-    
+    assert!(
+        stdout.contains("safe_func") && stdout.contains("pointer"),
+        "Should detect pointer in safe_func. Output: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("unsafe_func") || !stdout.contains("unsafe_func.*pointer"),
+        "Should not report pointer errors in unsafe_func. Output: {}",
+        stdout
+    );
+
     // Clean up
     let _ = fs::remove_file("test_mixed_pointers.cpp");
 }
@@ -234,12 +243,18 @@ int test_unary_plus(int v) {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect any violations - these are not pointer operations
-    assert!(stdout.contains("no violations") || stdout.contains("✓"),
-            "Non-pointer unary operators should be safe. Output: {}", stdout);
+    assert!(
+        stdout.contains("no violations") || stdout.contains("✓"),
+        "Non-pointer unary operators should be safe. Output: {}",
+        stdout
+    );
 
     // Make sure we're not seeing false positives for address-of
-    assert!(!stdout.contains("address-of"),
-            "Should not flag non-pointer unary operators as address-of. Output: {}", stdout);
+    assert!(
+        !stdout.contains("address-of"),
+        "Should not flag non-pointer unary operators as address-of. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_unary_non_pointer.cpp");
@@ -269,8 +284,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect null pointer
-    assert!(stdout.contains("null") && stdout.contains("pointer"),
-            "Should detect nullptr initialization. Output: {}", stdout);
+    assert!(
+        stdout.contains("null") && stdout.contains("pointer"),
+        "Should detect nullptr initialization. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_init.cpp");
@@ -296,9 +314,11 @@ void test(int* p) {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect null pointer assignment
-    assert!(stdout.contains("null") && stdout.contains("assignment") ||
-            stdout.contains("Null pointer"),
-            "Should detect nullptr assignment. Output: {}", stdout);
+    assert!(
+        stdout.contains("null") && stdout.contains("assignment") || stdout.contains("Null pointer"),
+        "Should detect nullptr assignment. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_assign.cpp");
@@ -325,9 +345,12 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect null pointer as argument
-    assert!(stdout.contains("null") && stdout.contains("argument") ||
-            stdout.contains("Null pointer passed"),
-            "Should detect nullptr as function argument. Output: {}", stdout);
+    assert!(
+        stdout.contains("null") && stdout.contains("argument")
+            || stdout.contains("Null pointer passed"),
+        "Should detect nullptr as function argument. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_arg.cpp");
@@ -353,9 +376,12 @@ int* test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect null pointer return
-    assert!(stdout.contains("null") && stdout.contains("return") ||
-            stdout.contains("Cannot return nullptr"),
-            "Should detect nullptr return. Output: {}", stdout);
+    assert!(
+        stdout.contains("null") && stdout.contains("return")
+            || stdout.contains("Cannot return nullptr"),
+        "Should detect nullptr return. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_return.cpp");
@@ -381,8 +407,11 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should detect uninitialized pointer
-    assert!(stdout.contains("uninitialized") || stdout.contains("Uninitialized"),
-            "Should detect uninitialized pointer. Output: {}", stdout);
+    assert!(
+        stdout.contains("uninitialized") || stdout.contains("Uninitialized"),
+        "Should detect uninitialized pointer. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_uninit_ptr.cpp");
@@ -409,8 +438,13 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect null pointer violations in unsafe function
-    assert!(!stdout.contains("null pointer") || stdout.contains("no violations") || stdout.contains("✓"),
-            "Should allow nullptr in unsafe functions. Output: {}", stdout);
+    assert!(
+        !stdout.contains("null pointer")
+            || stdout.contains("no violations")
+            || stdout.contains("✓"),
+        "Should allow nullptr in unsafe functions. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_unsafe_func.cpp");
@@ -439,8 +473,13 @@ void test() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should NOT detect null pointer violations in unsafe block
-    assert!(!stdout.contains("null pointer") || stdout.contains("no violations") || stdout.contains("✓"),
-            "Should allow nullptr in unsafe blocks. Output: {}", stdout);
+    assert!(
+        !stdout.contains("null pointer")
+            || stdout.contains("no violations")
+            || stdout.contains("✓"),
+        "Should allow nullptr in unsafe blocks. Output: {}",
+        stdout
+    );
 
     // Clean up
     let _ = fs::remove_file("test_nullptr_unsafe_block.cpp");

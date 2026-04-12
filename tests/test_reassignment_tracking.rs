@@ -20,8 +20,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -45,7 +44,8 @@ fn compile_and_check(source: &str) -> (bool, String) {
     // Replace relative include path with absolute path
     let project_root = get_project_root();
     let include_directive = format!("#include \"{}/include/rusty/box.hpp\"", project_root);
-    let source_with_abs_path = source.replace("#include \"include/rusty/box.hpp\"", &include_directive);
+    let source_with_abs_path =
+        source.replace("#include \"include/rusty/box.hpp\"", &include_directive);
 
     let temp_file = create_temp_cpp_file(&source_with_abs_path);
     let (success, output) = run_analyzer(temp_file.path());
@@ -103,11 +103,7 @@ int main() { return 0; }
 "#;
 
     let (success, output) = compile_and_check(source);
-    assert!(
-        success,
-        "Expected success but got error: {}",
-        output
-    );
+    assert!(success, "Expected success but got error: {}", output);
 }
 
 #[test]
@@ -134,11 +130,7 @@ int main() { return 0; }
 "#;
 
     let (success, output) = compile_and_check(source);
-    assert!(
-        success,
-        "Expected success but got error: {}",
-        output
-    );
+    assert!(success, "Expected success but got error: {}", output);
 }
 
 #[test]
@@ -244,11 +236,7 @@ int main() { return 0; }
 "#;
 
     let (success, output) = compile_and_check(source);
-    assert!(
-        success,
-        "Expected success but got error: {}",
-        output
-    );
+    assert!(success, "Expected success but got error: {}", output);
 }
 
 #[test]

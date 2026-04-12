@@ -64,6 +64,9 @@ jobs:
             ${{ runner.temp }}/rusty-parity-matrix/arrayvec/**
             ${{ runner.temp }}/rusty-parity-matrix/semver/**
             ${{ runner.temp }}/rusty-parity-matrix/bitflags/**
+            ${{ runner.temp }}/rusty-parity-matrix/smallvec/**
+            ${{ runner.temp }}/rusty-parity-matrix/itertools/**
+            ${{ runner.temp }}/rusty-parity-matrix/once_cell/**
           if-no-files-found: warn
           retention-days: 14
 
@@ -88,5 +91,29 @@ jobs:
           name: cpp-module-interop-artifacts-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/rusty-cpp-module-interop/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  cpp-std-complex-compile:
+    runs-on: self-hosted
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run cpp std complex compile check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./tests/transpile_tests/run_cpp_std_complex_compile.sh \
+            --work-dir "${RUNNER_TEMP}/rusty-cpp-std-complex"
+
+      - name: Upload cpp std complex artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-std-complex-artifacts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/rusty-cpp-std-complex/**
           if-no-files-found: warn
           retention-days: 14

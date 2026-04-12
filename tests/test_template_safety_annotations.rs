@@ -1,6 +1,5 @@
 /// Test that safety annotations work correctly for template functions
 /// This tests the specific bug: template functions in headers not being recognized
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -23,8 +22,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -86,7 +84,13 @@ void safe_caller() {
     let include_arg = format!("-I{}", temp_dir.path().display());
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", source_path.to_str().unwrap(), &include_arg]);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        source_path.to_str().unwrap(),
+        &include_arg,
+    ]);
 
     if cfg!(target_os = "macos") {
         cmd.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
@@ -105,7 +109,9 @@ void safe_caller() {
     // Should FAIL - but the key is the error message says "non-safe" not "undeclared"
     // This verifies the @unsafe annotation in header was recognized
     assert!(
-        !output.status.success() || full_output.contains("non-safe") || full_output.contains("@unsafe"),
+        !output.status.success()
+            || full_output.contains("non-safe")
+            || full_output.contains("@unsafe"),
         "Template function marked @unsafe should require @unsafe block to call from @safe. Output: {}",
         full_output
     );
@@ -173,7 +179,13 @@ std::shared_ptr<IntEvent> SendAppendEntries() {
     let include_arg = format!("-I{}", temp_dir.path().display());
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", source_path.to_str().unwrap(), &include_arg]);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        source_path.to_str().unwrap(),
+        &include_arg,
+    ]);
 
     if cfg!(target_os = "macos") {
         cmd.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");
@@ -250,7 +262,13 @@ void safe_caller() {
     let include_arg = format!("-I{}", temp_dir.path().display());
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", source_path.to_str().unwrap(), &include_arg]);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        source_path.to_str().unwrap(),
+        &include_arg,
+    ]);
 
     if cfg!(target_os = "macos") {
         cmd.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");

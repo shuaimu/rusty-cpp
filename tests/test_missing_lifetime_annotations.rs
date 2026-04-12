@@ -1,15 +1,14 @@
+use std::fs;
+use std::io::Write;
 /// Tests for detecting missing lifetime annotations in safe functions
 ///
 /// These tests verify that:
 /// 1. Safe functions returning references must have lifetime annotations
 /// 2. Safe functions calling other safe functions validate lifetime constraints
 /// 3. Dangling references are detected even without explicit borrows
-
 use std::path::Path;
 use std::process::Command;
 use tempfile::{NamedTempFile, TempDir};
-use std::io::Write;
-use std::fs;
 
 fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     let z3_header = if cfg!(target_os = "macos") {
@@ -60,9 +59,15 @@ int main() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(!success, "Should fail - safe function returning reference without lifetime annotation");
-    assert!(output.contains("lifetime") || output.contains("annotation"),
-            "Should report missing lifetime annotation. Output: {}", output);
+    assert!(
+        !success,
+        "Should fail - safe function returning reference without lifetime annotation"
+    );
+    assert!(
+        output.contains("lifetime") || output.contains("annotation"),
+        "Should report missing lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -82,9 +87,15 @@ int main() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(!success, "Should fail - returning reference to local variable");
-    assert!(output.contains("dangling") || output.contains("local"),
-            "Should detect dangling reference. Output: {}", output);
+    assert!(
+        !success,
+        "Should fail - returning reference to local variable"
+    );
+    assert!(
+        output.contains("dangling") || output.contains("local"),
+        "Should detect dangling reference. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -130,9 +141,15 @@ int main() {
 
     let (success, output) = run_analyzer(&cpp_path);
 
-    assert!(!success, "Should fail - safe function calling safe function without lifetime annotation");
-    assert!(output.contains("lifetime") || output.contains("annotation"),
-            "Should require lifetime annotation. Output: {}", output);
+    assert!(
+        !success,
+        "Should fail - safe function calling safe function without lifetime annotation"
+    );
+    assert!(
+        output.contains("lifetime") || output.contains("annotation"),
+        "Should require lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -179,7 +196,11 @@ int main() {
 
     let (success, output) = run_analyzer(&cpp_path);
 
-    assert!(success, "Should pass - proper lifetime annotation provided. Output: {}", output);
+    assert!(
+        success,
+        "Should pass - proper lifetime annotation provided. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -226,9 +247,15 @@ int main() {
 
     let (success, output) = run_analyzer(&cpp_path);
 
-    assert!(!success, "Should fail - implementation returns dangling reference");
-    assert!(output.contains("dangling") || output.contains("local"),
-            "Should detect implementation violates lifetime contract. Output: {}", output);
+    assert!(
+        !success,
+        "Should fail - implementation returns dangling reference"
+    );
+    assert!(
+        output.contains("dangling") || output.contains("local"),
+        "Should detect implementation violates lifetime contract. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -280,8 +307,11 @@ int main() {
     let (success, output) = run_analyzer(&cpp_path);
 
     assert!(!success, "Should fail - lifetime constraint violated");
-    assert!(output.contains("lifetime") || output.contains("constraint"),
-            "Should detect lifetime constraint violation. Output: {}", output);
+    assert!(
+        output.contains("lifetime") || output.contains("constraint"),
+        "Should detect lifetime constraint violation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -301,8 +331,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     assert!(!success, "Should fail - returning reference to temporary");
-    assert!(output.contains("temporary") || output.contains("dangling"),
-            "Should detect reference to temporary. Output: {}", output);
+    assert!(
+        output.contains("temporary") || output.contains("dangling"),
+        "Should detect reference to temporary. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -322,7 +355,11 @@ int main() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Should pass - owned return doesn't need lifetime annotation. Output: {}", output);
+    assert!(
+        success,
+        "Should pass - owned return doesn't need lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -417,7 +454,11 @@ int main() {
 
     let (success, output) = run_analyzer(&cpp_path);
 
-    assert!(success, "Should pass - correctly annotated parameter return. Output: {}", output);
+    assert!(
+        success,
+        "Should pass - correctly annotated parameter return. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -442,8 +483,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     assert!(!success, "Should fail - one path returns local variable");
-    assert!(output.contains("local") || output.contains("dangling") || output.contains("annotation"),
-            "Should detect issue with local return. Output: {}", output);
+    assert!(
+        output.contains("local") || output.contains("dangling") || output.contains("annotation"),
+        "Should detect issue with local return. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -467,9 +511,15 @@ int main() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(!success, "Should fail - functions returning references need annotations");
-    assert!(output.contains("annotation"),
-            "Should require lifetime annotations. Output: {}", output);
+    assert!(
+        !success,
+        "Should fail - functions returning references need annotations"
+    );
+    assert!(
+        output.contains("annotation"),
+        "Should require lifetime annotations. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -493,8 +543,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     // This should require annotation even though it's returning a field
-    assert!(!success || output.contains("annotation"),
-            "Should require lifetime annotation for field reference. Output: {}", output);
+    assert!(
+        !success || output.contains("annotation"),
+        "Should require lifetime annotation for field reference. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -522,8 +575,11 @@ int main() {
 
     assert!(!success, "Should fail - safe function returns local");
     // Should only report error for the safe function, not unsafe
-    assert!(output.contains("safe_return_local") || output.contains("annotation"),
-            "Should detect error in safe function. Output: {}", output);
+    assert!(
+        output.contains("safe_return_local") || output.contains("annotation"),
+        "Should detect error in safe function. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -543,8 +599,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     // Should require annotation for reference return
-    assert!(!success || output.contains("annotation"),
-            "Should require lifetime annotation. Output: {}", output);
+    assert!(
+        !success || output.contains("annotation"),
+        "Should require lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -563,7 +622,11 @@ int main() {
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Should pass - void return doesn't need annotation. Output: {}", output);
+    assert!(
+        success,
+        "Should pass - void return doesn't need annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -584,8 +647,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     // Should require annotation since we can't distinguish static from local easily
-    assert!(!success || output.contains("annotation"),
-            "Should require lifetime annotation. Output: {}", output);
+    assert!(
+        !success || output.contains("annotation"),
+        "Should require lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -607,8 +673,11 @@ int main() {
     let (success, output) = run_analyzer(temp_file.path());
 
     // Should require annotation
-    assert!(!success || output.contains("annotation"),
-            "Should require lifetime annotation. Output: {}", output);
+    assert!(
+        !success || output.contains("annotation"),
+        "Should require lifetime annotation. Output: {}",
+        output
+    );
 }
 
 #[test]
@@ -656,5 +725,9 @@ int main() {
 
     let (success, output) = run_analyzer(&cpp_path);
 
-    assert!(success, "Should pass - both overloads properly annotated. Output: {}", output);
+    assert!(
+        success,
+        "Should pass - both overloads properly annotated. Output: {}",
+        output
+    );
 }

@@ -1,6 +1,6 @@
 use rusty_cpp::analysis::this_tracking::ThisPointerTracker;
-use rusty_cpp::parser::MethodQualifier;
 use rusty_cpp::ir::BorrowKind;
+use rusty_cpp::parser::MethodQualifier;
 
 #[test]
 fn test_const_method_restrictions() {
@@ -16,10 +16,18 @@ fn test_const_method_restrictions() {
     assert!(tracker.can_move_member("field").is_err());
 
     // Can borrow immutably
-    assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_ok());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Immutable)
+            .is_ok()
+    );
 
     // Cannot borrow mutably
-    assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_err());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Mutable)
+            .is_err()
+    );
 }
 
 #[test]
@@ -34,10 +42,19 @@ fn test_nonconst_method_restrictions() {
 
     // CANNOT move (key restriction!)
     assert!(tracker.can_move_member("field").is_err());
-    assert!(tracker.can_move_member("field").unwrap_err().contains("&mut self"));
+    assert!(
+        tracker
+            .can_move_member("field")
+            .unwrap_err()
+            .contains("&mut self")
+    );
 
     // Can borrow mutably
-    assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_ok());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Mutable)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -54,7 +71,11 @@ fn test_rvalue_method_permissions() {
     assert!(tracker.can_move_member("field").is_ok());
 
     // Can borrow mutably
-    assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_ok());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Mutable)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -74,7 +95,11 @@ fn test_move_tracking() {
     assert!(tracker.can_move_member("field").is_err());
 
     // Cannot borrow after move
-    assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_err());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Immutable)
+            .is_err()
+    );
 }
 
 #[test]
@@ -85,12 +110,24 @@ fn test_borrow_conflicts() {
     tracker.mark_field_borrowed("field".to_string(), BorrowKind::Mutable);
 
     // Cannot create another borrow while mutably borrowed
-    assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_err());
-    assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_err());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Immutable)
+            .is_err()
+    );
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Mutable)
+            .is_err()
+    );
 
     // A fresh tracker can borrow (simulating scope exit)
     let fresh_tracker = ThisPointerTracker::new(Some(MethodQualifier::NonConst));
-    assert!(fresh_tracker.can_borrow_member("field", BorrowKind::Immutable).is_ok());
+    assert!(
+        fresh_tracker
+            .can_borrow_member("field", BorrowKind::Immutable)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -101,8 +138,16 @@ fn test_multiple_immutable_borrows() {
     tracker.mark_field_borrowed("field".to_string(), BorrowKind::Immutable);
 
     // Can create another immutable borrow
-    assert!(tracker.can_borrow_member("field", BorrowKind::Immutable).is_ok());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Immutable)
+            .is_ok()
+    );
 
     // Cannot create mutable borrow
-    assert!(tracker.can_borrow_member("field", BorrowKind::Mutable).is_err());
+    assert!(
+        tracker
+            .can_borrow_member("field", BorrowKind::Mutable)
+            .is_err()
+    );
 }

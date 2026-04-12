@@ -5,9 +5,9 @@
 //! - Relational comparison (<, >, <=, >=) requires same allocation
 //! - Equality comparison (==, !=) is allowed between any pointers
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

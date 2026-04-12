@@ -1,8 +1,8 @@
+use std::env;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use tempfile::NamedTempFile;
-use std::io::Write;
-use std::env;
 
 fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     // Set Z3 header path based on platform
@@ -23,8 +23,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -57,9 +56,21 @@ public:
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
 
-    assert!(output.contains("Mutable field"), "Error should mention mutable field, got: {}", output);
-    assert!(output.contains("count"), "Error should mention field name, got: {}", output);
-    assert!(output.contains("UnsafeCell"), "Error should suggest UnsafeCell, got: {}", output);
+    assert!(
+        output.contains("Mutable field"),
+        "Error should mention mutable field, got: {}",
+        output
+    );
+    assert!(
+        output.contains("count"),
+        "Error should mention field name, got: {}",
+        output
+    );
+    assert!(
+        output.contains("UnsafeCell"),
+        "Error should suggest UnsafeCell, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -78,8 +89,16 @@ public:
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Analysis should succeed without errors, got: {}", output);
-    assert!(output.contains("no violations"), "Should have no violations for undeclared class, got: {}", output);
+    assert!(
+        success,
+        "Analysis should succeed without errors, got: {}",
+        output
+    );
+    assert!(
+        output.contains("no violations"),
+        "Should have no violations for undeclared class, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -101,8 +120,16 @@ public:
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
 
-    assert!(output.contains("hits"), "Should report error for 'hits' field, got: {}", output);
-    assert!(output.contains("misses"), "Should report error for 'misses' field, got: {}", output);
+    assert!(
+        output.contains("hits"),
+        "Should report error for 'hits' field, got: {}",
+        output
+    );
+    assert!(
+        output.contains("misses"),
+        "Should report error for 'misses' field, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -122,8 +149,16 @@ public:
     let temp_file = create_temp_cpp_file(code);
     let (success, output) = run_analyzer(temp_file.path());
 
-    assert!(success, "Analysis should succeed without errors, got: {}", output);
-    assert!(output.contains("no violations"), "Should have no violations for non-mutable field, got: {}", output);
+    assert!(
+        success,
+        "Analysis should succeed without errors, got: {}",
+        output
+    );
+    assert!(
+        output.contains("no violations"),
+        "Should have no violations for non-mutable field, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -148,8 +183,16 @@ public:
     let temp_file = create_temp_cpp_file(code);
     let (_success, output) = run_analyzer(temp_file.path());
 
-    assert!(output.contains("count"), "Error should mention field name, got: {}", output);
-    assert!(output.contains("Mutable field"), "Should report mutable field error, got: {}", output);
+    assert!(
+        output.contains("count"),
+        "Error should mention field name, got: {}",
+        output
+    );
+    assert!(
+        output.contains("Mutable field"),
+        "Should report mutable field error, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -175,5 +218,9 @@ public:
     let (success, output) = run_analyzer(temp_file.path());
 
     // Should pass - unannotated class is @unsafe, mutable is allowed
-    assert!(success, "Mutable fields should be allowed in unsafe class, got: {}", output);
+    assert!(
+        success,
+        "Mutable fields should be allowed in unsafe class, got: {}",
+        output
+    );
 }

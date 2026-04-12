@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 /// Integration tests for Rust-like self tracking in C++ methods
 ///
@@ -44,9 +44,10 @@ public:
     // Should detect that const method cannot move field
     assert!(
         stdout.contains("Cannot move field") && stdout.contains("const method")
-        || stderr.contains("Cannot move field") && stderr.contains("const method"),
+            || stderr.contains("Cannot move field") && stderr.contains("const method"),
         "Should detect const method trying to move field. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_const_move.cpp").unwrap();
@@ -84,9 +85,10 @@ public:
     // Should detect that &mut self method cannot move field
     assert!(
         stdout.contains("Cannot move field") && stdout.contains("&mut self")
-        || stderr.contains("Cannot move field") && stderr.contains("&mut self"),
+            || stderr.contains("Cannot move field") && stderr.contains("&mut self"),
         "Should detect &mut self method trying to move field. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_mut_move.cpp").unwrap();
@@ -170,9 +172,10 @@ public:
     // Should detect that const method cannot modify field
     assert!(
         stdout.contains("Cannot modify field") && stdout.contains("const method")
-        || stderr.contains("Cannot modify field") && stderr.contains("const method"),
+            || stderr.contains("Cannot modify field") && stderr.contains("const method"),
         "Should detect const method trying to modify field. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_const_modify.cpp").unwrap();

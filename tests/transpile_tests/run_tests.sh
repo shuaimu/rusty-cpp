@@ -143,6 +143,23 @@ run_test "bitflags" \
     "2.6.0" \
     "Bit flag sets — operators, derives, macros"
 
+# ── Tier 4: Complex crates ──────────────────────────────
+
+run_test "smallvec" \
+    "https://github.com/servo/rust-smallvec.git" \
+    "v1.15.1" \
+    "Inline-optimized vec — const generics, unsafe, drop/move"
+
+run_test "itertools" \
+    "https://github.com/rust-itertools/itertools.git" \
+    "v0.14.0" \
+    "Iterator adaptors — chains, closures, associated types"
+
+run_test "once_cell" \
+    "https://github.com/matklad/once_cell.git" \
+    "v1.21.4" \
+    "Single-assignment cells — statics, sync, interior mutability"
+
 # ── Summary ─────────────────────────────────────────────
 
 echo "╔═══════════════════════════════════════════════════╗"

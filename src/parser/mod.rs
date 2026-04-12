@@ -1,16 +1,18 @@
 use clang::{Clang, Entity, EntityKind, Index};
 use std::path::Path;
 
-pub mod ast_visitor;
 pub mod annotations;
+pub mod ast_visitor;
+pub mod external_annotations;
 pub mod header_cache;
 pub mod safety_annotations;
-pub mod external_annotations;
 
-pub use ast_visitor::{CppAst, Function, Statement, Expression, MethodQualifier, MoveKind, CastKind};
-pub use header_cache::HeaderCache;
+pub use ast_visitor::{
+    CastKind, CppAst, Expression, Function, MethodQualifier, MoveKind, Statement,
+};
 #[allow(unused_imports)]
-pub use ast_visitor::{Variable, SourceLocation};
+pub use ast_visitor::{SourceLocation, Variable};
+pub use header_cache::HeaderCache;
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -21,17 +23,23 @@ pub fn parse_cpp_file(path: &Path) -> Result<CppAst, String> {
 }
 
 #[allow(dead_code)]
-pub fn parse_cpp_file_with_includes(path: &Path, include_paths: &[std::path::PathBuf]) -> Result<CppAst, String> {
+pub fn parse_cpp_file_with_includes(
+    path: &Path,
+    include_paths: &[std::path::PathBuf],
+) -> Result<CppAst, String> {
     parse_cpp_file_with_includes_and_defines(path, include_paths, &[])
 }
 
-pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[std::path::PathBuf], defines: &[String]) -> Result<CppAst, String> {
+pub fn parse_cpp_file_with_includes_and_defines(
+    path: &Path,
+    include_paths: &[std::path::PathBuf],
+    defines: &[String],
+) -> Result<CppAst, String> {
     // Initialize Clang
-    let clang = Clang::new()
-        .map_err(|e| format!("Failed to initialize Clang: {:?}", e))?;
-    
+    let clang = Clang::new().map_err(|e| format!("Failed to initialize Clang: {:?}", e))?;
+
     let index = Index::new(&clang, false, false);
-    
+
     // Build arguments with include paths and defines
     let mut args = vec![
         "-std=c++20".to_string(),
@@ -44,7 +52,7 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
         // Don't fail on missing includes
         "-Wno-error".to_string(),
     ];
-    
+
     // Add include paths
     for include_path in include_paths {
         args.push(format!("-I{}", include_path.display()));
@@ -54,17 +62,17 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
     for define in defines {
         args.push(format!("-D{}", define));
     }
-    
+
     // Parse the translation unit with skip function bodies option for better error recovery
     let tu = index
         .parser(path)
         .arguments(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
         .detailed_preprocessing_record(true)
-        .skip_function_bodies(false)  // We need function bodies for analysis
-        .incomplete(true)  // Allow incomplete translation units
+        .skip_function_bodies(false) // We need function bodies for analysis
+        .incomplete(true) // Allow incomplete translation units
         .parse()
         .map_err(|e| format!("Failed to parse file: {:?}", e))?;
-    
+
     // Check for diagnostics but only fail on fatal errors
     let diagnostics = tu.get_diagnostics();
     let mut has_fatal = false;
@@ -80,11 +88,11 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
             }
         }
     }
-    
+
     if has_fatal {
         return Err("Fatal parsing errors encountered".to_string());
     }
-    
+
     // Visit the AST
     let mut ast = CppAst::new();
     let root = tu.get_entity();
@@ -97,12 +105,24 @@ pub fn parse_cpp_file_with_includes_and_defines(path: &Path, include_paths: &[st
 fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
     use crate::debug_println;
     // Only debug function and class-related entities
-    if matches!(entity.get_kind(), EntityKind::FunctionDecl | EntityKind::Method | EntityKind::FunctionTemplate | EntityKind::ClassTemplate) {
+    if matches!(
+        entity.get_kind(),
+        EntityKind::FunctionDecl
+            | EntityKind::Method
+            | EntityKind::FunctionTemplate
+            | EntityKind::ClassTemplate
+    ) {
         // Check if this is a template specialization
         let template_kind = entity.get_template_kind();
         let template_args = entity.get_template_arguments();
-        debug_println!("DEBUG PARSE: Visiting entity: kind={:?}, name={:?}, is_definition={}, template_kind={:?}, has_template_args={}",
-            entity.get_kind(), entity.get_name(), entity.is_definition(), template_kind, template_args.is_some());
+        debug_println!(
+            "DEBUG PARSE: Visiting entity: kind={:?}, name={:?}, is_definition={}, template_kind={:?}, has_template_args={}",
+            entity.get_kind(),
+            entity.get_name(),
+            entity.is_definition(),
+            template_kind,
+            template_args.is_some()
+        );
     }
 
     // Extract entities from all files (main file and headers)
@@ -113,8 +133,12 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
 
     match entity.get_kind() {
         EntityKind::FunctionDecl | EntityKind::Method => {
-            debug_println!("DEBUG PARSE: Found FunctionDecl: name={:?}, is_definition={}, kind={:?}",
-                entity.get_name(), entity.is_definition(), entity.get_kind());
+            debug_println!(
+                "DEBUG PARSE: Found FunctionDecl: name={:?}, is_definition={}, kind={:?}",
+                entity.get_name(),
+                entity.is_definition(),
+                entity.get_kind()
+            );
             // Extract all function definitions (from main file and headers)
             if entity.is_definition() {
                 let func = ast_visitor::extract_function(entity);
@@ -124,14 +148,19 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
         EntityKind::FunctionTemplate => {
             // Template free functions: extract the template declaration to analyze with generic types
             // We don't need instantiations - our borrow/move checking works on generic types!
-            debug_println!("DEBUG PARSE: Found FunctionTemplate: {:?}, is_definition={}",
-                entity.get_name(), entity.is_definition());
+            debug_println!(
+                "DEBUG PARSE: Found FunctionTemplate: {:?}, is_definition={}",
+                entity.get_name(),
+                entity.is_definition()
+            );
 
             // The FunctionTemplateDecl IS the function entity in LibClang
             // Its children are: TemplateTypeParameter, ParmDecl, CompoundStmt
             // We extract the function directly from this entity
             if entity.is_definition() {
-                debug_println!("DEBUG PARSE: Extracting template function from FunctionTemplate entity");
+                debug_println!(
+                    "DEBUG PARSE: Extracting template function from FunctionTemplate entity"
+                );
                 let func = ast_visitor::extract_function(entity);
                 debug_println!("DEBUG PARSE: Extracted template function: {}", func.name);
                 ast.functions.push(func);
@@ -139,8 +168,11 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
         }
         EntityKind::ClassTemplate => {
             // Phase 3: Template classes
-            debug_println!("DEBUG PARSE: Found ClassTemplate: {:?}, is_definition={}",
-                entity.get_name(), entity.is_definition());
+            debug_println!(
+                "DEBUG PARSE: Found ClassTemplate: {:?}, is_definition={}",
+                entity.get_name(),
+                entity.is_definition()
+            );
 
             // ClassTemplateDecl works similarly to FunctionTemplateDecl
             // Its children are: TemplateTypeParameter, CXXRecordDecl
@@ -154,8 +186,11 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
         }
         EntityKind::ClassDecl | EntityKind::StructDecl => {
             // Regular (non-template) classes and structs
-            debug_println!("DEBUG PARSE: Found ClassDecl/StructDecl: {:?}, is_definition={}",
-                entity.get_name(), entity.is_definition());
+            debug_println!(
+                "DEBUG PARSE: Found ClassDecl/StructDecl: {:?}, is_definition={}",
+                entity.get_name(),
+                entity.is_definition()
+            );
 
             if entity.is_definition() {
                 debug_println!("DEBUG PARSE: Extracting regular class from ClassDecl entity");
@@ -186,25 +221,25 @@ fn visit_entity(entity: &Entity, ast: &mut CppAst, main_file: &Path) {
 /// Check if the file has @safe annotation at the beginning
 #[allow(dead_code)]
 pub fn check_file_safety_annotation(path: &Path) -> Result<bool, String> {
-    let file = fs::File::open(path)
-        .map_err(|e| format!("Failed to open file for safety check: {}", e))?;
-    
+    let file =
+        fs::File::open(path).map_err(|e| format!("Failed to open file for safety check: {}", e))?;
+
     let reader = BufReader::new(file);
-    
+
     // Check first 20 lines for @safe annotation (before any code)
     for (line_num, line_result) in reader.lines().enumerate() {
         if line_num > 20 {
             break; // Don't look too far
         }
-        
+
         let line = line_result.map_err(|e| format!("Failed to read line: {}", e))?;
         let trimmed = line.trim();
-        
+
         // Skip empty lines
         if trimmed.is_empty() {
             continue;
         }
-        
+
         // Check for @safe annotation in comments
         if trimmed.starts_with("//") {
             if trimmed.contains("@safe") {
@@ -220,15 +255,15 @@ pub fn check_file_safety_annotation(path: &Path) -> Result<bool, String> {
             break;
         }
     }
-    
+
     Ok(false) // No @safe annotation found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn create_temp_cpp_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
@@ -236,12 +271,12 @@ mod tests {
         file.flush().unwrap();
         file
     }
-    
+
     #[allow(dead_code)]
     fn is_libclang_available() -> bool {
         // Try to initialize Clang to check if libclang is available
         // Note: This might fail if another test already initialized Clang
-        true  // Assume it's available and let individual tests handle errors
+        true // Assume it's available and let individual tests handle errors
     }
 
     #[test]
@@ -251,10 +286,10 @@ mod tests {
             int x = 42;
         }
         "#;
-        
+
         let temp_file = create_temp_cpp_file(code);
         let result = parse_cpp_file(temp_file.path());
-        
+
         match result {
             Ok(ast) => {
                 assert_eq!(ast.functions.len(), 1);
@@ -281,10 +316,10 @@ mod tests {
             return a + b;
         }
         "#;
-        
+
         let temp_file = create_temp_cpp_file(code);
         let result = parse_cpp_file(temp_file.path());
-        
+
         match result {
             Ok(ast) => {
                 assert_eq!(ast.functions.len(), 1);
@@ -310,10 +345,10 @@ mod tests {
         
         void func() {}
         "#;
-        
+
         let temp_file = create_temp_cpp_file(code);
         let result = parse_cpp_file(temp_file.path());
-        
+
         match result {
             Ok(ast) => {
                 assert_eq!(ast.global_variables.len(), 1);
@@ -335,7 +370,7 @@ mod tests {
     fn test_parse_invalid_file() {
         let temp_dir = tempfile::tempdir().unwrap();
         let invalid_path = temp_dir.path().join("nonexistent.cpp");
-        
+
         let result = parse_cpp_file(&invalid_path);
         assert!(result.is_err());
     }

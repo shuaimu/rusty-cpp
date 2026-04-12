@@ -1,0 +1,20 @@
+version = 1
+
+[modules.std]
+namespace = "std"
+
+[modules.std.symbols.max]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+
+[modules.std.symbols.min]
+kind = "function"
+callable_signatures = ["int(int,int)"]
+
+[modules.std.symbols.clamp]
+kind = "function"
+callable_signatures = ["int(int,int,int)"]
+
+[modules.std.symbols.abs]
+kind = "function"
+callable_signatures = ["int(int)"]

@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 /// Integration tests for field borrowing in C++ methods
 ///
@@ -71,9 +71,10 @@ public:
     // Should detect that const method cannot create mutable borrow
     assert!(
         stdout.contains("Cannot create mutable borrow") && stdout.contains("const method")
-        || stderr.contains("Cannot create mutable borrow") && stderr.contains("const method"),
+            || stderr.contains("Cannot create mutable borrow") && stderr.contains("const method"),
         "Should detect const method trying to create mutable borrow. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_const_mut.cpp").unwrap();
@@ -177,10 +178,10 @@ public:
 
     // Should detect double mutable borrow
     assert!(
-        stdout.contains("already borrowed mutably")
-        || stderr.contains("already borrowed mutably"),
+        stdout.contains("already borrowed mutably") || stderr.contains("already borrowed mutably"),
         "Should detect double mutable borrow. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_double_mut.cpp").unwrap();
@@ -214,10 +215,10 @@ public:
 
     // Should detect conflict
     assert!(
-        stdout.contains("already borrowed mutably")
-        || stderr.contains("already borrowed mutably"),
+        stdout.contains("already borrowed mutably") || stderr.contains("already borrowed mutably"),
         "Should detect mutable-then-immutable conflict. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_mut_immut.cpp").unwrap();
@@ -252,9 +253,10 @@ public:
     // Should detect conflict
     assert!(
         stdout.contains("already borrowed immutably")
-        || stderr.contains("already borrowed immutably"),
+            || stderr.contains("already borrowed immutably"),
         "Should detect immutable-then-mutable conflict. Output: {}\nError: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     fs::remove_file("test_immut_mut.cpp").unwrap();

@@ -8,9 +8,9 @@
 //! - Default member initializers (NEW)
 //! - Assignment from possibly-null sources (NEW)
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -107,7 +107,9 @@ struct Container {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("pointer member") || output.contains("uninitialized") || output.contains("must be initialized"),
+        output.contains("pointer member")
+            || output.contains("uninitialized")
+            || output.contains("must be initialized"),
         "Should detect uninitialized pointer member in @safe struct. Output: {}",
         output
     );
@@ -263,7 +265,9 @@ struct MultiPointer {
     let output = run_checker(code);
     // Should detect at least one issue
     assert!(
-        output.contains("null") || output.contains("uninitialized") || output.contains("pointer member"),
+        output.contains("null")
+            || output.contains("uninitialized")
+            || output.contains("pointer member"),
         "Should detect issues with pointer members. Output: {}",
         output
     );
@@ -289,7 +293,9 @@ struct Outer {
 "#;
     let output = run_checker(code);
     assert!(
-        output.contains("pointer member") || output.contains("uninitialized") || output.contains("null"),
+        output.contains("pointer member")
+            || output.contains("uninitialized")
+            || output.contains("null"),
         "Should detect pointer member in nested struct. Output: {}",
         output
     );

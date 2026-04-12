@@ -5,7 +5,6 @@
 /// - const methods (&self): can read, cannot modify or move
 /// - non-const methods (&mut self): can read and modify, CANNOT move
 /// - && methods (self): can read, modify, and move
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;

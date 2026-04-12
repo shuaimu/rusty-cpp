@@ -1,7 +1,7 @@
+use crate::debug_println;
 use crate::parser::{CppAst, MethodQualifier};
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
-use crate::debug_println;
 
 /// Parse operator name from a function name
 /// Returns the operator symbol (e.g., "*", "=", "==") or None
@@ -81,14 +81,17 @@ fn is_receiver_temporary(expr: &crate::parser::Expression) -> bool {
                 if parts.len() >= 2 {
                     let last = parts[parts.len() - 1];
                     let second_last = parts[parts.len() - 2];
-                    last == second_last  // X::X pattern
+                    last == second_last // X::X pattern
                 } else {
                     false
                 }
             } else {
                 // A standalone name like "Builder" is a constructor call
                 // if it starts with uppercase (convention for type names)
-                name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                name.chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
             };
 
             if is_constructor {
@@ -105,13 +108,9 @@ fn is_receiver_temporary(expr: &crate::parser::Expression) -> bool {
             false
         }
         // Member access on a temporary propagates the temporary status
-        crate::parser::Expression::MemberAccess { object, .. } => {
-            is_receiver_temporary(object)
-        }
+        crate::parser::Expression::MemberAccess { object, .. } => is_receiver_temporary(object),
         // Dereference of a temporary propagates the temporary status
-        crate::parser::Expression::Dereference(inner) => {
-            is_receiver_temporary(inner)
-        }
+        crate::parser::Expression::Dereference(inner) => is_receiver_temporary(inner),
         // Variable references are NOT temporaries
         crate::parser::Expression::Variable(_) => false,
         // Literals are temporaries (but they're value types, so less important)
@@ -139,10 +138,10 @@ fn extract_member_path(expr: &crate::parser::Expression) -> Option<(String, Stri
                     let object_path = extract_full_member_path(object.as_ref())?;
                     Some((object_path, field.clone()))
                 }
-                _ => None
+                _ => None,
             }
         }
-        _ => None
+        _ => None,
     }
 }
 
@@ -156,7 +155,7 @@ fn extract_full_member_path(expr: &crate::parser::Expression) -> Option<String> 
             let obj_path = extract_full_member_path(object.as_ref())?;
             Some(format!("{}.{}", obj_path, field))
         }
-        _ => None
+        _ => None,
     }
 }
 
@@ -176,46 +175,46 @@ pub struct IrFunction {
     pub name: String,
     pub cfg: ControlFlowGraph,
     pub variables: HashMap<String, VariableInfo>,
-    pub return_type: String,  // Return type from AST
-    pub source_file: String,  // Source file path for distinguishing user code from system headers
+    pub return_type: String, // Return type from AST
+    pub source_file: String, // Source file path for distinguishing user code from system headers
     // Method information for tracking 'this' pointer
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
     // Phase 1: Lifetime information from annotations
-    pub lifetime_params: HashMap<String, LifetimeParam>,  // e.g., {"a" -> LifetimeParam, "b" -> LifetimeParam}
-    pub param_lifetimes: Vec<Option<ParameterLifetime>>,  // Lifetime for each parameter (indexed by param position)
-    pub return_lifetime: Option<ReturnLifetime>,          // Lifetime of return value
-    pub lifetime_constraints: Vec<LifetimeConstraint>,    // e.g., 'a: 'b (a outlives b)
+    pub lifetime_params: HashMap<String, LifetimeParam>, // e.g., {"a" -> LifetimeParam, "b" -> LifetimeParam}
+    pub param_lifetimes: Vec<Option<ParameterLifetime>>, // Lifetime for each parameter (indexed by param position)
+    pub return_lifetime: Option<ReturnLifetime>,         // Lifetime of return value
+    pub lifetime_constraints: Vec<LifetimeConstraint>,   // e.g., 'a: 'b (a outlives b)
 }
 
 /// Represents a lifetime parameter declared in the function signature
 /// Example: In `@lifetime: (&'a, &'b) -> &'a where 'a: 'b`, we have lifetime params 'a and 'b
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifetimeParam {
-    pub name: String,  // e.g., "a" (without the apostrophe)
+    pub name: String, // e.g., "a" (without the apostrophe)
 }
 
 /// Represents the lifetime annotation of a parameter
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParameterLifetime {
-    pub lifetime_name: String,  // e.g., "a" for &'a T
-    pub is_mutable: bool,       // true for &'a mut T, false for &'a T
-    pub is_owned: bool,         // true for "owned" annotation
+    pub lifetime_name: String, // e.g., "a" for &'a T
+    pub is_mutable: bool,      // true for &'a mut T, false for &'a T
+    pub is_owned: bool,        // true for "owned" annotation
 }
 
 /// Represents the lifetime annotation of the return value
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReturnLifetime {
-    pub lifetime_name: String,  // e.g., "a" for &'a T
-    pub is_mutable: bool,       // true for &'a mut T, false for &'a T
-    pub is_owned: bool,         // true for "owned" annotation
+    pub lifetime_name: String, // e.g., "a" for &'a T
+    pub is_mutable: bool,      // true for &'a mut T, false for &'a T
+    pub is_owned: bool,        // true for "owned" annotation
 }
 
 /// Represents a lifetime constraint (e.g., 'a: 'b means 'a outlives 'b)
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifetimeConstraint {
-    pub longer: String,   // e.g., "a" in 'a: 'b
-    pub shorter: String,  // e.g., "b" in 'a: 'b
+    pub longer: String,  // e.g., "a" in 'a: 'b
+    pub shorter: String, // e.g., "b" in 'a: 'b
 }
 
 #[derive(Debug, Clone)]
@@ -227,18 +226,18 @@ pub struct VariableInfo {
     pub ownership: OwnershipState,
     #[allow(dead_code)]
     pub lifetime: Option<Lifetime>,
-    pub is_parameter: bool,  // True if this is a function parameter
-    pub is_static: bool,     // True if this is a static variable
-    pub scope_level: usize,  // Scope depth where variable was declared (0 = function level)
-    pub has_destructor: bool, // True if this is an RAII type (Box, Rc, Arc, etc.)
+    pub is_parameter: bool,       // True if this is a function parameter
+    pub is_static: bool,          // True if this is a static variable
+    pub scope_level: usize,       // Scope depth where variable was declared (0 = function level)
+    pub has_destructor: bool,     // True if this is an RAII type (Box, Rc, Arc, etc.)
     pub declaration_index: usize, // Order of declaration within scope (for drop order)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum VariableType {
-    Owned(String),           // Type name
-    Reference(String),       // Referenced type
+    Owned(String),     // Type name
+    Reference(String), // Referenced type
     MutableReference(String),
     UniquePtr(String),
     SharedPtr(String),
@@ -298,7 +297,7 @@ pub enum IrStatement {
         to: String,
         kind: BorrowKind,
         line: usize,
-        is_pointer: bool,  // true if borrow via pointer (T* p = &x), false for references (T& r = x)
+        is_pointer: bool, // true if borrow via pointer (T* p = &x), false for references (T& r = x)
     },
     CallExpr {
         func: String,
@@ -330,7 +329,7 @@ pub enum IrStatement {
     // Phase 4: Pack expansion tracking
     PackExpansion {
         pack_name: String,
-        operation: String,  // "forward", "move", or "use"
+        operation: String, // "forward", "move", or "use"
     },
     // Variable usage (for checking moved state)
     UseVariable {
@@ -339,15 +338,15 @@ pub enum IrStatement {
     },
     // NEW: Field-level operations
     MoveField {
-        object: String,      // "container"
-        field: String,       // "data"
-        to: String,          // "_moved_data"
+        object: String, // "container"
+        field: String,  // "data"
+        to: String,     // "_moved_data"
         line: usize,
     },
     UseField {
         object: String,
         field: String,
-        operation: String,   // "read", "write", "call"
+        operation: String, // "read", "write", "call"
     },
     BorrowField {
         object: String,
@@ -360,7 +359,7 @@ pub enum IrStatement {
     ImplicitDrop {
         var: String,
         scope_level: usize,
-        has_destructor: bool,  // True if variable is RAII type (should be marked as moved)
+        has_destructor: bool, // True if variable is RAII type (should be marked as moved)
     },
     // Lambda expression with captures (for safety checking)
     LambdaCapture {
@@ -374,9 +373,9 @@ pub enum IrStatement {
     /// Struct with reference members borrows from constructor arguments
     /// Like Rust's `Holder<'a>` where struct lifetime is tied to referenced data
     StructBorrow {
-        struct_var: String,      // The struct instance (e.g., "h")
-        borrowed_from: String,   // Variable passed to constructor (e.g., "x")
-        struct_type: String,     // The struct type (e.g., "Holder")
+        struct_var: String,    // The struct instance (e.g., "h")
+        borrowed_from: String, // Variable passed to constructor (e.g., "x")
+        struct_type: String,   // The struct type (e.g., "Holder")
         line: usize,
     },
 }
@@ -385,7 +384,7 @@ pub enum IrStatement {
 #[derive(Debug, Clone)]
 pub struct LambdaCaptureInfo {
     pub name: String,
-    pub is_ref: bool,  // true = reference capture, false = copy capture
+    pub is_ref: bool, // true = reference capture, false = copy capture
 }
 
 #[derive(Debug, Clone)]
@@ -394,8 +393,8 @@ pub enum IrExpression {
     Variable(String),
     Move(String),
     Borrow(String, BorrowKind),
-    New(String),  // Allocation
-    Literal(String),  // Literal value assignment (restores ownership)
+    New(String),     // Allocation
+    Literal(String), // Literal value assignment (restores ownership)
 }
 
 #[derive(Debug, Clone)]
@@ -425,13 +424,16 @@ fn is_raii_type(type_name: &str) -> bool {
 }
 
 /// RAII Phase 2: Check if type is RAII, including user-defined types with destructors
-pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: &std::collections::HashSet<String>) -> bool {
+pub fn is_raii_type_with_user_defined(
+    type_name: &str,
+    user_defined_raii_types: &std::collections::HashSet<String>,
+) -> bool {
     // IMPORTANT: References don't have destructors - the referenced object does
     // So a `std::string&` is NOT an RAII type (it's just an alias)
     // References should not be marked as having destructors
     let trimmed = type_name.trim();
     if trimmed.ends_with('&') || trimmed.ends_with("& ") {
-        return false;  // References never have destructors
+        return false; // References never have destructors
     }
     // Also check for "const T&" pattern where & comes after the base type
     if trimmed.contains('&') && !trimmed.contains('<') {
@@ -466,14 +468,17 @@ pub fn is_raii_type_with_user_defined(type_name: &str, user_defined_raii_types: 
        type_name.starts_with("std::lock_guard<") ||
        type_name.starts_with("lock_guard<") ||
        type_name.starts_with("std::unique_lock<") ||
-       type_name.starts_with("unique_lock<") {
+       type_name.starts_with("unique_lock<")
+    {
         return true;
     }
 
     // RAII Phase 2: Check user-defined types with destructors
     // Extract base type name (without template parameters and qualifiers)
     let base_type = type_name
-        .split('<').next().unwrap_or(type_name)
+        .split('<')
+        .next()
+        .unwrap_or(type_name)
         .trim_start_matches("const ")
         .trim_end_matches('&')
         .trim_end_matches('*')
@@ -517,7 +522,10 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
         // Check if class has any reference members
         if class.members.iter().any(|m| m.is_reference) {
             types_with_ref_members.insert(class.name.clone());
-            debug_println!("STRUCT_LIFETIME: Type '{}' has reference members", class.name);
+            debug_println!(
+                "STRUCT_LIFETIME: Type '{}' has reference members",
+                class.name
+            );
         }
     }
 
@@ -535,7 +543,7 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
 
 pub fn build_ir_with_safety_context(
     ast: CppAst,
-    _safety_context: crate::parser::safety_annotations::SafetyContext
+    _safety_context: crate::parser::safety_annotations::SafetyContext,
 ) -> Result<IrProgram, String> {
     let mut functions = Vec::new();
     let ownership_graph = DiGraph::new();
@@ -552,7 +560,10 @@ pub fn build_ir_with_safety_context(
         // Check if class has any reference members
         if class.members.iter().any(|m| m.is_reference) {
             types_with_ref_members.insert(class.name.clone());
-            debug_println!("STRUCT_LIFETIME: Type '{}' has reference members", class.name);
+            debug_println!(
+                "STRUCT_LIFETIME: Type '{}' has reference members",
+                class.name
+            );
         }
     }
 
@@ -581,36 +592,51 @@ fn convert_function(
 
     for stmt in &func.body {
         // Convert the statement
-        if let Some(ir_stmts) = convert_statement(stmt, &mut variables, &mut current_scope_level, user_defined_raii_types)? {
+        if let Some(ir_stmts) = convert_statement(
+            stmt,
+            &mut variables,
+            &mut current_scope_level,
+            user_defined_raii_types,
+        )? {
             statements.extend(ir_stmts);
         }
     }
-    
+
     let entry_block = BasicBlock {
         id: 0,
         statements,
         terminator: None,
     };
-    
+
     let _entry_node = cfg.add_node(entry_block);
-    
+
     // Process parameters
     for param in &func.parameters {
         let (var_type, ownership) = if param.is_unique_ptr {
-            (VariableType::UniquePtr(param.type_name.clone()), OwnershipState::Owned)
+            (
+                VariableType::UniquePtr(param.type_name.clone()),
+                OwnershipState::Owned,
+            )
         } else if param.is_reference {
             if param.is_const {
-                (VariableType::Reference(param.type_name.clone()), 
-                 OwnershipState::Borrowed(BorrowKind::Immutable))
+                (
+                    VariableType::Reference(param.type_name.clone()),
+                    OwnershipState::Borrowed(BorrowKind::Immutable),
+                )
             } else {
-                (VariableType::MutableReference(param.type_name.clone()),
-                 OwnershipState::Borrowed(BorrowKind::Mutable))
+                (
+                    VariableType::MutableReference(param.type_name.clone()),
+                    OwnershipState::Borrowed(BorrowKind::Mutable),
+                )
             }
         } else {
-            (VariableType::Owned(param.type_name.clone()), OwnershipState::Owned)
+            (
+                VariableType::Owned(param.type_name.clone()),
+                OwnershipState::Owned,
+            )
         };
-        
-        let declaration_index = variables.len();  // Parameters declared in order
+
+        let declaration_index = variables.len(); // Parameters declared in order
         variables.insert(
             param.name.clone(),
             VariableInfo {
@@ -618,15 +644,18 @@ fn convert_function(
                 ty: var_type,
                 ownership,
                 lifetime: None,
-                is_parameter: true,  // This is a parameter
-                is_static: false,    // Parameters are not static
-                scope_level: 0,      // Parameters are at function scope
-                has_destructor: is_raii_type_with_user_defined(&param.type_name, user_defined_raii_types),
-                declaration_index,   // NEW: Track declaration order
+                is_parameter: true, // This is a parameter
+                is_static: false,   // Parameters are not static
+                scope_level: 0,     // Parameters are at function scope
+                has_destructor: is_raii_type_with_user_defined(
+                    &param.type_name,
+                    user_defined_raii_types,
+                ),
+                declaration_index, // NEW: Track declaration order
             },
         );
     }
-    
+
     Ok(IrFunction {
         name: func.name.clone(),
         cfg,
@@ -662,7 +691,7 @@ fn get_statement_line(stmt: &crate::parser::Statement) -> Option<u32> {
 /// Returns None for literals, function calls, and other expressions with no source variable.
 fn extract_return_source(
     expr: &crate::parser::Expression,
-    statements: &mut Vec<IrStatement>
+    statements: &mut Vec<IrStatement>,
 ) -> Option<String> {
     use crate::parser::Expression;
 
@@ -682,9 +711,15 @@ fn extract_return_source(
         Expression::MemberAccess { object, field } => {
             // Member access: return obj.field; or return this->ptr;
             // The source is the object being accessed
-            debug_println!("DEBUG IR: Return member access: {}.{}",
-                if let Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                field);
+            debug_println!(
+                "DEBUG IR: Return member access: {}.{}",
+                if let Expression::Variable(obj) = object.as_ref() {
+                    obj
+                } else {
+                    "complex"
+                },
+                field
+            );
             extract_return_source(object, statements)
         }
 
@@ -705,14 +740,20 @@ fn extract_return_source(
                     statements.push(IrStatement::Move {
                         from: var.clone(),
                         to: format!("_returned_{}", var),
-                        line: 0,  // Line not available in this context
+                        line: 0, // Line not available in this context
                     });
                     Some(var.clone())
                 }
                 Expression::MemberAccess { object, field } => {
-                    debug_println!("DEBUG IR: Return Move(MemberAccess): {}.{}",
-                        if let Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                        field);
+                    debug_println!(
+                        "DEBUG IR: Return Move(MemberAccess): {}.{}",
+                        if let Expression::Variable(obj) = object.as_ref() {
+                            obj
+                        } else {
+                            "complex"
+                        },
+                        field
+                    );
                     if let Expression::Variable(obj_name) = object.as_ref() {
                         // Generate MoveField statement
                         statements.push(IrStatement::MoveField {
@@ -848,43 +889,62 @@ fn convert_statement(
 ) -> Result<Option<Vec<IrStatement>>, String> {
     use crate::parser::Statement;
 
-    debug_println!("DEBUG IR: Converting statement: {:?}", match stmt {
-        Statement::VariableDecl(_) => "VariableDecl",
-        Statement::Assignment { .. } => "Assignment",
-        Statement::ReferenceBinding { .. } => "ReferenceBinding",
-        Statement::Return(_) => "Return",
-        Statement::FunctionCall { name, .. } => {
-            debug_println!("DEBUG IR:   FunctionCall name: {}", name);
-            "FunctionCall"
-        },
-        Statement::ExpressionStatement { .. } => "ExpressionStatement",
-        Statement::If { condition, .. } => {
-            debug_println!("DEBUG IR:   If condition: {:?}", condition);
-            "If"
-        },
-        _ => "Other"
-    });
+    debug_println!(
+        "DEBUG IR: Converting statement: {:?}",
+        match stmt {
+            Statement::VariableDecl(_) => "VariableDecl",
+            Statement::Assignment { .. } => "Assignment",
+            Statement::ReferenceBinding { .. } => "ReferenceBinding",
+            Statement::Return(_) => "Return",
+            Statement::FunctionCall { name, .. } => {
+                debug_println!("DEBUG IR:   FunctionCall name: {}", name);
+                "FunctionCall"
+            }
+            Statement::ExpressionStatement { .. } => "ExpressionStatement",
+            Statement::If { condition, .. } => {
+                debug_println!("DEBUG IR:   If condition: {:?}", condition);
+                "If"
+            }
+            _ => "Other",
+        }
+    );
 
     match stmt {
         Statement::VariableDecl(var) => {
             let (var_type, ownership) = if var.is_unique_ptr {
-                (VariableType::UniquePtr(var.type_name.clone()), OwnershipState::Owned)
+                (
+                    VariableType::UniquePtr(var.type_name.clone()),
+                    OwnershipState::Owned,
+                )
             } else if var.is_reference {
                 if var.is_const {
-                    (VariableType::Reference(var.type_name.clone()),
-                     OwnershipState::Uninitialized) // Will be set when bound
+                    (
+                        VariableType::Reference(var.type_name.clone()),
+                        OwnershipState::Uninitialized,
+                    ) // Will be set when bound
                 } else {
-                    (VariableType::MutableReference(var.type_name.clone()),
-                     OwnershipState::Uninitialized)
+                    (
+                        VariableType::MutableReference(var.type_name.clone()),
+                        OwnershipState::Uninitialized,
+                    )
                 }
             } else {
-                (VariableType::Owned(var.type_name.clone()), OwnershipState::Owned)
+                (
+                    VariableType::Owned(var.type_name.clone()),
+                    OwnershipState::Owned,
+                )
             };
-            
-            let has_destructor_value = is_raii_type_with_user_defined(&var.type_name, user_defined_raii_types);
-            let declaration_index = variables.len();  // Current count = declaration order
-            debug_println!("DEBUG IR: VariableDecl '{}': type='{}', has_destructor={}, declaration_index={}",
-                var.name, var.type_name, has_destructor_value, declaration_index);
+
+            let has_destructor_value =
+                is_raii_type_with_user_defined(&var.type_name, user_defined_raii_types);
+            let declaration_index = variables.len(); // Current count = declaration order
+            debug_println!(
+                "DEBUG IR: VariableDecl '{}': type='{}', has_destructor={}, declaration_index={}",
+                var.name,
+                var.type_name,
+                has_destructor_value,
+                declaration_index
+            );
 
             variables.insert(
                 var.name.clone(),
@@ -893,11 +953,11 @@ fn convert_statement(
                     ty: var_type,
                     ownership,
                     lifetime: None,
-                    is_parameter: false,  // This is a local variable
-                    is_static: var.is_static,  // Propagate static status from parser
-                    scope_level: *current_scope_level,  // Track scope depth
+                    is_parameter: false,               // This is a local variable
+                    is_static: var.is_static,          // Propagate static status from parser
+                    scope_level: *current_scope_level, // Track scope depth
                     has_destructor: has_destructor_value,
-                    declaration_index,  // NEW: Track declaration order
+                    declaration_index, // NEW: Track declaration order
                 },
             );
             // Generate VarDecl IR statement for loop-local tracking
@@ -906,7 +966,12 @@ fn convert_statement(
                 type_name: var.type_name.clone(),
             }]))
         }
-        Statement::ReferenceBinding { name, target, is_mutable, location } => {
+        Statement::ReferenceBinding {
+            name,
+            target,
+            is_mutable,
+            location,
+        } => {
             let mut statements = Vec::new();
             let line = location.line as usize;
 
@@ -939,12 +1004,15 @@ fn convert_statement(
                         to: name.clone(),
                         kind,
                         line,
-                        is_pointer: false,  // Reference binding
+                        is_pointer: false, // Reference binding
                     });
-                },
+                }
 
                 // Reference to function call result: create CallExpr with result
-                crate::parser::Expression::FunctionCall { name: func_name, args } => {
+                crate::parser::Expression::FunctionCall {
+                    name: func_name,
+                    args,
+                } => {
                     let mut arg_names = Vec::new();
                     let mut temp_counter = 0;
                     // Track if the first argument (method receiver) is a field access
@@ -995,9 +1063,12 @@ fn convert_statement(
                                 arg_names.push(temp_name);
                             }
                             // For chained method calls, the receiver might be a FunctionCall
-                            crate::parser::Expression::FunctionCall { name: inner_name, .. } => {
+                            crate::parser::Expression::FunctionCall {
+                                name: inner_name, ..
+                            } => {
                                 // Use the function name as a placeholder for the temporary
-                                let temp_name = format!("_temp_call_{}", inner_name.replace("::", "_"));
+                                let temp_name =
+                                    format!("_temp_call_{}", inner_name.replace("::", "_"));
                                 arg_names.push(temp_name);
                             }
                             // Phase 3: Track MemberAccess as receiver for field borrow tracking
@@ -1005,8 +1076,13 @@ fn convert_statement(
                                 if let Some((obj_path, field_name)) = extract_member_path(arg) {
                                     // If this is the first arg (method receiver), track it for field borrowing
                                     if i == 0 && func_name.contains("::") {
-                                        debug_println!("DEBUG IR: Method receiver is field access: {}.{}", obj_path, field_name);
-                                        receiver_field = Some((obj_path.clone(), field_name.clone()));
+                                        debug_println!(
+                                            "DEBUG IR: Method receiver is field access: {}.{}",
+                                            obj_path,
+                                            field_name
+                                        );
+                                        receiver_field =
+                                            Some((obj_path.clone(), field_name.clone()));
                                     }
                                     arg_names.push(format!("{}.{}", obj_path, field_name));
                                 }
@@ -1026,7 +1102,10 @@ fn convert_statement(
                                 BorrowKind::Immutable
                             };
 
-                            debug_println!("DEBUG IR: ReferenceBinding via operator* creates borrow from '{}'", first_arg);
+                            debug_println!(
+                                "DEBUG IR: ReferenceBinding via operator* creates borrow from '{}'",
+                                first_arg
+                            );
 
                             // Create a Borrow from the object being dereferenced
                             statements.push(IrStatement::Borrow {
@@ -1034,7 +1113,7 @@ fn convert_statement(
                                 to: name.clone(),
                                 kind: kind.clone(),
                                 line,
-                                is_pointer: false,  // Reference binding via operator*
+                                is_pointer: false, // Reference binding via operator*
                             });
 
                             // Update the reference variable's ownership state
@@ -1049,7 +1128,11 @@ fn convert_statement(
                         }
                     } else {
                         // For other function calls, create CallExpr
-                        debug_println!("DEBUG IR: Creating CallExpr for '{}' with receiver_is_temporary={}", func_name, receiver_is_temp);
+                        debug_println!(
+                            "DEBUG IR: Creating CallExpr for '{}' with receiver_is_temporary={}",
+                            func_name,
+                            receiver_is_temp
+                        );
                         statements.push(IrStatement::CallExpr {
                             func: func_name.clone(),
                             args: arg_names,
@@ -1068,7 +1151,12 @@ fn convert_statement(
                                 BorrowKind::Immutable
                             };
 
-                            debug_println!("DEBUG IR: Method result '{}' borrows from field '{}.{}'", name, obj_path, field_name);
+                            debug_println!(
+                                "DEBUG IR: Method result '{}' borrows from field '{}.{}'",
+                                name,
+                                obj_path,
+                                field_name
+                            );
                             statements.push(IrStatement::BorrowField {
                                 object: obj_path,
                                 field: field_name,
@@ -1093,14 +1181,18 @@ fn convert_statement(
                             }
                         }
                     }
-                },
+                }
 
                 // Reference to a field: create a field borrow
                 // Supports both simple (p.field) and nested (o.inner.field) member access
                 crate::parser::Expression::MemberAccess { object, field } => {
                     // Use helper to extract full object path for nested access
                     if let Some((obj_path, final_field)) = extract_member_path(target) {
-                        debug_println!("DEBUG IR: ReferenceBinding to field: {}.{}", obj_path, final_field);
+                        debug_println!(
+                            "DEBUG IR: ReferenceBinding to field: {}.{}",
+                            obj_path,
+                            final_field
+                        );
 
                         let kind = if *is_mutable {
                             BorrowKind::Mutable
@@ -1133,7 +1225,11 @@ fn convert_statement(
                         });
                     } else if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
                         // Fallback for simple Variable case
-                        debug_println!("DEBUG IR: ReferenceBinding to field (simple): {}.{}", obj_name, field);
+                        debug_println!(
+                            "DEBUG IR: ReferenceBinding to field (simple): {}.{}",
+                            obj_name,
+                            field
+                        );
 
                         let kind = if *is_mutable {
                             BorrowKind::Mutable
@@ -1162,7 +1258,7 @@ fn convert_statement(
                             line,
                         });
                     }
-                },
+                }
 
                 _ => return Ok(None),
             }
@@ -1199,7 +1295,10 @@ fn convert_statement(
                     // This is a dereference assignment via operator*
                     // The first argument is the object being dereferenced
                     if let Some(crate::parser::Expression::Variable(ptr_var)) = args.first() {
-                        debug_println!("DEBUG IR: Creating UseVariable for dereference_write on '{}'", ptr_var);
+                        debug_println!(
+                            "DEBUG IR: Creating UseVariable for dereference_write on '{}'",
+                            ptr_var
+                        );
                         // Create a UseVariable statement to check that ptr is valid
                         return Ok(Some(vec![IrStatement::UseVariable {
                             var: ptr_var.clone(),
@@ -1214,19 +1313,23 @@ fn convert_statement(
 
             // Check if LHS is a field access (e.g., this.value = 42)
             if let crate::parser::Expression::MemberAccess { object, field } = lhs {
-                debug_println!("DEBUG IR: Field write assignment: {}.{} = ...",
-                    if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                    field);
+                debug_println!(
+                    "DEBUG IR: Field write assignment: {}.{} = ...",
+                    if let crate::parser::Expression::Variable(obj) = object.as_ref() {
+                        obj
+                    } else {
+                        "complex"
+                    },
+                    field
+                );
 
                 if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
                     // Generate UseField statement for write operation
-                    return Ok(Some(vec![
-                        IrStatement::UseField {
-                            object: obj_name.clone(),
-                            field: field.clone(),
-                            operation: "write".to_string(),
-                        }
-                    ]));
+                    return Ok(Some(vec![IrStatement::UseField {
+                        object: obj_name.clone(),
+                        field: field.clone(),
+                        operation: "write".to_string(),
+                    }]));
                 } else {
                     return Ok(None);
                 }
@@ -1256,7 +1359,10 @@ fn convert_statement(
             let mut prepend_drop = false;
 
             if lhs_is_raii {
-                debug_println!("DEBUG IR: Assignment to RAII type '{}', this is operator= (drops old value)", lhs_var);
+                debug_println!(
+                    "DEBUG IR: Assignment to RAII type '{}', this is operator= (drops old value)",
+                    lhs_var
+                );
 
                 // For RAII types, assignment is operator= which drops the old value.
                 // We need to check if LHS is borrowed before allowing this.
@@ -1265,15 +1371,19 @@ fn convert_statement(
                 if let crate::parser::Expression::Move { inner, .. } = rhs {
                     match inner.as_ref() {
                         crate::parser::Expression::Variable(from_var) => {
-                            debug_println!("DEBUG IR: RAII assignment with std::move: generating Move from '{}' to '{}'", from_var, lhs_var);
+                            debug_println!(
+                                "DEBUG IR: RAII assignment with std::move: generating Move from '{}' to '{}'",
+                                from_var,
+                                lhs_var
+                            );
 
                             // Generate Move statement - this will check if LHS is borrowed!
                             // Move already handles the drop implicitly
                             return Ok(Some(vec![IrStatement::Move {
                                 from: from_var.clone(),
                                 to: lhs_var.clone(),
-                        line: 0,
-                    }]));
+                                line: 0,
+                            }]));
                         }
                         _ => {
                             // Move of complex expression - continue to regular handling
@@ -1311,16 +1421,16 @@ fn convert_statement(
                                 Ok(Some(vec![IrStatement::Move {
                                     from: rhs_var.clone(),
                                     to: lhs_var.clone(),
-                        line: 0,
-                    }]))
+                                    line: 0,
+                                }]))
                             }
                             _ => {
                                 // Regular assignment (copy)
                                 Ok(Some(vec![IrStatement::Assign {
                                     lhs: lhs_var.clone(),
                                     rhs: IrExpression::Variable(rhs_var.clone()),
-                        line: 0,
-                    }]))
+                                    line: 0,
+                                }]))
                             }
                         }
                     } else {
@@ -1331,7 +1441,11 @@ fn convert_statement(
                 crate::parser::Expression::MemberAccess { .. } => {
                     // Use helper to extract full path for nested member access
                     if let Some((obj_path, field_name)) = extract_member_path(rhs) {
-                        debug_println!("DEBUG IR: Processing MemberAccess read from '{}.{}'", obj_path, field_name);
+                        debug_println!(
+                            "DEBUG IR: Processing MemberAccess read from '{}.{}'",
+                            obj_path,
+                            field_name
+                        );
                         Ok(Some(vec![
                             IrStatement::UseField {
                                 object: obj_path.clone(),
@@ -1342,7 +1456,7 @@ fn convert_statement(
                                 lhs: lhs_var.clone(),
                                 rhs: IrExpression::Variable(format!("{}.{}", obj_path, field_name)),
                                 line,
-                            }
+                            },
                         ]))
                     } else {
                         debug_println!("DEBUG IR: MemberAccess could not be parsed");
@@ -1354,7 +1468,11 @@ fn convert_statement(
                     // This is an explicit std::move call
                     match inner.as_ref() {
                         crate::parser::Expression::Variable(var) => {
-                            debug_println!("DEBUG IR: Creating IrStatement::Move from '{}' to '{}'", var, lhs_var);
+                            debug_println!(
+                                "DEBUG IR: Creating IrStatement::Move from '{}' to '{}'",
+                                var,
+                                lhs_var
+                            );
                             // Transfer type from source if needed
                             let source_type = variables.get(var).map(|info| info.ty.clone());
                             if let Some(var_info) = variables.get_mut(lhs_var) {
@@ -1365,27 +1483,35 @@ fn convert_statement(
                             Ok(Some(vec![IrStatement::Move {
                                 from: var.clone(),
                                 to: lhs_var.clone(),
-                        line: 0,
-                    }]))
+                                line: 0,
+                            }]))
                         }
                         // NEW: Handle std::move(obj.field) including nested fields
                         crate::parser::Expression::MemberAccess { .. } => {
                             // Use helper to extract full path for nested member access
-                            if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
-                                debug_println!("DEBUG IR: Creating MoveField for field '{}' of object '{}'", field_name, obj_path);
+                            if let Some((obj_path, field_name)) =
+                                extract_member_path(inner.as_ref())
+                            {
+                                debug_println!(
+                                    "DEBUG IR: Creating MoveField for field '{}' of object '{}'",
+                                    field_name,
+                                    obj_path
+                                );
                                 Ok(Some(vec![IrStatement::MoveField {
                                     object: obj_path,
                                     field: field_name,
                                     to: lhs_var.clone(),
-                        line: 0,
-                    }]))
+                                    line: 0,
+                                }]))
                             } else {
                                 debug_println!("DEBUG IR: MemberAccess could not be parsed");
                                 Ok(None)
                             }
                         }
                         _ => {
-                            debug_println!("DEBUG IR: Move expression doesn't contain a variable or member access");
+                            debug_println!(
+                                "DEBUG IR: Move expression doesn't contain a variable or member access"
+                            );
                             Ok(None)
                         }
                     }
@@ -1427,7 +1553,8 @@ fn convert_statement(
                                     if is_dereference_operator(&name) {
                                         statements.push(IrStatement::UseVariable {
                                             var: var.clone(),
-                                            operation: "dereference_read (via operator*)".to_string(),
+                                            operation: "dereference_read (via operator*)"
+                                                .to_string(),
                                         });
                                     } else {
                                         // Other method calls also use the receiver
@@ -1441,10 +1568,15 @@ fn convert_statement(
                             }
                             crate::parser::Expression::Move { inner, .. } => {
                                 // Handle std::move in constructor/function arguments
-                                debug_println!("DEBUG IR: Processing Move in assignment RHS function call");
+                                debug_println!(
+                                    "DEBUG IR: Processing Move in assignment RHS function call"
+                                );
                                 match inner.as_ref() {
                                     crate::parser::Expression::Variable(var) => {
-                                        debug_println!("DEBUG IR: Move(Variable) in assignment: {}", var);
+                                        debug_println!(
+                                            "DEBUG IR: Move(Variable) in assignment: {}",
+                                            var
+                                        );
 
                                         // CRITICAL FIX: When Move is the receiver of a method call (first argument),
                                         // use the temporary as the receiver instead of the original variable.
@@ -1453,12 +1585,16 @@ fn convert_statement(
                                         statements.push(IrStatement::Move {
                                             from: var.clone(),
                                             to: temp_name.clone(),
-                        line: 0,
-                    });
+                                            line: 0,
+                                        });
 
                                         if is_method_call && i == 0 {
                                             // Use the temporary as the receiver for rvalue method calls
-                                            debug_println!("DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'", temp_name, var);
+                                            debug_println!(
+                                                "DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'",
+                                                temp_name,
+                                                var
+                                            );
                                             arg_names.push(temp_name);
                                         } else {
                                             // For non-receiver arguments, use the original variable name
@@ -1467,13 +1603,19 @@ fn convert_statement(
                                     }
                                     crate::parser::Expression::MemberAccess { .. } => {
                                         // Use helper to extract full path for nested member access
-                                        if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
-                                            debug_println!("DEBUG IR: Move(MemberAccess) in assignment: {}.{}", obj_path, field_name);
+                                        if let Some((obj_path, field_name)) =
+                                            extract_member_path(inner.as_ref())
+                                        {
+                                            debug_println!(
+                                                "DEBUG IR: Move(MemberAccess) in assignment: {}.{}",
+                                                obj_path,
+                                                field_name
+                                            );
                                             statements.push(IrStatement::MoveField {
                                                 object: obj_path.clone(),
                                                 field: field_name.clone(),
-                                                to: lhs_var.clone(),  // Move to the LHS variable
-                                                line: 0,  // Line not easily available in this nested context
+                                                to: lhs_var.clone(), // Move to the LHS variable
+                                                line: 0, // Line not easily available in this nested context
                                             });
                                             arg_names.push(format!("{}.{}", obj_path, field_name));
                                         }
@@ -1481,7 +1623,10 @@ fn convert_statement(
                                     _ => {}
                                 }
                             }
-                            crate::parser::Expression::FunctionCall { name: recv_name, args: recv_args } if is_method_call && i == 0 => {
+                            crate::parser::Expression::FunctionCall {
+                                name: recv_name,
+                                args: recv_args,
+                            } if is_method_call && i == 0 => {
                                 // Receiver is a method call itself (e.g., ptr->method() where ptr-> is operator->)
                                 debug_println!("DEBUG IR: Receiver is FunctionCall: {}", recv_name);
 
@@ -1490,10 +1635,16 @@ fn convert_statement(
                                     // Extract the actual pointer variable from operator-> args
                                     for recv_arg in recv_args {
                                         if let crate::parser::Expression::Variable(var) = recv_arg {
-                                            debug_println!("DEBUG IR: Found pointer variable in operator->: {}", var);
+                                            debug_println!(
+                                                "DEBUG IR: Found pointer variable in operator->: {}",
+                                                var
+                                            );
                                             statements.push(IrStatement::UseVariable {
                                                 var: var.clone(),
-                                                operation: format!("call method '{}' via operator->", name),
+                                                operation: format!(
+                                                    "call method '{}' via operator->",
+                                                    name
+                                                ),
                                             });
                                         }
                                     }
@@ -1505,7 +1656,11 @@ fn convert_statement(
                             crate::parser::Expression::MemberAccess { .. } => {
                                 // Use helper to extract full path for nested member access
                                 if let Some((obj_path, field_name)) = extract_member_path(arg) {
-                                    debug_println!("DEBUG IR: MemberAccess as function argument in assignment: {}.{}", obj_path, field_name);
+                                    debug_println!(
+                                        "DEBUG IR: MemberAccess as function argument in assignment: {}.{}",
+                                        obj_path,
+                                        field_name
+                                    );
                                     // Generate UseField statement to check if field is valid
                                     statements.push(IrStatement::UseField {
                                         object: obj_path.clone(),
@@ -1523,7 +1678,7 @@ fn convert_statement(
                         func: name.clone(),
                         args: arg_names,
                         result: Some(lhs_var.clone()),
-                        receiver_is_temporary: false,  // TODO: detect temporaries
+                        receiver_is_temporary: false, // TODO: detect temporaries
                     });
 
                     Ok(Some(statements))
@@ -1541,49 +1696,56 @@ fn convert_statement(
                 // String literal assignment (e.g., const char* s = "hello")
                 // String literals have static lifetime - this is safe
                 crate::parser::Expression::StringLiteral(value) => {
-                    debug_println!("DEBUG IR: String literal assignment: {} = \"{}\"", lhs_var, value);
+                    debug_println!(
+                        "DEBUG IR: String literal assignment: {} = \"{}\"",
+                        lhs_var,
+                        value
+                    );
                     Ok(Some(vec![IrStatement::Assign {
                         lhs: lhs_var.clone(),
-                        rhs: IrExpression::Literal(value.clone()),  // Treat as literal for IR
+                        rhs: IrExpression::Literal(value.clone()), // Treat as literal for IR
                         line,
                     }]))
                 }
                 // Lambda expression: generate LambdaCapture statement for safety checking
                 crate::parser::Expression::Lambda { captures } => {
                     debug_println!("DEBUG IR: Lambda assignment: {} = [captures]", lhs_var);
-                    let capture_infos: Vec<LambdaCaptureInfo> = captures.iter().map(|c| {
-                        use crate::parser::ast_visitor::LambdaCaptureKind;
-                        match c {
-                            LambdaCaptureKind::DefaultRef => LambdaCaptureInfo {
-                                name: "<default>".to_string(),
-                                is_ref: true,
-                            },
-                            LambdaCaptureKind::DefaultCopy => LambdaCaptureInfo {
-                                name: "<default>".to_string(),
-                                is_ref: false,
-                            },
-                            LambdaCaptureKind::ByRef(name) => LambdaCaptureInfo {
-                                name: name.clone(),
-                                is_ref: true,
-                            },
-                            LambdaCaptureKind::ByCopy(name) => LambdaCaptureInfo {
-                                name: name.clone(),
-                                is_ref: false,
-                            },
-                            LambdaCaptureKind::Init { name, .. } => LambdaCaptureInfo {
-                                name: name.clone(),
-                                is_ref: false, // Init captures are by value
-                            },
-                            LambdaCaptureKind::This => LambdaCaptureInfo {
-                                name: "this".to_string(),
-                                is_ref: true, // 'this' capture is a pointer, essentially by-ref
-                            },
-                            LambdaCaptureKind::ThisCopy => LambdaCaptureInfo {
-                                name: "this".to_string(),
-                                is_ref: false, // *this capture is by value
-                            },
-                        }
-                    }).collect();
+                    let capture_infos: Vec<LambdaCaptureInfo> = captures
+                        .iter()
+                        .map(|c| {
+                            use crate::parser::ast_visitor::LambdaCaptureKind;
+                            match c {
+                                LambdaCaptureKind::DefaultRef => LambdaCaptureInfo {
+                                    name: "<default>".to_string(),
+                                    is_ref: true,
+                                },
+                                LambdaCaptureKind::DefaultCopy => LambdaCaptureInfo {
+                                    name: "<default>".to_string(),
+                                    is_ref: false,
+                                },
+                                LambdaCaptureKind::ByRef(name) => LambdaCaptureInfo {
+                                    name: name.clone(),
+                                    is_ref: true,
+                                },
+                                LambdaCaptureKind::ByCopy(name) => LambdaCaptureInfo {
+                                    name: name.clone(),
+                                    is_ref: false,
+                                },
+                                LambdaCaptureKind::Init { name, .. } => LambdaCaptureInfo {
+                                    name: name.clone(),
+                                    is_ref: false, // Init captures are by value
+                                },
+                                LambdaCaptureKind::This => LambdaCaptureInfo {
+                                    name: "this".to_string(),
+                                    is_ref: true, // 'this' capture is a pointer, essentially by-ref
+                                },
+                                LambdaCaptureKind::ThisCopy => LambdaCaptureInfo {
+                                    name: "this".to_string(),
+                                    is_ref: false, // *this capture is by value
+                                },
+                            }
+                        })
+                        .collect();
 
                     Ok(Some(vec![IrStatement::LambdaCapture {
                         captures: capture_infos,
@@ -1595,14 +1757,20 @@ fn convert_statement(
                     debug_println!("DEBUG IR: AddressOf in assignment: {} = &...", lhs_var);
                     match inner.as_ref() {
                         crate::parser::Expression::Variable(target_var) => {
-                            debug_println!("DEBUG IR: Creating pointer borrow from '{}' to '{}'", target_var, lhs_var);
+                            debug_println!(
+                                "DEBUG IR: Creating pointer borrow from '{}' to '{}'",
+                                target_var,
+                                lhs_var
+                            );
 
                             // Determine mutability from LHS pointer type
                             // - Ptr<T> (const T*) -> Immutable borrow
                             // - MutPtr<T> (T*) -> Mutable borrow
                             let kind = if let Some(var_info) = variables.get(lhs_var) {
                                 match &var_info.ty {
-                                    VariableType::Owned(type_name) if is_immutable_pointer_type(type_name) => {
+                                    VariableType::Owned(type_name)
+                                        if is_immutable_pointer_type(type_name) =>
+                                    {
                                         BorrowKind::Immutable
                                     }
                                     _ => {
@@ -1620,21 +1788,28 @@ fn convert_statement(
                                 to: lhs_var.clone(),
                                 kind,
                                 line,
-                                is_pointer: true,  // Mark as pointer borrow
+                                is_pointer: true, // Mark as pointer borrow
                             }]))
                         }
                         // Handle &obj.field (address of a field)
                         crate::parser::Expression::MemberAccess { object, field } => {
                             if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
-                                debug_println!("DEBUG IR: Creating pointer borrow from '{}.{}' to '{}'", obj_name, field, lhs_var);
+                                debug_println!(
+                                    "DEBUG IR: Creating pointer borrow from '{}.{}' to '{}'",
+                                    obj_name,
+                                    field,
+                                    lhs_var
+                                );
 
                                 // Same mutability logic as above
                                 let kind = if let Some(var_info) = variables.get(lhs_var) {
                                     match &var_info.ty {
-                                        VariableType::Owned(type_name) if is_immutable_pointer_type(type_name) => {
+                                        VariableType::Owned(type_name)
+                                            if is_immutable_pointer_type(type_name) =>
+                                        {
                                             BorrowKind::Immutable
                                         }
-                                        _ => BorrowKind::Mutable
+                                        _ => BorrowKind::Mutable,
                                     }
                                 } else {
                                     BorrowKind::Mutable
@@ -1653,10 +1828,10 @@ fn convert_statement(
                                 Ok(None)
                             }
                         }
-                        _ => Ok(None)
+                        _ => Ok(None),
                     }
                 }
-                _ => Ok(None)
+                _ => Ok(None),
             };
 
             // If we need to prepend a Drop check for RAII reassignment, do it now
@@ -1672,14 +1847,22 @@ fn convert_statement(
                         // No assignment IR generated, just return Drop
                         Ok(Some(vec![IrStatement::Drop(lhs_var.clone())]))
                     }
-                    Err(e) => Err(e)
+                    Err(e) => Err(e),
                 }
             } else {
                 assignment_ir
             }
         }
-        Statement::FunctionCall { name, args, location } => {
-            debug_println!("DEBUG IR: Processing FunctionCall statement: {} with {} args", name, args.len());
+        Statement::FunctionCall {
+            name,
+            args,
+            location,
+        } => {
+            debug_println!(
+                "DEBUG IR: Processing FunctionCall statement: {} with {} args",
+                name,
+                args.len()
+            );
             let line = location.line as usize;
             // Standalone function call (no assignment)
             let mut statements = Vec::new();
@@ -1709,21 +1892,31 @@ fn convert_statement(
                         };
 
                         // Handle Move RHS
-                        if let crate::parser::Expression::Move { inner: rhs_inner, .. } = &args[1] {
+                        if let crate::parser::Expression::Move {
+                            inner: rhs_inner, ..
+                        } = &args[1]
+                        {
                             debug_println!("DEBUG IR: operator= with Move: {} = Move(...)", lhs);
                             if let crate::parser::Expression::Variable(rhs) = rhs_inner.as_ref() {
-                                debug_println!("DEBUG IR: Creating Move from '{}' to '{}' for operator=", rhs, lhs);
+                                debug_println!(
+                                    "DEBUG IR: Creating Move from '{}' to '{}' for operator=",
+                                    rhs,
+                                    lhs
+                                );
                                 return Ok(Some(vec![IrStatement::Move {
                                     from: rhs.clone(),
                                     to: lhs.clone(),
-                        line: 0,
-                    }]));
+                                    line: 0,
+                                }]));
                             }
                         }
 
                         // For RAII types with non-move RHS, we need to check borrows before drop
                         if lhs_is_raii {
-                            debug_println!("DEBUG IR: operator= on RAII type '{}' - generating Drop check", lhs);
+                            debug_println!(
+                                "DEBUG IR: operator= on RAII type '{}' - generating Drop check",
+                                lhs
+                            );
                             // Generate Drop check - the FunctionCall itself will be processed below
                             statements.push(IrStatement::Drop(lhs.clone()));
                         }
@@ -1759,7 +1952,10 @@ fn convert_statement(
                         // Handle std::move in function arguments
                         match inner.as_ref() {
                             crate::parser::Expression::Variable(var) => {
-                                debug_println!("DEBUG IR: Move(Variable) as direct argument: {}", var);
+                                debug_println!(
+                                    "DEBUG IR: Move(Variable) as direct argument: {}",
+                                    var
+                                );
 
                                 // CRITICAL FIX: When Move is the receiver of a method call (first argument),
                                 // use the temporary as the receiver instead of the original variable.
@@ -1768,12 +1964,16 @@ fn convert_statement(
                                 statements.push(IrStatement::Move {
                                     from: var.clone(),
                                     to: temp_name.clone(),
-                        line: 0,
-                    });
+                                    line: 0,
+                                });
 
                                 if is_method_call && i == 0 {
                                     // Use the temporary as the receiver for rvalue method calls
-                                    debug_println!("DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'", temp_name, var);
+                                    debug_println!(
+                                        "DEBUG IR: Move as method receiver - using temporary '{}' instead of '{}'",
+                                        temp_name,
+                                        var
+                                    );
                                     arg_names.push(temp_name);
                                 } else {
                                     // For non-receiver arguments, use the original variable name
@@ -1782,8 +1982,14 @@ fn convert_statement(
                             }
                             crate::parser::Expression::MemberAccess { .. } => {
                                 // Use helper to extract full path for nested member access
-                                if let Some((obj_path, field_name)) = extract_member_path(inner.as_ref()) {
-                                    debug_println!("DEBUG IR: Move(MemberAccess) as direct argument: {}.{}", obj_path, field_name);
+                                if let Some((obj_path, field_name)) =
+                                    extract_member_path(inner.as_ref())
+                                {
+                                    debug_println!(
+                                        "DEBUG IR: Move(MemberAccess) as direct argument: {}.{}",
+                                        obj_path,
+                                        field_name
+                                    );
                                     statements.push(IrStatement::MoveField {
                                         object: obj_path.clone(),
                                         field: field_name.clone(),
@@ -1796,7 +2002,10 @@ fn convert_statement(
                             _ => {}
                         }
                     }
-                    crate::parser::Expression::FunctionCall { name: inner_name, args: inner_args } => {
+                    crate::parser::Expression::FunctionCall {
+                        name: inner_name,
+                        args: inner_args,
+                    } => {
                         debug_println!("DEBUG IR: Nested FunctionCall in argument: {}", inner_name);
 
                         // Check if this is the receiver of a method call (i == 0)
@@ -1806,10 +2015,16 @@ fn convert_statement(
                                 // Extract the actual pointer variable from operator-> args
                                 for inner_arg in inner_args {
                                     if let crate::parser::Expression::Variable(var) = inner_arg {
-                                        debug_println!("DEBUG IR: Found pointer variable in operator->: {}", var);
+                                        debug_println!(
+                                            "DEBUG IR: Found pointer variable in operator->: {}",
+                                            var
+                                        );
                                         statements.push(IrStatement::UseVariable {
                                             var: var.clone(),
-                                            operation: format!("call method '{}' via operator->", name),
+                                            operation: format!(
+                                                "call method '{}' via operator->",
+                                                name
+                                            ),
                                         });
                                     }
                                 }
@@ -1818,10 +2033,16 @@ fn convert_statement(
 
                         // Recursively check for moves in nested function call
                         for inner_arg in inner_args {
-                            if let crate::parser::Expression::Move { inner: move_inner, .. } = inner_arg {
+                            if let crate::parser::Expression::Move {
+                                inner: move_inner, ..
+                            } = inner_arg
+                            {
                                 match move_inner.as_ref() {
                                     crate::parser::Expression::Variable(var) => {
-                                        debug_println!("DEBUG IR: Found Move(Variable) in nested call: {}", var);
+                                        debug_println!(
+                                            "DEBUG IR: Found Move(Variable) in nested call: {}",
+                                            var
+                                        );
                                         statements.push(IrStatement::Move {
                                             from: var.clone(),
                                             to: format!("_moved_{}", var),
@@ -1830,8 +2051,14 @@ fn convert_statement(
                                     }
                                     crate::parser::Expression::MemberAccess { .. } => {
                                         // Use helper to extract full path for nested member access
-                                        if let Some((obj_path, field_name)) = extract_member_path(move_inner.as_ref()) {
-                                            debug_println!("DEBUG IR: Found Move(MemberAccess) in nested call: {}.{}", obj_path, field_name);
+                                        if let Some((obj_path, field_name)) =
+                                            extract_member_path(move_inner.as_ref())
+                                        {
+                                            debug_println!(
+                                                "DEBUG IR: Found Move(MemberAccess) in nested call: {}.{}",
+                                                obj_path,
+                                                field_name
+                                            );
                                             statements.push(IrStatement::MoveField {
                                                 object: obj_path,
                                                 field: field_name.clone(),
@@ -1851,7 +2078,11 @@ fn convert_statement(
                     crate::parser::Expression::MemberAccess { .. } => {
                         // Use helper to extract full path for nested member access
                         if let Some((obj_path, field_name)) = extract_member_path(arg) {
-                            debug_println!("DEBUG IR: MemberAccess as function argument: {}.{}", obj_path, field_name);
+                            debug_println!(
+                                "DEBUG IR: MemberAccess as function argument: {}.{}",
+                                obj_path,
+                                field_name
+                            );
 
                             // When field is receiver of a method call, we need to check for conflicts
                             // with existing borrows but NOT create a persistent borrow
@@ -1901,7 +2132,7 @@ fn convert_statement(
                 func: name.clone(),
                 args: arg_names,
                 result: None,
-                receiver_is_temporary: false,  // TODO: detect temporaries
+                receiver_is_temporary: false, // TODO: detect temporaries
             });
 
             Ok(Some(statements))
@@ -1909,24 +2140,35 @@ fn convert_statement(
         Statement::Return(expr) => {
             let mut statements = Vec::new();
 
-            let value = expr.as_ref().and_then(|e| {
-                extract_return_source(e, &mut statements)
-            });
+            let value = expr
+                .as_ref()
+                .and_then(|e| extract_return_source(e, &mut statements));
 
-            statements.push(IrStatement::Return { value , line: 0 });
+            statements.push(IrStatement::Return { value, line: 0 });
             Ok(Some(statements))
         }
         Statement::EnterScope => {
             *current_scope_level += 1;
-            debug_println!("DEBUG IR: EnterScope - now at level {}", current_scope_level);
+            debug_println!(
+                "DEBUG IR: EnterScope - now at level {}",
+                current_scope_level
+            );
             Ok(Some(vec![IrStatement::EnterScope]))
         }
         Statement::ExitScope => {
-            debug_println!("DEBUG IR: ExitScope - leaving level {}", current_scope_level);
+            debug_println!(
+                "DEBUG IR: ExitScope - leaving level {}",
+                current_scope_level
+            );
             debug_println!("DEBUG IR: Total variables: {}", variables.len());
             for (name, info) in variables.iter() {
-                debug_println!("DEBUG IR:   Variable '{}': scope_level={}, has_destructor={}, is_static={}",
-                    name, info.scope_level, info.has_destructor, info.is_static);
+                debug_println!(
+                    "DEBUG IR:   Variable '{}': scope_level={}, has_destructor={}, is_static={}",
+                    name,
+                    info.scope_level,
+                    info.has_destructor,
+                    info.is_static
+                );
             }
 
             // Find ALL variables declared at this scope level (including references)
@@ -1934,8 +2176,7 @@ fn convert_statement(
             let mut vars_to_drop: Vec<(String, usize, bool)> = variables
                 .iter()
                 .filter(|(_, info)| {
-                    info.scope_level == *current_scope_level &&
-                    !info.is_static  // Static variables are never dropped
+                    info.scope_level == *current_scope_level && !info.is_static // Static variables are never dropped
                 })
                 .map(|(name, info)| (name.clone(), info.declaration_index, info.has_destructor))
                 .collect();
@@ -1944,17 +2185,29 @@ fn convert_statement(
             // This ensures variables drop in reverse order of declaration
             vars_to_drop.sort_by(|a, b| b.1.cmp(&a.1));
 
-            debug_println!("DROP ORDER: Processing {} variables at scope end in reverse declaration order", vars_to_drop.len());
+            debug_println!(
+                "DROP ORDER: Processing {} variables at scope end in reverse declaration order",
+                vars_to_drop.len()
+            );
             for (name, decl_idx, has_dest) in &vars_to_drop {
-                debug_println!("DROP ORDER:   '{}' (declaration_index={}, has_destructor={})", name, decl_idx, has_dest);
+                debug_println!(
+                    "DROP ORDER:   '{}' (declaration_index={}, has_destructor={})",
+                    name,
+                    decl_idx,
+                    has_dest
+                );
             }
 
             // Create ImplicitDrop statements in reverse declaration order
             // This clears borrows for ALL variables, and marks RAII types as moved
             let mut statements = Vec::new();
             for (var, _, has_dest) in vars_to_drop {
-                debug_println!("DEBUG IR: Inserting ImplicitDrop for '{}' at scope level {} (has_destructor={})",
-                    var, current_scope_level, has_dest);
+                debug_println!(
+                    "DEBUG IR: Inserting ImplicitDrop for '{}' at scope level {} (has_destructor={})",
+                    var,
+                    current_scope_level,
+                    has_dest
+                );
                 statements.push(IrStatement::ImplicitDrop {
                     var,
                     scope_level: *current_scope_level,
@@ -1968,19 +2221,16 @@ fn convert_statement(
             *current_scope_level = current_scope_level.saturating_sub(1);
             Ok(Some(statements))
         }
-        Statement::EnterLoop => {
-            Ok(Some(vec![IrStatement::EnterLoop]))
-        }
-        Statement::ExitLoop => {
-            Ok(Some(vec![IrStatement::ExitLoop]))
-        }
-        Statement::EnterUnsafe => {
-            Ok(Some(vec![IrStatement::EnterUnsafe]))
-        }
-        Statement::ExitUnsafe => {
-            Ok(Some(vec![IrStatement::ExitUnsafe]))
-        }
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::EnterLoop => Ok(Some(vec![IrStatement::EnterLoop])),
+        Statement::ExitLoop => Ok(Some(vec![IrStatement::ExitLoop])),
+        Statement::EnterUnsafe => Ok(Some(vec![IrStatement::EnterUnsafe])),
+        Statement::ExitUnsafe => Ok(Some(vec![IrStatement::ExitUnsafe])),
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             // Convert if statement to IR
             // First, process the condition (which might contain uses like `if (ptr)`)
             let mut condition_ir = Vec::new();
@@ -1995,7 +2245,11 @@ fn convert_statement(
                         if let crate::parser::Expression::Variable(var) = arg {
                             // For method calls, first arg is the receiver
                             if is_method_call && i == 0 {
-                                debug_println!("DEBUG IR: Creating UseVariable for '{}' in condition (method: {})", var, name);
+                                debug_println!(
+                                    "DEBUG IR: Creating UseVariable for '{}' in condition (method: {})",
+                                    var,
+                                    name
+                                );
                                 condition_ir.push(IrStatement::UseVariable {
                                     var: var.clone(),
                                     operation: format!("call method '{}' in condition", name),
@@ -2019,7 +2273,12 @@ fn convert_statement(
             // Convert then branch
             let mut then_ir = Vec::new();
             for stmt in then_branch {
-                if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level, user_defined_raii_types)? {
+                if let Some(ir_stmts) = convert_statement(
+                    stmt,
+                    variables,
+                    current_scope_level,
+                    user_defined_raii_types,
+                )? {
                     then_ir.extend(ir_stmts);
                 }
             }
@@ -2028,7 +2287,12 @@ fn convert_statement(
             let else_ir = if let Some(else_stmts) = else_branch {
                 let mut else_ir = Vec::new();
                 for stmt in else_stmts {
-                    if let Some(ir_stmts) = convert_statement(stmt, variables, current_scope_level, user_defined_raii_types)? {
+                    if let Some(ir_stmts) = convert_statement(
+                        stmt,
+                        variables,
+                        current_scope_level,
+                        user_defined_raii_types,
+                    )? {
                         else_ir.extend(ir_stmts);
                     }
                 }
@@ -2068,20 +2332,25 @@ fn convert_statement(
                     debug_println!("DEBUG IR: ExpressionStatement assignment: op={}", op);
 
                     // Check if LHS is a field access (e.g., this.value = 42)
-                    if let crate::parser::Expression::MemberAccess { object, field } = left.as_ref() {
-                        debug_println!("DEBUG IR: ExpressionStatement field write: {}.{} = ...",
-                            if let crate::parser::Expression::Variable(obj) = object.as_ref() { obj } else { "complex" },
-                            field);
+                    if let crate::parser::Expression::MemberAccess { object, field } = left.as_ref()
+                    {
+                        debug_println!(
+                            "DEBUG IR: ExpressionStatement field write: {}.{} = ...",
+                            if let crate::parser::Expression::Variable(obj) = object.as_ref() {
+                                obj
+                            } else {
+                                "complex"
+                            },
+                            field
+                        );
 
                         if let crate::parser::Expression::Variable(obj_name) = object.as_ref() {
                             // Generate UseField statement for write operation
-                            return Ok(Some(vec![
-                                IrStatement::UseField {
-                                    object: obj_name.clone(),
-                                    field: field.clone(),
-                                    operation: "write".to_string(),
-                                }
-                            ]));
+                            return Ok(Some(vec![IrStatement::UseField {
+                                object: obj_name.clone(),
+                                field: field.clone(),
+                                operation: "write".to_string(),
+                            }]));
                         }
                     }
 
@@ -2091,9 +2360,17 @@ fn convert_statement(
                 _ => Ok(None),
             }
         }
-        Statement::PackExpansion { pack_name, operation, .. } => {
+        Statement::PackExpansion {
+            pack_name,
+            operation,
+            ..
+        } => {
             // Phase 4: Convert pack expansion to IR
-            debug_println!("DEBUG IR: PackExpansion: pack='{}', operation='{}'", pack_name, operation);
+            debug_println!(
+                "DEBUG IR: PackExpansion: pack='{}', operation='{}'",
+                pack_name,
+                operation
+            );
             Ok(Some(vec![IrStatement::PackExpansion {
                 pack_name: pack_name.clone(),
                 operation: operation.clone(),
@@ -2106,7 +2383,7 @@ fn convert_statement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{Function, Variable, SourceLocation};
+    use crate::parser::{Function, SourceLocation, Variable};
 
     fn create_test_function(name: &str) -> Function {
         Function {
@@ -2154,7 +2431,7 @@ mod tests {
     fn test_build_empty_ir() {
         let ast = crate::parser::CppAst::new();
         let result = build_ir(ast);
-        
+
         assert!(result.is_ok());
         let ir = result.unwrap();
         assert_eq!(ir.functions.len(), 0);
@@ -2164,10 +2441,10 @@ mod tests {
     fn test_build_ir_with_function() {
         let mut ast = crate::parser::CppAst::new();
         ast.functions.push(create_test_function("test_func"));
-        
+
         let result = build_ir(ast);
         assert!(result.is_ok());
-        
+
         let ir = result.unwrap();
         assert_eq!(ir.functions.len(), 1);
         assert_eq!(ir.functions[0].name, "test_func");
@@ -2180,10 +2457,10 @@ mod tests {
         let mut func = create_test_function("test");
         func.parameters.push(unique_var);
         ast.functions.push(func);
-        
+
         let result = build_ir(ast);
         assert!(result.is_ok());
-        
+
         let ir = result.unwrap();
         let var_info = ir.functions[0].variables.get("ptr").unwrap();
         assert!(matches!(var_info.ty, VariableType::UniquePtr(_)));
@@ -2196,10 +2473,10 @@ mod tests {
         let mut func = create_test_function("test");
         func.parameters.push(var);
         ast.functions.push(func);
-        
+
         let result = build_ir(ast);
         assert!(result.is_ok());
-        
+
         let ir = result.unwrap();
         let var_info = ir.functions[0].variables.get("x").unwrap();
         assert_eq!(var_info.ownership, OwnershipState::Owned);
@@ -2222,24 +2499,22 @@ mod tests {
 // Phase 1: Conversion functions from parsed annotations to IR lifetime types
 
 /// Convert LifetimeAnnotation to ParameterLifetime for IR
-fn convert_param_lifetime(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<ParameterLifetime> {
+fn convert_param_lifetime(
+    annotation: &crate::parser::annotations::LifetimeAnnotation,
+) -> Option<ParameterLifetime> {
     use crate::parser::annotations::LifetimeAnnotation;
 
     match annotation {
-        LifetimeAnnotation::Ref(lifetime_name) => {
-            Some(ParameterLifetime {
-                lifetime_name: lifetime_name.clone(),
-                is_mutable: false,
-                is_owned: false,
-            })
-        }
-        LifetimeAnnotation::MutRef(lifetime_name) => {
-            Some(ParameterLifetime {
-                lifetime_name: lifetime_name.clone(),
-                is_mutable: true,
-                is_owned: false,
-            })
-        }
+        LifetimeAnnotation::Ref(lifetime_name) => Some(ParameterLifetime {
+            lifetime_name: lifetime_name.clone(),
+            is_mutable: false,
+            is_owned: false,
+        }),
+        LifetimeAnnotation::MutRef(lifetime_name) => Some(ParameterLifetime {
+            lifetime_name: lifetime_name.clone(),
+            is_mutable: true,
+            is_owned: false,
+        }),
         LifetimeAnnotation::Ptr(lifetime_name) => {
             // Mutable pointer - similar to MutRef
             Some(ParameterLifetime {
@@ -2258,7 +2533,7 @@ fn convert_param_lifetime(annotation: &crate::parser::annotations::LifetimeAnnot
         }
         LifetimeAnnotation::Owned => {
             Some(ParameterLifetime {
-                lifetime_name: String::new(),  // No specific lifetime for owned
+                lifetime_name: String::new(), // No specific lifetime for owned
                 is_mutable: false,
                 is_owned: true,
             })
@@ -2271,24 +2546,22 @@ fn convert_param_lifetime(annotation: &crate::parser::annotations::LifetimeAnnot
 }
 
 /// Convert LifetimeAnnotation to ReturnLifetime for IR
-fn convert_return_lifetime(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<ReturnLifetime> {
+fn convert_return_lifetime(
+    annotation: &crate::parser::annotations::LifetimeAnnotation,
+) -> Option<ReturnLifetime> {
     use crate::parser::annotations::LifetimeAnnotation;
 
     match annotation {
-        LifetimeAnnotation::Ref(lifetime_name) => {
-            Some(ReturnLifetime {
-                lifetime_name: lifetime_name.clone(),
-                is_mutable: false,
-                is_owned: false,
-            })
-        }
-        LifetimeAnnotation::MutRef(lifetime_name) => {
-            Some(ReturnLifetime {
-                lifetime_name: lifetime_name.clone(),
-                is_mutable: true,
-                is_owned: false,
-            })
-        }
+        LifetimeAnnotation::Ref(lifetime_name) => Some(ReturnLifetime {
+            lifetime_name: lifetime_name.clone(),
+            is_mutable: false,
+            is_owned: false,
+        }),
+        LifetimeAnnotation::MutRef(lifetime_name) => Some(ReturnLifetime {
+            lifetime_name: lifetime_name.clone(),
+            is_mutable: true,
+            is_owned: false,
+        }),
         LifetimeAnnotation::Ptr(lifetime_name) => {
             // Mutable pointer return - similar to MutRef
             Some(ReturnLifetime {
@@ -2307,7 +2580,7 @@ fn convert_return_lifetime(annotation: &crate::parser::annotations::LifetimeAnno
         }
         LifetimeAnnotation::Owned => {
             Some(ReturnLifetime {
-                lifetime_name: String::new(),  // No specific lifetime for owned
+                lifetime_name: String::new(), // No specific lifetime for owned
                 is_mutable: false,
                 is_owned: true,
             })
@@ -2322,9 +2595,12 @@ fn convert_return_lifetime(annotation: &crate::parser::annotations::LifetimeAnno
 /// Populate IrFunction lifetime fields from FunctionSignature annotations
 pub fn populate_lifetime_info(
     ir_func: &mut IrFunction,
-    signature: &crate::parser::annotations::FunctionSignature
+    signature: &crate::parser::annotations::FunctionSignature,
 ) {
-    debug_println!("DEBUG IR LIFETIME: Populating lifetime info for function '{}'", ir_func.name);
+    debug_println!(
+        "DEBUG IR LIFETIME: Populating lifetime info for function '{}'",
+        ir_func.name
+    );
 
     // Extract all unique lifetime names from parameters and return type
     let mut lifetime_names = std::collections::HashSet::new();
@@ -2354,49 +2630,69 @@ pub fn populate_lifetime_info(
     // Create LifetimeParam entries
     for name in lifetime_names {
         debug_println!("DEBUG IR LIFETIME:   Lifetime parameter: '{}'", name);
-        ir_func.lifetime_params.insert(
-            name.clone(),
-            LifetimeParam { name }
-        );
+        ir_func
+            .lifetime_params
+            .insert(name.clone(), LifetimeParam { name });
     }
 
     // Convert parameter lifetimes
     for param_lifetime_opt in &signature.param_lifetimes {
-        let converted = param_lifetime_opt.as_ref()
+        let converted = param_lifetime_opt
+            .as_ref()
             .and_then(|lt| convert_param_lifetime(lt));
 
         if let Some(ref param_lt) = converted {
-            debug_println!("DEBUG IR LIFETIME:   Parameter lifetime: '{}' (mutable={}, owned={})",
-                param_lt.lifetime_name, param_lt.is_mutable, param_lt.is_owned);
+            debug_println!(
+                "DEBUG IR LIFETIME:   Parameter lifetime: '{}' (mutable={}, owned={})",
+                param_lt.lifetime_name,
+                param_lt.is_mutable,
+                param_lt.is_owned
+            );
         }
 
         ir_func.param_lifetimes.push(converted);
     }
 
     // Convert return lifetime
-    ir_func.return_lifetime = signature.return_lifetime.as_ref()
+    ir_func.return_lifetime = signature
+        .return_lifetime
+        .as_ref()
         .and_then(|lt| convert_return_lifetime(lt));
 
     if let Some(ref ret_lt) = ir_func.return_lifetime {
-        debug_println!("DEBUG IR LIFETIME:   Return lifetime: '{}' (mutable={}, owned={})",
-            ret_lt.lifetime_name, ret_lt.is_mutable, ret_lt.is_owned);
+        debug_println!(
+            "DEBUG IR LIFETIME:   Return lifetime: '{}' (mutable={}, owned={})",
+            ret_lt.lifetime_name,
+            ret_lt.is_mutable,
+            ret_lt.is_owned
+        );
     }
 
     // Convert lifetime constraints
     for bound in &signature.lifetime_bounds {
-        debug_println!("DEBUG IR LIFETIME:   Lifetime constraint: '{}': '{}'", bound.longer, bound.shorter);
+        debug_println!(
+            "DEBUG IR LIFETIME:   Lifetime constraint: '{}': '{}'",
+            bound.longer,
+            bound.shorter
+        );
         ir_func.lifetime_constraints.push(LifetimeConstraint {
             longer: bound.longer.clone(),
             shorter: bound.shorter.clone(),
         });
     }
 
-    debug_println!("DEBUG IR LIFETIME: Populated {} lifetime params, {} param lifetimes, {} constraints",
-        ir_func.lifetime_params.len(), ir_func.param_lifetimes.len(), ir_func.lifetime_constraints.len());
+    debug_println!(
+        "DEBUG IR LIFETIME: Populated {} lifetime params, {} param lifetimes, {} constraints",
+        ir_func.lifetime_params.len(),
+        ir_func.param_lifetimes.len(),
+        ir_func.lifetime_constraints.len()
+    );
 }
 
 /// Extract lifetime name from a LifetimeAnnotation
-fn extract_lifetime_name_from_annotation(annotation: &crate::parser::annotations::LifetimeAnnotation) -> Option<String> {
+fn extract_lifetime_name_from_annotation(
+    annotation: &crate::parser::annotations::LifetimeAnnotation,
+) -> Option<String> {
     use crate::parser::annotations::LifetimeAnnotation;
 
     match annotation {

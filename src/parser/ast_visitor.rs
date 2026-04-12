@@ -1,5 +1,5 @@
-use clang::{Entity, EntityKind, Type, TypeKind};
 use crate::debug_println;
+use clang::{Entity, EntityKind, Type, TypeKind};
 
 /// Check if a C++ method is deleted (= delete) or defaulted (= default)
 /// These special member functions don't count as regular methods for @interface validation.
@@ -12,20 +12,29 @@ use crate::debug_println;
 fn is_deleted_or_defaulted_method(entity: &Entity) -> bool {
     // Check for = default using clang crate's wrapper
     if entity.is_defaulted() {
-        debug_println!("DEBUG PARSE: Method {:?} is defaulted via libclang", entity.get_name());
+        debug_println!(
+            "DEBUG PARSE: Method {:?} is defaulted via libclang",
+            entity.get_name()
+        );
         return true;
     }
 
     // Check for = delete using availability
     // Deleted methods have Unavailable availability
     if entity.get_availability() == clang::Availability::Unavailable {
-        debug_println!("DEBUG PARSE: Method {:?} is deleted (Unavailable)", entity.get_name());
+        debug_println!(
+            "DEBUG PARSE: Method {:?} is deleted (Unavailable)",
+            entity.get_name()
+        );
         return true;
     }
 
     // Fallback: Check for = delete using libclang 16+ native API
     if is_deleted_via_libclang(entity) {
-        debug_println!("DEBUG PARSE: Method {:?} is deleted via libclang FFI", entity.get_name());
+        debug_println!(
+            "DEBUG PARSE: Method {:?} is deleted via libclang FFI",
+            entity.get_name()
+        );
         return true;
     }
 
@@ -53,9 +62,7 @@ fn is_deleted_via_libclang(entity: &Entity) -> bool {
     };
 
     // Call the libclang 16+ function directly
-    let result = unsafe {
-        clang_sys::clang_CXXMethod_isDeleted(raw_cursor)
-    };
+    let result = unsafe { clang_sys::clang_CXXMethod_isDeleted(raw_cursor) };
 
     result != 0
 }
@@ -65,10 +72,7 @@ fn is_deleted_via_libclang(entity: &Entity) -> bool {
 /// rusty::move provides Rust-like move semantics where moving a reference
 /// invalidates the reference variable itself (not just the underlying object).
 fn is_move_function(name: &str) -> bool {
-    name == "move"
-        || name == "std::move"
-        || name == "rusty::move"
-        || name.ends_with("::move")
+    name == "move" || name == "std::move" || name == "rusty::move" || name.ends_with("::move")
 }
 
 /// Determine the kind of move function (std::move vs rusty::move)
@@ -200,12 +204,18 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
             // Check the previous line for @unsafe annotation
             let trimmed = prev_line.trim();
             if trimmed.starts_with("//") && trimmed.contains("@unsafe") {
-                debug_println!("DEBUG UNSAFE: Found @unsafe annotation for block at line {}", block_line);
+                debug_println!(
+                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
+                    block_line
+                );
                 return true;
             }
             // Also check for /* @unsafe */ style comments
             if trimmed.contains("/*") && trimmed.contains("@unsafe") && trimmed.contains("*/") {
-                debug_println!("DEBUG UNSAFE: Found @unsafe annotation for block at line {}", block_line);
+                debug_println!(
+                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
+                    block_line
+                );
                 return true;
             }
             return false;
@@ -258,12 +268,16 @@ fn check_for_mutable_keyword(entity: &Entity) -> bool {
             // Check if the line contains the 'mutable' keyword
             // Look for word boundary to avoid matching "immutable" or similar
             let trimmed = line.trim();
-            let has_mutable = trimmed.starts_with("mutable ") ||
-                             trimmed.contains(" mutable ") ||
-                             (trimmed == "mutable");
+            let has_mutable = trimmed.starts_with("mutable ")
+                || trimmed.contains(" mutable ")
+                || (trimmed == "mutable");
 
-            debug_println!("DEBUG MUTABLE: Line {}: '{}' -> has_mutable = {}",
-                decl_line, trimmed, has_mutable);
+            debug_println!(
+                "DEBUG MUTABLE: Line {}: '{}' -> has_mutable = {}",
+                decl_line,
+                trimmed,
+                has_mutable
+            );
 
             return has_mutable;
         }
@@ -282,7 +296,10 @@ pub fn get_qualified_name(entity: &Entity) -> String {
 
     while let Some(parent) = current {
         match parent.get_kind() {
-            EntityKind::Namespace | EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate => {
+            EntityKind::Namespace
+            | EntityKind::ClassDecl
+            | EntityKind::StructDecl
+            | EntityKind::ClassTemplate => {
                 if let Some(parent_name) = parent.get_name() {
                     if !parent_name.is_empty() {
                         parts.push(parent_name);
@@ -335,35 +352,35 @@ pub fn extract_template_parameters(entity: &Entity) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct Class {
     pub name: String,
-    pub members: Vec<Variable>,            // Member fields
-    pub methods: Vec<Function>,            // Member methods
-    pub base_classes: Vec<String>,         // Base class names (may contain packs like "Bases...")
+    pub members: Vec<Variable>,    // Member fields
+    pub methods: Vec<Function>,    // Member methods
+    pub base_classes: Vec<String>, // Base class names (may contain packs like "Bases...")
     pub location: SourceLocation,
     // RAII Phase 2: Track if class has a destructor
-    pub has_destructor: bool,              // True if class has ~ClassName()
+    pub has_destructor: bool, // True if class has ~ClassName()
     // Inheritance safety: Interface-related fields
-    pub is_interface: bool,                // Has @interface annotation
-    pub has_virtual_destructor: bool,      // virtual ~Class() or virtual ~Class() = default
-    pub destructor_is_defaulted: bool,     // True if destructor is = default
-    pub all_methods_pure_virtual: bool,    // All methods are = 0 (pure virtual)
-    pub has_non_virtual_methods: bool,     // Has any non-virtual methods (excluding destructor)
+    pub is_interface: bool,             // Has @interface annotation
+    pub has_virtual_destructor: bool,   // virtual ~Class() or virtual ~Class() = default
+    pub destructor_is_defaulted: bool,  // True if destructor is = default
+    pub all_methods_pure_virtual: bool, // All methods are = 0 (pure virtual)
+    pub has_non_virtual_methods: bool,  // Has any non-virtual methods (excluding destructor)
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>, // @safe or @unsafe on class
     // Copy semantics: @safe classes should not have copy operations (Rust-like move semantics)
-    pub has_copy_constructor: bool,        // True if class has ClassName(const ClassName&)
-    pub has_copy_assignment: bool,         // True if class has operator=(const ClassName&)
-    pub copy_constructor_deleted: bool,    // True if copy constructor is explicitly deleted
-    pub copy_assignment_deleted: bool,     // True if copy assignment is explicitly deleted
+    pub has_copy_constructor: bool, // True if class has ClassName(const ClassName&)
+    pub has_copy_assignment: bool,  // True if class has operator=(const ClassName&)
+    pub copy_constructor_deleted: bool, // True if copy constructor is explicitly deleted
+    pub copy_assignment_deleted: bool, // True if copy assignment is explicitly deleted
     // Constructor tracking for pointer member safety
-    pub has_user_defined_constructor: bool,  // Any user-defined constructor exists
-    pub has_default_constructor: bool,       // Default ctor exists (explicit or implicit)
-    pub default_constructor_deleted: bool,   // Default ctor is = delete
+    pub has_user_defined_constructor: bool, // Any user-defined constructor exists
+    pub has_default_constructor: bool,      // Default ctor exists (explicit or implicit)
+    pub default_constructor_deleted: bool,  // Default ctor is = delete
 }
 
 #[derive(Debug, Clone)]
 pub struct CppAst {
     pub functions: Vec<Function>,
     pub global_variables: Vec<Variable>,
-    pub classes: Vec<Class>,  // Phase 3: Track template classes
+    pub classes: Vec<Class>, // Phase 3: Track template classes
 }
 
 impl CppAst {
@@ -371,16 +388,16 @@ impl CppAst {
         Self {
             functions: Vec::new(),
             global_variables: Vec::new(),
-            classes: Vec::new(),  // Phase 3
+            classes: Vec::new(), // Phase 3
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MethodQualifier {
-    Const,        // const method (like Rust's &self)
-    NonConst,     // regular method (like Rust's &mut self)
-    RvalueRef,    // && qualified method (like Rust's self)
+    Const,     // const method (like Rust's &self)
+    NonConst,  // regular method (like Rust's &mut self)
+    RvalueRef, // && qualified method (like Rust's self)
 }
 
 /// Represents a member initializer in a constructor initializer list
@@ -388,7 +405,7 @@ pub enum MethodQualifier {
 #[derive(Debug, Clone)]
 pub struct MemberInitializer {
     pub member_name: String,
-    pub is_nullptr: bool,  // Quick check if initialized to nullptr
+    pub is_nullptr: bool, // Quick check if initialized to nullptr
 }
 
 #[derive(Debug, Clone)]
@@ -405,13 +422,13 @@ pub struct Function {
     pub is_method: bool,
     pub method_qualifier: Option<MethodQualifier>,
     // Template information
-    pub template_parameters: Vec<String>,  // e.g., ["T", "U"] for template<typename T, typename U>
+    pub template_parameters: Vec<String>, // e.g., ["T", "U"] for template<typename T, typename U>
     // Safety annotation for method safety contract checking
     pub safety_annotation: Option<crate::parser::safety_annotations::SafetyMode>,
-    pub has_explicit_safety_annotation: bool,  // true if annotation was in source code
+    pub has_explicit_safety_annotation: bool, // true if annotation was in source code
     // Constructor-specific: member initializer list
-    pub is_deleted: bool,      // = delete
-    pub member_initializers: Vec<MemberInitializer>,  // : member(expr), ...
+    pub is_deleted: bool,                            // = delete
+    pub member_initializers: Vec<MemberInitializer>, // : member(expr), ...
 }
 
 #[derive(Debug, Clone)]
@@ -426,12 +443,12 @@ pub struct Variable {
     #[allow(dead_code)]
     pub is_shared_ptr: bool,
     pub is_static: bool,
-    pub is_mutable: bool,                      // C++ mutable keyword (for interior mutability)
+    pub is_mutable: bool, // C++ mutable keyword (for interior mutability)
     #[allow(dead_code)]
     pub location: SourceLocation,
     // Variadic template support (Phase 1)
-    pub is_pack: bool,                         // Is this a parameter pack (e.g., Args... args)?
-    pub pack_element_type: Option<String>,     // Type of pack elements (e.g., "Args&&" from "Args&&...")
+    pub is_pack: bool, // Is this a parameter pack (e.g., Args... args)?
+    pub pack_element_type: Option<String>, // Type of pack elements (e.g., "Args&&" from "Args&&...")
 }
 
 #[derive(Debug, Clone)]
@@ -439,7 +456,7 @@ pub struct Variable {
 pub enum Statement {
     VariableDecl(Variable),
     Assignment {
-        lhs: Expression,  // Changed to Expression to support dereference: *ptr = value
+        lhs: Expression, // Changed to Expression to support dereference: *ptr = value
         rhs: Expression,
         location: SourceLocation,
     },
@@ -479,8 +496,8 @@ pub enum Statement {
     },
     // Phase 2: Pack expansion statement (fold expressions, pack usage)
     PackExpansion {
-        pack_name: String,           // Name of the pack being expanded (e.g., "args")
-        operation: String,           // Type of operation: "forward", "move", "use"
+        pack_name: String, // Name of the pack being expanded (e.g., "args")
+        operation: String, // Type of operation: "forward", "move", "use"
         location: SourceLocation,
     },
     // Lambda expression with captures (for safety checking)
@@ -726,9 +743,7 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
             }
             Expression::Literal("0".to_string())
         }
-        EntityKind::NullPtrLiteralExpr => {
-            Expression::Nullptr
-        }
+        EntityKind::NullPtrLiteralExpr => Expression::Nullptr,
         EntityKind::CallExpr => {
             // Function call
             let name = entity.get_name().unwrap_or_else(|| "unknown".to_string());
@@ -737,9 +752,7 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
                 args: Vec::new(), // Simplified - don't extract args here
             }
         }
-        _ => {
-            Expression::Literal("unknown".to_string())
-        }
+        _ => Expression::Literal("unknown".to_string()),
     }
 }
 
@@ -782,8 +795,11 @@ pub fn extract_function(entity: &Entity) -> Function {
                     let element_type = type_str.trim_end_matches("...").trim().to_string();
                     param.pack_element_type = Some(element_type.clone());
 
-                    debug_println!("DEBUG PARSE: Found parameter pack '{}' with element type '{}'",
-                        param.name, element_type);
+                    debug_println!(
+                        "DEBUG PARSE: Found parameter pack '{}' with element type '{}'",
+                        param.name,
+                        element_type
+                    );
                 }
             }
 
@@ -823,13 +839,17 @@ pub fn extract_function(entity: &Entity) -> Function {
         }
     } else if entity.get_kind() == EntityKind::FunctionTemplate {
         // Entity IS a FunctionTemplate - extract parameters directly from it
-        debug_println!("TEMPLATE: Free template function (entity is FunctionTemplate), extracting parameters");
+        debug_println!(
+            "TEMPLATE: Free template function (entity is FunctionTemplate), extracting parameters"
+        );
         extract_template_parameters(entity)
     } else {
         // For free functions, check if parent is a FunctionTemplate (fallback)
         if let Some(parent) = entity.get_semantic_parent() {
             if parent.get_kind() == EntityKind::FunctionTemplate {
-                debug_println!("TEMPLATE: Free template function, extracting parameters from FunctionTemplate parent");
+                debug_println!(
+                    "TEMPLATE: Free template function, extracting parameters from FunctionTemplate parent"
+                );
                 extract_template_parameters(&parent)
             } else {
                 Vec::new()
@@ -844,7 +864,7 @@ pub fn extract_function(entity: &Entity) -> Function {
 
     // Check for = delete
     let is_deleted = entity.get_availability() == clang::Availability::Unavailable
-                     || is_deleted_via_libclang(entity);
+        || is_deleted_via_libclang(entity);
 
     // Extract member initializer list for constructors
     let member_initializers = if is_constructor {
@@ -872,7 +892,9 @@ pub fn extract_function(entity: &Entity) -> Function {
 // Phase 3: Extract class template information
 pub fn extract_class(entity: &Entity) -> Class {
     use crate::debug_println;
-    use crate::parser::safety_annotations::{check_class_interface_annotation, parse_entity_safety};
+    use crate::parser::safety_annotations::{
+        check_class_interface_annotation, parse_entity_safety,
+    };
 
     // Bug #8 fix: Use qualified name for classes to prevent namespace collision
     // e.g., "yaml::Node" instead of just "Node"
@@ -893,12 +915,12 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut members = Vec::new();
     let mut methods = Vec::new();
     let mut base_classes = Vec::new();
-    let mut has_destructor = false;  // RAII Phase 2: Track destructors
+    let mut has_destructor = false; // RAII Phase 2: Track destructors
     let mut has_virtual_destructor = false;
     let mut destructor_is_defaulted = false;
     let mut has_non_virtual_methods = false;
-    let mut all_methods_pure_virtual = true;  // Start true, set false if we find non-pure method
-    let mut has_any_method = false;  // Track if there are any methods to check
+    let mut all_methods_pure_virtual = true; // Start true, set false if we find non-pure method
+    let mut has_any_method = false; // Track if there are any methods to check
     // Copy semantics tracking
     let mut has_copy_constructor = false;
     let mut has_copy_assignment = false;
@@ -906,13 +928,16 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut copy_assignment_deleted = false;
     // Constructor tracking for pointer member safety
     let mut has_user_defined_constructor = false;
-    let mut has_default_constructor = false;  // Will set to true if found, or compute based on ctors
+    let mut has_default_constructor = false; // Will set to true if found, or compute based on ctors
     let mut default_constructor_deleted = false;
 
     // LibClang's get_children() flattens the hierarchy and returns class members directly
     // (FieldDecl, Method, etc.) rather than going through CXXRecordDecl
     for child in entity.get_children() {
-        debug_println!("DEBUG PARSE: ClassTemplate child kind: {:?}", child.get_kind());
+        debug_println!(
+            "DEBUG PARSE: ClassTemplate child kind: {:?}",
+            child.get_kind()
+        );
         match child.get_kind() {
             EntityKind::FieldDecl => {
                 // Member field
@@ -922,8 +947,11 @@ pub fn extract_class(entity: &Entity) -> Class {
                 if let Some(field_type) = child.get_type() {
                     let type_str = type_to_string(&field_type);
                     if type_str.contains("...") {
-                        debug_println!("DEBUG PARSE: Found member field with pack expansion: '{}' of type '{}'",
-                            member.name, type_str);
+                        debug_println!(
+                            "DEBUG PARSE: Found member field with pack expansion: '{}' of type '{}'",
+                            member.name,
+                            type_str
+                        );
                         member.is_pack = true;
                         member.pack_element_type = Some(type_str.clone());
                     }
@@ -965,7 +993,10 @@ pub fn extract_class(entity: &Entity) -> Class {
                         has_copy_constructor = true;
                         if is_deleted {
                             copy_constructor_deleted = true;
-                            debug_println!("DEBUG PARSE: Class '{}' has deleted copy constructor", name);
+                            debug_println!(
+                                "DEBUG PARSE: Class '{}' has deleted copy constructor",
+                                name
+                            );
                         } else {
                             debug_println!("DEBUG PARSE: Class '{}' has copy constructor", name);
                         }
@@ -975,15 +1006,25 @@ pub fn extract_class(entity: &Entity) -> Class {
                     let is_default_ctor = child.is_default_constructor();
                     if is_default_ctor {
                         has_default_constructor = true;
-                        let ctor_is_deleted = child.get_availability() == clang::Availability::Unavailable
-                                              || is_deleted_via_libclang(&child);
+                        let ctor_is_deleted = child.get_availability()
+                            == clang::Availability::Unavailable
+                            || is_deleted_via_libclang(&child);
                         if ctor_is_deleted {
                             default_constructor_deleted = true;
-                            debug_println!("DEBUG PARSE: Class '{}' has deleted default constructor", name);
+                            debug_println!(
+                                "DEBUG PARSE: Class '{}' has deleted default constructor",
+                                name
+                            );
                         } else if child.is_defaulted() {
-                            debug_println!("DEBUG PARSE: Class '{}' has defaulted (= default) default constructor", name);
+                            debug_println!(
+                                "DEBUG PARSE: Class '{}' has defaulted (= default) default constructor",
+                                name
+                            );
                         } else {
-                            debug_println!("DEBUG PARSE: Class '{}' has user-defined default constructor", name);
+                            debug_println!(
+                                "DEBUG PARSE: Class '{}' has user-defined default constructor",
+                                name
+                            );
                         }
                     }
                 }
@@ -1004,20 +1045,27 @@ pub fn extract_class(entity: &Entity) -> Class {
                                         // Copy assignment takes const ClassName& or ClassName const&
                                         // Get the unqualified class name for comparison
                                         let simple_name = name.split("::").last().unwrap_or(&name);
-                                        if type_str.contains(simple_name) &&
-                                           type_str.contains("const") &&
-                                           type_str.contains("&") &&
-                                           !type_str.contains("&&") {
+                                        if type_str.contains(simple_name)
+                                            && type_str.contains("const")
+                                            && type_str.contains("&")
+                                            && !type_str.contains("&&")
+                                        {
                                             has_copy_assignment = true;
                                             if is_deleted {
                                                 copy_assignment_deleted = true;
-                                                debug_println!("DEBUG PARSE: Class '{}' has deleted copy assignment", name);
+                                                debug_println!(
+                                                    "DEBUG PARSE: Class '{}' has deleted copy assignment",
+                                                    name
+                                                );
                                             } else {
-                                                debug_println!("DEBUG PARSE: Class '{}' has copy assignment", name);
+                                                debug_println!(
+                                                    "DEBUG PARSE: Class '{}' has copy assignment",
+                                                    name
+                                                );
                                             }
                                         }
                                     }
-                                    break;  // Only check first parameter
+                                    break; // Only check first parameter
                                 }
                             }
                         }
@@ -1032,13 +1080,21 @@ pub fn extract_class(entity: &Entity) -> Class {
                     // member functions, not regular callable methods.
                     if !is_virtual && !is_deleted {
                         has_non_virtual_methods = true;
-                        debug_println!("DEBUG PARSE: Class '{}' has non-virtual method: {:?}", name, child.get_name());
+                        debug_println!(
+                            "DEBUG PARSE: Class '{}' has non-virtual method: {:?}",
+                            name,
+                            child.get_name()
+                        );
                     }
 
                     // Deleted/defaulted methods also don't count for pure virtual check
                     if !is_pure_virtual && !is_deleted {
                         all_methods_pure_virtual = false;
-                        debug_println!("DEBUG PARSE: Class '{}' has non-pure-virtual method: {:?}", name, child.get_name());
+                        debug_println!(
+                            "DEBUG PARSE: Class '{}' has non-pure-virtual method: {:?}",
+                            name,
+                            child.get_name()
+                        );
                     }
                 }
 
@@ -1076,13 +1132,32 @@ pub fn extract_class(entity: &Entity) -> Class {
     // (unless there are member types that prevent it)
     if !has_user_defined_constructor {
         has_default_constructor = true;
-        debug_println!("DEBUG PARSE: Class '{}' has implicit default constructor (no user-defined ctors)", name);
+        debug_println!(
+            "DEBUG PARSE: Class '{}' has implicit default constructor (no user-defined ctors)",
+            name
+        );
     }
 
-    debug_println!("DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, destructor_is_defaulted={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={}), has_user_defined_ctor={}, has_default_ctor={}, default_ctor_deleted={}",
-        name, members.len(), methods.len(), base_classes.len(), has_destructor, is_interface, has_virtual_destructor, destructor_is_defaulted, all_methods_pure_virtual, has_non_virtual_methods,
-        has_copy_constructor, copy_constructor_deleted, has_copy_assignment, copy_assignment_deleted,
-        has_user_defined_constructor, has_default_constructor, default_constructor_deleted);
+    debug_println!(
+        "DEBUG PARSE: Class '{}' has {} members, {} methods, {} base classes, has_destructor={}, is_interface={}, has_virtual_destructor={}, destructor_is_defaulted={}, all_methods_pure_virtual={}, has_non_virtual_methods={}, has_copy_constructor={} (deleted={}), has_copy_assignment={} (deleted={}), has_user_defined_ctor={}, has_default_ctor={}, default_ctor_deleted={}",
+        name,
+        members.len(),
+        methods.len(),
+        base_classes.len(),
+        has_destructor,
+        is_interface,
+        has_virtual_destructor,
+        destructor_is_defaulted,
+        all_methods_pure_virtual,
+        has_non_virtual_methods,
+        has_copy_constructor,
+        copy_constructor_deleted,
+        has_copy_assignment,
+        copy_assignment_deleted,
+        has_user_defined_constructor,
+        has_default_constructor,
+        default_constructor_deleted
+    );
 
     Class {
         name,
@@ -1090,7 +1165,7 @@ pub fn extract_class(entity: &Entity) -> Class {
         methods,
         base_classes,
         location,
-        has_destructor,  // RAII Phase 2
+        has_destructor, // RAII Phase 2
         // Inheritance safety fields
         is_interface,
         has_virtual_destructor,
@@ -1129,7 +1204,11 @@ fn detect_method_qualifier(entity: &Entity) -> MethodQualifier {
         false
     };
 
-    debug_println!("DEBUG METHOD: is_const={}, has_rvalue_ref={}", is_const, has_rvalue_ref_qualifier);
+    debug_println!(
+        "DEBUG METHOD: is_const={}, has_rvalue_ref={}",
+        is_const,
+        has_rvalue_ref_qualifier
+    );
 
     // Determine the qualifier
     if has_rvalue_ref_qualifier {
@@ -1144,13 +1223,16 @@ fn detect_method_qualifier(entity: &Entity) -> MethodQualifier {
 pub fn extract_variable(entity: &Entity) -> Variable {
     let name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
     let location = extract_location(entity);
-    
+
     let type_info = entity.get_type().unwrap();
     let type_name = type_to_string(&type_info);
-    
-    let is_reference = matches!(type_info.get_kind(), TypeKind::LValueReference | TypeKind::RValueReference);
+
+    let is_reference = matches!(
+        type_info.get_kind(),
+        TypeKind::LValueReference | TypeKind::RValueReference
+    );
     let is_pointer = matches!(type_info.get_kind(), TypeKind::Pointer);
-    
+
     // For references, check if the pointee type is const
     let is_const = if is_reference {
         if let Some(pointee) = type_info.get_pointee_type() {
@@ -1161,7 +1243,7 @@ pub fn extract_variable(entity: &Entity) -> Variable {
     } else {
         type_info.is_const_qualified()
     };
-    
+
     let is_unique_ptr = type_name.contains("unique_ptr");
     let is_shared_ptr = type_name.contains("shared_ptr");
 
@@ -1173,7 +1255,11 @@ pub fn extract_variable(entity: &Entity) -> Variable {
     // We need to read the source code to check for the 'mutable' keyword
     // because libclang doesn't expose mutable as a storage class
     let is_mutable = check_for_mutable_keyword(entity);
-    debug_println!("DEBUG MUTABLE: Field '{}' is_mutable = {}", name, is_mutable);
+    debug_println!(
+        "DEBUG MUTABLE: Field '{}' is_mutable = {}",
+        name,
+        is_mutable
+    );
 
     Variable {
         name,
@@ -1186,20 +1272,20 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         is_static,
         is_mutable,
         location,
-        is_pack: false,              // Will be set properly for function parameters
-        pack_element_type: None,     // Will be set properly for function parameters
+        is_pack: false,          // Will be set properly for function parameters
+        pack_element_type: None, // Will be set properly for function parameters
     }
 }
 
 fn extract_function_body(entity: &Entity) -> Vec<Statement> {
     let mut statements = Vec::new();
-    
+
     for child in entity.get_children() {
         if child.get_kind() == EntityKind::CompoundStmt {
             statements.extend(extract_compound_statement(&child));
         }
     }
-    
+
     statements
 }
 
@@ -1211,7 +1297,10 @@ fn extract_function_name(call_expr: &Entity) -> Option<String> {
     // Try to get name from the first child (usually the callee)
     for child in call_expr.get_children() {
         // Check DeclRefExpr or UnexposedExpr for function name
-        if matches!(child.get_kind(), EntityKind::DeclRefExpr | EntityKind::UnexposedExpr) {
+        if matches!(
+            child.get_kind(),
+            EntityKind::DeclRefExpr | EntityKind::UnexposedExpr
+        ) {
             if let Some(ref_entity) = child.get_reference() {
                 if let Some(name) = ref_entity.get_name() {
                     debug_println!("DEBUG: Found function name '{}' from reference", name);
@@ -1238,14 +1327,13 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 for decl_child in child.get_children() {
                     if decl_child.get_kind() == EntityKind::VarDecl {
                         let var = extract_variable(&decl_child);
-                        
+
                         // Always add the variable declaration first
                         statements.push(Statement::VariableDecl(var.clone()));
-                        
+
                         // Check if this variable has an initializer
                         for init_child in decl_child.get_children() {
                             if let Some(expr) = extract_expression(&init_child) {
-                                
                                 // Check if this is a reference binding
                                 if var.is_reference {
                                     statements.push(Statement::ReferenceBinding {
@@ -1273,8 +1361,14 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let children: Vec<Entity> = child.get_children().into_iter().collect();
                 debug_println!("DEBUG STMT: BinaryOperator has {} children", children.len());
                 if children.len() == 2 {
-                    debug_println!("DEBUG STMT: BinaryOperator child[0] kind: {:?}", children[0].get_kind());
-                    debug_println!("DEBUG STMT: BinaryOperator child[1] kind: {:?}", children[1].get_kind());
+                    debug_println!(
+                        "DEBUG STMT: BinaryOperator child[0] kind: {:?}",
+                        children[0].get_kind()
+                    );
+                    debug_println!(
+                        "DEBUG STMT: BinaryOperator child[1] kind: {:?}",
+                        children[1].get_kind()
+                    );
                     let lhs_expr = extract_expression(&children[0]);
                     let rhs_expr = extract_expression(&children[1]);
                     debug_println!("DEBUG STMT: BinaryOperator LHS: {:?}", lhs_expr);
@@ -1282,12 +1376,14 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     if let (Some(lhs), Some(rhs)) = (lhs_expr, rhs_expr) {
                         debug_println!("DEBUG STMT: Creating Assignment statement");
                         statements.push(Statement::Assignment {
-                            lhs,  // Now supports dereference: *ptr = value
+                            lhs, // Now supports dereference: *ptr = value
                             rhs,
                             location: extract_location(&child),
                         });
                     } else {
-                        debug_println!("DEBUG STMT: Failed to extract expressions from BinaryOperator");
+                        debug_println!(
+                            "DEBUG STMT: Failed to extract expressions from BinaryOperator"
+                        );
                     }
                 }
             }
@@ -1295,30 +1391,36 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let children: Vec<Entity> = child.get_children().into_iter().collect();
                 let mut name = "unknown".to_string();
                 let mut args = Vec::new();
-                
+
                 // Check if this might be a variable declaration disguised as a CallExpr
                 // This happens with constructs like "struct timeval now;" or "ClassName obj;"
                 let mut is_likely_var_decl = false;
-                
+
                 // Debug: Log all CallExprs
                 debug_println!("DEBUG AST: Found CallExpr with {} children", children.len());
-                
+
                 // First check if the CallExpr itself has a reference
                 if let Some(ref_entity) = child.get_reference() {
-                    debug_println!("DEBUG AST: CallExpr references entity kind: {:?}, name: {:?}", 
-                        ref_entity.get_kind(), ref_entity.get_name());
-                    
+                    debug_println!(
+                        "DEBUG AST: CallExpr references entity kind: {:?}, name: {:?}",
+                        ref_entity.get_kind(),
+                        ref_entity.get_name()
+                    );
+
                     // Check if it references a type (struct/class/typedef)
-                    if ref_entity.get_kind() == EntityKind::StructDecl || 
-                       ref_entity.get_kind() == EntityKind::ClassDecl ||
-                       ref_entity.get_kind() == EntityKind::TypedefDecl ||
-                       ref_entity.get_kind() == EntityKind::TypeAliasDecl {
+                    if ref_entity.get_kind() == EntityKind::StructDecl
+                        || ref_entity.get_kind() == EntityKind::ClassDecl
+                        || ref_entity.get_kind() == EntityKind::TypedefDecl
+                        || ref_entity.get_kind() == EntityKind::TypeAliasDecl
+                    {
                         // This is likely a variable declaration, not a function call
-                        debug_println!("DEBUG AST: CallExpr appears to be a variable declaration of type {:?}", 
-                            ref_entity.get_name());
+                        debug_println!(
+                            "DEBUG AST: CallExpr appears to be a variable declaration of type {:?}",
+                            ref_entity.get_name()
+                        );
                         is_likely_var_decl = true;
                     }
-                    
+
                     if let Some(_n) = ref_entity.get_name() {
                         // Build qualified name for ALL functions (methods AND free functions)
                         // This ensures:
@@ -1328,78 +1430,114 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         name = get_qualified_name(&ref_entity);
                     }
                 }
-                
+
                 // If this looks like a variable declaration, skip it
                 if is_likely_var_decl && children.is_empty() {
-                    debug_println!("DEBUG AST: Skipping variable declaration disguised as CallExpr: {}", name);
+                    debug_println!(
+                        "DEBUG AST: Skipping variable declaration disguised as CallExpr: {}",
+                        name
+                    );
                     continue;
                 }
-                
+
                 // Try to extract the function name from children
                 // CRITICAL: EXCLUDE entities that reference variables/parameters
                 // (which caused the "rhs"/"schema"/"vv" bugs where args were mistaken for function names)
                 for (idx, c) in children.iter().enumerate() {
-                    debug_println!("DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
-                        idx, c.get_kind(), c.get_name(), c.get_display_name(),
-                        c.get_reference().map(|r| (r.get_kind(), r.get_name())));
+                    debug_println!(
+                        "DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
+                        idx,
+                        c.get_kind(),
+                        c.get_name(),
+                        c.get_display_name(),
+                        c.get_reference().map(|r| (r.get_kind(), r.get_name()))
+                    );
 
-                    if c.get_kind() == EntityKind::UnexposedExpr || c.get_kind() == EntityKind::DeclRefExpr {
+                    if c.get_kind() == EntityKind::UnexposedExpr
+                        || c.get_kind() == EntityKind::DeclRefExpr
+                    {
                         // Check if this entity references a variable/parameter - if so, skip it
                         if let Some(ref_entity) = c.get_reference() {
                             let ref_kind = ref_entity.get_kind();
                             // EXCLUDE variables and parameters - these are arguments, not function names
                             if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
-                                debug_println!("DEBUG AST: Skipping variable/parameter reference: {:?}", ref_kind);
+                                debug_println!(
+                                    "DEBUG AST: Skipping variable/parameter reference: {:?}",
+                                    ref_kind
+                                );
                                 continue;
                             }
                             // This is a function reference - use qualified name
                             if name == "unknown" {
                                 let qualified = get_qualified_name(&ref_entity);
-                                debug_println!("DEBUG AST: Got qualified name from child reference: {}", qualified);
+                                debug_println!(
+                                    "DEBUG AST: Got qualified name from child reference: {}",
+                                    qualified
+                                );
                                 name = qualified;
                             }
                         } else {
                             // No reference (template-dependent) - use unqualified name as fallback
                             if let Some(n) = c.get_name() {
                                 if name == "unknown" {
-                                    debug_println!("DEBUG AST: Got name from child (template-dependent): {}", n);
+                                    debug_println!(
+                                        "DEBUG AST: Got name from child (template-dependent): {}",
+                                        n
+                                    );
                                     name = n;
                                 }
                             }
                         }
                     }
                 }
-                
+
                 // Check if this is a type name being used as a constructor/declaration
                 // Common pattern: TypeName varname; is parsed as CallExpr
                 if children.len() == 1 && name != "unknown" {
                     // Check if the name matches known type patterns
-                    if name.ends_with("val") || name.ends_with("spec") || 
-                       name.starts_with("struct") || name.starts_with("class") {
-                        debug_println!("DEBUG AST: Likely variable declaration based on name pattern: {}", name);
+                    if name.ends_with("val")
+                        || name.ends_with("spec")
+                        || name.starts_with("struct")
+                        || name.starts_with("class")
+                    {
+                        debug_println!(
+                            "DEBUG AST: Likely variable declaration based on name pattern: {}",
+                            name
+                        );
                         is_likely_var_decl = true;
                     }
                 }
-                
+
                 // If this looks like a variable declaration, skip it
                 if is_likely_var_decl {
-                    debug_println!("DEBUG AST: Skipping variable declaration disguised as CallExpr: {}", name);
+                    debug_println!(
+                        "DEBUG AST: Skipping variable declaration disguised as CallExpr: {}",
+                        name
+                    );
                     continue;
                 }
-                
+
                 // Two-pass approach: identify name-providing child, then extract args
                 let mut name_providing_child_idx: Option<usize> = None;
 
                 // Pass 1: If name still unknown, find it; otherwise identify which child has it
                 if name == "unknown" {
                     for (i, c) in children.iter().enumerate() {
-                        debug_println!("DEBUG AST: Child {}: kind={:?}, name={:?}", i, c.get_kind(), c.get_name());
+                        debug_println!(
+                            "DEBUG AST: Child {}: kind={:?}, name={:?}",
+                            i,
+                            c.get_kind(),
+                            c.get_name()
+                        );
                         match c.get_kind() {
                             EntityKind::MemberRefExpr => {
                                 debug_println!("DEBUG AST: Found MemberRefExpr!");
                                 if let Some(ref_entity) = c.get_reference() {
-                                    debug_println!("DEBUG AST: MemberRefExpr has reference: kind={:?}, name={:?}",
-                                        ref_entity.get_kind(), ref_entity.get_name());
+                                    debug_println!(
+                                        "DEBUG AST: MemberRefExpr has reference: kind={:?}, name={:?}",
+                                        ref_entity.get_kind(),
+                                        ref_entity.get_name()
+                                    );
                                     if let Some(_n) = ref_entity.get_name() {
                                         // Use qualified name for ALL function calls
                                         name = get_qualified_name(&ref_entity);
@@ -1415,7 +1553,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                 // (which caused the "rhs"/"schema"/"vv" bugs)
                                 if let Some(ref_entity) = c.get_reference() {
                                     let ref_kind = ref_entity.get_kind();
-                                    if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
+                                    if ref_kind == EntityKind::VarDecl
+                                        || ref_kind == EntityKind::ParmDecl
+                                    {
                                         continue; // Skip variables/parameters
                                     }
                                     // Use qualified name for function calls
@@ -1435,39 +1575,68 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 } else {
                     // Name already known, find which child provides it
-                    debug_println!("DEBUG AST: Name already known: '{}', searching {} children", name, children.len());
+                    debug_println!(
+                        "DEBUG AST: Name already known: '{}', searching {} children",
+                        name,
+                        children.len()
+                    );
                     for (i, c) in children.iter().enumerate() {
-                        debug_println!("DEBUG AST: Child {}: kind={:?}, name={:?}", i, c.get_kind(), c.get_name());
+                        debug_println!(
+                            "DEBUG AST: Child {}: kind={:?}, name={:?}",
+                            i,
+                            c.get_kind(),
+                            c.get_name()
+                        );
                         match c.get_kind() {
                             EntityKind::MemberRefExpr => {
                                 // For .method() calls, MemberRefExpr contains the method name
-                                debug_println!("DEBUG AST: Exploring MemberRefExpr for receiver object:");
+                                debug_println!(
+                                    "DEBUG AST: Exploring MemberRefExpr for receiver object:"
+                                );
                                 debug_println!("  - name: {:?}", c.get_name());
                                 debug_println!("  - display_name: {:?}", c.get_display_name());
                                 debug_println!("  - num children: {}", c.get_children().len());
 
                                 // Check if MemberRefExpr has children
-                                for (child_idx, member_child) in c.get_children().iter().enumerate() {
-                                    debug_println!("    - MemberRefExpr child {}: kind={:?}, name={:?}",
-                                        child_idx, member_child.get_kind(), member_child.get_name());
+                                for (child_idx, member_child) in c.get_children().iter().enumerate()
+                                {
+                                    debug_println!(
+                                        "    - MemberRefExpr child {}: kind={:?}, name={:?}",
+                                        child_idx,
+                                        member_child.get_kind(),
+                                        member_child.get_name()
+                                    );
                                 }
 
                                 // Check semantic parent
                                 if let Some(semantic_parent) = c.get_semantic_parent() {
-                                    debug_println!("  - semantic_parent: kind={:?}, name={:?}",
-                                        semantic_parent.get_kind(), semantic_parent.get_name());
+                                    debug_println!(
+                                        "  - semantic_parent: kind={:?}, name={:?}",
+                                        semantic_parent.get_kind(),
+                                        semantic_parent.get_name()
+                                    );
                                 }
 
                                 // Check lexical parent
                                 if let Some(lexical_parent) = c.get_lexical_parent() {
-                                    debug_println!("  - lexical_parent: kind={:?}, name={:?}",
-                                        lexical_parent.get_kind(), lexical_parent.get_name());
+                                    debug_println!(
+                                        "  - lexical_parent: kind={:?}, name={:?}",
+                                        lexical_parent.get_kind(),
+                                        lexical_parent.get_name()
+                                    );
                                 }
 
                                 if let Some(child_name) = c.get_name() {
-                                    debug_println!("DEBUG AST: Checking if '{}' matches name '{}'", child_name, name);
+                                    debug_println!(
+                                        "DEBUG AST: Checking if '{}' matches name '{}'",
+                                        child_name,
+                                        name
+                                    );
                                     if name.ends_with(&child_name) || name == child_name {
-                                        debug_println!("DEBUG AST: Match found! Setting name_providing_child_idx = {}", i);
+                                        debug_println!(
+                                            "DEBUG AST: Match found! Setting name_providing_child_idx = {}",
+                                            i
+                                        );
                                         name_providing_child_idx = Some(i);
                                         break;
                                     }
@@ -1475,9 +1644,16 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             }
                             EntityKind::DeclRefExpr | EntityKind::UnexposedExpr => {
                                 if let Some(child_name) = c.get_name() {
-                                    debug_println!("DEBUG AST: Checking if '{}' matches name '{}'", child_name, name);
+                                    debug_println!(
+                                        "DEBUG AST: Checking if '{}' matches name '{}'",
+                                        child_name,
+                                        name
+                                    );
                                     if name.ends_with(&child_name) || name == child_name {
-                                        debug_println!("DEBUG AST: Match found! Setting name_providing_child_idx = {}", i);
+                                        debug_println!(
+                                            "DEBUG AST: Match found! Setting name_providing_child_idx = {}",
+                                            i
+                                        );
                                         name_providing_child_idx = Some(i);
                                         break;
                                     }
@@ -1486,7 +1662,10 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             _ => {}
                         }
                     }
-                    debug_println!("DEBUG AST: name_providing_child_idx = {:?}", name_providing_child_idx);
+                    debug_println!(
+                        "DEBUG AST: name_providing_child_idx = {:?}",
+                        name_providing_child_idx
+                    );
                 }
 
                 // Pass 2: Extract arguments, skipping name-providing child
@@ -1495,14 +1674,17 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         // For MemberRefExpr, extract the receiver from its children
                         if c.get_kind() == EntityKind::MemberRefExpr {
                             debug_println!("DEBUG AST: Extracting receiver from MemberRefExpr");
-                            let member_children: Vec<Entity> = c.get_children().into_iter().collect();
+                            let member_children: Vec<Entity> =
+                                c.get_children().into_iter().collect();
                             if !member_children.is_empty() {
                                 // Has children - extract receiver from first child
-                                if let Some(receiver_expr) = extract_expression(&member_children[0]) {
+                                if let Some(receiver_expr) = extract_expression(&member_children[0])
+                                {
                                     // Check if receiver type is a pointer (means -> was used)
                                     // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
                                     // EXCEPT for safe smart pointers whose operator-> is safe
-                                    let is_arrow = member_children[0].get_type()
+                                    let is_arrow = member_children[0]
+                                        .get_type()
                                         .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
                                         .unwrap_or(false);
 
@@ -1515,10 +1697,16 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                     };
 
                                     if is_arrow && !has_overloaded_arrow {
-                                        debug_println!("DEBUG AST: Raw pointer arrow method call: (*{:?})", receiver_expr);
+                                        debug_println!(
+                                            "DEBUG AST: Raw pointer arrow method call: (*{:?})",
+                                            receiver_expr
+                                        );
                                         args.push(Expression::Dereference(Box::new(receiver_expr)));
                                     } else {
-                                        debug_println!("DEBUG AST: Dot/smart pointer method call: {:?}", receiver_expr);
+                                        debug_println!(
+                                            "DEBUG AST: Dot/smart pointer method call: {:?}",
+                                            receiver_expr
+                                        );
                                         args.push(receiver_expr);
                                     }
                                 }
@@ -1530,19 +1718,28 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                                     // But we need to be careful - the name might be the method name
                                     // Check if this is different from our extracted function name
                                     if member_name != name && !name.ends_with(&member_name) {
-                                        debug_println!("DEBUG AST: Found receiver from MemberRefExpr name: {}", member_name);
+                                        debug_println!(
+                                            "DEBUG AST: Found receiver from MemberRefExpr name: {}",
+                                            member_name
+                                        );
                                         args.push(Expression::Variable(member_name));
                                     }
                                 } else if let Some(display) = c.get_display_name() {
                                     // Try display name as fallback
-                                    if display != name && !name.ends_with(&display) && !display.is_empty() {
-                                        debug_println!("DEBUG AST: Found receiver from MemberRefExpr display: {}", display);
+                                    if display != name
+                                        && !name.ends_with(&display)
+                                        && !display.is_empty()
+                                    {
+                                        debug_println!(
+                                            "DEBUG AST: Found receiver from MemberRefExpr display: {}",
+                                            display
+                                        );
                                         args.push(Expression::Variable(display));
                                     }
                                 }
                             }
                         }
-                        continue;  // Skip the MemberRefExpr itself
+                        continue; // Skip the MemberRefExpr itself
                     }
 
                     // Phase 2: Check if this argument is a PackExpansionExpr
@@ -1557,7 +1754,10 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             // Check if it's a CallExpr (could be std::forward or std::move)
                             if pack_child.get_kind() == EntityKind::CallExpr {
                                 if let Some(callee_name) = extract_function_name(&pack_child) {
-                                    debug_println!("DEBUG STMT: PackExpansion contains call to: {}", callee_name);
+                                    debug_println!(
+                                        "DEBUG STMT: PackExpansion contains call to: {}",
+                                        callee_name
+                                    );
                                     if is_forward_function(&callee_name) {
                                         operation = "forward".to_string();
                                     } else if is_move_function(&callee_name) {
@@ -1567,17 +1767,28 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
 
                                 // Find pack name inside the call
                                 // Skip the first child (function name) and look for parameter references
-                                debug_println!("DEBUG STMT: Searching for pack name in CallExpr children (count: {})",
-                                    pack_child.get_children().len());
+                                debug_println!(
+                                    "DEBUG STMT: Searching for pack name in CallExpr children (count: {})",
+                                    pack_child.get_children().len()
+                                );
                                 for call_child in pack_child.get_children() {
-                                    debug_println!("DEBUG STMT: CallExpr child kind: {:?}", call_child.get_kind());
+                                    debug_println!(
+                                        "DEBUG STMT: CallExpr child kind: {:?}",
+                                        call_child.get_kind()
+                                    );
                                     if call_child.get_kind() == EntityKind::DeclRefExpr {
                                         if let Some(ref_entity) = call_child.get_reference() {
-                                            debug_println!("DEBUG STMT: DeclRefExpr references entity kind: {:?}", ref_entity.get_kind());
+                                            debug_println!(
+                                                "DEBUG STMT: DeclRefExpr references entity kind: {:?}",
+                                                ref_entity.get_kind()
+                                            );
                                             // Only accept if it references a parameter (ParmDecl), not a function
                                             if ref_entity.get_kind() == EntityKind::ParmDecl {
                                                 if let Some(name) = ref_entity.get_name() {
-                                                    debug_println!("DEBUG STMT: Found pack name '{}' inside CallExpr", name);
+                                                    debug_println!(
+                                                        "DEBUG STMT: Found pack name '{}' inside CallExpr",
+                                                        name
+                                                    );
                                                     pack_name = name;
                                                     break;
                                                 }
@@ -1588,10 +1799,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             }
                             // Direct DeclRefExpr (pack used without forward/move)
                             else if pack_child.get_kind() == EntityKind::DeclRefExpr {
-                                debug_println!("DEBUG STMT: Found direct DeclRefExpr in PackExpansionExpr");
+                                debug_println!(
+                                    "DEBUG STMT: Found direct DeclRefExpr in PackExpansionExpr"
+                                );
                                 if let Some(ref_entity) = pack_child.get_reference() {
                                     if let Some(name) = ref_entity.get_name() {
-                                        debug_println!("DEBUG STMT: Pack name from direct DeclRefExpr: '{}'", name);
+                                        debug_println!(
+                                            "DEBUG STMT: Pack name from direct DeclRefExpr: '{}'",
+                                            name
+                                        );
                                         pack_name = name;
                                     }
                                 }
@@ -1599,8 +1815,11 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         }
 
                         if !pack_name.is_empty() {
-                            debug_println!("DEBUG STMT: Pack expansion detected: pack='{}', operation='{}'",
-                                pack_name, operation);
+                            debug_println!(
+                                "DEBUG STMT: Pack expansion detected: pack='{}', operation='{}'",
+                                pack_name,
+                                operation
+                            );
                             statements.push(Statement::PackExpansion {
                                 pack_name,
                                 operation,
@@ -1613,8 +1832,12 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                         args.push(expr);
                     }
                 }
-                
-                debug_println!("DEBUG STMT: Creating FunctionCall statement: name='{}', args={:?}", name, args);
+
+                debug_println!(
+                    "DEBUG STMT: Creating FunctionCall statement: name='{}', args={:?}",
+                    name,
+                    args
+                );
                 statements.push(Statement::FunctionCall {
                     name,
                     args,
@@ -1623,7 +1846,8 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             }
             EntityKind::ReturnStmt => {
                 // Extract the return value expression
-                let return_expr = child.get_children()
+                let return_expr = child
+                    .get_children()
                     .into_iter()
                     .find_map(|c| extract_expression(&c));
                 statements.push(Statement::Return(return_expr));
@@ -1664,13 +1888,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let mut condition = Expression::Literal("true".to_string());
                 let mut then_branch = Vec::new();
                 let mut else_branch = None;
-                
+
                 // Parse the if statement structure
                 let mut i = 0;
                 while i < children.len() {
                     let child_kind = children[i].get_kind();
-                    
-                    if child_kind == EntityKind::UnexposedExpr || child_kind == EntityKind::BinaryOperator {
+
+                    if child_kind == EntityKind::UnexposedExpr
+                        || child_kind == EntityKind::BinaryOperator
+                    {
                         // This is likely the condition
                         if let Some(expr) = extract_expression(&children[i]) {
                             condition = expr;
@@ -1685,7 +1911,7 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                     i += 1;
                 }
-                
+
                 statements.push(Statement::If {
                     condition,
                     then_branch,
@@ -1729,7 +1955,10 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
             EntityKind::PackExpansionExpr => {
                 // Handle pack expansion at statement level (direct fold expressions)
                 if let Some(pack_stmt) = extract_pack_expansion(&child) {
-                    debug_println!("DEBUG STMT: PackExpansionExpr statement level: {:?}", child.get_display_name());
+                    debug_println!(
+                        "DEBUG STMT: PackExpansionExpr statement level: {:?}",
+                        child.get_display_name()
+                    );
                     statements.push(pack_stmt);
                 }
             }
@@ -1740,16 +1969,22 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 // PackExpansionExpr children - it directly contains forward/move calls
 
                 // First check for pack expansions in children (traditional pack expansion)
-                let has_pack_expansion = child.get_children().iter()
+                let has_pack_expansion = child
+                    .get_children()
+                    .iter()
                     .any(|c| c.get_kind() == EntityKind::PackExpansionExpr);
 
                 if has_pack_expansion {
-                    debug_println!("DEBUG STMT: UnexposedExpr contains PackExpansionExpr (fold expression)");
+                    debug_println!(
+                        "DEBUG STMT: UnexposedExpr contains PackExpansionExpr (fold expression)"
+                    );
                     // Extract pack expansion info from fold expression children
                     for ue_child in child.get_children() {
                         if ue_child.get_kind() == EntityKind::PackExpansionExpr {
                             if let Some(pack_stmt) = extract_pack_expansion(&ue_child) {
-                                debug_println!("DEBUG STMT: Extracted pack expansion from fold expression");
+                                debug_println!(
+                                    "DEBUG STMT: Extracted pack expansion from fold expression"
+                                );
                                 statements.push(pack_stmt);
                             }
                         }
@@ -1758,7 +1993,9 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     // Try to extract pack expansion from CXXFoldExpr (mapped to UnexposedExpr)
                     // This handles (void(std::forward<Args>(args)), ...) patterns
                     if let Some(pack_stmt) = extract_pack_expansion(&child) {
-                        debug_println!("DEBUG STMT: Extracted pack expansion from CXXFoldExpr (UnexposedExpr)");
+                        debug_println!(
+                            "DEBUG STMT: Extracted pack expansion from CXXFoldExpr (UnexposedExpr)"
+                        );
                         statements.push(pack_stmt);
                     } else {
                         // Regular UnexposedExpr handling
@@ -1833,7 +2070,11 @@ fn extract_pack_expansion(entity: &Entity) -> Option<Statement> {
     search_pack_info(entity, &mut pack_name, &mut operation);
 
     if !pack_name.is_empty() {
-        debug_println!("DEBUG PACK: Extracted pack expansion: name='{}', operation='{}'", pack_name, operation);
+        debug_println!(
+            "DEBUG PACK: Extracted pack expansion: name='{}', operation='{}'",
+            pack_name,
+            operation
+        );
         Some(Statement::PackExpansion {
             pack_name,
             operation,
@@ -1847,16 +2088,9 @@ fn extract_pack_expansion(entity: &Entity) -> Option<Statement> {
 /// Binary operators that we recognize
 const BINARY_OPERATORS: &[&str] = &[
     // Multi-character operators (check these first)
-    "!=", "==", ">=", "<=", "&&", "||",
-    "<<=", ">>=",
-    "+=", "-=", "*=", "/=", "%=",
-    "&=", "|=", "^=",
-    "<<", ">>",
-    // Single-character operators (check after multi-char)
-    ">", "<",
-    "&", "|", "^",
-    "+", "-", "*", "/", "%",
-    "=",
+    "!=", "==", ">=", "<=", "&&", "||", "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+    "^=", "<<", ">>", // Single-character operators (check after multi-char)
+    ">", "<", "&", "|", "^", "+", "-", "*", "/", "%", "=",
 ];
 
 /// Check if a string is a binary operator
@@ -1925,7 +2159,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 if ref_entity.get_kind() == EntityKind::FieldDecl {
                     // This is a member field access - convert to this.field
                     if let Some(field_name) = entity.get_name() {
-                        debug_println!("DEBUG: DeclRefExpr to FieldDecl '{}' - converting to this.{}", field_name, field_name);
+                        debug_println!(
+                            "DEBUG: DeclRefExpr to FieldDecl '{}' - converting to this.{}",
+                            field_name,
+                            field_name
+                        );
                         return Some(Expression::MemberAccess {
                             object: Box::new(Expression::Variable("this".to_string())),
                             field: field_name,
@@ -1933,15 +2171,25 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     }
                 }
                 // Check if this references a method (member function)
-                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::FunctionDecl {
+                if ref_entity.get_kind() == EntityKind::Method
+                    || ref_entity.get_kind() == EntityKind::FunctionDecl
+                {
                     // This is a function/method reference - include class qualifier if available
                     if let Some(func_name) = entity.get_name() {
                         // Try to get the class name from semantic parent
                         if let Some(parent) = ref_entity.get_semantic_parent() {
-                            if matches!(parent.get_kind(), EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate) {
+                            if matches!(
+                                parent.get_kind(),
+                                EntityKind::ClassDecl
+                                    | EntityKind::StructDecl
+                                    | EntityKind::ClassTemplate
+                            ) {
                                 if let Some(class_name) = parent.get_name() {
                                     // Return qualified name: ClassName::method
-                                    return Some(Expression::Variable(format!("{}::{}", class_name, func_name)));
+                                    return Some(Expression::Variable(format!(
+                                        "{}::{}",
+                                        class_name, func_name
+                                    )));
                                 }
                             }
                         }
@@ -1961,7 +2209,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // Functional cast expression like Holder{x} or int(42)
             // This is a constructor/conversion call
             // Get the type name for the constructor
-            let type_name = entity.get_type()
+            let type_name = entity
+                .get_type()
                 .map(|t| type_to_string(&t))
                 .unwrap_or_else(|| "unknown".to_string());
 
@@ -1990,15 +2239,18 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             let mut name = "unknown".to_string();
             let mut args = Vec::new();
-            
+
             // Check if this might be a variable declaration disguised as a CallExpr
             // This happens with constructs like "struct timeval now;" or "ClassName obj;"
             // The pattern is: CallExpr with 0 children that references a type name
-            
+
             // First check if the CallExpr itself has a reference
             let mut method_name_from_callexpr = false;
             if let Some(ref_entity) = entity.get_reference() {
-                debug_println!("DEBUG AST: CallExpr itself references: {:?}", ref_entity.get_name());
+                debug_println!(
+                    "DEBUG AST: CallExpr itself references: {:?}",
+                    ref_entity.get_name()
+                );
 
                 // Check if it references a type (struct/class/typedef)
                 // BUT: A CallExpr with 0 children is likely a constructor/declaration
@@ -2006,8 +2258,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     if let Some(n) = ref_entity.get_name() {
                         name = n;
                     }
-                    debug_println!("DEBUG AST: CallExpr with 0 children referencing '{}' - likely a variable declaration", name);
-                    return None;  // Not a function call, it's a variable declaration
+                    debug_println!(
+                        "DEBUG AST: CallExpr with 0 children referencing '{}' - likely a variable declaration",
+                        name
+                    );
+                    return None; // Not a function call, it's a variable declaration
                 }
 
                 // Build qualified name for all functions to avoid namespace collisions
@@ -2015,38 +2270,56 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 if ref_entity.get_kind() == EntityKind::Method
                     || ref_entity.get_kind() == EntityKind::Constructor
                     || ref_entity.get_kind() == EntityKind::FunctionDecl
-                    || ref_entity.get_kind() == EntityKind::FunctionTemplate {
+                    || ref_entity.get_kind() == EntityKind::FunctionTemplate
+                {
                     name = get_qualified_name(&ref_entity);
-                    if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
+                    if ref_entity.get_kind() == EntityKind::Method
+                        || ref_entity.get_kind() == EntityKind::Constructor
+                    {
                         method_name_from_callexpr = true;
                     }
-                    debug_println!("DEBUG AST: Function name extracted from CallExpr reference: {}", name);
+                    debug_println!(
+                        "DEBUG AST: Function name extracted from CallExpr reference: {}",
+                        name
+                    );
                 } else if let Some(n) = ref_entity.get_name() {
                     name = n;
                 }
             }
-            
+
             // Debug: print all child entity kinds
             for (idx, c) in children.iter().enumerate() {
-                debug_println!("DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
-                    idx, c.get_kind(), c.get_name(), c.get_display_name(),
-                    c.get_reference().map(|r| (r.get_kind(), r.get_name())));
-                    
+                debug_println!(
+                    "DEBUG AST: CallExpr child[{}] kind: {:?}, name: {:?}, display_name: {:?}, reference: {:?}",
+                    idx,
+                    c.get_kind(),
+                    c.get_name(),
+                    c.get_display_name(),
+                    c.get_reference().map(|r| (r.get_kind(), r.get_name()))
+                );
+
                 // For member function calls, check for MemberRefExpr first
                 if c.get_kind() == EntityKind::MemberRefExpr {
                     // MemberRefExpr can be either a method call OR a field access
                     // We need to distinguish between them
                     if let Some(ref_entity) = c.get_reference() {
-                        debug_println!("DEBUG AST: MemberRefExpr references: {:?}", ref_entity.get_name());
+                        debug_println!(
+                            "DEBUG AST: MemberRefExpr references: {:?}",
+                            ref_entity.get_name()
+                        );
                         if let Some(n) = ref_entity.get_name() {
                             if name == "unknown" {
                                 // Build qualified name for member functions and constructors
-                                if ref_entity.get_kind() == EntityKind::Method || ref_entity.get_kind() == EntityKind::Constructor {
+                                if ref_entity.get_kind() == EntityKind::Method
+                                    || ref_entity.get_kind() == EntityKind::Constructor
+                                {
                                     name = get_qualified_name(&ref_entity);
                                 } else if ref_entity.get_kind() == EntityKind::FieldDecl {
                                     // This is a field access, not a function call
                                     // Don't use it as the function name - it will be extracted as MemberAccess
-                                    debug_println!("DEBUG AST: MemberRefExpr is field access, not function name");
+                                    debug_println!(
+                                        "DEBUG AST: MemberRefExpr is field access, not function name"
+                                    );
                                 } else {
                                     name = n;
                                 }
@@ -2056,15 +2329,25 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
                     // Debug: Check if MemberRefExpr has children (which might be the receiver object)
                     let member_children = c.get_children();
-                    debug_println!("DEBUG AST: MemberRefExpr has {} children", member_children.len());
+                    debug_println!(
+                        "DEBUG AST: MemberRefExpr has {} children",
+                        member_children.len()
+                    );
                     for (i, mc) in member_children.iter().enumerate() {
-                        debug_println!("  DEBUG AST: MemberRefExpr child[{}]: kind={:?}, name={:?}",
-                            i, mc.get_kind(), mc.get_name());
+                        debug_println!(
+                            "  DEBUG AST: MemberRefExpr child[{}]: kind={:?}, name={:?}",
+                            i,
+                            mc.get_kind(),
+                            mc.get_name()
+                        );
                     }
                 } else if c.get_kind() == EntityKind::UnexposedExpr {
                     // Try to get the referenced entity
                     if let Some(ref_entity) = c.get_reference() {
-                        debug_println!("DEBUG AST: UnexposedExpr references: {:?}", ref_entity.get_name());
+                        debug_println!(
+                            "DEBUG AST: UnexposedExpr references: {:?}",
+                            ref_entity.get_name()
+                        );
                         if let Some(n) = ref_entity.get_name() {
                             if name == "unknown" {
                                 name = n;
@@ -2073,9 +2356,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     }
                     // Also try children of UnexposedExpr
                     for ue_child in c.get_children() {
-                        debug_println!("DEBUG AST: UnexposedExpr child: kind={:?}, name={:?}, display_name={:?}", 
-                            ue_child.get_kind(), ue_child.get_name(), ue_child.get_display_name());
-                        
+                        debug_println!(
+                            "DEBUG AST: UnexposedExpr child: kind={:?}, name={:?}, display_name={:?}",
+                            ue_child.get_kind(),
+                            ue_child.get_name(),
+                            ue_child.get_display_name()
+                        );
+
                         // Try to extract member function name from MemberRefExpr
                         if let Some(n) = ue_child.get_name() {
                             if name == "unknown" {
@@ -2086,10 +2373,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 name = dn;
                             }
                         }
-                        
+
                         // Also check if this child has a reference
                         if let Some(ref_entity) = ue_child.get_reference() {
-                            debug_println!("DEBUG AST: Child references: {:?}", ref_entity.get_name());
+                            debug_println!(
+                                "DEBUG AST: Child references: {:?}",
+                                ref_entity.get_name()
+                            );
                             if let Some(n) = ref_entity.get_name() {
                                 if name == "unknown" {
                                     name = n;
@@ -2099,7 +2389,7 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     }
                 }
             }
-            
+
             // Two-pass approach:
             // Pass 1: Identify which child provides the function name
             // Pass 2: Extract arguments, handling MemberRefExpr specially if it's the name provider
@@ -2114,7 +2404,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     if c.get_kind() == EntityKind::MemberRefExpr {
                         if let Some(ref_entity) = c.get_reference() {
                             if ref_entity.get_kind() == EntityKind::Method {
-                                debug_println!("DEBUG AST: Found MemberRefExpr at index {} for method call", i);
+                                debug_println!(
+                                    "DEBUG AST: Found MemberRefExpr at index {} for method call",
+                                    i
+                                );
                                 name_providing_child_idx = Some(i);
                                 break;
                             }
@@ -2133,20 +2426,29 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 // (which caused the "rhs"/"schema"/"vv" bugs)
                                 if let Some(ref_entity) = c.get_reference() {
                                     let ref_kind = ref_entity.get_kind();
-                                    if ref_kind == EntityKind::VarDecl || ref_kind == EntityKind::ParmDecl {
+                                    if ref_kind == EntityKind::VarDecl
+                                        || ref_kind == EntityKind::ParmDecl
+                                    {
                                         continue; // Skip variables/parameters
                                     }
                                     // Bug #8 fix: Use qualified name for free functions too
                                     // This ensures namespace::function is captured correctly
                                     let n = get_qualified_name(&ref_entity);
-                                    debug_println!("DEBUG AST: Got function name '{}' from reference (kind: {:?})", n, ref_entity.get_kind());
+                                    debug_println!(
+                                        "DEBUG AST: Got function name '{}' from reference (kind: {:?})",
+                                        n,
+                                        ref_entity.get_kind()
+                                    );
                                     name = n;
                                     name_providing_child_idx = Some(i);
                                     break;
                                 }
                                 // No reference - might be template-dependent, use name directly
                                 if let Some(n) = c.get_name() {
-                                    debug_println!("DEBUG AST: Got function name '{}' from name field", n);
+                                    debug_println!(
+                                        "DEBUG AST: Got function name '{}' from name field",
+                                        n
+                                    );
                                     name = n;
                                     name_providing_child_idx = Some(i);
                                     break;
@@ -2179,7 +2481,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 if Some(i) == name_providing_child_idx {
                     // For method calls (MemberRefExpr is name provider), extract the receiver
                     if c.get_kind() == EntityKind::MemberRefExpr {
-                        debug_println!("DEBUG AST: MemberRefExpr is name provider - extracting receiver");
+                        debug_println!(
+                            "DEBUG AST: MemberRefExpr is name provider - extracting receiver"
+                        );
                         // Extract receiver from MemberRefExpr's children
                         let member_children = c.get_children();
                         if !member_children.is_empty() {
@@ -2188,7 +2492,8 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 // Check if receiver type is a pointer (means -> was used)
                                 // ptr->method() is semantically (*ptr).method(), so wrap in Dereference
                                 // EXCEPT for safe smart pointers whose operator-> is safe
-                                let is_arrow = member_children[0].get_type()
+                                let is_arrow = member_children[0]
+                                    .get_type()
                                     .map(|t| matches!(t.get_kind(), TypeKind::Pointer))
                                     .unwrap_or(false);
 
@@ -2201,10 +2506,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                                 };
 
                                 if is_arrow && !has_overloaded_arrow {
-                                    debug_println!("DEBUG AST: Raw pointer arrow method call: (*{:?})", recv_expr);
+                                    debug_println!(
+                                        "DEBUG AST: Raw pointer arrow method call: (*{:?})",
+                                        recv_expr
+                                    );
                                     args.push(Expression::Dereference(Box::new(recv_expr)));
                                 } else {
-                                    debug_println!("DEBUG AST: Dot/smart pointer method call: {:?}", recv_expr);
+                                    debug_println!(
+                                        "DEBUG AST: Dot/smart pointer method call: {:?}",
+                                        recv_expr
+                                    );
                                     args.push(recv_expr);
                                 }
                             }
@@ -2213,7 +2524,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             // For a MemberRefExpr like m.content_size(), we need to extract "m"
                             // Unfortunately libclang doesn't always give us this directly
                             // We'll need to handle this case differently
-                            debug_println!("DEBUG AST: MemberRefExpr has no children, cannot extract receiver");
+                            debug_println!(
+                                "DEBUG AST: MemberRefExpr has no children, cannot extract receiver"
+                            );
                         }
                     }
                     // Skip the name-providing child itself
@@ -2225,9 +2538,13 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     args.push(expr);
                 }
             }
-            
+
             // Check if this is std::move
-            debug_println!("DEBUG: Found function call: name='{}', args_count={}", name, args.len());
+            debug_println!(
+                "DEBUG: Found function call: name='{}', args_count={}",
+                name,
+                args.len()
+            );
             for (i, arg) in args.iter().enumerate() {
                 debug_println!("  DEBUG: arg[{}] = {:?}", i, arg);
             }
@@ -2243,27 +2560,39 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     });
                 }
             }
-            
+
             Some(Expression::FunctionCall { name, args })
         }
         EntityKind::UnexposedExpr => {
             // UnexposedExpr often wraps other expressions, so look at its children
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
-            debug_println!("DEBUG EXTRACT: UnexposedExpr with name={:?}, {} children",
-                entity.get_name(), children.len());
+            debug_println!(
+                "DEBUG EXTRACT: UnexposedExpr with name={:?}, {} children",
+                entity.get_name(),
+                children.len()
+            );
 
             // Check if this UnexposedExpr has a reference (might be a method call)
             if let Some(ref_entity) = entity.get_reference() {
-                debug_println!("  DEBUG EXTRACT: UnexposedExpr has reference: kind={:?}, name={:?}",
-                    ref_entity.get_kind(), ref_entity.get_name());
+                debug_println!(
+                    "  DEBUG EXTRACT: UnexposedExpr has reference: kind={:?}, name={:?}",
+                    ref_entity.get_kind(),
+                    ref_entity.get_name()
+                );
             }
 
             // If there are exactly 2 children, this might be a binary operation (e.g., assignment)
             if children.len() == 2 {
-                debug_println!("  DEBUG EXTRACT: UnexposedExpr with 2 children - checking for binary op");
-                if let (Some(left), Some(right)) =
-                    (extract_expression(&children[0]), extract_expression(&children[1])) {
-                    debug_println!("  DEBUG EXTRACT: Extracted both children, treating as assignment");
+                debug_println!(
+                    "  DEBUG EXTRACT: UnexposedExpr with 2 children - checking for binary op"
+                );
+                if let (Some(left), Some(right)) = (
+                    extract_expression(&children[0]),
+                    extract_expression(&children[1]),
+                ) {
+                    debug_println!(
+                        "  DEBUG EXTRACT: Extracted both children, treating as assignment"
+                    );
                     // UnexposedExpr with 2 operands is typically an assignment in a const method
                     // (C++ allows it syntactically even though it's a semantic error)
                     return Some(Expression::BinaryOp {
@@ -2276,13 +2605,19 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
             // Otherwise, try to extract single child expression
             for child in children {
-                debug_println!("  DEBUG EXTRACT: Child kind={:?}, name={:?}",
-                    child.get_kind(), child.get_name());
+                debug_println!(
+                    "  DEBUG EXTRACT: Child kind={:?}, name={:?}",
+                    child.get_kind(),
+                    child.get_name()
+                );
 
                 // Check if child has a reference
                 if let Some(child_ref) = child.get_reference() {
-                    debug_println!("    DEBUG EXTRACT: Child has reference: kind={:?}, name={:?}",
-                        child_ref.get_kind(), child_ref.get_name());
+                    debug_println!(
+                        "    DEBUG EXTRACT: Child has reference: kind={:?}, name={:?}",
+                        child_ref.get_kind(),
+                        child_ref.get_name()
+                    );
                 }
 
                 if let Some(expr) = extract_expression(&child) {
@@ -2296,11 +2631,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
         EntityKind::BinaryOperator => {
             // Extract binary operation (e.g., i < 2, x == 0)
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
-            debug_println!("DEBUG: BinaryOperator - name={:?}, display_name={:?}",
-                          entity.get_name(), entity.get_display_name());
+            debug_println!(
+                "DEBUG: BinaryOperator - name={:?}, display_name={:?}",
+                entity.get_name(),
+                entity.get_display_name()
+            );
             if children.len() == 2 {
-                if let (Some(left), Some(right)) =
-                    (extract_expression(&children[0]), extract_expression(&children[1])) {
+                if let (Some(left), Some(right)) = (
+                    extract_expression(&children[0]),
+                    extract_expression(&children[1]),
+                ) {
                     // Try multiple methods to get the operator
                     let op = {
                         // Method 1: Try tokenizing the source range to find the operator
@@ -2312,8 +2652,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             // Only tokenize if not in a system header (avoids crashes)
                             if !range.is_in_system_header() {
                                 let tokens = safe_tokenize(&range);
-                                debug_println!("DEBUG: BinaryOperator tokens: {:?}",
-                                              tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>());
+                                debug_println!(
+                                    "DEBUG: BinaryOperator tokens: {:?}",
+                                    tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>()
+                                );
                                 for token in tokens {
                                     let spelling = token.get_spelling();
                                     if is_binary_operator(&spelling) {
@@ -2325,27 +2667,42 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         }
 
                         // Method 2: Try display_name
-                        found_op.or_else(|| entity.get_display_name()
-                            .and_then(|d| extract_operator_from_display(&d)))
-                        // Method 3: Fall back to name
-                        .or_else(|| entity.get_name())
-                        // Default to "?" if nothing works
-                        .unwrap_or_else(|| "?".to_string())
+                        found_op
+                            .or_else(|| {
+                                entity
+                                    .get_display_name()
+                                    .and_then(|d| extract_operator_from_display(&d))
+                            })
+                            // Method 3: Fall back to name
+                            .or_else(|| entity.get_name())
+                            // Default to "?" if nothing works
+                            .unwrap_or_else(|| "?".to_string())
                     };
 
                     // Check for pointer arithmetic (p + n, p - n, p += n, p -= n)
                     // Pointer arithmetic is when one operand is a pointer and the operator is +, -, +=, -=
                     if matches!(op.as_str(), "+" | "-" | "+=" | "-=") {
                         // Use canonical type to resolve type aliases for pointer detection
-                        let left_type = children[0].get_type().map(|t| canonical_type_to_string(&t));
-                        let right_type = children[1].get_type().map(|t| canonical_type_to_string(&t));
+                        let left_type =
+                            children[0].get_type().map(|t| canonical_type_to_string(&t));
+                        let right_type =
+                            children[1].get_type().map(|t| canonical_type_to_string(&t));
 
-                        let left_is_pointer = left_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
-                        let right_is_pointer = right_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
+                        let left_is_pointer =
+                            left_type.as_ref().map(|t| t.contains('*')).unwrap_or(false);
+                        let right_is_pointer = right_type
+                            .as_ref()
+                            .map(|t| t.contains('*'))
+                            .unwrap_or(false);
 
                         // p + n, p - n, p += n, p -= n (left is pointer)
                         if left_is_pointer && !right_is_pointer {
-                            debug_println!("DEBUG: Detected pointer arithmetic: {:?} {} {:?}", left, op, right);
+                            debug_println!(
+                                "DEBUG: Detected pointer arithmetic: {:?} {} {:?}",
+                                left,
+                                op,
+                                right
+                            );
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: op.clone(),
@@ -2353,7 +2710,12 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         }
                         // n + p (right is pointer, only for + operator)
                         if right_is_pointer && !left_is_pointer && op == "+" {
-                            debug_println!("DEBUG: Detected pointer arithmetic: {:?} {} {:?}", left, op, right);
+                            debug_println!(
+                                "DEBUG: Detected pointer arithmetic: {:?} {} {:?}",
+                                left,
+                                op,
+                                right
+                            );
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(right),
                                 op: op.clone(),
@@ -2361,7 +2723,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         }
                         // p - q (pointer difference)
                         if left_is_pointer && right_is_pointer && op == "-" {
-                            debug_println!("DEBUG: Detected pointer difference: {:?} - {:?}", left, right);
+                            debug_println!(
+                                "DEBUG: Detected pointer difference: {:?} - {:?}",
+                                left,
+                                right
+                            );
                             return Some(Expression::PointerArithmetic {
                                 pointer: Box::new(left),
                                 op: "pointer difference".to_string(),
@@ -2419,28 +2785,23 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             // e.g., (*n) in (*n).value_ - we want to get the Dereference(n) inside
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if !children.is_empty() {
-                debug_println!("DEBUG: ParenExpr has child: kind={:?}", children[0].get_kind());
+                debug_println!(
+                    "DEBUG: ParenExpr has child: kind={:?}",
+                    children[0].get_kind()
+                );
                 return extract_expression(&children[0]);
             }
             None
         }
         // C++ cast expressions - extract the inner expression with cast kind
         // static_cast<T*>(ptr), dynamic_cast<T*>(ptr), reinterpret_cast<T*>(ptr), const_cast<T*>(ptr)
-        EntityKind::StaticCastExpr => {
-            extract_cast_expression(entity, CastKind::StaticCast)
-        }
-        EntityKind::DynamicCastExpr => {
-            extract_cast_expression(entity, CastKind::DynamicCast)
-        }
+        EntityKind::StaticCastExpr => extract_cast_expression(entity, CastKind::StaticCast),
+        EntityKind::DynamicCastExpr => extract_cast_expression(entity, CastKind::DynamicCast),
         EntityKind::ReinterpretCastExpr => {
             extract_cast_expression(entity, CastKind::ReinterpretCast)
         }
-        EntityKind::ConstCastExpr => {
-            extract_cast_expression(entity, CastKind::ConstCast)
-        }
-        EntityKind::CStyleCastExpr => {
-            extract_cast_expression(entity, CastKind::CStyleCast)
-        }
+        EntityKind::ConstCastExpr => extract_cast_expression(entity, CastKind::ConstCast),
+        EntityKind::CStyleCastExpr => extract_cast_expression(entity, CastKind::CStyleCast),
         EntityKind::UnaryOperator => {
             // Check if it's address-of (&), dereference (*), or pointer increment/decrement (++, --)
             // Other unary operators (!, ~, -, +) should be treated as simple expressions
@@ -2468,7 +2829,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             // Both operand and result are pointers, but the operation modifies the pointer
                             else if child_type_str.contains('*') && type_str.contains('*') {
                                 // This is pointer increment or decrement
-                                debug_println!("DEBUG: Detected pointer increment/decrement on {:?}", inner);
+                                debug_println!(
+                                    "DEBUG: Detected pointer increment/decrement on {:?}",
+                                    inner
+                                );
                                 return Some(Expression::PointerArithmetic {
                                     pointer: Box::new(inner),
                                     op: "++/--".to_string(),
@@ -2499,11 +2863,16 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
             // Get the field/member name from the entity's reference or name
             let field_name = if let Some(ref_entity) = entity.get_reference() {
-                debug_println!("DEBUG: MemberRefExpr references kind={:?}, name={:?}",
-                    ref_entity.get_kind(), ref_entity.get_name());
+                debug_println!(
+                    "DEBUG: MemberRefExpr references kind={:?}, name={:?}",
+                    ref_entity.get_kind(),
+                    ref_entity.get_name()
+                );
                 // Check if it's a field (not a method)
                 if ref_entity.get_kind() == EntityKind::FieldDecl {
-                    ref_entity.get_name().unwrap_or_else(|| "unknown_field".to_string())
+                    ref_entity
+                        .get_name()
+                        .unwrap_or_else(|| "unknown_field".to_string())
                 } else {
                     // It's a method call, not field access - return None to let CallExpr handle it
                     debug_println!("DEBUG: MemberRefExpr is method, not field");
@@ -2538,15 +2907,26 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     };
 
                     if is_arrow && !has_overloaded_arrow {
-                        debug_println!("DEBUG: MemberRefExpr raw pointer arrow: (*{:?}).{}", object_expr, field_name);
+                        debug_println!(
+                            "DEBUG: MemberRefExpr raw pointer arrow: (*{:?}).{}",
+                            object_expr,
+                            field_name
+                        );
                         return Some(Expression::MemberAccess {
                             object: Box::new(Expression::Dereference(Box::new(object_expr))),
                             field: field_name,
                         });
                     } else {
-                        debug_println!("DEBUG: MemberRefExpr {} access: {:?}.{}",
-                            if has_overloaded_arrow { "smart pointer" } else { "dot" },
-                            object_expr, field_name);
+                        debug_println!(
+                            "DEBUG: MemberRefExpr {} access: {:?}.{}",
+                            if has_overloaded_arrow {
+                                "smart pointer"
+                            } else {
+                                "dot"
+                            },
+                            object_expr,
+                            field_name
+                        );
                         return Some(Expression::MemberAccess {
                             object: Box::new(object_expr),
                             field: field_name,
@@ -2557,7 +2937,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 // No children means implicit 'this->field' access in a method
                 // 'this' is guaranteed valid inside member functions, so NOT unsafe
                 // (Unlike arbitrary raw pointers, 'this' cannot be null/invalid in well-formed code)
-                debug_println!("DEBUG: MemberRefExpr implicit 'this' access: this.{}", field_name);
+                debug_println!(
+                    "DEBUG: MemberRefExpr implicit 'this' access: this.{}",
+                    field_name
+                );
                 return Some(Expression::MemberAccess {
                     object: Box::new(Expression::Variable("this".to_string())),
                     field: field_name,
@@ -2586,7 +2969,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             let mut has_move_call = false;
 
             for child in entity.get_children() {
-                debug_println!("DEBUG LAMBDA child: kind={:?} name={:?}", child.get_kind(), child.get_name());
+                debug_println!(
+                    "DEBUG LAMBDA child: kind={:?} name={:?}",
+                    child.get_kind(),
+                    child.get_name()
+                );
                 match child.get_kind() {
                     EntityKind::VariableRef => {
                         has_explicit_captures = true;
@@ -2619,7 +3006,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
 
             // If no explicit captures found, check if lambda uses default capture
             // by looking at the source code range
-            debug_println!("DEBUG LAMBDA: has_explicit_captures={}", has_explicit_captures);
+            debug_println!(
+                "DEBUG LAMBDA: has_explicit_captures={}",
+                has_explicit_captures
+            );
             if !has_explicit_captures {
                 // Try to get the source range and parse the capture specifier
                 if let Some(range) = entity.get_range() {
@@ -2627,52 +3017,77 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                         if let Ok(content) = std::fs::read_to_string(file.get_path()) {
                             let start_line = range.get_start().get_file_location().line as usize;
                             let start_col = range.get_start().get_file_location().column as usize;
-                            debug_println!("DEBUG LAMBDA: Source parsing at line={} col={}", start_line, start_col);
+                            debug_println!(
+                                "DEBUG LAMBDA: Source parsing at line={} col={}",
+                                start_line,
+                                start_col
+                            );
 
                             if let Some(line) = content.lines().nth(start_line.saturating_sub(1)) {
                                 debug_println!("DEBUG LAMBDA: Line content: '{}'", line);
                                 // Find the capture list: [...]
-                                if let Some(bracket_start) = line.get(start_col.saturating_sub(1)..).and_then(|s| s.find('[')) {
+                                if let Some(bracket_start) = line
+                                    .get(start_col.saturating_sub(1)..)
+                                    .and_then(|s| s.find('['))
+                                {
                                     let search_start = start_col.saturating_sub(1) + bracket_start;
                                     if let Some(rest) = line.get(search_start..) {
                                         if let Some(bracket_end) = rest.find(']') {
                                             let capture_list = &rest[1..bracket_end];
-                                            debug_println!("DEBUG LAMBDA: Capture list from source: '{}'", capture_list);
+                                            debug_println!(
+                                                "DEBUG LAMBDA: Capture list from source: '{}'",
+                                                capture_list
+                                            );
 
                                             // Check for default reference capture [&]
                                             if capture_list.trim() == "&" {
-                                                debug_println!("DEBUG LAMBDA: Default reference capture [&] detected");
+                                                debug_println!(
+                                                    "DEBUG LAMBDA: Default reference capture [&] detected"
+                                                );
                                                 captures.push(LambdaCaptureKind::DefaultRef);
                                             }
                                             // Check for default copy capture [=]
                                             else if capture_list.trim() == "=" {
-                                                debug_println!("DEBUG LAMBDA: Default copy capture [=] detected");
+                                                debug_println!(
+                                                    "DEBUG LAMBDA: Default copy capture [=] detected"
+                                                );
                                                 captures.push(LambdaCaptureKind::DefaultCopy);
                                             }
                                             // Check for 'this' capture [this]
                                             else if capture_list.trim() == "this" {
-                                                debug_println!("DEBUG LAMBDA: 'this' capture [this] detected");
+                                                debug_println!(
+                                                    "DEBUG LAMBDA: 'this' capture [this] detected"
+                                                );
                                                 captures.push(LambdaCaptureKind::This);
                                             }
                                             // Check for '*this' capture [*this]
                                             else if capture_list.trim() == "*this" {
-                                                debug_println!("DEBUG LAMBDA: '*this' capture [*this] detected");
+                                                debug_println!(
+                                                    "DEBUG LAMBDA: '*this' capture [*this] detected"
+                                                );
                                                 captures.push(LambdaCaptureKind::ThisCopy);
                                             }
                                             // Check for init captures [x = expr] or [x = std::move(y)]
-                                            else if capture_list.contains('=') && !capture_list.starts_with('&') {
+                                            else if capture_list.contains('=')
+                                                && !capture_list.starts_with('&')
+                                            {
                                                 // This is an init capture - safe (copy or move)
-                                                debug_println!("DEBUG LAMBDA: Init capture detected");
+                                                debug_println!(
+                                                    "DEBUG LAMBDA: Init capture detected"
+                                                );
                                                 // Extract variable name before the '='
                                                 if let Some(eq_pos) = capture_list.find('=') {
-                                                    let var_name = capture_list[..eq_pos].trim().to_string();
+                                                    let var_name =
+                                                        capture_list[..eq_pos].trim().to_string();
                                                     captures.push(LambdaCaptureKind::Init {
                                                         name: var_name,
                                                     });
                                                 }
                                             }
                                             // Check for explicit reference captures [&x, &y, ...]
-                                            else if capture_list.starts_with('&') && !capture_list.contains(',') {
+                                            else if capture_list.starts_with('&')
+                                                && !capture_list.contains(',')
+                                            {
                                                 // [&x] - single explicit reference capture
                                                 // Already handled by VariableRef detection above
                                             }
@@ -2707,16 +3122,12 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 } else if has_move_call {
                     // Has move() call = init move capture [y = std::move(x)]
                     debug_println!("DEBUG LAMBDA: Init move capture '{}'", var_name);
-                    captures.push(LambdaCaptureKind::Init {
-                        name: var_name,
-                    });
+                    captures.push(LambdaCaptureKind::Init { name: var_name });
                 } else if is_init_capture_pattern {
                     // Has DeclRefExpr with entirely DIFFERENT names = init capture [y = x]
                     // The VariableRef is the new capture name, DeclRefExpr is the source
                     debug_println!("DEBUG LAMBDA: Init copy capture '{}'", var_name);
-                    captures.push(LambdaCaptureKind::Init {
-                        name: var_name,
-                    });
+                    captures.push(LambdaCaptureKind::Init { name: var_name });
                 } else {
                     // No matching DeclRefExpr = reference capture
                     debug_println!("DEBUG LAMBDA: Reference capture of '{}'", var_name);
@@ -2724,8 +3135,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
 
-            debug_println!("DEBUG LAMBDA: Found lambda with {} captures: {:?}",
-                captures.len(), captures);
+            debug_println!(
+                "DEBUG LAMBDA: Found lambda with {} captures: {:?}",
+                captures.len(),
+                captures
+            );
 
             Some(Expression::Lambda { captures })
         }
@@ -2754,7 +3168,11 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                     }
 
                     // For actual arrays, return ArraySubscript for bounds checking
-                    debug_println!("DEBUG: ArraySubscriptExpr - array: {:?}, index: {:?}", array, index);
+                    debug_println!(
+                        "DEBUG: ArraySubscriptExpr - array: {:?}, index: {:?}",
+                        array,
+                        index
+                    );
                     return Some(Expression::ArraySubscript {
                         array: Box::new(array),
                         index: Box::new(index),
@@ -2763,7 +3181,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
             } else if !children.is_empty() {
                 // Fallback: return just the array expression
                 if let Some(array_expr) = extract_expression(&children[0]) {
-                    debug_println!("DEBUG: ArraySubscriptExpr (fallback) - array: {:?}", array_expr);
+                    debug_println!(
+                        "DEBUG: ArraySubscriptExpr (fallback) - array: {:?}",
+                        array_expr
+                    );
                     return Some(array_expr);
                 }
             }
@@ -2782,7 +3203,9 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             // If no children, use a placeholder
-            Some(Expression::New(Box::new(Expression::Literal("type".to_string()))))
+            Some(Expression::New(Box::new(Expression::Literal(
+                "type".to_string(),
+            ))))
         }
         EntityKind::DeleteExpr => {
             // C++ delete expression: delete ptr, delete[] ptr
@@ -2796,16 +3219,18 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                 }
             }
             // If no children, use a placeholder
-            Some(Expression::Delete(Box::new(Expression::Literal("ptr".to_string()))))
+            Some(Expression::Delete(Box::new(Expression::Literal(
+                "ptr".to_string(),
+            ))))
         }
-        _ => None
+        _ => None,
     }
 }
 
 fn extract_location(entity: &Entity) -> SourceLocation {
     let location = entity.get_location().unwrap();
     let file_location = location.get_file_location();
-    
+
     SourceLocation {
         file: file_location
             .file

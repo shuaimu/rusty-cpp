@@ -4,7 +4,6 @@
 /// 1. Parameter packs are recognized (is_pack flag)
 /// 2. Pack element types are extracted
 /// 3. Pack types are properly whitelisted in analysis
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -27,8 +26,7 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -97,9 +95,7 @@ fn test_phase1_forwarding_reference_pack() {
 
     // Should parse forwarding reference pack
     assert!(
-        output.contains("Found parameter pack") ||
-        output.contains("Args &&") ||
-        success,
+        output.contains("Found parameter pack") || output.contains("Args &&") || success,
         "Should recognize forwarding reference pack. Output: {}",
         output
     );
@@ -203,10 +199,7 @@ fn test_phase1_empty_pack() {
     let (success, _output) = run_analyzer(temp_file.path());
 
     // Should handle empty pack without errors
-    assert!(
-        success,
-        "Should handle empty parameter pack"
-    );
+    assert!(success, "Should handle empty parameter pack");
 }
 
 // ============================================================================
@@ -234,8 +227,8 @@ fn test_phase1_pack_type_not_flagged_as_unsafe() {
 
     // Should NOT report "Args" as an unsafe function call
     assert!(
-        !output.contains("unsafe function 'Args'") &&
-        !output.contains("undeclared function 'Args'"),
+        !output.contains("unsafe function 'Args'")
+            && !output.contains("undeclared function 'Args'"),
         "Pack type 'Args' should be whitelisted. Output: {}",
         output
     );
@@ -263,8 +256,8 @@ fn test_phase1_pack_element_type_whitelisted() {
 
     // Should NOT flag "Args&&" as unsafe
     assert!(
-        !output.contains("unsafe function 'Args'") &&
-        !output.contains("undeclared function 'Args'"),
+        !output.contains("unsafe function 'Args'")
+            && !output.contains("undeclared function 'Args'"),
         "Pack element type 'Args&&' should be whitelisted. Output: {}",
         output
     );

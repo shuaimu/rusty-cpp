@@ -10,7 +10,7 @@
 //! - Phase 7: Constructor initialization order
 //! - Phase 8: Reference lifetime checking (use-after-free detection)
 
-use crate::ir::{IrFunction, IrStatement, BorrowKind};
+use crate::ir::{BorrowKind, IrFunction, IrStatement};
 use crate::parser::HeaderCache;
 use std::collections::{HashMap, HashSet};
 
@@ -261,49 +261,49 @@ impl RaiiTracker {
 
     /// Check if a type is a container type
     pub fn is_container_type(type_name: &str) -> bool {
-        type_name.contains("vector") ||
-        type_name.contains("Vector") ||
-        type_name.contains("Vec<") ||
-        type_name.contains("list") ||
-        type_name.contains("deque") ||
-        type_name.contains("set") ||
-        type_name.contains("map") ||
-        type_name.contains("unordered_") ||
-        type_name.contains("array<") ||
-        type_name.contains("span<")
+        type_name.contains("vector")
+            || type_name.contains("Vector")
+            || type_name.contains("Vec<")
+            || type_name.contains("list")
+            || type_name.contains("deque")
+            || type_name.contains("set")
+            || type_name.contains("map")
+            || type_name.contains("unordered_")
+            || type_name.contains("array<")
+            || type_name.contains("span<")
     }
 
     /// Check if a type is an iterator type
     pub fn is_iterator_type(type_name: &str) -> bool {
-        type_name.contains("iterator") ||
-        type_name.contains("Iterator") ||
-        type_name.ends_with("::iterator") ||
-        type_name.ends_with("::const_iterator") ||
-        type_name.ends_with("::reverse_iterator")
+        type_name.contains("iterator")
+            || type_name.contains("Iterator")
+            || type_name.ends_with("::iterator")
+            || type_name.ends_with("::const_iterator")
+            || type_name.ends_with("::reverse_iterator")
     }
 
     /// Check if a function is a container method that stores a reference
     pub fn is_container_store_method(method_name: &str) -> bool {
-        method_name == "push_back" ||
-        method_name == "push_front" ||
-        method_name == "insert" ||
-        method_name == "emplace" ||
-        method_name == "emplace_back" ||
-        method_name == "emplace_front" ||
-        method_name == "assign"
+        method_name == "push_back"
+            || method_name == "push_front"
+            || method_name == "insert"
+            || method_name == "emplace"
+            || method_name == "emplace_back"
+            || method_name == "emplace_front"
+            || method_name == "assign"
     }
 
     /// Check if a function returns an iterator
     pub fn is_iterator_returning_method(method_name: &str) -> bool {
-        method_name == "begin" ||
-        method_name == "end" ||
-        method_name == "cbegin" ||
-        method_name == "cend" ||
-        method_name == "rbegin" ||
-        method_name == "rend" ||
-        method_name == "find" ||
-        method_name == "lower_bound" ||
-        method_name == "upper_bound"
+        method_name == "begin"
+            || method_name == "end"
+            || method_name == "cbegin"
+            || method_name == "cend"
+            || method_name == "rbegin"
+            || method_name == "rend"
+            || method_name == "find"
+            || method_name == "lower_bound"
+            || method_name == "upper_bound"
     }
 
     /// Check if a function modifies the container and potentially invalidates iterators
@@ -335,14 +335,14 @@ impl RaiiTracker {
         method_name == "data" ||
         // Some containers have additional element access methods
         method_name == "top" ||   // stack, priority_queue
-        method_name == "peek"     // custom containers
+        method_name == "peek" // custom containers
     }
 
     /// Check if a type is a unique_ptr type
     pub fn is_unique_ptr_type(type_name: &str) -> bool {
-        type_name.contains("unique_ptr") ||
-        type_name.contains("UniquePtr") ||
-        type_name.contains("rusty::Box")  // Rust-style box is similar
+        type_name.contains("unique_ptr")
+            || type_name.contains("UniquePtr")
+            || type_name.contains("rusty::Box") // Rust-style box is similar
     }
 
     /// Check if a method invalidates a unique_ptr (makes the pointed-to object inaccessible)
@@ -407,7 +407,13 @@ impl RaiiTracker {
 
     /// Record that a reference to a container element was obtained
     /// (via operator[], at(), front(), back(), data(), etc.)
-    pub fn record_container_element_ref(&mut self, reference: &str, container: &str, method: &str, line: usize) {
+    pub fn record_container_element_ref(
+        &mut self,
+        reference: &str,
+        container: &str,
+        method: &str,
+        line: usize,
+    ) {
         let reference_scope = self.current_scope;
         let container_scope = *self.variable_scopes.get(container).unwrap_or(&0);
 
@@ -425,7 +431,13 @@ impl RaiiTracker {
 
     /// Record that a reference was obtained by dereferencing a unique_ptr
     /// Pattern: `int& ref = *ptr;` or `auto& ref = ptr->value;`
-    pub fn record_unique_ptr_dereference(&mut self, reference: &str, unique_ptr: &str, method: &str, line: usize) {
+    pub fn record_unique_ptr_dereference(
+        &mut self,
+        reference: &str,
+        unique_ptr: &str,
+        method: &str,
+        line: usize,
+    ) {
         let reference_scope = self.current_scope;
         let unique_ptr_scope = *self.variable_scopes.get(unique_ptr).unwrap_or(&0);
 
@@ -443,7 +455,12 @@ impl RaiiTracker {
 
     /// Record that a unique_ptr was invalidated (reset, release, or moved)
     /// Returns a list of references that were just invalidated
-    pub fn record_unique_ptr_invalidation(&mut self, unique_ptr: &str, method: &str, line: usize) -> Vec<String> {
+    pub fn record_unique_ptr_invalidation(
+        &mut self,
+        unique_ptr: &str,
+        method: &str,
+        line: usize,
+    ) -> Vec<String> {
         let mut newly_invalidated = Vec::new();
 
         // Find all references that borrow from this unique_ptr
@@ -479,7 +496,10 @@ impl RaiiTracker {
     }
 
     /// Get invalidation info for a unique_ptr reference
-    pub fn get_unique_ptr_ref_invalidation_info(&self, reference: &str) -> Option<&UniquePtrInvalidation> {
+    pub fn get_unique_ptr_ref_invalidation_info(
+        &self,
+        reference: &str,
+    ) -> Option<&UniquePtrInvalidation> {
         self.invalidated_unique_ptr_refs.get(reference)
     }
 
@@ -516,7 +536,12 @@ impl RaiiTracker {
 
     /// Record that a container was modified, invalidating all its iterators and element references
     /// Returns a list of iterators/refs that were just invalidated (for immediate error if used in same statement)
-    pub fn record_container_modification(&mut self, container: &str, method: &str, line: usize) -> Vec<String> {
+    pub fn record_container_modification(
+        &mut self,
+        container: &str,
+        method: &str,
+        line: usize,
+    ) -> Vec<String> {
         let mut newly_invalidated = Vec::new();
 
         // Find all iterators that borrow from this container
@@ -586,7 +611,10 @@ impl RaiiTracker {
     }
 
     /// Get invalidation info for a container element reference (for error reporting)
-    pub fn get_element_ref_invalidation_info(&self, reference: &str) -> Option<&IteratorInvalidation> {
+    pub fn get_element_ref_invalidation_info(
+        &self,
+        reference: &str,
+    ) -> Option<&IteratorInvalidation> {
         self.invalidated_element_refs.get(reference)
     }
 
@@ -611,9 +639,18 @@ impl RaiiTracker {
 
     /// Record a reference to an object's member field (Phase 5)
     /// When `ptr = &obj.field`, the reference `ptr` borrows from `obj`
-    pub fn record_member_borrow(&mut self, reference: &str, object: &str, field: &str, line: usize) {
+    pub fn record_member_borrow(
+        &mut self,
+        reference: &str,
+        object: &str,
+        field: &str,
+        line: usize,
+    ) {
         // Use the reference's scope from variable_scopes if known, otherwise use current scope
-        let reference_scope = *self.variable_scopes.get(reference).unwrap_or(&self.current_scope);
+        let reference_scope = *self
+            .variable_scopes
+            .get(reference)
+            .unwrap_or(&self.current_scope);
         let object_scope = *self.variable_scopes.get(object).unwrap_or(&0);
 
         self.member_borrows.push(MemberBorrow {
@@ -628,8 +665,17 @@ impl RaiiTracker {
 
     /// Record a general reference borrow (Phase 8: Lifetime Checking)
     /// When `ref = source` or `ref = source.get_mut().unwrap()`, track the borrow
-    pub fn record_reference_borrow(&mut self, reference: &str, source: &str, _is_mutable: bool, line: usize) {
-        let reference_scope = *self.variable_scopes.get(reference).unwrap_or(&self.current_scope);
+    pub fn record_reference_borrow(
+        &mut self,
+        reference: &str,
+        source: &str,
+        _is_mutable: bool,
+        line: usize,
+    ) {
+        let reference_scope = *self
+            .variable_scopes
+            .get(reference)
+            .unwrap_or(&self.current_scope);
         let source_scope = *self.variable_scopes.get(source).unwrap_or(&0);
 
         self.reference_borrows.push(ReferenceBorrow {
@@ -658,15 +704,23 @@ impl RaiiTracker {
     }
 
     /// Check if source is reassigned while borrowed (returns error message if violation)
-    pub fn check_reassignment_while_borrowed(&self, var: &str, _assign_line: usize) -> Option<String> {
+    pub fn check_reassignment_while_borrowed(
+        &self,
+        var: &str,
+        _assign_line: usize,
+    ) -> Option<String> {
         if let Some(borrowers) = self.active_borrows.get(var) {
             if !borrowers.is_empty() {
                 // Find the borrow line from reference_borrows
-                let borrow_lines: Vec<String> = borrowers.iter().filter_map(|borrower| {
-                    self.reference_borrows.iter()
-                        .find(|b| &b.reference == borrower && &b.source == var)
-                        .map(|b| format!("{} at line {}", borrower, b.line))
-                }).collect();
+                let borrow_lines: Vec<String> = borrowers
+                    .iter()
+                    .filter_map(|borrower| {
+                        self.reference_borrows
+                            .iter()
+                            .find(|b| &b.reference == borrower && &b.source == var)
+                            .map(|b| format!("{} at line {}", borrower, b.line))
+                    })
+                    .collect();
 
                 let borrower_info = if borrow_lines.is_empty() {
                     borrowers.join(", ")
@@ -676,8 +730,7 @@ impl RaiiTracker {
 
                 return Some(format!(
                     "Cannot assign to '{}' because it is borrowed by {}",
-                    var,
-                    borrower_info
+                    var, borrower_info
                 ));
             }
         }
@@ -686,10 +739,13 @@ impl RaiiTracker {
 
     /// Record a new allocation
     pub fn record_allocation(&mut self, var: &str, _line: usize) {
-        self.heap_allocations.insert(var.to_string(), HeapAllocation {
-            state: AllocationState::Allocated,
-            free_line: None,
-        });
+        self.heap_allocations.insert(
+            var.to_string(),
+            HeapAllocation {
+                state: AllocationState::Allocated,
+                free_line: None,
+            },
+        );
     }
 
     /// Record a delete operation
@@ -699,7 +755,8 @@ impl RaiiTracker {
                 // Double free!
                 return Some(format!(
                     "Double free: '{}' was already freed at line {}",
-                    var, alloc.free_line.unwrap_or(0)
+                    var,
+                    alloc.free_line.unwrap_or(0)
                 ));
             }
             alloc.state = AllocationState::Freed;
@@ -710,7 +767,8 @@ impl RaiiTracker {
 
     /// Check if a variable has been freed
     pub fn is_freed(&self, var: &str) -> bool {
-        self.heap_allocations.get(var)
+        self.heap_allocations
+            .get(var)
             .map(|a| a.state == AllocationState::Freed)
             .unwrap_or(false)
     }
@@ -785,13 +843,17 @@ impl RaiiTracker {
 
         // Clean up borrows from dying scope
         // For container borrows: keep if pointee survives OR container dies with it
-        self.container_borrows.retain(|b| b.pointee_scope != dying_scope || b.container_scope >= dying_scope);
+        self.container_borrows
+            .retain(|b| b.pointee_scope != dying_scope || b.container_scope >= dying_scope);
         // For iterator borrows: keep if container survives OR iterator dies with it
-        self.iterator_borrows.retain(|b| b.container_scope != dying_scope || b.iterator_scope >= dying_scope);
+        self.iterator_borrows
+            .retain(|b| b.container_scope != dying_scope || b.iterator_scope >= dying_scope);
         // For member borrows: remove if reference OR object dies (no longer needs tracking)
-        self.member_borrows.retain(|b| b.reference_scope != dying_scope && b.object_scope != dying_scope);
+        self.member_borrows
+            .retain(|b| b.reference_scope != dying_scope && b.object_scope != dying_scope);
         // For reference borrows: remove if reference OR source dies
-        self.reference_borrows.retain(|b| b.reference_scope != dying_scope && b.source_scope != dying_scope);
+        self.reference_borrows
+            .retain(|b| b.reference_scope != dying_scope && b.source_scope != dying_scope);
 
         // Clean up active borrows for dying references
         for (source, borrowers) in self.active_borrows.iter_mut() {
@@ -801,7 +863,9 @@ impl RaiiTracker {
             let _ = source; // Silence unused warning
         }
         // Remove sources that are in the dying scope
-        let dying_sources: Vec<_> = self.active_borrows.keys()
+        let dying_sources: Vec<_> = self
+            .active_borrows
+            .keys()
             .filter(|s| self.variable_scopes.get(*s) == Some(&dying_scope))
             .cloned()
             .collect();
@@ -861,7 +925,9 @@ fn process_raii_statement(
             errors.extend(scope_errors);
         }
 
-        IrStatement::CallExpr { func, args, result, .. } => {
+        IrStatement::CallExpr {
+            func, args, result, ..
+        } => {
             // Check for container store methods (push_back, insert, etc.)
             let method_name = func.split("::").last().unwrap_or(func);
 
@@ -891,7 +957,8 @@ fn process_raii_statement(
             if RaiiTracker::is_container_modifying_method(method_name) {
                 if let Some(container) = extract_receiver(func) {
                     // Invalidate all iterators for this container
-                    let _invalidated = tracker.record_container_modification(&container, method_name, 0);
+                    let _invalidated =
+                        tracker.record_container_modification(&container, method_name, 0);
                 }
             }
 
@@ -906,7 +973,8 @@ fn process_raii_statement(
             if RaiiTracker::is_unique_ptr_invalidation_method(method_name) {
                 if let Some(unique_ptr) = extract_receiver(func) {
                     if tracker.is_unique_ptr(&unique_ptr) {
-                        let _invalidated = tracker.record_unique_ptr_invalidation(&unique_ptr, method_name, 0);
+                        let _invalidated =
+                            tracker.record_unique_ptr_invalidation(&unique_ptr, method_name, 0);
                     }
                 }
             }
@@ -916,7 +984,12 @@ fn process_raii_statement(
             if method_name == "operator*" || method_name == "operator->" {
                 if let (Some(result_var), Some(unique_ptr)) = (result, extract_receiver(func)) {
                     if tracker.is_unique_ptr(&unique_ptr) {
-                        tracker.record_unique_ptr_dereference(result_var, &unique_ptr, method_name, 0);
+                        tracker.record_unique_ptr_dereference(
+                            result_var,
+                            &unique_ptr,
+                            method_name,
+                            0,
+                        );
                     }
                 }
             }
@@ -1098,7 +1171,13 @@ fn process_raii_statement(
         }
 
         // Phase 8: Track general borrows
-        IrStatement::Borrow { from, to, kind, line, .. } => {
+        IrStatement::Borrow {
+            from,
+            to,
+            kind,
+            line,
+            ..
+        } => {
             let is_mutable = matches!(kind, BorrowKind::Mutable);
             tracker.record_reference_borrow(to, from, is_mutable, *line);
         }
@@ -1112,7 +1191,10 @@ fn process_raii_statement(
 
         // Phase 8: Check for move of borrowed variable
         IrStatement::Move { from, line, .. } => {
-            if tracker.check_reassignment_while_borrowed(from, *line).is_some() {
+            if tracker
+                .check_reassignment_while_borrowed(from, *line)
+                .is_some()
+            {
                 errors.push(format!(
                     "Cannot move '{}' at line {} because it is borrowed",
                     from, line
@@ -1121,7 +1203,13 @@ fn process_raii_statement(
         }
 
         // Phase 5: Track borrows from object fields
-        IrStatement::BorrowField { object, field, to, line, .. } => {
+        IrStatement::BorrowField {
+            object,
+            field,
+            to,
+            line,
+            ..
+        } => {
             // When we see `to = &object.field`, record that `to` borrows from `object`
             tracker.record_member_borrow(to, object, field, *line);
         }
@@ -1157,7 +1245,9 @@ mod tests {
     fn test_is_container_type() {
         assert!(RaiiTracker::is_container_type("std::vector<int>"));
         assert!(RaiiTracker::is_container_type("std::map<int, int>"));
-        assert!(RaiiTracker::is_container_type("std::unordered_map<int, int>"));
+        assert!(RaiiTracker::is_container_type(
+            "std::unordered_map<int, int>"
+        ));
         assert!(!RaiiTracker::is_container_type("int"));
         assert!(!RaiiTracker::is_container_type("std::string"));
     }
@@ -1165,7 +1255,9 @@ mod tests {
     #[test]
     fn test_is_iterator_type() {
         assert!(RaiiTracker::is_iterator_type("std::vector<int>::iterator"));
-        assert!(RaiiTracker::is_iterator_type("std::map<int,int>::const_iterator"));
+        assert!(RaiiTracker::is_iterator_type(
+            "std::map<int,int>::const_iterator"
+        ));
         assert!(!RaiiTracker::is_iterator_type("int*"));
     }
 
@@ -1350,6 +1442,6 @@ mod tests {
 
         // Original invalidation info should be preserved
         let info = tracker.get_invalidation_info("it").unwrap();
-        assert_eq!(info.invalidation_line, 15);  // First modification's line
+        assert_eq!(info.invalidation_line, 15); // First modification's line
     }
 }

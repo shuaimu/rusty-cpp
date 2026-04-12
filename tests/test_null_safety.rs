@@ -7,9 +7,9 @@
 //! - nullptr is Null
 //! - Null checks narrow state in conditionals
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -86,8 +86,7 @@ void process(int* ptr) {
     // Note: The null check narrowing should make this safe
     // If implementation is correct, no "potentially null" error in the then-branch
     assert!(
-        !output.contains("potentially null pointer 'ptr'") ||
-        output.contains("no violations"),
+        !output.contains("potentially null pointer 'ptr'") || output.contains("no violations"),
         "Null check should narrow to NonNull. Output: {}",
         output
     );

@@ -5,7 +5,7 @@ use tempfile::TempDir;
 #[test]
 fn test_header_safety_propagation() {
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create a header file with @safe annotation
     let header_path = temp_dir.path().join("test.h");
     let header_content = r#"
@@ -33,7 +33,7 @@ public:
 #endif
 "#;
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create implementation file that includes the header
     let cpp_path = temp_dir.path().join("test.cpp");
     let cpp_content = r#"
@@ -70,36 +70,46 @@ void TestClass::unsafe_method() {
 }
 "#;
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     // Run the checker with the include path
     let output = Command::new("cargo")
-        .args(&["run", "--", 
-                &cpp_path.to_string_lossy(),
-                "-I", &temp_dir.path().to_string_lossy()])
+        .args(&[
+            "run",
+            "--",
+            &cpp_path.to_string_lossy(),
+            "-I",
+            &temp_dir.path().to_string_lossy(),
+        ])
         .output()
         .expect("Failed to execute rusty-cpp");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     eprintln!("STDOUT:\n{}", stdout);
     eprintln!("STDERR:\n{}", stderr);
-    
+
     // Check that safe functions from header are properly checked
-    assert!(stdout.contains("violation") || stderr.contains("violation"), 
-            "Expected violations for pointer operations in safe functions");
-    
+    assert!(
+        stdout.contains("violation") || stderr.contains("violation"),
+        "Expected violations for pointer operations in safe functions"
+    );
+
     // Verify specific functions are checked
-    assert!(stderr.contains("safe_function_in_header") || stdout.contains("safe_function_in_header"),
-            "Expected safe_function_in_header to be checked");
-    assert!(stderr.contains("safe_method") || stdout.contains("safe_method"),
-            "Expected safe_method to be checked");
+    assert!(
+        stderr.contains("safe_function_in_header") || stdout.contains("safe_function_in_header"),
+        "Expected safe_function_in_header to be checked"
+    );
+    assert!(
+        stderr.contains("safe_method") || stdout.contains("safe_method"),
+        "Expected safe_method to be checked"
+    );
 }
 
 #[test]
 fn test_header_safety_override_by_source() {
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create a header file with @safe annotation
     let header_path = temp_dir.path().join("override.h");
     let header_content = r#"
@@ -112,7 +122,7 @@ void function_safe_in_header();
 #endif
 "#;
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create implementation file that overrides with @unsafe
     let cpp_path = temp_dir.path().join("override.cpp");
     let cpp_content = r#"
@@ -127,31 +137,36 @@ void function_safe_in_header() {
 }
 "#;
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     // Run the checker
     let output = Command::new("cargo")
-        .args(&["run", "--", 
-                &cpp_path.to_string_lossy(),
-                "-I", &temp_dir.path().to_string_lossy()])
+        .args(&[
+            "run",
+            "--",
+            &cpp_path.to_string_lossy(),
+            "-I",
+            &temp_dir.path().to_string_lossy(),
+        ])
         .output()
         .expect("Failed to execute rusty-cpp");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     eprintln!("STDOUT:\n{}", stdout);
     eprintln!("STDERR:\n{}", stderr);
-    
+
     // Should not have violations since source file overrides header
-    assert!(!stdout.contains("function_safe_in_header") || 
-            stdout.contains("no violations found"),
-            "Source file @unsafe should override header @safe");
+    assert!(
+        !stdout.contains("function_safe_in_header") || stdout.contains("no violations found"),
+        "Source file @unsafe should override header @safe"
+    );
 }
 
 #[test]
 fn test_namespace_safety_in_header() {
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create a header with namespace-level safety
     let header_path = temp_dir.path().join("namespace.h");
     let header_content = r#"
@@ -171,7 +186,7 @@ namespace UnsafeNamespace {
 #endif
 "#;
     fs::write(&header_path, header_content).unwrap();
-    
+
     // Create implementation
     let cpp_path = temp_dir.path().join("namespace.cpp");
     let cpp_content = r#"
@@ -200,22 +215,28 @@ namespace UnsafeNamespace {
 }
 "#;
     fs::write(&cpp_path, cpp_content).unwrap();
-    
+
     // Run the checker
     let output = Command::new("cargo")
-        .args(&["run", "--", 
-                &cpp_path.to_string_lossy(),
-                "-I", &temp_dir.path().to_string_lossy()])
+        .args(&[
+            "run",
+            "--",
+            &cpp_path.to_string_lossy(),
+            "-I",
+            &temp_dir.path().to_string_lossy(),
+        ])
         .output()
         .expect("Failed to execute rusty-cpp");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     eprintln!("STDOUT:\n{}", stdout);
     eprintln!("STDERR:\n{}", stderr);
-    
+
     // Functions in safe namespace should be checked
-    assert!(stdout.contains("violation") || stderr.contains("violation"),
-            "Expected violations for functions in safe namespace");
+    assert!(
+        stdout.contains("violation") || stderr.contains("violation"),
+        "Expected violations for functions in safe namespace"
+    );
 }

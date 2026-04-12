@@ -1,7 +1,7 @@
-use crate::parser::annotations::{LifetimeAnnotation, FunctionSignature, LifetimeBound};
+use crate::ir::{IrFunction, IrProgram, IrStatement, VariableType};
 use crate::parser::HeaderCache;
+use crate::parser::annotations::{FunctionSignature, LifetimeAnnotation, LifetimeBound};
 use crate::parser::safety_annotations::SafetyContext;
-use crate::ir::{IrProgram, IrStatement, IrFunction, VariableType};
 use std::collections::{HashMap, HashSet};
 
 /// Tracks lifetime information for variables in the current scope
@@ -26,27 +26,27 @@ impl LifetimeScope {
             expired_lifetimes: HashSet::new(),
         }
     }
-    
+
     /// Assign a lifetime to a variable
     pub fn set_lifetime(&mut self, var: String, lifetime: String) {
         self.variable_lifetimes.insert(var, lifetime);
     }
-    
+
     /// Mark a variable as owned (not a reference)
     pub fn mark_owned(&mut self, var: String) {
         self.owned_variables.insert(var);
     }
-    
+
     /// Get the lifetime of a variable
     pub fn get_lifetime(&self, var: &str) -> Option<&String> {
         self.variable_lifetimes.get(var)
     }
-    
+
     /// Check if a variable is owned
     pub fn is_owned(&self, var: &str) -> bool {
         self.owned_variables.contains(var)
     }
-    
+
     /// Add a lifetime constraint
     #[allow(dead_code)]
     pub fn add_constraint(&mut self, constraint: LifetimeBound) {
@@ -84,11 +84,11 @@ impl LifetimeScope {
         // Lower scope number = outer scope = longer lifetime
         if let (Some(longer_scope), Some(shorter_scope)) = (
             longer.strip_prefix("'scope_"),
-            shorter.strip_prefix("'scope_")
+            shorter.strip_prefix("'scope_"),
         ) {
             if let (Ok(longer_depth), Ok(shorter_depth)) = (
                 longer_scope.parse::<usize>(),
-                shorter_scope.parse::<usize>()
+                shorter_scope.parse::<usize>(),
             ) {
                 return longer_depth <= shorter_depth;
             }
@@ -105,15 +105,20 @@ impl LifetimeScope {
         // If 'a: 'b and 'b: 'c, then 'a: 'c
         self.check_outlives_transitive(longer, shorter, &mut HashSet::new())
     }
-    
+
     /// Check outlives relationship with transitive closure
-    fn check_outlives_transitive(&self, longer: &str, shorter: &str, visited: &mut HashSet<String>) -> bool {
+    fn check_outlives_transitive(
+        &self,
+        longer: &str,
+        shorter: &str,
+        visited: &mut HashSet<String>,
+    ) -> bool {
         // Avoid infinite recursion
         if visited.contains(longer) {
             return false;
         }
         visited.insert(longer.to_string());
-        
+
         // Find all lifetimes that 'longer' outlives directly
         for constraint in &self.constraints {
             if constraint.longer == longer {
@@ -121,14 +126,14 @@ impl LifetimeScope {
                 if constraint.shorter == shorter {
                     return true;
                 }
-                
+
                 // Try transitively through this intermediate lifetime
                 if self.check_outlives_transitive(&constraint.shorter, shorter, visited) {
                     return true;
                 }
             }
         }
-        
+
         false
     }
 }
@@ -152,11 +157,12 @@ fn is_system_header(file_path: &str) -> bool {
     }
 
     // STL and system library patterns (works for relative paths too)
-    if file_path.contains("/include/c++/") ||
-       file_path.contains("/bits/") ||
-       file_path.contains("/ext/") ||
-       file_path.contains("stl_") ||
-       file_path.contains("/lib/gcc/") {
+    if file_path.contains("/include/c++/")
+        || file_path.contains("/bits/")
+        || file_path.contains("/ext/")
+        || file_path.contains("stl_")
+        || file_path.contains("/lib/gcc/")
+    {
         return true;
     }
 
@@ -171,7 +177,7 @@ fn is_system_header(file_path: &str) -> bool {
 pub fn check_lifetimes_with_annotations(
     program: &IrProgram,
     header_cache: &HeaderCache,
-    safety_context: &SafetyContext
+    safety_context: &SafetyContext,
 ) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
 
@@ -187,7 +193,12 @@ pub fn check_lifetimes_with_annotations(
             continue;
         }
         let mut scope = LifetimeScope::new();
-        let function_errors = check_function_lifetimes(function, &mut scope, header_cache, &program.types_with_ref_members)?;
+        let function_errors = check_function_lifetimes(
+            function,
+            &mut scope,
+            header_cache,
+            &program.types_with_ref_members,
+        )?;
         errors.extend(function_errors);
     }
 
@@ -198,16 +209,16 @@ fn check_function_lifetimes(
     function: &IrFunction,
     scope: &mut LifetimeScope,
     header_cache: &HeaderCache,
-    types_with_ref_members: &std::collections::HashSet<String>
+    types_with_ref_members: &std::collections::HashSet<String>,
 ) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
-    
+
     // Initialize lifetimes for function parameters and variables
     // For now, give each variable a unique lifetime based on its name
     for (name, var_info) in &function.variables {
         match &var_info.ty {
-            crate::ir::VariableType::Reference(_) |
-            crate::ir::VariableType::MutableReference(_) => {
+            crate::ir::VariableType::Reference(_)
+            | crate::ir::VariableType::MutableReference(_) => {
                 // References get a lifetime based on their name
                 scope.set_lifetime(name.clone(), format!("'{}", name));
             }
@@ -217,11 +228,11 @@ fn check_function_lifetimes(
             }
         }
     }
-    
+
     // Track scope using a unique scope ID (counter) instead of just depth
     // This ensures sequential scopes at the same depth have different IDs
-    let mut scope_counter: usize = 0;  // Monotonically increasing scope ID
-    let mut scope_stack: Vec<usize> = vec![0];  // Stack of active scope IDs (starts with scope 0)
+    let mut scope_counter: usize = 0; // Monotonically increasing scope ID
+    let mut scope_stack: Vec<usize> = vec![0]; // Stack of active scope IDs (starts with scope 0)
     let mut variable_scopes: HashMap<String, usize> = HashMap::new();
 
     // First pass: assign unique scope IDs to variables based on where they're declared/used
@@ -239,8 +250,7 @@ fn check_function_lifetimes(
                         scope_stack.pop();
                     }
                 }
-                IrStatement::Assign { lhs, .. } |
-                IrStatement::Borrow { to: lhs, .. } => {
+                IrStatement::Assign { lhs, .. } | IrStatement::Borrow { to: lhs, .. } => {
                     // Record the current scope ID where this variable is first assigned
                     if !variable_scopes.contains_key(lhs) {
                         let current_scope = *scope_stack.last().unwrap_or(&0);
@@ -310,7 +320,12 @@ fn check_function_lifetimes(
                         scope_stack.pop();
                     }
                 }
-                IrStatement::CallExpr { func, args, result, receiver_is_temporary } => {
+                IrStatement::CallExpr {
+                    func,
+                    args,
+                    result,
+                    receiver_is_temporary,
+                } => {
                     // Check if we have annotations for this function
                     if let Some(signature) = header_cache.get_signature(func) {
                         let call_errors = check_function_call(
@@ -318,7 +333,7 @@ fn check_function_lifetimes(
                             args,
                             result.as_ref(),
                             signature,
-                            scope,  // Pass mutable scope to set result lifetime
+                            scope, // Pass mutable scope to set result lifetime
                             *receiver_is_temporary,
                         );
                         errors.extend(call_errors);
@@ -365,7 +380,8 @@ fn check_function_lifetimes(
                 IrStatement::Return { value, .. } => {
                     // Check that returned references have appropriate lifetimes
                     if let Some(value) = value {
-                        let return_errors = check_return_lifetime(value, function, scope, types_with_ref_members);
+                        let return_errors =
+                            check_return_lifetime(value, function, scope, types_with_ref_members);
                         errors.extend(return_errors);
                     }
                 }
@@ -374,7 +390,7 @@ fn check_function_lifetimes(
             }
         }
     }
-    
+
     Ok(errors)
 }
 
@@ -425,7 +441,7 @@ fn check_function_call(
             }
         }
     }
-    
+
     // Check parameter lifetime requirements
     // Note: In C++, passing owned values to const reference parameters is legal (creates temporary)
     // So we only check for ownership transfer violations
@@ -454,7 +470,7 @@ fn check_function_call(
             }
         }
     }
-    
+
     // Check lifetime bounds
     for bound in &signature.lifetime_bounds {
         // Map lifetime names from signature to actual argument lifetimes
@@ -471,7 +487,7 @@ fn check_function_call(
             }
         }
     }
-    
+
     // Check return lifetime and set result variable's lifetime
     if let (Some(result_var), Some(return_lifetime)) = (result, &signature.return_lifetime) {
         match return_lifetime {
@@ -508,7 +524,7 @@ fn check_return_lifetime(
     value: &str,
     function: &IrFunction,
     scope: &LifetimeScope,
-    types_with_ref_members: &std::collections::HashSet<String>
+    types_with_ref_members: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -529,11 +545,11 @@ fn check_return_lifetime(
                         // Only flag if the dependency is an OWNED local variable
                         // Reference aliases that depend on other references are OK
                         // (they inherit the lifetime of whatever they're bound to)
-                        let is_owned_type = matches!(
-                            other_var_info.ty,
-                            VariableType::Owned(_)
-                        );
-                        if is_owned_type && lifetime.contains(var_name) && !is_parameter(var_name, function) {
+                        let is_owned_type = matches!(other_var_info.ty, VariableType::Owned(_));
+                        if is_owned_type
+                            && lifetime.contains(var_name)
+                            && !is_parameter(var_name, function)
+                        {
                             errors.push(format!(
                                 "Returning reference to local variable '{}' - this will create a dangling reference",
                                 var_name
@@ -563,8 +579,12 @@ fn check_return_lifetime(
         .trim()
         .trim_start_matches("const ")
         .trim_start_matches("struct ")
-        .split('<').next().unwrap_or(return_type)  // Handle templates
-        .split("::").last().unwrap_or(return_type)  // Handle namespaces
+        .split('<')
+        .next()
+        .unwrap_or(return_type) // Handle templates
+        .split("::")
+        .last()
+        .unwrap_or(return_type) // Handle namespaces
         .trim();
 
     if types_with_ref_members.contains(base_return_type) {
@@ -572,7 +592,8 @@ fn check_return_lifetime(
         // The 'value' passed to this function is the source of the constructor (e.g., "x" for Holder{x})
         // If this source is a local owned variable, the struct's reference will dangle
         if let Some(var_info) = function.variables.get(value) {
-            let is_local_owned = matches!(var_info.ty, VariableType::Owned(_)) && !var_info.is_parameter;
+            let is_local_owned =
+                matches!(var_info.ty, VariableType::Owned(_)) && !var_info.is_parameter;
             if is_local_owned {
                 errors.push(format!(
                     "Returning struct '{}' with reference member initialized from local variable '{}' - \
@@ -588,7 +609,9 @@ fn check_return_lifetime(
 
 fn is_parameter(var_name: &str, function: &IrFunction) -> bool {
     // Check if variable is marked as a parameter in the IR
-    function.variables.get(var_name)
+    function
+        .variables
+        .get(var_name)
         .map(|var_info| var_info.is_parameter)
         .unwrap_or(false)
 }
@@ -606,19 +629,19 @@ fn map_lifetime_to_actual(lifetime_name: &str, arg_lifetimes: &[Option<String>])
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_lifetime_scope() {
         let mut scope = LifetimeScope::new();
-        
+
         scope.set_lifetime("ref1".to_string(), "'a".to_string());
         scope.mark_owned("value".to_string());
-        
+
         assert_eq!(scope.get_lifetime("ref1"), Some(&"'a".to_string()));
         assert!(scope.is_owned("value"));
         assert!(!scope.is_owned("ref1"));
     }
-    
+
     #[test]
     fn test_outlives_checking() {
         let mut scope = LifetimeScope::new();
@@ -635,22 +658,25 @@ mod tests {
 
     #[test]
     fn test_check_return_lifetime_pointer_is_safe() {
-        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use crate::ir::{ControlFlowGraph, OwnershipState, VariableInfo};
         use std::collections::HashMap;
 
         // Create a function with a pointer variable (Raw type)
         let mut variables = HashMap::new();
-        variables.insert("p".to_string(), VariableInfo {
-            name: "p".to_string(),
-            ty: VariableType::Raw("void*".to_string()),
-            ownership: OwnershipState::Owned,
-            lifetime: None,
-            is_parameter: false,
-            is_static: false,
-            scope_level: 1,
-            has_destructor: false,
-            declaration_index: 0,
-        });
+        variables.insert(
+            "p".to_string(),
+            VariableInfo {
+                name: "p".to_string(),
+                ty: VariableType::Raw("void*".to_string()),
+                ownership: OwnershipState::Owned,
+                lifetime: None,
+                is_parameter: false,
+                is_static: false,
+                scope_level: 1,
+                has_destructor: false,
+                declaration_index: 0,
+            },
+        );
 
         let function = IrFunction {
             name: "allocate".to_string(),
@@ -672,38 +698,48 @@ mod tests {
         // Returning a pointer should NOT produce any errors
         let empty_types = std::collections::HashSet::new();
         let errors = check_return_lifetime("p", &function, &scope, &empty_types);
-        assert!(errors.is_empty(), "Returning pointer value should be safe, got: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Returning pointer value should be safe, got: {:?}",
+            errors
+        );
     }
 
     #[test]
     fn test_check_return_lifetime_reference_is_unsafe() {
-        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use crate::ir::{ControlFlowGraph, OwnershipState, VariableInfo};
         use std::collections::HashMap;
 
         // Create a function with a reference variable
         let mut variables = HashMap::new();
-        variables.insert("local".to_string(), VariableInfo {
-            name: "local".to_string(),
-            ty: VariableType::Owned("int".to_string()),
-            ownership: OwnershipState::Owned,
-            lifetime: None,
-            is_parameter: false,
-            is_static: false,
-            scope_level: 1,
-            has_destructor: false,
-            declaration_index: 0,
-        });
-        variables.insert("ref".to_string(), VariableInfo {
-            name: "ref".to_string(),
-            ty: VariableType::Reference("int".to_string()),
-            ownership: OwnershipState::Owned,
-            lifetime: None,
-            is_parameter: false,
-            is_static: false,
-            scope_level: 1,
-            has_destructor: false,
-            declaration_index: 1,
-        });
+        variables.insert(
+            "local".to_string(),
+            VariableInfo {
+                name: "local".to_string(),
+                ty: VariableType::Owned("int".to_string()),
+                ownership: OwnershipState::Owned,
+                lifetime: None,
+                is_parameter: false,
+                is_static: false,
+                scope_level: 1,
+                has_destructor: false,
+                declaration_index: 0,
+            },
+        );
+        variables.insert(
+            "ref".to_string(),
+            VariableInfo {
+                name: "ref".to_string(),
+                ty: VariableType::Reference("int".to_string()),
+                ownership: OwnershipState::Owned,
+                lifetime: None,
+                is_parameter: false,
+                is_static: false,
+                scope_level: 1,
+                has_destructor: false,
+                declaration_index: 1,
+            },
+        );
 
         let function = IrFunction {
             name: "bad_return".to_string(),
@@ -726,28 +762,37 @@ mod tests {
         // Returning a reference to local should produce an error
         let empty_types = std::collections::HashSet::new();
         let errors = check_return_lifetime("ref", &function, &scope, &empty_types);
-        assert!(!errors.is_empty(), "Returning reference to local should be flagged as unsafe");
-        assert!(errors[0].contains("local"), "Error should mention the local variable");
+        assert!(
+            !errors.is_empty(),
+            "Returning reference to local should be flagged as unsafe"
+        );
+        assert!(
+            errors[0].contains("local"),
+            "Error should mention the local variable"
+        );
     }
 
     #[test]
     fn test_check_return_lifetime_owned_is_safe() {
-        use crate::ir::{VariableInfo, OwnershipState, ControlFlowGraph};
+        use crate::ir::{ControlFlowGraph, OwnershipState, VariableInfo};
         use std::collections::HashMap;
 
         // Create a function with an owned variable (like unique_ptr)
         let mut variables = HashMap::new();
-        variables.insert("ptr".to_string(), VariableInfo {
-            name: "ptr".to_string(),
-            ty: VariableType::UniquePtr("int".to_string()),
-            ownership: OwnershipState::Owned,
-            lifetime: None,
-            is_parameter: false,
-            is_static: false,
-            scope_level: 1,
-            has_destructor: true,
-            declaration_index: 0,
-        });
+        variables.insert(
+            "ptr".to_string(),
+            VariableInfo {
+                name: "ptr".to_string(),
+                ty: VariableType::UniquePtr("int".to_string()),
+                ownership: OwnershipState::Owned,
+                lifetime: None,
+                is_parameter: false,
+                is_static: false,
+                scope_level: 1,
+                has_destructor: true,
+                declaration_index: 0,
+            },
+        );
 
         let function = IrFunction {
             name: "create".to_string(),
@@ -769,6 +814,10 @@ mod tests {
         // Returning owned value should NOT produce any errors
         let empty_types = std::collections::HashSet::new();
         let errors = check_return_lifetime("ptr", &function, &scope, &empty_types);
-        assert!(errors.is_empty(), "Returning owned value should be safe, got: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Returning owned value should be safe, got: {:?}",
+            errors
+        );
     }
 }

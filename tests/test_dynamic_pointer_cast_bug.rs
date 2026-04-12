@@ -3,7 +3,6 @@
 /// User report: Using std::dynamic_pointer_cast with std_annotation.hpp works,
 /// but using dynamic_pointer_cast directly (with using namespace std) gives
 /// "undeclared function" error from safe functions.
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -93,8 +92,8 @@ void test() {
     println!("{}", output);
 
     // BUG: This reports "undeclared function" even in unsafe block!
-    let has_undeclared_error = output.contains("undeclared function") &&
-                               output.contains("dynamic_pointer_cast");
+    let has_undeclared_error =
+        output.contains("undeclared function") && output.contains("dynamic_pointer_cast");
 
     if has_undeclared_error {
         println!("❌ BUG CONFIRMED: dynamic_pointer_cast treated as undeclared!");
@@ -140,9 +139,8 @@ void test_qualified() {
     println!("{}", output);
 
     // Check if unqualified version has issues
-    let has_undeclared = output.contains("undeclared") &&
-                        (output.contains("static_pointer_cast") ||
-                         output.contains("dynamic_pointer_cast"));
+    let has_undeclared = output.contains("undeclared")
+        && (output.contains("static_pointer_cast") || output.contains("dynamic_pointer_cast"));
 
     if has_undeclared {
         println!("❌ BUG: Unqualified pointer casts treated as undeclared");
@@ -183,7 +181,8 @@ void test_all_casts() {
 
     // In @unsafe function, all should be allowed
     // Check what errors we get
-    let errors = output.lines()
+    let errors = output
+        .lines()
         .filter(|line| line.contains("undeclared") || line.contains("violation"))
         .collect::<Vec<_>>();
 

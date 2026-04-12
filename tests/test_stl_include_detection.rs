@@ -4,7 +4,6 @@
 /// automatically without requiring manual -I flags.
 ///
 /// Related to: https://github.com/shuaimu/rusty-cpp/issues/15
-
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -24,8 +23,7 @@ fn run_analyzer_with_args(cpp_file: &Path, extra_args: &[&str]) -> (bool, String
     let mut cmd = Command::new("cargo");
     let mut args = vec!["run", "--quiet", "--", cpp_file.to_str().unwrap()];
     args.extend(extra_args);
-    cmd.args(&args)
-        .env("Z3_SYS_Z3_HEADER", z3_header);
+    cmd.args(&args).env("Z3_SYS_Z3_HEADER", z3_header);
 
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -33,8 +31,7 @@ fn run_analyzer_with_args(cpp_file: &Path, extra_args: &[&str]) -> (bool, String
         cmd.env("LD_LIBRARY_PATH", "/usr/lib/llvm-14/lib");
     }
 
-    let output = cmd.output()
-        .expect("Failed to execute analyzer");
+    let output = cmd.output().expect("Failed to execute analyzer");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -13,19 +13,16 @@
 //! - Non-const method calls through such pointers are forbidden
 //! - Assignments through such pointers are forbidden
 
-use crate::parser::{Function, Statement, Expression, Variable};
 use crate::parser::ast_visitor::Class;
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{Expression, Function, Statement, Variable};
 use std::collections::{HashMap, HashSet};
 
 /// Placeholder for class pointer member tracking (for future expansion)
 type ClassInfo = ();
 
 /// Check for const propagation violations in @safe functions
-pub fn check_const_propagation(
-    functions: &[Function],
-    classes: &[Class],
-) -> Vec<String> {
+pub fn check_const_propagation(functions: &[Function], classes: &[Class]) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Build map of class name -> pointer members
@@ -83,8 +80,7 @@ fn build_class_info(classes: &[Class]) -> HashMap<String, ClassInfo> {
     let mut info = HashMap::new();
 
     for class in classes {
-        let has_pointer_members = class.members.iter()
-            .any(|m| m.is_pointer);
+        let has_pointer_members = class.members.iter().any(|m| m.is_pointer);
 
         if has_pointer_members {
             info.insert(class.name.clone(), ());
@@ -129,8 +125,7 @@ fn is_const_pointer_or_ref(var: &Variable) -> bool {
 
     // Also check type_name for patterns like "const X *" or "const X &"
     let type_lower = var.type_name.to_lowercase();
-    if type_lower.starts_with("const ") &&
-       (type_lower.contains('*') || type_lower.contains('&')) {
+    if type_lower.starts_with("const ") && (type_lower.contains('*') || type_lower.contains('&')) {
         return true;
     }
 
@@ -161,39 +156,69 @@ fn check_function_for_const_violations(
                 // Skip checks inside @unsafe blocks
                 continue;
             }
-            Statement::FunctionCall { name, args, location, .. } => {
+            Statement::FunctionCall {
+                name,
+                args,
+                location,
+                ..
+            } => {
                 // Check if this is a method call through a const-propagated path
                 if let Some(error) = check_method_call_const_propagation(
-                    name, args, location.line, const_vars, class_info, safe_functions
+                    name,
+                    args,
+                    location.line,
+                    const_vars,
+                    class_info,
+                    safe_functions,
                 ) {
                     errors.push(error);
                 }
             }
-            Statement::Assignment { lhs, rhs: _, location } => {
+            Statement::Assignment {
+                lhs,
+                rhs: _,
+                location,
+            } => {
                 // Check if assigning through a const-propagated path
-                if let Some(error) = check_assignment_const_propagation(
-                    lhs, location.line, const_vars, class_info
-                ) {
+                if let Some(error) =
+                    check_assignment_const_propagation(lhs, location.line, const_vars, class_info)
+                {
                     errors.push(error);
                 }
             }
-            Statement::If { then_branch, else_branch, .. } => {
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 // Recursively check branches
                 let branch_errors = check_statements_for_const_violations(
-                    then_branch, const_vars, class_info, unsafe_depth, safe_functions
+                    then_branch,
+                    const_vars,
+                    class_info,
+                    unsafe_depth,
+                    safe_functions,
                 );
                 errors.extend(branch_errors);
 
                 if let Some(else_stmts) = else_branch {
                     let else_errors = check_statements_for_const_violations(
-                        else_stmts, const_vars, class_info, unsafe_depth, safe_functions
+                        else_stmts,
+                        const_vars,
+                        class_info,
+                        unsafe_depth,
+                        safe_functions,
                     );
                     errors.extend(else_errors);
                 }
             }
             Statement::Block(stmts) => {
                 let block_errors = check_statements_for_const_violations(
-                    stmts, const_vars, class_info, unsafe_depth, safe_functions
+                    stmts,
+                    const_vars,
+                    class_info,
+                    unsafe_depth,
+                    safe_functions,
                 );
                 errors.extend(block_errors);
             }
@@ -227,17 +252,27 @@ fn check_statements_for_const_violations(
             _ if unsafe_depth > 0 => {
                 continue;
             }
-            Statement::FunctionCall { name, args, location, .. } => {
+            Statement::FunctionCall {
+                name,
+                args,
+                location,
+                ..
+            } => {
                 if let Some(error) = check_method_call_const_propagation(
-                    name, args, location.line, const_vars, class_info, safe_functions
+                    name,
+                    args,
+                    location.line,
+                    const_vars,
+                    class_info,
+                    safe_functions,
                 ) {
                     errors.push(error);
                 }
             }
             Statement::Assignment { lhs, location, .. } => {
-                if let Some(error) = check_assignment_const_propagation(
-                    lhs, location.line, const_vars, class_info
-                ) {
+                if let Some(error) =
+                    check_assignment_const_propagation(lhs, location.line, const_vars, class_info)
+                {
                     errors.push(error);
                 }
             }

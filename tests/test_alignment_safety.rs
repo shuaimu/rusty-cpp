@@ -5,9 +5,9 @@
 //! - Casts to stricter alignment types
 //! - Dereference of misaligned pointers
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -256,4 +256,3 @@ void process() {
     // void* is permissive for alignment
     println!("Output: {}", output);
 }
-

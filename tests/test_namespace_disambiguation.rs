@@ -1,15 +1,23 @@
 /// Tests for namespace disambiguation in safety annotations
 /// These tests verify that functions with the same name in different namespaces
 /// are correctly tracked and matched with their safety annotations.
-
 use std::process::Command;
 use tempfile::TempDir;
 
-fn run_analyzer_with_include(source_path: &std::path::Path, include_path: &std::path::Path) -> (bool, String) {
+fn run_analyzer_with_include(
+    source_path: &std::path::Path,
+    include_path: &std::path::Path,
+) -> (bool, String) {
     let include_arg = format!("-I{}", include_path.display());
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", source_path.to_str().unwrap(), &include_arg]);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        source_path.to_str().unwrap(),
+        &include_arg,
+    ]);
 
     if cfg!(target_os = "macos") {
         cmd.env("Z3_SYS_Z3_HEADER", "/opt/homebrew/include/z3.h");

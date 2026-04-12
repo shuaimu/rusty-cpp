@@ -16,8 +16,8 @@
 //! int64_t* p2 = reinterpret_cast<int64_t*>(buffer + 1); // ERROR: misaligned
 //! ```
 
-use crate::parser::{Statement, Expression, Function, CastKind};
 use crate::parser::safety_annotations::SafetyMode;
+use crate::parser::{CastKind, Expression, Function, Statement};
 use std::collections::HashMap;
 
 /// Alignment information for a pointer
@@ -128,9 +128,7 @@ fn get_type_alignment(type_name: &str) -> usize {
     }
 
     // Remove reference suffixes for alignment calculation
-    let base_type = type_name
-        .trim_end_matches('&')
-        .trim();
+    let base_type = type_name.trim_end_matches('&').trim();
 
     // Check for alignas attribute
     if let Some(alignas_start) = base_type.find("alignas(") {
@@ -148,8 +146,8 @@ fn get_type_alignment(type_name: &str) -> usize {
         "short" | "signed short" | "unsigned short" | "int16_t" | "uint16_t" => 2,
         "int" | "signed int" | "unsigned int" | "int32_t" | "uint32_t" | "float" => 4,
         "long" | "signed long" | "unsigned long" | "long long" | "signed long long"
-        | "unsigned long long" | "int64_t" | "uint64_t" | "double" | "size_t"
-        | "ptrdiff_t" | "intptr_t" | "uintptr_t" => 8,
+        | "unsigned long long" | "int64_t" | "uint64_t" | "double" | "size_t" | "ptrdiff_t"
+        | "intptr_t" | "uintptr_t" => 8,
         "long double" => 16, // Platform dependent, 16 on x86-64
         "__m128" | "__m128i" | "__m128d" => 16,
         "__m256" | "__m256i" | "__m256d" => 32,
@@ -190,7 +188,13 @@ pub fn check_alignment_safety(function: &Function, function_safety: SafetyMode) 
         }
 
         // Skip checking in unsafe blocks, but still track alignment
-        analyze_statement_alignment(stmt, &mut tracker, &function.name, &mut errors, unsafe_depth > 0);
+        analyze_statement_alignment(
+            stmt,
+            &mut tracker,
+            &function.name,
+            &mut errors,
+            unsafe_depth > 0,
+        );
     }
 
     errors
@@ -239,7 +243,12 @@ fn analyze_statement_alignment(
             }
         }
 
-        Statement::If { condition, then_branch, else_branch, .. } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             if !in_unsafe {
                 check_expr_alignment(condition, tracker, func_name, errors);
             }
@@ -306,27 +315,32 @@ fn update_alignment_from_expr(ptr: &str, expr: &Expression, tracker: &mut Alignm
                 if let Some(info) = tracker.get_alignment(&source).cloned() {
                     // For operations like p++, p--, p += n, the offset is unknown at static analysis time
                     // unless we can derive it from context. For now, mark as potentially misaligned.
-                    let new_info = if info.pointee_type == "char" || info.pointee_type == "unsigned char" {
-                        // Char pointer arithmetic can change alignment by 1 byte
-                        AlignmentInfo {
-                            base_alignment: info.base_alignment,
-                            offset: 1, // Mark as potentially misaligned (offset 1)
-                            pointee_type: info.pointee_type.clone(),
-                        }
-                    } else {
-                        // For typed pointers, arithmetic maintains alignment if offset is element-sized
-                        info.clone()
-                    };
+                    let new_info =
+                        if info.pointee_type == "char" || info.pointee_type == "unsigned char" {
+                            // Char pointer arithmetic can change alignment by 1 byte
+                            AlignmentInfo {
+                                base_alignment: info.base_alignment,
+                                offset: 1, // Mark as potentially misaligned (offset 1)
+                                pointee_type: info.pointee_type.clone(),
+                            }
+                        } else {
+                            // For typed pointers, arithmetic maintains alignment if offset is element-sized
+                            info.clone()
+                        };
                     tracker.set_alignment(ptr, new_info);
                 }
             }
         }
 
-        Expression::Cast { inner, target_type, .. } => {
+        Expression::Cast {
+            inner, target_type, ..
+        } => {
             // Cast may change the perceived type but the underlying alignment stays
             if let Some(source) = extract_var_name(inner) {
                 if let Some(info) = tracker.get_alignment(&source).cloned() {
-                    let new_type = target_type.clone().unwrap_or_else(|| info.pointee_type.clone());
+                    let new_type = target_type
+                        .clone()
+                        .unwrap_or_else(|| info.pointee_type.clone());
                     let new_info = AlignmentInfo {
                         base_alignment: info.base_alignment,
                         offset: info.offset,
@@ -352,7 +366,11 @@ fn check_expr_alignment(
     errors: &mut Vec<String>,
 ) {
     match expr {
-        Expression::Cast { inner, kind, target_type } => {
+        Expression::Cast {
+            inner,
+            kind,
+            target_type,
+        } => {
             // Check for potentially misaligned casts
             if matches!(kind, CastKind::ReinterpretCast | CastKind::CStyleCast) {
                 if let Some(target) = target_type {
@@ -374,7 +392,13 @@ fn check_expr_alignment(
                         }
 
                         // Check for pointer arithmetic in the cast source
-                        check_arithmetic_alignment_in_cast(inner, target_alignment, tracker, func_name, errors);
+                        check_arithmetic_alignment_in_cast(
+                            inner,
+                            target_alignment,
+                            tracker,
+                            func_name,
+                            errors,
+                        );
                     }
                 }
             }
@@ -392,8 +416,12 @@ fn check_expr_alignment(
                         errors.push(format!(
                             "In function '{}': Dereferencing potentially misaligned pointer '{}' \
                             (alignment {}, offset {}, type '{}' requires alignment {})",
-                            func_name, ptr_name, info.base_alignment, info.offset,
-                            info.pointee_type, required_alignment
+                            func_name,
+                            ptr_name,
+                            info.base_alignment,
+                            info.offset,
+                            info.pointee_type,
+                            required_alignment
                         ));
                     }
                 }
@@ -434,8 +462,11 @@ fn check_arithmetic_alignment_in_cast(
             if let Some(source) = extract_var_name(pointer) {
                 if let Some(info) = tracker.get_alignment(&source) {
                     // If we're doing arithmetic on a char* and casting to a stricter type
-                    if info.pointee_type == "char" || info.pointee_type == "unsigned char"
-                       || info.pointee_type == "signed char" || info.pointee_type == "void" {
+                    if info.pointee_type == "char"
+                        || info.pointee_type == "unsigned char"
+                        || info.pointee_type == "signed char"
+                        || info.pointee_type == "void"
+                    {
                         // Pointer arithmetic on char* before cast to stricter alignment is suspicious
                         if target_alignment > 1 {
                             errors.push(format!(

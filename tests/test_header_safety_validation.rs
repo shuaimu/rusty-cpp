@@ -2,7 +2,6 @@
 ///
 /// This test suite verifies that the analyzer checks function implementations
 /// in header files for safety violations, not just propagates annotations.
-
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -48,7 +47,8 @@ inline void handle_client(int client_id) {
 
     // Create source file that includes the header
     let source_path = temp_dir.path().join("server.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 // Implementation of the undeclared function
@@ -60,7 +60,9 @@ void process_request(int x) {{
 void main_loop() {{
     handle_client(42);
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -71,10 +73,10 @@ void main_loop() {{
 
     // Should report violation: safe function calling undeclared function
     assert!(
-        output.contains("safe") &&
-        (output.contains("cannot call undeclared") ||
-         output.contains("undeclared function") ||
-         output.contains("process_request")),
+        output.contains("safe")
+            && (output.contains("cannot call undeclared")
+                || output.contains("undeclared function")
+                || output.contains("process_request")),
         "Expected safety violation for safe function calling undeclared function in header. Output:\n{}",
         output
     );
@@ -108,7 +110,8 @@ inline int safe_compute(int x) {
 
     // Create source file that includes the header
     let source_path = temp_dir.path().join("math.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 // @unsafe
@@ -119,7 +122,9 @@ void unsafe_operation(int* ptr) {{
 int main() {{
     return safe_compute(10);
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -162,7 +167,8 @@ inline void process_item(T item) {
     fs::write(&header_path, header_content).unwrap();
 
     let source_path = temp_dir.path().join("container.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 void log_operation(const char* msg) {{
@@ -172,7 +178,9 @@ void log_operation(const char* msg) {{
 void use_template() {{
     process_item(42);
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -181,10 +189,10 @@ void use_template() {{
     println!("Output:\n{}", output);
 
     assert!(
-        output.contains("safe") &&
-        (output.contains("cannot call undeclared") ||
-         output.contains("undeclared function") ||
-         output.contains("log_operation")),
+        output.contains("safe")
+            && (output.contains("cannot call undeclared")
+                || output.contains("undeclared function")
+                || output.contains("log_operation")),
         "Expected safety violation for safe template function calling undeclared. Output:\n{}",
         output
     );
@@ -217,7 +225,8 @@ public:
     fs::write(&header_path, header_content).unwrap();
 
     let source_path = temp_dir.path().join("handler.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 void internal_process(int x) {{
@@ -229,7 +238,9 @@ int main() {{
     h.handle(10);
     return 0;
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -238,10 +249,10 @@ int main() {{
     println!("Output:\n{}", output);
 
     assert!(
-        output.contains("safe") &&
-        (output.contains("cannot call undeclared") ||
-         output.contains("undeclared function") ||
-         output.contains("internal_process")),
+        output.contains("safe")
+            && (output.contains("cannot call undeclared")
+                || output.contains("undeclared function")
+                || output.contains("internal_process")),
         "Expected safety violation for safe class method calling undeclared. Output:\n{}",
         output
     );
@@ -266,7 +277,8 @@ void safe_function(int x);
     fs::write(&header_path, header_content).unwrap();
 
     let source_path = temp_dir.path().join("api.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 // @safe - implementation calls other safe functions
@@ -274,7 +286,9 @@ void safe_function(int x) {{
     // Safe implementation
     int y = x + 1;
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -318,7 +332,8 @@ inline bool is_server_ready() {
 
     // Create server.cc that includes the header
     let source_path = temp_dir.path().join("server.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 // Implementation of undeclared function
@@ -332,7 +347,9 @@ int main() {{
     }}
     return 1;
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -344,10 +361,10 @@ int main() {{
 
     // According to user, this should throw a violation but doesn't
     // Let's verify if this is indeed broken
-    let has_violation = output.contains("safe") &&
-                       (output.contains("cannot call undeclared") ||
-                        output.contains("undeclared function") ||
-                        output.contains("get_socket_fd"));
+    let has_violation = output.contains("safe")
+        && (output.contains("cannot call undeclared")
+            || output.contains("undeclared function")
+            || output.contains("get_socket_fd"));
 
     if has_violation {
         println!("✅ GOOD: Violation detected as expected");
@@ -394,7 +411,8 @@ inline void send_message(const char* msg) {
     fs::write(&header_path, header_content).unwrap();
 
     let source_path = temp_dir.path().join("network.cc");
-    let source_content = format!(r#"
+    let source_content = format!(
+        r#"
 #include "{}"
 
 namespace network {{
@@ -409,7 +427,9 @@ int main() {{
     network::send_message("hello");
     return 0;
 }}
-"#, header_path.to_str().unwrap());
+"#,
+        header_path.to_str().unwrap()
+    );
 
     fs::write(&source_path, source_content).unwrap();
 
@@ -418,10 +438,10 @@ int main() {{
     println!("Output:\n{}", output);
 
     assert!(
-        output.contains("safe") &&
-        (output.contains("cannot call undeclared") ||
-         output.contains("undeclared function") ||
-         output.contains("send_packet")),
+        output.contains("safe")
+            && (output.contains("cannot call undeclared")
+                || output.contains("undeclared function")
+                || output.contains("send_packet")),
         "Expected safety violation for namespaced safe function calling undeclared. Output:\n{}",
         output
     );

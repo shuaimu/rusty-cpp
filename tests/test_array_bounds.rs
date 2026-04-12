@@ -5,9 +5,9 @@
 //! - Negative index detection
 //! - Array size tracking
 
-use std::process::Command;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn get_checker_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -265,4 +265,3 @@ void process() {
     // Valid accesses
     println!("Output: {}", output);
 }
-

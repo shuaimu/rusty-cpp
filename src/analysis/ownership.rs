@@ -1,4 +1,4 @@
-use crate::ir::{OwnershipState, IrStatement, IrExpression};
+use crate::ir::{IrExpression, IrStatement, OwnershipState};
 use std::collections::HashMap;
 
 #[allow(dead_code)]
@@ -13,7 +13,7 @@ impl OwnershipAnalyzer {
             states: HashMap::new(),
         }
     }
-    
+
     #[allow(dead_code)]
     pub fn analyze_statement(&mut self, stmt: &IrStatement) -> Result<(), String> {
         match stmt {
@@ -45,7 +45,7 @@ impl OwnershipAnalyzer {
         }
         Ok(())
     }
-    
+
     #[allow(dead_code)]
     pub fn get_state(&self, var: &str) -> Option<&OwnershipState> {
         self.states.get(var)

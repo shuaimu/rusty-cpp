@@ -25,8 +25,8 @@ impl LifetimeAnnotation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SafetyAnnotation {
-    Safe,    // @safe - enforce borrow checking
-    Unsafe,  // @unsafe - skip borrow checking
+    Safe,   // @safe - enforce borrow checking
+    Unsafe, // @unsafe - skip borrow checking
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ pub struct FunctionSignature {
     pub return_lifetime: Option<LifetimeAnnotation>,
     pub param_lifetimes: Vec<Option<LifetimeAnnotation>>,
     pub lifetime_bounds: Vec<LifetimeBound>, // e.g., 'a: 'b
-    pub safety: Option<SafetyAnnotation>, // @safe or @unsafe
+    pub safety: Option<SafetyAnnotation>,    // @safe or @unsafe
 }
 
 #[derive(Debug, Clone)]
@@ -191,15 +191,15 @@ fn parse_lifetime_annotations(comment: &str, func_name: String) -> Option<Functi
 
 fn parse_param_lifetimes(params_str: &str) -> Vec<Option<LifetimeAnnotation>> {
     let mut result = Vec::new();
-    
+
     // Remove parentheses if present
     let cleaned = params_str.trim_start_matches('(').trim_end_matches(')');
-    
+
     // Split by comma
     for param in cleaned.split(',') {
         result.push(parse_single_lifetime(param.trim()));
     }
-    
+
     result
 }
 
@@ -262,10 +262,10 @@ fn extract_lifetime_name(s: &str) -> Option<String> {
 
 fn parse_lifetime_bounds(bounds_str: &str) -> Vec<LifetimeBound> {
     let mut bounds = Vec::new();
-    
+
     // Parse patterns like 'a: 'b
     let bound_re = Regex::new(r"'([a-z][a-z0-9]*)\s*:\s*'([a-z][a-z0-9]*)").unwrap();
-    
+
     for cap in bound_re.captures_iter(bounds_str) {
         if let (Some(longer), Some(shorter)) = (cap.get(1), cap.get(2)) {
             bounds.push(LifetimeBound {
@@ -274,52 +274,67 @@ fn parse_lifetime_bounds(bounds_str: &str) -> Vec<LifetimeBound> {
             });
         }
     }
-    
+
     bounds
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_simple_lifetime() {
         let comment = "// @lifetime: &'a";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
-        
+
         assert_eq!(sig.name, "test");
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ref("a".to_string())));
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::Ref("a".to_string()))
+        );
         assert!(sig.param_lifetimes.is_empty());
     }
-    
+
     #[test]
     fn test_parse_owned() {
         let comment = "// @lifetime: owned";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
-        
+
         assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Owned));
     }
-    
+
     #[test]
     fn test_parse_with_params() {
         let comment = "// @lifetime: (&'a, &'b) -> &'a where 'a: 'b";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
-        
+
         assert_eq!(sig.param_lifetimes.len(), 2);
-        assert_eq!(sig.param_lifetimes[0], Some(LifetimeAnnotation::Ref("a".to_string())));
-        assert_eq!(sig.param_lifetimes[1], Some(LifetimeAnnotation::Ref("b".to_string())));
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ref("a".to_string())));
+        assert_eq!(
+            sig.param_lifetimes[0],
+            Some(LifetimeAnnotation::Ref("a".to_string()))
+        );
+        assert_eq!(
+            sig.param_lifetimes[1],
+            Some(LifetimeAnnotation::Ref("b".to_string()))
+        );
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::Ref("a".to_string()))
+        );
         assert_eq!(sig.lifetime_bounds.len(), 1);
         assert_eq!(sig.lifetime_bounds[0].longer, "a");
         assert_eq!(sig.lifetime_bounds[0].shorter, "b");
     }
-    
+
     #[test]
     fn test_parse_mut_ref() {
         let comment = "// @lifetime: &'a mut";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
 
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::MutRef("a".to_string())));
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::MutRef("a".to_string()))
+        );
     }
 
     #[test]
@@ -328,7 +343,10 @@ mod tests {
         let comment = "// @lifetime: int* 'a";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
 
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("a".to_string())));
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::Ptr("a".to_string()))
+        );
     }
 
     #[test]
@@ -337,7 +355,10 @@ mod tests {
         let comment = "// @lifetime: const int* 'a";
         let sig = parse_lifetime_annotations(comment, "test".to_string()).unwrap();
 
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::ConstPtr("a".to_string())));
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::ConstPtr("a".to_string()))
+        );
     }
 
     #[test]
@@ -347,8 +368,14 @@ mod tests {
         let sig = parse_lifetime_annotations(comment, "identity".to_string()).unwrap();
 
         assert_eq!(sig.param_lifetimes.len(), 1);
-        assert_eq!(sig.param_lifetimes[0], Some(LifetimeAnnotation::Ptr("a".to_string())));
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("a".to_string())));
+        assert_eq!(
+            sig.param_lifetimes[0],
+            Some(LifetimeAnnotation::Ptr("a".to_string()))
+        );
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::Ptr("a".to_string()))
+        );
     }
 
     #[test]
@@ -358,9 +385,18 @@ mod tests {
         let sig = parse_lifetime_annotations(comment, "longer".to_string()).unwrap();
 
         assert_eq!(sig.param_lifetimes.len(), 2);
-        assert_eq!(sig.param_lifetimes[0], Some(LifetimeAnnotation::ConstPtr("a".to_string())));
-        assert_eq!(sig.param_lifetimes[1], Some(LifetimeAnnotation::Ptr("b".to_string())));
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::ConstPtr("a".to_string())));
+        assert_eq!(
+            sig.param_lifetimes[0],
+            Some(LifetimeAnnotation::ConstPtr("a".to_string()))
+        );
+        assert_eq!(
+            sig.param_lifetimes[1],
+            Some(LifetimeAnnotation::Ptr("b".to_string()))
+        );
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::ConstPtr("a".to_string()))
+        );
         assert_eq!(sig.lifetime_bounds.len(), 1);
         assert_eq!(sig.lifetime_bounds[0].longer, "a");
         assert_eq!(sig.lifetime_bounds[0].shorter, "b");
@@ -373,6 +409,9 @@ mod tests {
         let sig = parse_lifetime_annotations(comment, "get_global".to_string()).unwrap();
 
         assert_eq!(sig.param_lifetimes.len(), 1); // empty parens results in one empty param
-        assert_eq!(sig.return_lifetime, Some(LifetimeAnnotation::Ptr("static".to_string())));
+        assert_eq!(
+            sig.return_lifetime,
+            Some(LifetimeAnnotation::Ptr("static".to_string()))
+        );
     }
 }

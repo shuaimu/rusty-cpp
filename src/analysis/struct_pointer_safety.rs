@@ -79,24 +79,24 @@ pub fn check_struct_pointer_safety(classes: &[Class]) -> Vec<String> {
 
 /// Check if a type name is a smart pointer type
 fn is_smart_pointer_type(type_name: &str) -> bool {
-    type_name.contains("unique_ptr") ||
-    type_name.contains("shared_ptr") ||
-    type_name.contains("weak_ptr") ||
-    type_name.contains("Box<") ||
-    type_name.contains("Arc<") ||
-    type_name.contains("Rc<")
+    type_name.contains("unique_ptr")
+        || type_name.contains("shared_ptr")
+        || type_name.contains("weak_ptr")
+        || type_name.contains("Box<")
+        || type_name.contains("Arc<")
+        || type_name.contains("Rc<")
 }
 
 /// Check if the type string contains a nullptr initializer
 /// e.g., "int* = nullptr" or "char* ptr = nullptr"
 fn has_nullptr_initializer(type_name: &str) -> bool {
     // The parser may include the initializer in the type name for default member initializers
-    type_name.contains("= nullptr") ||
-    type_name.contains("= NULL") ||
-    type_name.contains("= 0") ||
-    type_name.contains("=nullptr") ||
-    type_name.contains("=NULL") ||
-    type_name.contains("=0")
+    type_name.contains("= nullptr")
+        || type_name.contains("= NULL")
+        || type_name.contains("= 0")
+        || type_name.contains("=nullptr")
+        || type_name.contains("=NULL")
+        || type_name.contains("=0")
 }
 
 /// Check if a member has a default member initializer
@@ -135,7 +135,9 @@ fn is_constructor(method_name: &str, class_name: &str) -> bool {
 /// - AND all existing non-deleted constructors initialize the member to non-null
 fn check_constructors_initialize_member(class: &Class, member_name: &str) -> bool {
     // Get all user-defined constructors (not deleted)
-    let constructors: Vec<_> = class.methods.iter()
+    let constructors: Vec<_> = class
+        .methods
+        .iter()
         .filter(|m| is_constructor(&m.name, &class.name) && !m.is_deleted)
         .collect();
 
@@ -144,8 +146,7 @@ fn check_constructors_initialize_member(class: &Class, member_name: &str) -> boo
     // an uninitialized instance (unless all ctors init properly)
     if class.has_default_constructor && !class.default_constructor_deleted {
         // Check if the default constructor (if user-defined) initializes this member
-        let default_ctor = constructors.iter()
-            .find(|m| m.parameters.is_empty());
+        let default_ctor = constructors.iter().find(|m| m.parameters.is_empty());
 
         if let Some(ctor) = default_ctor {
             // User-defined default constructor - check it initializes the member
@@ -196,7 +197,10 @@ fn check_constructors_initialize_member(class: &Class, member_name: &str) -> boo
 }
 
 /// Check if a constructor initializes a specific member (checking init list first, then body)
-fn constructor_initializes_member_with_init_list(ctor: &crate::parser::Function, member_name: &str) -> bool {
+fn constructor_initializes_member_with_init_list(
+    ctor: &crate::parser::Function,
+    member_name: &str,
+) -> bool {
     // First check member initializer list (`: ptr(&value)`)
     for init in &ctor.member_initializers {
         if init.member_name == member_name {
@@ -212,7 +216,10 @@ fn constructor_initializes_member_with_init_list(ctor: &crate::parser::Function,
 }
 
 /// Check if a constructor initializes a specific member in its body
-fn constructor_initializes_member_in_body(ctor: &crate::parser::Function, member_name: &str) -> bool {
+fn constructor_initializes_member_in_body(
+    ctor: &crate::parser::Function,
+    member_name: &str,
+) -> bool {
     use crate::parser::Statement;
 
     // Check statements in constructor body
@@ -263,22 +270,15 @@ fn is_nullptr_expression(expr: &crate::parser::Expression) -> bool {
 
     match expr {
         Expression::Nullptr => true,
-        Expression::Literal(lit) => {
-            lit == "nullptr" || lit == "NULL" || lit == "0"
-        }
-        Expression::Variable(name) => {
-            name == "nullptr" || name == "NULL"
-        }
+        Expression::Literal(lit) => lit == "nullptr" || lit == "NULL" || lit == "0",
+        Expression::Variable(name) => name == "nullptr" || name == "NULL",
         _ => false,
     }
 }
 
 /// Check a constructor for nullptr assignments to pointer members
 /// Checks both member initializer lists and constructor body
-fn check_constructor_for_nullptr(
-    ctor: &crate::parser::Function,
-    class: &Class,
-) -> Vec<String> {
+fn check_constructor_for_nullptr(ctor: &crate::parser::Function, class: &Class) -> Vec<String> {
     use crate::parser::Statement;
 
     let mut errors = Vec::new();
@@ -290,7 +290,9 @@ fn check_constructor_for_nullptr(
     }
 
     // Get set of pointer member names
-    let pointer_members: std::collections::HashSet<_> = class.members.iter()
+    let pointer_members: std::collections::HashSet<_> = class
+        .members
+        .iter()
         .filter(|m| m.is_pointer && !is_smart_pointer_type(&m.type_name))
         .map(|m| m.name.clone())
         .collect();
@@ -366,10 +368,18 @@ mod tests {
         use crate::parser::Expression;
 
         assert!(is_nullptr_expression(&Expression::Nullptr));
-        assert!(is_nullptr_expression(&Expression::Literal("nullptr".to_string())));
-        assert!(is_nullptr_expression(&Expression::Literal("NULL".to_string())));
+        assert!(is_nullptr_expression(&Expression::Literal(
+            "nullptr".to_string()
+        )));
+        assert!(is_nullptr_expression(&Expression::Literal(
+            "NULL".to_string()
+        )));
         assert!(is_nullptr_expression(&Expression::Literal("0".to_string())));
-        assert!(!is_nullptr_expression(&Expression::Literal("42".to_string())));
-        assert!(!is_nullptr_expression(&Expression::Variable("ptr".to_string())));
+        assert!(!is_nullptr_expression(&Expression::Literal(
+            "42".to_string()
+        )));
+        assert!(!is_nullptr_expression(&Expression::Variable(
+            "ptr".to_string()
+        )));
     }
 }

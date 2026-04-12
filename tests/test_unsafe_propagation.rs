@@ -6,17 +6,15 @@ fn compile_and_check(source: &str) -> Result<Vec<String>, String> {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("test.cpp");
     fs::write(&file_path, source).unwrap();
-    
+
     let output = Command::new("cargo")
         .args(&["run", "--", file_path.to_str().unwrap()])
-        
-        
         .output()
         .map_err(|e| format!("Failed to run checker: {}", e))?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Extract violations from output (ignore compiler warnings)
     let mut violations = Vec::new();
     for line in stdout.lines() {
@@ -25,7 +23,8 @@ fn compile_and_check(source: &str) -> Result<Vec<String>, String> {
             && !line.contains("warning:")
             && !line.contains("-->")
             && !line.trim().starts_with("|")
-            && !line.contains("✓") {
+            && !line.contains("✓")
+        {
             violations.push(line.to_string());
         }
     }
@@ -56,8 +55,11 @@ namespace safe_namespace {
 
     let violations = compile_and_check(source).unwrap();
     // Should have NO violations - unmarked functions in @safe namespace are safe
-    assert!(violations.is_empty(),
-            "Expected no violations, but got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations, but got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -78,8 +80,11 @@ namespace safe_namespace {
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    assert!(violations.is_empty(),
-            "Expected no violations when calling unmarked function in @safe namespace, got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations when calling unmarked function in @safe namespace, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -103,8 +108,11 @@ namespace safe_namespace {
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    assert!(violations.is_empty(),
-            "Expected no violations for nested calls in @safe namespace, got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations for nested calls in @safe namespace, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -128,10 +136,18 @@ namespace safe_namespace {
 
     let violations = compile_and_check(source).unwrap();
     // Should have violations - @safe cannot call @unsafe without @unsafe block
-    assert!(!violations.is_empty(),
-            "Expected violations when @safe calls @unsafe without @unsafe block, got: {:?}", violations);
-    assert!(violations.iter().any(|v| v.contains("non-safe") || v.contains("@unsafe")),
-            "Error should mention unsafe call requirement, got: {:?}", violations);
+    assert!(
+        !violations.is_empty(),
+        "Expected violations when @safe calls @unsafe without @unsafe block, got: {:?}",
+        violations
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("non-safe") || v.contains("@unsafe")),
+        "Error should mention unsafe call requirement, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -157,8 +173,11 @@ namespace safe_namespace {
 
     let violations = compile_and_check(source).unwrap();
     // Should have NO violations - @unsafe block allows calling unsafe
-    assert!(violations.is_empty(),
-            "Expected no violations when @safe calls @unsafe via @unsafe block, got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations when @safe calls @unsafe via @unsafe block, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -177,10 +196,14 @@ namespace safe_namespace {
     }
 }
 "#;
-    
+
     let violations = compile_and_check(source).unwrap();
     // Should not have any unsafe propagation errors for this case
-    assert!(!violations.iter().any(|v| v.contains("helper") && v.contains("unsafe")));
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.contains("helper") && v.contains("unsafe"))
+    );
 }
 
 #[test]
@@ -197,10 +220,14 @@ namespace default_namespace {
     }
 }
 "#;
-    
+
     let violations = compile_and_check(source).unwrap();
     // Should not have errors for unsafe functions calling other functions
-    assert!(!violations.iter().any(|v| v.contains("unmarked_function") && v.contains("requires unsafe")));
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.contains("unmarked_function") && v.contains("requires unsafe"))
+    );
 }
 
 // REMOVED: This test was expecting incorrect behavior.
@@ -236,8 +263,11 @@ namespace safe_namespace {
 
     let violations = compile_and_check(source).unwrap();
     // Should have NO violations - no borrow conflicts in the code
-    assert!(violations.is_empty(),
-            "Expected no violations - no borrow conflicts, got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations - no borrow conflicts, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -264,8 +294,11 @@ namespace safe_namespace {
 "#;
 
     let violations = compile_and_check(source).unwrap();
-    assert!(violations.is_empty(),
-            "Expected no violations when all functions are safe, got: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Expected no violations when all functions are safe, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -287,8 +320,13 @@ void safe_function() {
 
     let violations = compile_and_check(source).unwrap();
     // Should have violation - safe function cannot call undeclared function
-    assert!(violations.iter().any(|v| v.contains("unmarked_function") || v.contains("undeclared")),
-            "Expected violation for calling undeclared function from safe context, got: {:?}", violations);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("unmarked_function") || v.contains("undeclared")),
+        "Expected violation for calling undeclared function from safe context, got: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -306,8 +344,12 @@ namespace safe_namespace {
     }
 }
 "#;
-    
+
     let violations = compile_and_check(source).unwrap();
     // printf and move should not trigger unsafe propagation errors
-    assert!(!violations.iter().any(|v| v.contains("printf") && v.contains("unsafe")));
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.contains("printf") && v.contains("unsafe"))
+    );
 }

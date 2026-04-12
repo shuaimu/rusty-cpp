@@ -1,30 +1,32 @@
+use clang_sys::support::Clang;
 use clap::Parser;
 use colored::*;
-use std::path::PathBuf;
-use std::fs;
-use std::env;
 use serde_json;
-use clang_sys::support::Clang;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
 
 #[macro_use]
 mod debug_macros;
 
-mod parser;
-mod ir;
 mod analysis;
-mod solver;
 mod diagnostics;
+mod ir;
+mod parser;
+mod solver;
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "rusty-cpp-checker")]
 #[command(about = "A static analyzer that enforces Rust-like borrow checking rules for C++")]
 #[command(version)]
-#[command(long_about = "Rusty C++ Checker - A static analyzer that enforces Rust-like borrow checking rules for C++\n\n\
+#[command(
+    long_about = "Rusty C++ Checker - A static analyzer that enforces Rust-like borrow checking rules for C++\n\n\
 Environment variables:\n  \
 CPLUS_INCLUDE_PATH  : Colon-separated list of C++ include directories\n  \
 C_INCLUDE_PATH      : Colon-separated list of C include directories\n  \
 CPATH               : Colon-separated list of C/C++ include directories\n  \
-CPP_INCLUDE_PATH    : Custom include paths for this tool")]
+CPP_INCLUDE_PATH    : Custom include paths for this tool"
+)]
 struct Args {
     /// C++ source file to analyze
     #[arg(value_name = "FILE")]
@@ -54,16 +56,29 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    
+
     println!("{}", "Rusty C++ Checker".bold().blue());
     println!("Analyzing: {}", args.input.display());
-    
-    match analyze_file(&args.input, &args.include_paths, &args.defines, args.compile_commands.as_ref()) {
+
+    match analyze_file(
+        &args.input,
+        &args.include_paths,
+        &args.defines,
+        args.compile_commands.as_ref(),
+    ) {
         Ok(results) => {
             if results.is_empty() {
                 println!("{}", "✓ rusty-cpp: no violations found!".green());
             } else {
-                println!("{}", format!("✗ Found {} violation(s) in {}:", results.len(), args.input.display()).red());
+                println!(
+                    "{}",
+                    format!(
+                        "✗ Found {} violation(s) in {}:",
+                        results.len(),
+                        args.input.display()
+                    )
+                    .red()
+                );
                 for error in results {
                     println!("{}", error);
                 }
@@ -77,7 +92,12 @@ fn main() {
     }
 }
 
-fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], compile_commands: Option<&PathBuf>) -> Result<Vec<String>, String> {
+fn analyze_file(
+    path: &PathBuf,
+    include_paths: &[PathBuf],
+    defines: &[String],
+    compile_commands: Option<&PathBuf>,
+) -> Result<Vec<String>, String> {
     // Start with CLI-provided include paths
     let mut all_include_paths = include_paths.to_vec();
 
@@ -94,7 +114,7 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
         let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
         all_include_paths.extend(extracted_paths);
     }
-    
+
     // Parse included headers for lifetime annotations
     let mut header_cache = parser::HeaderCache::new();
     header_cache.set_include_paths(all_include_paths.clone());
@@ -107,8 +127,14 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     // Also parse external annotations from the source file itself (not just headers)
     // This allows annotations like @external: { function: [unsafe, ...] } in .cc/.cpp files
     if let Ok(source_content) = std::fs::read_to_string(path) {
-        if let Err(e) = header_cache.external_annotations.parse_content(&source_content) {
-            debug_println!("DEBUG: Failed to parse external annotations from source file: {}", e);
+        if let Err(e) = header_cache
+            .external_annotations
+            .parse_content(&source_content)
+        {
+            debug_println!(
+                "DEBUG: Failed to parse external annotations from source file: {}",
+                e
+            );
         } else {
             debug_println!("DEBUG: Parsed external annotations from source file");
         }
@@ -116,13 +142,13 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
 
     // Parse the C++ file with include paths and defines
     let ast = parser::parse_cpp_file_with_includes_and_defines(path, &all_include_paths, defines)?;
-    
+
     // Parse safety annotations using the unified rule
     let mut safety_context = parser::safety_annotations::parse_safety_annotations(path)?;
-    
+
     // Merge safety annotations from headers into the context
     safety_context.merge_header_annotations(&header_cache);
-    
+
     // Build a set of known safe functions from the safety context
     let mut known_safe_functions = std::collections::HashSet::new();
     for (func_sig, mode) in &safety_context.function_overrides {
@@ -130,7 +156,7 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             known_safe_functions.insert(func_sig.name.clone());
         }
     }
-    
+
     // Helper function to check if a file or function is from a system header
     fn is_system_header_or_std(file_path: &str, _function_name: &str) -> bool {
         // Common system header paths (absolute)
@@ -150,11 +176,12 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
         }
 
         // STL and system library patterns (works for relative paths too)
-        if file_path.contains("/include/c++/") ||
-           file_path.contains("/bits/") ||
-           file_path.contains("/ext/") ||
-           file_path.contains("stl_") ||
-           file_path.contains("/lib/gcc/") {
+        if file_path.contains("/include/c++/")
+            || file_path.contains("/bits/")
+            || file_path.contains("/ext/")
+            || file_path.contains("stl_")
+            || file_path.contains("/lib/gcc/")
+        {
             return true;
         }
 
@@ -172,11 +199,20 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     for function in &ast.functions {
         // Skip system header functions - they shouldn't be analyzed internally
         if is_system_header_or_std(&function.location.file, &function.name) {
-            debug_println!("DEBUG: Skipping system header function '{}' from {}", function.name, function.location.file);
+            debug_println!(
+                "DEBUG: Skipping system header function '{}' from {}",
+                function.name,
+                function.location.file
+            );
             continue;
         }
 
-        debug_println!("DEBUG: Processing function '{}' from '{}' with {} statements", function.name, function.location.file, function.body.len());
+        debug_println!(
+            "DEBUG: Processing function '{}' from '{}' with {} statements",
+            function.name,
+            function.location.file,
+            function.body.len()
+        );
 
         // TEMPORARY WORKAROUND: Treat all operator overloads as unsafe
         // This bypasses annotation matching issues with template operators
@@ -188,13 +224,22 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
         // Override safety mode for operators - treat them as unsafe
         if is_operator {
             function_safety = parser::safety_annotations::SafetyMode::Unsafe;
-            debug_println!("DEBUG: Function '{}' is an operator overload, automatically treating as unsafe", function.name);
+            debug_println!(
+                "DEBUG: Function '{}' is an operator overload, automatically treating as unsafe",
+                function.name
+            );
         }
 
         if safety_context.should_check_function(&function.name) && !is_operator {
-            debug_println!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
+            debug_println!(
+                "DEBUG: Function '{}' is marked safe, performing checks",
+                function.name
+            );
             // Check for pointer operations (pass the function's safety mode)
-            let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(function, function_safety);
+            let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(
+                function,
+                function_safety,
+            );
             violations.extend(pointer_errors);
 
             // Check for null safety (dereferencing potentially null pointers)
@@ -202,36 +247,47 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
             violations.extend(null_errors);
 
             // Check for initialization safety (use of uninitialized variables)
-            let init_errors = analysis::initialization_tracking::check_initialization_safety(function, function_safety);
+            let init_errors = analysis::initialization_tracking::check_initialization_safety(
+                function,
+                function_safety,
+            );
             violations.extend(init_errors);
 
             // Check for pointer provenance (pointer subtraction/comparison between different allocations)
-            let provenance_errors = analysis::pointer_provenance::check_pointer_provenance(function, function_safety);
+            let provenance_errors =
+                analysis::pointer_provenance::check_pointer_provenance(function, function_safety);
             violations.extend(provenance_errors);
 
             // Check for alignment safety (misaligned pointer access)
-            let alignment_errors = analysis::alignment_safety::check_alignment_safety(function, function_safety);
+            let alignment_errors =
+                analysis::alignment_safety::check_alignment_safety(function, function_safety);
             violations.extend(alignment_errors);
 
             // Check for array bounds safety (out-of-bounds access)
-            let bounds_errors = analysis::array_bounds::check_array_bounds(function, function_safety);
+            let bounds_errors =
+                analysis::array_bounds::check_array_bounds(function, function_safety);
             violations.extend(bounds_errors);
 
             // Check for std::move on references (forbidden in @safe code)
-            let std_move_errors = analysis::pointer_safety::check_std_move_on_references(function, function_safety);
+            let std_move_errors =
+                analysis::pointer_safety::check_std_move_on_references(function, function_safety);
             violations.extend(std_move_errors);
 
             // Check for lambda capture safety (reference captures forbidden in @safe)
-            let lambda_errors = analysis::lambda_capture_safety::check_lambda_capture_safety(function, function_safety);
+            let lambda_errors = analysis::lambda_capture_safety::check_lambda_capture_safety(
+                function,
+                function_safety,
+            );
             violations.extend(lambda_errors);
 
             // Check for calls to unsafe functions with external annotations from headers
-            let propagation_errors = analysis::unsafe_propagation::check_unsafe_propagation_with_external(
-                function,
-                &safety_context,
-                &known_safe_functions,
-                Some(&header_cache.external_annotations)
-            );
+            let propagation_errors =
+                analysis::unsafe_propagation::check_unsafe_propagation_with_external(
+                    function,
+                    &safety_context,
+                    &known_safe_functions,
+                    Some(&header_cache.external_annotations),
+                );
             violations.extend(propagation_errors);
         }
     }
@@ -241,20 +297,23 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     let mutable_violations = analysis::mutable_checker::check_mutable_fields(
         &ast,
         &safety_context,
-        Some(&header_cache.external_annotations)
+        Some(&header_cache.external_annotations),
     )?;
     violations.extend(mutable_violations);
 
     // Check inheritance safety (@interface validation, safe inheritance rules)
-    let inheritance_violations = analysis::inheritance_safety::check_inheritance_safety(&ast.classes);
+    let inheritance_violations =
+        analysis::inheritance_safety::check_inheritance_safety(&ast.classes);
     violations.extend(inheritance_violations);
 
     // Check struct pointer member safety (pointer members must be non-null)
-    let struct_pointer_violations = analysis::struct_pointer_safety::check_struct_pointer_safety(&ast.classes);
+    let struct_pointer_violations =
+        analysis::struct_pointer_safety::check_struct_pointer_safety(&ast.classes);
     violations.extend(struct_pointer_violations);
 
     // Check const propagation through pointer members (in @safe code, const propagates)
-    let const_propagation_violations = analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
+    let const_propagation_violations =
+        analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
     violations.extend(const_propagation_violations);
 
     // Build intermediate representation with safety context
@@ -264,27 +323,34 @@ fn analyze_file(path: &PathBuf, include_paths: &[PathBuf], defines: &[String], c
     for ir_func in &mut ir.functions {
         // Try to get the function signature from the header cache
         if let Some(signature) = header_cache.get_signature(&ir_func.name) {
-            debug_println!("DEBUG MAIN: Found lifetime annotations for function '{}'", ir_func.name);
+            debug_println!(
+                "DEBUG MAIN: Found lifetime annotations for function '{}'",
+                ir_func.name
+            );
             ir::populate_lifetime_info(ir_func, signature);
         }
     }
 
     // Perform borrow checking analysis with header knowledge and safety context
-    let borrow_violations = analysis::check_borrows_with_safety_context(ir, header_cache, safety_context)?;
+    let borrow_violations =
+        analysis::check_borrows_with_safety_context(ir, header_cache, safety_context)?;
     violations.extend(borrow_violations);
 
     Ok(violations)
 }
 
-fn extract_include_paths_from_compile_commands(cc_path: &PathBuf, source_file: &PathBuf) -> Result<Vec<PathBuf>, String> {
+fn extract_include_paths_from_compile_commands(
+    cc_path: &PathBuf,
+    source_file: &PathBuf,
+) -> Result<Vec<PathBuf>, String> {
     let content = fs::read_to_string(cc_path)
         .map_err(|e| format!("Failed to read compile_commands.json: {}", e))?;
-    
+
     let commands: Vec<serde_json::Value> = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse compile_commands.json: {}", e))?;
-    
+
     let source_str = source_file.to_string_lossy();
-    
+
     // Find the entry for our source file
     for entry in commands {
         if let Some(file) = entry.get("file").and_then(|f| f.as_str()) {
@@ -295,14 +361,14 @@ fn extract_include_paths_from_compile_commands(cc_path: &PathBuf, source_file: &
             }
         }
     }
-    
+
     Ok(Vec::new()) // No matching entry found
 }
 
 fn extract_include_paths_from_command(command: &str) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     let parts: Vec<&str> = command.split_whitespace().collect();
-    
+
     let mut i = 0;
     while i < parts.len() {
         if parts[i] == "-I" && i + 1 < parts.len() {
@@ -318,27 +384,27 @@ fn extract_include_paths_from_command(command: &str) -> Result<Vec<PathBuf>, Str
             i += 1;
         }
     }
-    
+
     Ok(paths)
 }
 
 fn extract_include_paths_from_env() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    
+
     // Standard C++ include path environment variables
     // Priority order: CPLUS_INCLUDE_PATH > C_INCLUDE_PATH > CPATH
     let env_vars = [
-        "CPLUS_INCLUDE_PATH",  // C++ specific
-        "C_INCLUDE_PATH",       // C specific (but we might use it)
-        "CPATH",                // Both C and C++
-        "CPP_INCLUDE_PATH",     // Custom variable for our tool
+        "CPLUS_INCLUDE_PATH", // C++ specific
+        "C_INCLUDE_PATH",     // C specific (but we might use it)
+        "CPATH",              // Both C and C++
+        "CPP_INCLUDE_PATH",   // Custom variable for our tool
     ];
-    
+
     for var_name in &env_vars {
         if let Ok(env_value) = env::var(var_name) {
             // Split by platform-specific path separator
             let separator = if cfg!(windows) { ';' } else { ':' };
-            
+
             for path_str in env_value.split(separator) {
                 let path_str = path_str.trim();
                 if !path_str.is_empty() {
@@ -351,10 +417,13 @@ fn extract_include_paths_from_env() -> Vec<PathBuf> {
             }
         }
     }
-    
+
     // Print info about environment paths if verbose mode is enabled
     if !paths.is_empty() {
-        eprintln!("Found {} include path(s) from environment variables", paths.len());
+        eprintln!(
+            "Found {} include path(s) from environment variables",
+            paths.len()
+        );
     }
 
     paths
@@ -406,7 +475,8 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
 
                     // Skip LLVM/clang internal paths if we have GCC paths
                     // These can conflict with GCC's stdint definitions
-                    if has_gcc_paths && (path_str.contains("/llvm") || path_str.contains("/clang")) {
+                    if has_gcc_paths && (path_str.contains("/llvm") || path_str.contains("/clang"))
+                    {
                         continue;
                     }
 
@@ -427,7 +497,9 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
         }
         None => {
             // Clang not found - this is okay, user can specify paths manually
-            debug_println!("DEBUG: Could not find clang installation for auto-detecting include paths");
+            debug_println!(
+                "DEBUG: Could not find clang installation for auto-detecting include paths"
+            );
             // Still try to add system C paths even without clang
             add_system_c_include_paths(&mut paths);
         }
@@ -443,11 +515,16 @@ fn find_libclang_resource_include() -> Option<PathBuf> {
     // Search for the newest version first (higher versions are typically more compatible)
     for version in (14..=20).rev() {
         // Try versioned path (e.g., /usr/lib/llvm-16/lib/clang/16/include)
-        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
+        let versioned_path = PathBuf::from(format!(
+            "/usr/lib/llvm-{}/lib/clang/{}/include",
+            version, version
+        ));
         if versioned_path.exists() {
             // Verify this version's libclang is actually what we're linked against
-            let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
-            let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
+            let libclang_path =
+                PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
+            let libclang_path_alt =
+                PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
             if libclang_path.exists() || libclang_path_alt.exists() {
                 return Some(versioned_path);
             }
@@ -461,8 +538,10 @@ fn find_libclang_resource_include() -> Option<PathBuf> {
                     version, version, minor, patch
                 ));
                 if full_version_path.exists() {
-                    let libclang_path = PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
-                    let libclang_path_alt = PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
+                    let libclang_path =
+                        PathBuf::from(format!("/lib/x86_64-linux-gnu/libclang-{}.so", version));
+                    let libclang_path_alt =
+                        PathBuf::from(format!("/usr/lib/x86_64-linux-gnu/libclang-{}.so", version));
                     if libclang_path.exists() || libclang_path_alt.exists() {
                         return Some(full_version_path);
                     }
@@ -473,7 +552,10 @@ fn find_libclang_resource_include() -> Option<PathBuf> {
 
     // Fallback: Try to find any clang resource directory
     for version in (14..=20).rev() {
-        let versioned_path = PathBuf::from(format!("/usr/lib/llvm-{}/lib/clang/{}/include", version, version));
+        let versioned_path = PathBuf::from(format!(
+            "/usr/lib/llvm-{}/lib/clang/{}/include",
+            version, version
+        ));
         if versioned_path.exists() {
             return Some(versioned_path);
         }
@@ -524,4 +606,3 @@ fn add_system_c_include_paths(paths: &mut Vec<PathBuf>) {
         }
     }
 }
-

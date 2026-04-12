@@ -20,8 +20,8 @@ fn run_analyzer_on_code(code: &str, include_paths: &[&str]) -> (String, bool) {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let full_output = format!("{}\n{}", stdout, stderr);
 
-    let has_borrow_violation = full_output.contains("borrowed") ||
-                                full_output.contains("Cannot move");
+    let has_borrow_violation =
+        full_output.contains("borrowed") || full_output.contains("Cannot move");
     (full_output, has_borrow_violation)
 }
 
@@ -66,9 +66,14 @@ int main() {
     let (output, has_violation) = run_analyzer_on_code(code, &["include"]);
     println!("Output: {}", output);
 
-    assert!(has_violation, "Should detect transitive borrow preventing move");
-    assert!(output.contains("ref1") && output.contains("ref2"),
-        "Error should show the complete borrow chain");
+    assert!(
+        has_violation,
+        "Should detect transitive borrow preventing move"
+    );
+    assert!(
+        output.contains("ref1") && output.contains("ref2"),
+        "Error should show the complete borrow chain"
+    );
 }
 
 #[test]
@@ -96,8 +101,10 @@ int main() {
     println!("Output: {}", output);
 
     assert!(has_violation, "Should detect conflict");
-    assert!(output.contains("already") || output.contains("mutably borrowed"),
-        "Error should mention the conflict");
+    assert!(
+        output.contains("already") || output.contains("mutably borrowed"),
+        "Error should mention the conflict"
+    );
 }
 
 #[test]
@@ -209,7 +216,8 @@ int main() {
 
     assert!(has_violation, "Should detect complex borrow graph");
     // Should show all three borrowers
-    let has_all_refs = output.contains("ref1") && output.contains("ref2") && output.contains("ref3");
+    let has_all_refs =
+        output.contains("ref1") && output.contains("ref2") && output.contains("ref3");
     assert!(has_all_refs, "Error should show all borrowers in the graph");
 }
 
