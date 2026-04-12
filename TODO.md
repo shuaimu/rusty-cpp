@@ -5629,7 +5629,32 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-71b-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and expression-shape-gated in core runtime-match/diverging detection paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.72: `smallvec` Stage D `rusty::ptr::write` array-target construction shape (`std::construct_at(std::array<...>*, scalar)`) compile-head family collapse
+        - [x] *done* Leaf 5.1.72: `smallvec` Stage D `rusty::ptr::write` array-target construction shape (`std::construct_at(std::array<...>*, scalar)`) compile-head family collapse
+          - Plan/scope check: shared type-inference hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - hardened associated-item extraction for `SmallVec<Owner>` receiver types to recover element type as `rusty::detail::associated_item_t<Owner>` instead of owner type itself,
+            - hardened `as_ptr`/`as_mut_ptr` local return-type fallback in `SmallVec` contexts to use associated item projection (`associated_item_t<A>`) rather than raw owner parameter (`A`),
+            - this collapses the deterministic post-5.1.71 first-head family at `include/rusty/ptr.hpp:174` (`rusty::ptr::write` instantiating `std::construct_at(std::array<...>*, scalar)` in `SmallVec::insert_many` paths).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5172_smallvec_as_mut_ptr_chain_add_uses_assoc_item_pointer_shape`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf41543333333327151_as_mut_ptr_chain_add_adapts_expected_pointer_pointee`
+            - `codegen::tests::test_leaf5129_nonnull_as_ptr_infers_assoc_item_pointee_type_for_copy_calls`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5172 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf41543333333327151_as_mut_ptr_chain_add_adapts_expected_pointer_pointee -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5129_nonnull_as_ptr_infers_assoc_item_pointee_type_for_copy_calls -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-72a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.71 first-head family at `include/rusty/ptr.hpp:174` (`std::construct_at(std::array<...>*, scalar)` from `SmallVec::insert_many`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2865` (`v.into_iter().next().is_some()` lowered to `.has_value()` on `rusty::Option<...>`; private-member/call-shape mismatch), with adjacent downstream option/runtime helper families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-72a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in core inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.73: `smallvec` Stage D `Option` surface mismatch (`is_some` lowered to `.has_value()` on `rusty::Option`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

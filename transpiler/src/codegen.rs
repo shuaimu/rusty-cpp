@@ -17329,7 +17329,13 @@ impl CodeGen {
                                 .and_then(|k| k.get(idx))
                                 .is_some_and(|k| matches!(k, GenericParamKind::Type));
                             if is_type {
-                                return syn::parse_str::<syn::Type>(param).ok();
+                                let param_ty = syn::parse_str::<syn::Type>(param).ok()?;
+                                if struct_name == "SmallVec" {
+                                    let item_ty: syn::Type =
+                                        parse_quote!(rusty::detail::associated_item_t<#param_ty>);
+                                    return Some(item_ty);
+                                }
+                                return Some(param_ty);
                             }
                         }
                         None
@@ -23683,6 +23689,16 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 let last = tp.path.segments.last()?;
                 match last.ident.to_string().as_str() {
+                    "SmallVec" => {
+                        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                            return None;
+                        };
+                        let owner_ty = args.args.iter().find_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(t.clone()),
+                            _ => None,
+                        })?;
+                        Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
+                    }
                     "ArrayVec" | "IntoIter" | "Iter" | "Vec" | "array" | "span" | "range"
                     | "range_inclusive" | "range_from" | "range_to" | "range_to_inclusive"
                     | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo" | "RangeToInclusive" => {
@@ -44179,6 +44195,39 @@ mod tests {
             "raw_ptr_add<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this)))))>>>(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
         ));
         assert!(!out.contains("raw_ptr_add(rusty::as_mut_ptr((*this)),"));
+    }
+
+    #[test]
+    fn test_leaf5172_smallvec_as_mut_ptr_chain_add_uses_assoc_item_pointer_shape() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            struct SmallVec<A: ArrayLike> {
+                marker: std::marker::PhantomData<A>,
+            }
+            impl<A: ArrayLike> SmallVec<A> {
+                fn as_mut_ptr(&mut self) -> *mut A::Item { loop {} }
+                fn write_one(&mut self, index: usize, element: A::Item) {
+                    unsafe {
+                        let start = self.as_mut_ptr();
+                        let ptr = start.add(index);
+                        let cur = ptr.add(0);
+                        std::ptr::write(cur, element);
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::add_pointer_t<rusty::detail::associated_item_t<A>>")
+                || out.contains("std::add_pointer_t<typename A::Item>")
+                || out.contains("rusty::ptr::add(rusty::as_mut_ptr((*this)),"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("reinterpret_cast<std::add_pointer_t<A>>(rusty::as_mut_ptr((*this)))"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -2541,6 +2541,11 @@ Current status snapshot:
    - extending diverging call-path detection to include Rust alloc error surfaces (`alloc::alloc::handle_alloc_error`, `core::alloc::handle_alloc_error`, `std::alloc::handle_alloc_error`),
    - preserving shared expression-match lowering (no crate-specific rewriting).
 146. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/ptr.hpp:174` (`rusty::ptr::write` emits `std::construct_at(std::array<...>*, scalar)` in `SmallVec::insert_many` paths), with adjacent downstream pointer/helper/runtime families (`runner.cpp:1663/1669/1673` `NonNull`/call-shape fallout and later helper surfaces). Guardrail check against §11 remains satisfied for `Leaf 5.1.71` (fixes stayed shared and expression-shape-gated in core runtime-match/diverging detection, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+147. Focused `smallvec` repro after `Leaf 5.1.72` (`/tmp/rusty-parity-matrix-5-1-72a-20260412/smallvec/...`) collapses the prior post-5.1.71 `ptr::write` array-target construction family by:
+   - hardening `SmallVec<Owner>` item-type recovery in shared inference (`extract_iter_item_type_from_type`) to return `rusty::detail::associated_item_t<Owner>` instead of owner type,
+   - hardening `as_ptr`/`as_mut_ptr` local return-type fallback in `SmallVec` contexts to use associated item projection (`associated_item_t<A>`) instead of raw owner parameter (`A`),
+   - preserving shared transpiler lowering (no crate-specific rewriting).
+148. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2865` (`v.into_iter().next().is_some()` lowering emits `.has_value()` against `rusty::Option<...>`, causing private-member/call-shape failure), with adjacent downstream option/runtime helper families. Guardrail check against §11 remains satisfied for `Leaf 5.1.72` (fixes stayed shared and type-shape-gated in core inference paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
