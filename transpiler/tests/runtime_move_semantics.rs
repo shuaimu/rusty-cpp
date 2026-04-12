@@ -339,6 +339,32 @@ fn test_slice_filter_runtime_adapter_surface() {
 }
 
 #[test]
+fn test_slice_get_runtime_helper_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+
+        int main() {
+            std::array<int, 3> values{4, 5, 6};
+
+            auto mid = rusty::get(values, 1);
+            if (!mid.is_some() || mid.unwrap() != 5) {
+                return 1;
+            }
+
+            auto miss = rusty::get(values, 99);
+            if (!miss.is_none()) {
+                return 2;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_get_runtime_surface");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

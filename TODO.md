@@ -5076,6 +5076,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-48a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/iterator-shape-gated in transpiler/runtime, with no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching.
+        - [x] *done* Leaf 5.1.49: `smallvec` Stage D container `.get(index)` shared-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime `.get(index)` hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites slice-like/Vec-like `.get(index)` calls to shared runtime helper form `rusty::get(receiver, index)` under receiver-shape gating (same family as existing swap/index-shape detection), while preserving non-slice-like user-defined `get(...)` member calls.
+            - `.get(...)` lowering is range-argument guarded (`v.get(0..n)` style is not rewritten by this leaf).
+            - runtime `include/rusty/array.hpp` now provides shared `rusty::get(container, index)` helper returning Option reference shape, using shared `slice_full` + `as_ptr`/`len` surfaces so transpiled containers that do not expose uniform `.data()`/`.size()` member APIs are still supported.
+            - this collapses the deterministic post-5.1.48 first-head family at `runner.cpp:5144` (`SmallVec<std::array<int, 2>>` missing `.get(...)` method surface).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added receiver-shape-gated `.get(index)` rewrite to `rusty::get(receiver, index)`.
+              - added focused regressions:
+                - `test_leaf5149_vec_get_lowers_to_runtime_helper`
+                - `test_leaf5149_non_slice_like_get_method_call_is_unchanged`
+            - `include/rusty/array.hpp`:
+              - added shared `rusty::get(container, index)` helper surface.
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - added runtime regression `test_slice_get_runtime_helper_surface`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5149 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_slice_get_runtime_helper_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-49c-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.48 first-head family at `runner.cpp:5144` (`SmallVec<...>::get(...)` missing member) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1466` (`A::size()` emitted as static call shape in `SmallVec::new_/inline_capacity` paths: `cannot call member function ... without object`), followed by downstream declaration/surface fallout (`array.hpp` span-equality scaffolding expecting `.size()`/`.begin()` on `SmallVec` wrappers, drain/NonNull surfaces, and related errors).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-49c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/container-shape-gated in transpiler/runtime surfaces; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

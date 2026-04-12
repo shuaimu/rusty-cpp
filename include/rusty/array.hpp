@@ -747,6 +747,20 @@ auto as_mut_slice(Container&& container) {
     return slice_full(container);
 }
 
+// Explicit helper surface for Rust-style `.get(index)` lowering on
+// slice-like/Vec-like containers. Returns Option<&T> in const-view form.
+template<typename Container, typename Index>
+auto get(const Container& container, Index idx) {
+    const auto span = slice_full(container);
+    const size_t index = detail::checked_index(idx);
+    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+    using Opt = Option<Elem&>;
+    if (index < rusty::len(span)) {
+        return Opt(*(rusty::as_ptr(span) + index));
+    }
+    return Opt(None);
+}
+
 // Collect a slice-like container into rusty::Vec by value-cloning elements.
 // Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
 template<typename Container>

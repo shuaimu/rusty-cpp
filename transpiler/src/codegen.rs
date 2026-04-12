@@ -20343,6 +20343,21 @@ impl CodeGen {
                 );
             }
         }
+        // Rust Vec/ArrayVec/SmallVec-style `.get(index)` fallback surface.
+        // Shared lowering path: preserve member calls on unrelated `get(...)` APIs.
+        if method_name == "get"
+            && args.len() == 1
+            && !self.is_slice_range_index_expr(&mc.args[0])
+            && self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::get({}, {})", receiver, args[0]);
+        }
         // Note: `.as_bytes()` on slices is NOT rewritten generically —
         // it would require full Rust slice API on the returned span.
         // Rust `is_empty()` → dispatch to `.is_empty()` or `.empty()` depending on type
@@ -47870,6 +47885,38 @@ mod tests {
         );
         assert!(out.contains("s.filter(1)"), "{out}");
         assert!(!out.contains("rusty::filter(s, 1)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5149_vec_get_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<i32>) {
+                let _ = v.get(0);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::get(v, 0)"), "{out}");
+        assert!(!out.contains("v.get(0)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5149_non_slice_like_get_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn get(&self, n: usize) -> usize {
+                    n
+                }
+            }
+            fn f(s: S) {
+                let _ = s.get(1);
+            }
+        "#,
+        );
+        assert!(out.contains("s.get(1)"), "{out}");
+        assert!(!out.contains("rusty::get(s, 1)"), "{out}");
     }
 
     #[test]
