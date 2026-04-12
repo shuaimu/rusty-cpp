@@ -22196,6 +22196,26 @@ impl CodeGen {
         let elem_ty = slice_ty.elem.as_ref();
         let elem_cpp = self.map_type(elem_ty);
         let is_mut = reference.mutability.is_some() || expected_ref.mutability.is_some();
+
+        // If expected element type still leaks out-of-scope type params
+        // (for example `A::Item` outside generic scope), avoid emitting an
+        // explicit span return type that will not compile in concrete call sites.
+        if self.mapped_type_has_out_of_scope_type_params(&elem_cpp) {
+            let storage_decl = if is_mut {
+                "auto _slice_ref_tmp".to_string()
+            } else {
+                "const auto _slice_ref_tmp".to_string()
+            };
+            let inner = self
+                .emit_expr_to_string_with_expected(&reference.expr, Some(expected_ref.elem.as_ref()));
+            let span_decl = if is_mut { "auto" } else { "const auto" };
+            let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
+            return Some(format!(
+                "{}() {{ static {} = {}; {} _span = std::span(_slice_ref_tmp); return _span; }}()",
+                capture, storage_decl, inner, span_decl
+            ));
+        }
+
         let span_cpp = if is_mut {
             format!("std::span<{}>", elem_cpp)
         } else {
@@ -49171,6 +49191,35 @@ mod tests {
         assert!(out.contains("auto v = rusty::Vec::new_();"));
         assert!(out.contains("const auto _s = rusty::as_mut_slice(v);"));
         assert!(!out.contains("v.as_mut_slice()"));
+    }
+
+    #[test]
+    fn test_leaf5139_assoc_from_indexed_slice_avoids_unresolved_item_span_surface() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike {
+                type Item;
+            }
+            impl ArrayLike for [u32; 2] {
+                type Item = u32;
+            }
+            struct SmallVec<A>(A);
+            impl<A: ArrayLike> SmallVec<A> {
+                fn from(_s: &[A::Item]) -> SmallVec<A> { loop {} }
+            }
+            fn f() {
+                let mut vec = SmallVec::<[u32; 2]>::from(&[1, 2, 3][..]);
+                let vec2 = SmallVec::<[u32; 2]>::from(&[1, 2, 3][..]);
+            }
+        "#,
+        );
+        assert!(out.contains("SmallVec<std::array<uint32_t, 2>>::from("));
+        assert!(
+            !out.contains("std::span<const A::Item>")
+                && !out.contains("std::span<const A::Item>(_slice_ref_tmp)")
+                && !out.contains("-> std::span<const A::Item>"),
+            "concrete-owner associated from indexed-slice calls must not leak unresolved A::Item span surfaces\nGot: {out}"
+        );
     }
 
     #[test]

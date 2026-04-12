@@ -4821,6 +4821,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-38a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and method-shape/runtime-helper-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.39: `smallvec` Stage D indexed-slice span-storage fallback for out-of-scope associated item surfaces (`A::Item`) compile-head family collapse
+          - Plan/scope check: shared transpiler-only span-storage lowering hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - reference-expression span-storage lowering now detects out-of-scope type-parameter leakage in expected element surfaces and avoids emitting explicit lambda span return types that leak unresolved associated items (e.g., `std::span<const A::Item>` at concrete-owner call sites).
+            - `try_emit_reference_expr_with_expected_span_storage(...)` now falls back to deduced span storage/return shape when expected element type maps to an out-of-scope parameterized surface, preventing invalid qself-associated `A::Item` emission in non-generic contexts.
+            - this collapses the deterministic `runner.cpp:3906/3964` invalid type-surface family (`std::span<const A::Item>` in `SmallVec::<[u32;2]>::from(&[1,2,3][..])` call lowering).
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5139_assoc_from_indexed_slice_avoids_unresolved_item_span_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5139 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-39a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.38 first-head family at `runner.cpp:3906/3964` (`std::span<const A::Item>` invalid associated-type surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family remains at `runner.cpp:3906/3964` but now as concrete element-typing mismatch (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)` no matching overload), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapter methods, `from_iter`/`from_raw_parts`, and related test-surface fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-39a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-surface-gated in core span-storage lowering; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -2401,6 +2401,10 @@ Current status snapshot:
    - lowering non-pointer `.as_slice()` / `.as_mut_slice()` method calls through shared runtime helpers (`rusty::as_slice(...)` / `rusty::as_mut_slice(...)`) instead of direct member-call emission, and
    - adding shared runtime helper surfaces in `include/rusty/array.hpp` that dispatch through `slice_full(...)` with const/mutable view intent and temporary-receiver support.
 80. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3906` (`std::span<const A::Item>` invalid associated-type surface in lambda return position), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapter methods, `from_iter`/`from_raw_parts`, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.38` (fixes stayed shared and method-shape/runtime-helper-gated, with no crate-specific scripts and no generated-output text patching).
+81. Focused `smallvec` repro after `Leaf 5.1.39` (`/tmp/rusty-parity-matrix-5-1-39a-20260412/smallvec/...`) collapses the prior post-5.1.38 invalid qself-associated span-return family by:
+   - hardening `try_emit_reference_expr_with_expected_span_storage(...)` to detect out-of-scope type-parameter leakage in expected span element surfaces, and
+   - lowering those cases via deduced span-storage lambda return shapes instead of explicit `std::span<const A::Item>` emission.
+82. New first deterministic Stage D head in `smallvec` remains at `runner.cpp:3906/3964` but moves to concrete element-typing mismatch (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)` no matching overload), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapters, `from_iter`/`from_raw_parts`, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.39` (fix stayed shared and type-surface-gated, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
