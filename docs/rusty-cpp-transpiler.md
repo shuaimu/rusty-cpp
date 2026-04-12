@@ -2369,6 +2369,10 @@ Current status snapshot:
    - emitting move closures as `[=](...) mutable` so captured-by-value bindings remain mutable in lambda bodies.
 65. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3254` (slice element-type mismatch in `insert_from_slice`: `std::span<const int,2>` cannot convert to `std::span<const unsigned char,...>`), with adjacent same-family/API-surface fallout at `runner.cpp:3298` (`extend_from_slice` shape) and downstream independent compile families.
 66. Guardrail check against §11 remains satisfied for `Leaf 5.1.31`: fixes stayed shared and semantics-gated in runtime/closure lowering paths; no crate-specific scripts and no generated-output text patching were introduced.
+67. Focused `smallvec` repro after `Leaf 5.1.32` (`/tmp/rusty-parity-matrix-5-1-32/smallvec/...`) collapses the prior post-5.1.31 `insert_from_slice`/`extend_from_slice` first-head family by:
+   - deriving receiver-item slice expected types from receiver owner generics for `insert_from_slice`/`extend_from_slice` method families (including array-owner `A::Item` extraction), and
+   - switching extension-call rewrite collision gating to an inherent-method-only index so local inherent methods block `rusty::method(...)` rewriting without suppressing valid trait-extension rewrites.
+68. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3401/3403` (`auto _m0_tmp/_m1_tmp` deduced from `void` in hash assertion tuple temporaries), with adjacent same-family fallout at `runner.cpp:3425/3427`; guardrail check against §11 remains satisfied for `Leaf 5.1.32` (fixes stayed shared and receiver/type-shape-gated with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

@@ -4676,6 +4676,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-31/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and semantics-gated in runtime/closure lowering paths (no crate-specific scripts, no generated-output text patching, and no callsite-only post-processing).
+        - [x] *done* Leaf 5.1.32: `smallvec` Stage D `insert_from_slice`/`extend_from_slice` receiver-item-slice typing + extension-rewrite collision family collapse
+          - Plan/scope check: shared transpiler-only receiver-type inference and extension-rewrite gating hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - receiver-driven expected-type inference now handles receiver-item slice APIs (`insert_from_slice`, `extend_from_slice`, `try_extend_from_slice`, `copy_from_slice`, `clone_from_slice`) by deriving item type from receiver owner generics (including array-owner `A::Item` extraction), so array literals like `&[5, 6]` are emitted as typed byte arrays when receiver item type is `u8`.
+            - extension-method rewrite collision guard now consults an inherent-method-only index (instead of mixed impl metadata), so local inherent methods (for example `SmallVec::extend_from_slice`) block `rusty::...` rewrites while trait-extension rewrites (`tap_err`, `tap_some`, `write_hex`) remain active.
+            - block-local impl override plumbing now preserves/restore inherent-method metadata during scoped emission, keeping local-type behavior consistent with top-level impl handling.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5132_extension_method_rewrite_skips_local_inherent_method_receiver`
+            - `test_leaf5132_insert_from_slice_assoc_expected_uses_receiver_item_type_hint`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf105403_write_hex_extension_call_lowers_to_runtime_helper -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf133_tap_err_call_shape_keeps_deref_closure_param -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf133_tap_some_call_shape_keeps_deref_closure_param -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf5132 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-32 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.31 first-head family at `runner.cpp:3254`/`runner.cpp:3298` (`insert_from_slice` slice element-type mismatch + `extend_from_slice` extension free-function misrewrite) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3401`/`runner.cpp:3403` (`auto _m0_tmp/_m1_tmp` deduced from `void` in hash assertion tuple temporaries), with adjacent same-family fallout at `runner.cpp:3425/3427` and downstream independent compile families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-32/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core inference/rewrite paths; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

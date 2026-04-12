@@ -200,6 +200,10 @@ pub struct CodeGen {
     /// Prevents duplicate C++ method emissions when expanded Rust yields
     /// overlapping inherent impl methods with the same callable signature.
     impl_method_conflict_keys: HashMap<String, HashSet<String>>,
+    /// Inherent impl method names keyed by merged impl target type.
+    /// Used to suppress extension-method call rewriting only when a real
+    /// inherent receiver method is available (trait impl methods excluded).
+    inherent_impl_method_names: HashMap<String, HashSet<String>>,
     /// Maps (type_name, method_name) → C++ operator name for operator trait impls.
     operator_renames: HashMap<(String, String), String>,
     /// Marks impl methods that come from `Drop` trait impls.
@@ -561,6 +565,7 @@ impl CodeGen {
             deferred_self_const_defs: Vec::new(),
             deferred_module_items: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
+            inherent_impl_method_names: HashMap::new(),
             operator_renames: HashMap::new(),
             drop_trait_methods: HashSet::new(),
             current_struct: None,
@@ -721,6 +726,7 @@ impl CodeGen {
         self.impl_blocks.clear();
         self.impl_source_modules.clear();
         self.impl_method_conflict_keys.clear();
+        self.inherent_impl_method_names.clear();
         self.operator_renames.clear();
         self.drop_trait_methods.clear();
         self.skipped_module_traits.clear();
@@ -3083,12 +3089,14 @@ impl CodeGen {
                         .as_ref()
                         .and_then(|(_, path, _)| path.segments.last())
                         .map(|seg| seg.ident.to_string());
+                    let is_inherent_impl = trait_name.is_none();
                     let is_drop_trait = trait_name.as_deref() == Some("Drop");
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));
                     let impl_is_automatically_derived =
                         impl_block_is_automatically_derived(impl_block);
+                    let mut inherent_method_names_for_type: Vec<String> = Vec::new();
 
                     // Record module path for methods merged from sibling modules
                     if !module_path.is_empty() {
@@ -3151,9 +3159,19 @@ impl CodeGen {
                                 self.drop_trait_methods
                                     .insert((type_name.clone(), method_name));
                             }
+                            if is_inherent_impl {
+                                inherent_method_names_for_type.push(merged.sig.ident.to_string());
+                            }
                             collected_item = syn::ImplItem::Fn(merged);
                         }
                         entry.push(collected_item);
+                    }
+                    if is_inherent_impl && !inherent_method_names_for_type.is_empty() {
+                        let inherent_names = self
+                            .inherent_impl_method_names
+                            .entry(type_name.clone())
+                            .or_default();
+                        inherent_names.extend(inherent_method_names_for_type);
                     }
 
                     // Inject trait static default methods (no receiver) into the type.
@@ -3465,10 +3483,12 @@ impl CodeGen {
         HashMap<String, Vec<syn::ImplItem>>,
         HashSet<(String, String)>,
         HashMap<(String, String), String>,
+        HashMap<String, HashSet<String>>,
     ) {
         let mut local_impl_blocks: HashMap<String, Vec<syn::ImplItem>> = HashMap::new();
         let mut local_drop_trait_methods: HashSet<(String, String)> = HashSet::new();
         let mut local_operator_renames: HashMap<(String, String), String> = HashMap::new();
+        let mut local_inherent_method_names: HashMap<String, HashSet<String>> = HashMap::new();
         let mut local_impl_method_conflict_keys: HashMap<String, HashSet<String>> = HashMap::new();
 
         for stmt in stmts {
@@ -3548,6 +3568,12 @@ impl CodeGen {
                         let method_name = merged.sig.ident.to_string();
                         local_drop_trait_methods.insert((type_name.clone(), method_name));
                     }
+                    if is_inherent_impl {
+                        local_inherent_method_names
+                            .entry(type_name.clone())
+                            .or_default()
+                            .insert(merged.sig.ident.to_string());
+                    }
                     collected_item = syn::ImplItem::Fn(merged);
                 }
                 entry.push(collected_item);
@@ -3558,6 +3584,7 @@ impl CodeGen {
             local_impl_blocks,
             local_drop_trait_methods,
             local_operator_renames,
+            local_inherent_method_names,
         )
     }
 
@@ -5755,8 +5782,12 @@ impl CodeGen {
         }
         let hoisted_type_names: HashSet<String> =
             hoisted_structs.iter().map(|s| s.ident.to_string()).collect();
-        let (local_impl_overrides, local_drop_overrides, local_operator_overrides) =
-            self.collect_local_impl_overrides(&block.stmts, &hoisted_type_names);
+        let (
+            local_impl_overrides,
+            local_drop_overrides,
+            local_operator_overrides,
+            local_inherent_method_overrides,
+        ) = self.collect_local_impl_overrides(&block.stmts, &hoisted_type_names);
 
         let mut prev_impl_overrides: Vec<(String, Option<Vec<syn::ImplItem>>)> = Vec::new();
         for (type_name, impl_items) in local_impl_overrides {
@@ -5773,6 +5804,13 @@ impl CodeGen {
             let prev = self.operator_renames.insert(op_key.clone(), op_value);
             prev_operator_overrides.push((op_key, prev));
         }
+        let mut prev_inherent_overrides: Vec<(String, Option<HashSet<String>>)> = Vec::new();
+        for (type_name, method_names) in local_inherent_method_overrides {
+            let prev = self
+                .inherent_impl_method_names
+                .insert(type_name.clone(), method_names);
+            prev_inherent_overrides.push((type_name, prev));
+        }
 
         for struct_item in hoisted_structs {
             self.emit_struct(struct_item);
@@ -5783,6 +5821,13 @@ impl CodeGen {
                 self.operator_renames.insert(op_key, prev_value);
             } else {
                 self.operator_renames.remove(&op_key);
+            }
+        }
+        for (type_name, prev) in prev_inherent_overrides {
+            if let Some(prev_names) = prev {
+                self.inherent_impl_method_names.insert(type_name, prev_names);
+            } else {
+                self.inherent_impl_method_names.remove(&type_name);
             }
         }
         for (drop_key, inserted) in inserted_drop_overrides {
@@ -10023,8 +10068,12 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
-        let (local_impl_overrides, local_drop_overrides, local_operator_overrides) =
-            self.collect_local_impl_overrides(&block.stmts, &local_types);
+        let (
+            local_impl_overrides,
+            local_drop_overrides,
+            local_operator_overrides,
+            local_inherent_method_overrides,
+        ) = self.collect_local_impl_overrides(&block.stmts, &local_types);
         self.local_function_bindings.push(local_functions);
         self.local_type_bindings.push(local_types);
         self.local_manually_drop_bindings.push(HashSet::new());
@@ -10046,6 +10095,13 @@ impl CodeGen {
         for (op_key, op_value) in local_operator_overrides {
             let prev = self.operator_renames.insert(op_key.clone(), op_value);
             prev_operator_overrides.push((op_key, prev));
+        }
+        let mut prev_inherent_overrides: Vec<(String, Option<HashSet<String>>)> = Vec::new();
+        for (type_name, method_names) in local_inherent_method_overrides {
+            let prev = self
+                .inherent_impl_method_names
+                .insert(type_name.clone(), method_names);
+            prev_inherent_overrides.push((type_name, prev));
         }
 
         let stmts = &block.stmts;
@@ -10093,6 +10149,13 @@ impl CodeGen {
                 self.operator_renames.insert(op_key, prev_value);
             } else {
                 self.operator_renames.remove(&op_key);
+            }
+        }
+        for (type_name, prev) in prev_inherent_overrides {
+            if let Some(prev_names) = prev {
+                self.inherent_impl_method_names.insert(type_name, prev_names);
+            } else {
+                self.inherent_impl_method_names.remove(&type_name);
             }
         }
         for (drop_key, inserted) in inserted_drop_overrides {
@@ -20021,15 +20084,18 @@ impl CodeGen {
         method_name: &str,
         arg_idx: usize,
     ) -> Option<syn::Type> {
-        if arg_idx != 0 {
-            return None;
-        }
         let uses_receiver_elem_slice = matches!(
             method_name,
             "try_extend_from_slice" | "extend_from_slice" | "copy_from_slice" | "clone_from_slice"
         );
         let is_write_method = matches!(method_name, "write" | "write_all");
         if !uses_receiver_elem_slice && !is_write_method {
+            return None;
+        }
+        if uses_receiver_elem_slice {
+            return self.infer_receiver_item_slice_expected_type(receiver, method_name, arg_idx);
+        }
+        if arg_idx != 0 {
             return None;
         }
         let receiver_ty = self.infer_simple_expr_type(receiver)?;
@@ -20051,6 +20117,45 @@ impl CodeGen {
             return None;
         }
         Some(parse_quote!(&[#elem_ty]))
+    }
+
+    fn infer_receiver_item_slice_expected_type(
+        &self,
+        receiver: &syn::Expr,
+        method_name: &str,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let owner_arg_idx = match method_name {
+            "insert_from_slice" if arg_idx == 1 => 0usize,
+            "try_extend_from_slice" | "extend_from_slice" | "copy_from_slice"
+            | "clone_from_slice"
+                if arg_idx == 0 =>
+            {
+                0usize
+            }
+            _ => return None,
+        };
+        let receiver_ty = self.infer_simple_expr_type(receiver)?;
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let owner_ty = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .nth(owner_arg_idx)?;
+        let item_ty = self
+            .extract_iter_item_type_from_type(&owner_ty)
+            .unwrap_or(owner_ty);
+        Some(parse_quote!(&[#item_ty]))
     }
 
     fn infer_method_arg_expected_type_from_receiver(
@@ -20082,6 +20187,12 @@ impl CodeGen {
         };
         if !allow_infer {
             return None;
+        }
+
+        if let Some(slice_ty) =
+            self.infer_receiver_item_slice_expected_type(receiver, method_name, arg_idx)
+        {
+            return Some(slice_ty);
         }
 
         let elem_arg_idx = match method_name {
@@ -20217,6 +20328,9 @@ impl CodeGen {
         if !self.extension_method_names.contains(&method_name) {
             return None;
         }
+        if self.receiver_has_inherent_method_named(&mc.receiver, &method_name) {
+            return None;
+        }
 
         let is_self_receiver = matches!(mc.receiver.as_ref(), syn::Expr::Path(p)
             if p.path.segments.len() == 1 && p.path.segments[0].ident == "self");
@@ -20238,6 +20352,32 @@ impl CodeGen {
             escape_cpp_keyword(&method_name),
             all_args.join(", ")
         ))
+    }
+
+    fn receiver_has_inherent_method_named(&self, receiver: &syn::Expr, method_name: &str) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let segments: Vec<String> = tp.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        if segments.is_empty() {
+            return false;
+        }
+        let receiver_path = segments.join("::");
+        let receiver_leaf = segments.last().cloned().unwrap_or_default();
+        let receiver_is_single_segment = segments.len() == 1;
+        self.inherent_impl_method_names
+            .iter()
+            .any(|(impl_ty, methods)| {
+            let type_matches = impl_ty == &receiver_path
+                || (receiver_is_single_segment
+                    && (impl_ty == &receiver_leaf
+                        || impl_ty.ends_with(&format!("::{}", receiver_leaf))));
+                type_matches && methods.contains(method_name)
+            })
     }
 
     /// Emit an expression with optional expected type context from its parent.
@@ -34194,6 +34334,55 @@ mod tests {
         );
         assert!(out.contains("foo.tap();"));
         assert!(!out.contains("rusty::tap(foo"));
+    }
+
+    #[test]
+    fn test_leaf5132_extension_method_rewrite_skips_local_inherent_method_receiver() {
+        let out = transpile_str(
+            r#"
+            trait ExtendFromSlice<T> { fn extend_from_slice(&mut self, other: &[T]); }
+            impl<T> ExtendFromSlice<T> for Vec<T> {
+                fn extend_from_slice(&mut self, other: &[T]) {
+                    Vec::extend_from_slice(self, other);
+                }
+            }
+
+            struct SmallVec;
+            impl SmallVec { fn extend_from_slice(&mut self, other: &[u8]) {} }
+
+            fn f(v: &mut SmallVec) {
+                v.extend_from_slice(&[5, 6]);
+            }
+        "#,
+        );
+        assert!(
+            out.contains("v->extend_from_slice(") || out.contains("v.extend_from_slice("),
+            "{out}"
+        );
+        assert!(!out.contains("rusty::extend_from_slice(v"), "{out}");
+        assert!(!out.contains("rusty::extend_from_slice((*v)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5132_insert_from_slice_assoc_expected_uses_receiver_item_type_hint() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike { type Item; }
+            impl ArrayLike for [u8; 8] { type Item = u8; }
+
+            struct SmallVec<A: ArrayLike> { marker: std::marker::PhantomData<A> }
+            impl<A: ArrayLike> SmallVec<A> {
+                fn insert_from_slice(&mut self, index: usize, slice: &[A::Item]) {}
+            }
+
+            fn f(v: &mut SmallVec<[u8; 8]>) {
+                v.insert_from_slice(1, &[5, 6]);
+            }
+        "#,
+        );
+        assert!(out.contains("std::span<const uint8_t>"), "{out}");
+        assert!(out.contains("std::array<uint8_t, 2> _slice_ref_tmp"), "{out}");
+        assert!(!out.contains("static const auto _slice_ref_tmp = std::array{5, 6};"), "{out}");
     }
 
     #[test]
