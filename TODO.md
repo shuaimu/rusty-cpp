@@ -5599,7 +5599,37 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-70a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/control-flow-shape-gated in core runtime-match lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.71: `smallvec` Stage D runtime `Result` match expression diverging-arm return-type unification (`T` vs `void` in `infallible`) compile-head family collapse
+        - [x] *done* Leaf 5.1.71: `smallvec` Stage D runtime `Result` match expression diverging-arm return-type unification (`T` vs `void` in `infallible`) compile-head family collapse
+          - Plan/scope check: shared runtime-match return-prefix/diverging-path hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - hardened runtime expression-match return emission to distinguish diverging arm-body shape:
+              - keep `return` for typed diverging bodies (for example typed diverging IIFEs like `[&]() -> T { panic(...); }()`),
+              - omit `return` for untyped diverging calls (for example `handle_alloc_error(...)`) to avoid `T` vs `void` lambda return-type deduction conflicts,
+            - extended diverging-call detection to include Rust alloc error paths (`alloc::alloc::handle_alloc_error`, `core::alloc::handle_alloc_error`, `std::alloc::handle_alloc_error`),
+            - this collapses the deterministic post-5.1.70 first-head family at `runner.cpp:1323` (`infallible` runtime-match expression deducing inconsistent lambda return types `T` vs `void`).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5171_runtime_result_expr_diverging_err_arm_keeps_typed_return`
+            - `codegen::tests::test_leaf5171_runtime_result_expr_diverging_err_arm_omits_untyped_return`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf5119_unreachable_unchecked_paths_are_diverging`
+            - `codegen::tests::test_leaf4154410_diverging_match_arm_omits_return_keyword`
+            - `codegen::tests::test_leaf4154410_diverging_nested_block_unreachable_display_omits_return`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5171 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5119_unreachable_unchecked_paths_are_diverging -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf4154410_diverging_match_arm_omits_return_keyword -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf4154410_diverging_nested_block_unreachable_display_omits_return -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-71b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.70 first-head family at `runner.cpp:1323` (runtime-match expression `T` vs `void` return unification in `infallible`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/ptr.hpp:174` (`rusty::ptr::write` attempts `std::construct_at(std::array<...>*, scalar)` in `SmallVec::insert_many` contexts), with adjacent downstream pointer/helper families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-71b-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and expression-shape-gated in core runtime-match/diverging detection paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.72: `smallvec` Stage D `rusty::ptr::write` array-target construction shape (`std::construct_at(std::array<...>*, scalar)`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

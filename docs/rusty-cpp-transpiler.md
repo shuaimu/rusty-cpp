@@ -2536,6 +2536,11 @@ Current status snapshot:
    - guarding data-enum struct payload patterns with `std::holds_alternative<Enum_Variant>(payload)` and binding fields through `std::get<Enum_Variant>(payload).field` instead of direct sum-wrapper field access (`payload.field`),
    - preserving runtime statement/expression match lowering structure without crate-specific rewriting.
 144. New first deterministic Stage D head in `smallvec` remains at `runner.cpp:1323` but moves to runtime-match expression return-type unification fallout (`infallible` lambda deduces inconsistent return types `T` vs `void` across diverging `Err(...)` arm branches), with adjacent downstream pointer/runtime helper families. Guardrail check against §11 remains satisfied for `Leaf 5.1.70` (fixes stayed shared and AST/control-flow-shape-gated in core runtime-match lowering, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+145. Focused `smallvec` repro after `Leaf 5.1.71` (`/tmp/rusty-parity-matrix-5-1-71b-20260412/smallvec/...`) collapses the prior post-5.1.70 runtime-match expression return-type unification family by:
+   - hardening runtime expression-match return-prefix selection to distinguish diverging body shape (typed diverging IIFEs keep `return`; untyped diverging calls omit `return`),
+   - extending diverging call-path detection to include Rust alloc error surfaces (`alloc::alloc::handle_alloc_error`, `core::alloc::handle_alloc_error`, `std::alloc::handle_alloc_error`),
+   - preserving shared expression-match lowering (no crate-specific rewriting).
+146. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/ptr.hpp:174` (`rusty::ptr::write` emits `std::construct_at(std::array<...>*, scalar)` in `SmallVec::insert_many` paths), with adjacent downstream pointer/helper/runtime families (`runner.cpp:1663/1669/1673` `NonNull`/call-shape fallout and later helper surfaces). Guardrail check against §11 remains satisfied for `Leaf 5.1.71` (fixes stayed shared and expression-shape-gated in core runtime-match/diverging detection, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

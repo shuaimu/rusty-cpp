@@ -13776,9 +13776,19 @@ impl CodeGen {
                     expected_ty,
                 )
             };
-            // Detect diverging (never-returning) arm bodies to avoid `return <void>;`
+            // Keep runtime-expression match return typing coherent.
+            // Diverging arms should still return when the emitted body is already
+            // typed (e.g. `[&]() -> T { panic(...); }()`), otherwise C++ may
+            // deduce inconsistent lambda return types (`T` vs `void`).
             let diverging = self.is_expr_diverging(&arm.body);
-            let ret_prefix = if diverging { "" } else { "return " };
+            let body_trimmed = body.trim_start();
+            let body_is_return_expr = body_trimmed.starts_with("return ");
+            let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
+            let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
+                ""
+            } else {
+                "return "
+            };
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -19627,6 +19637,10 @@ impl CodeGen {
                 | "core::intrinsics::unreachable"
                 | "core::hint::unreachable_unchecked"
                 | "std::hint::unreachable_unchecked"
+                | "alloc::alloc::handle_alloc_error"
+                | "alloc::handle_alloc_error"
+                | "core::alloc::handle_alloc_error"
+                | "std::alloc::handle_alloc_error"
                 | "panicking::panic"
                 | "panicking::panic_fmt"
                 | "panicking::unreachable_display"
@@ -38235,6 +38249,70 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5171_runtime_result_expr_diverging_err_arm_keeps_typed_return() {
+        let out = transpile_str(
+            r#"
+            enum CollectionAllocErr {
+                CapacityOverflow,
+                AllocErr { layout: usize },
+            }
+            fn infallible(result: Result<i32, CollectionAllocErr>) -> i32 {
+                match result {
+                    Ok(v) => v,
+                    Err(CollectionAllocErr::CapacityOverflow) => ::core::panicking::panic("capacity overflow"),
+                    Err(CollectionAllocErr::AllocErr { layout }) => layout as i32,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (_m.is_err())"),
+            "runtime Result expression match should use is_err dispatch, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("if (std::holds_alternative<CollectionAllocErr_CapacityOverflow>(_mv1)) { return [&]() -> int32_t { rusty::panicking::panic(\"capacity overflow\"); }(); }"),
+            "diverging err arm should keep a typed return in runtime expression match lowering, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("if (std::holds_alternative<CollectionAllocErr_CapacityOverflow>(_mv1)) { [&]() -> int32_t { rusty::panicking::panic(\"capacity overflow\"); }(); }"),
+            "diverging err arm should not be emitted as non-return statement in runtime expression match lowering, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5171_runtime_result_expr_diverging_err_arm_omits_untyped_return() {
+        let out = transpile_str(
+            r#"
+            enum CollectionAllocErr {
+                AllocErr { layout: usize },
+            }
+            fn infallible<T>(result: Result<T, CollectionAllocErr>) -> T {
+                match result {
+                    Ok(v) => v,
+                    Err(CollectionAllocErr::AllocErr { layout }) =>
+                        ::alloc::alloc::handle_alloc_error(unsafe {
+                            ::core::alloc::Layout::from_size_align_unchecked(layout, 1)
+                        }),
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::alloc::handle_alloc_error("),
+            "runtime Result expression should keep alloc error call in err arm, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return rusty::alloc::handle_alloc_error("),
+            "diverging err arm should not emit return for void-typed diverging call, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10511_runtime_option_return_arm_if_expr_lowers_without_todo() {
         let out = transpile_str(
             r#"
@@ -39094,6 +39172,15 @@ mod tests {
             "core::hint::unreachable_unchecked"
         ));
         assert!(CodeGen::is_diverging_function_path("std::hint::unreachable_unchecked"));
+        assert!(CodeGen::is_diverging_function_path(
+            "alloc::alloc::handle_alloc_error"
+        ));
+        assert!(CodeGen::is_diverging_function_path(
+            "core::alloc::handle_alloc_error"
+        ));
+        assert!(CodeGen::is_diverging_function_path(
+            "std::alloc::handle_alloc_error"
+        ));
     }
 
     #[test]
