@@ -5937,7 +5937,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-86b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and runtime-shape-gated in core memory/ownership helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.87: `smallvec` Stage E `tests::into_iter_rev` runtime failure (`Range end out of bounds`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.87: `smallvec` Stage E `tests::into_iter_rev` runtime failure (`Range end out of bounds`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared transpiler hardening for nested drop-move forgotten-mark propagation:
+            - `transpiler/src/codegen.rs`: move-constructor generation for `Drop` types now emits an extra `other.rusty_mark_forgotten();` in the `consume_forgotten_address(&other)` branch when the first field type also has a `Drop` impl.
+            - this preserves the source forgotten-mark budget when first-field move construction has already contributed a mark at the same address slot (for example `IntoIter { data: SmallVec<...>, ... }`), preventing premature source-member teardown in reverse-iterator construction paths.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5187_drop_move_ctor_preserves_extra_forgotten_mark_for_nested_first_field_drop`
+            - `codegen::tests::test_leaf5187_drop_move_ctor_keeps_single_mark_when_first_field_has_no_drop`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5187 -- --nocapture`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-87a-20260412`
+          - Deterministic frontier movement:
+            - prior post-5.1.86 first Stage E failure (`tests::into_iter_rev` runtime failure with trailing allocator abort) is collapsed from deterministic first-head slots.
+            - `tests::into_iter_rev` now passes; new deterministic first Stage E failure is `tests_max_swap_remove FAILED: expected panic` with trailing allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-87a-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST-shape-gated in generic `Drop` move-ctor generation; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.88: `smallvec` Stage E `tests_max_swap_remove` expected-panic mismatch (`FAILED: expected panic`) with trailing allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

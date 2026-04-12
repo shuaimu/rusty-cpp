@@ -5366,6 +5366,20 @@ impl CodeGen {
                 .contains(&(self.scoped_type_key(type_name), method_name))
     }
 
+    fn field_type_has_drop_impl(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.qself.is_some() {
+            return false;
+        }
+        tp.path
+            .segments
+            .last()
+            .map(|seg| self.type_has_drop_impl(&seg.ident.to_string()))
+            .unwrap_or(false)
+    }
+
     /// Returns true if visibility is pub, we're in module mode, and the item is at
     /// top-level module scope (not nested inside an inline namespace block).
     fn is_exported(&self, vis: &syn::Visibility) -> bool {
@@ -6485,6 +6499,12 @@ impl CodeGen {
         if has_drop_impl {
             match &s.fields {
                 syn::Fields::Named(fields) => {
+                    let first_field_has_drop_impl = fields
+                        .named
+                        .iter()
+                        .next()
+                        .map(|field| self.field_type_has_drop_impl(&field.ty))
+                        .unwrap_or(false);
                     let ctor_params: Vec<String> = fields
                         .named
                         .iter()
@@ -6560,6 +6580,9 @@ impl CodeGen {
                     self.indent += 1;
                     self.writeln("this->rusty_mark_forgotten();");
                     self.writeln("other.rusty_mark_forgotten();");
+                    if first_field_has_drop_impl {
+                        self.writeln("other.rusty_mark_forgotten();");
+                    }
                     self.indent -= 1;
                     self.writeln("} else {");
                     self.indent += 1;
@@ -6589,6 +6612,12 @@ impl CodeGen {
                     self.writeln("}");
                 }
                 syn::Fields::Unnamed(fields) => {
+                    let first_field_has_drop_impl = fields
+                        .unnamed
+                        .iter()
+                        .next()
+                        .map(|field| self.field_type_has_drop_impl(&field.ty))
+                        .unwrap_or(false);
                     let ctor_params: Vec<String> = fields
                         .unnamed
                         .iter()
@@ -6647,6 +6676,9 @@ impl CodeGen {
                     self.indent += 1;
                     self.writeln("this->rusty_mark_forgotten();");
                     self.writeln("other.rusty_mark_forgotten();");
+                    if first_field_has_drop_impl {
+                        self.writeln("other.rusty_mark_forgotten();");
+                    }
                     self.indent -= 1;
                     self.writeln("} else {");
                     self.indent += 1;
@@ -38228,6 +38260,70 @@ mod tests {
         assert!(!out.contains("rusty_forget_flag_"));
         assert!(out.contains("const auto x = Foo(1);"));
         assert!(!out.contains("Foo{.value = 1}"));
+    }
+
+    #[test]
+    fn test_leaf5187_drop_move_ctor_preserves_extra_forgotten_mark_for_nested_first_field_drop() {
+        let out = transpile_str(
+            r#"
+            struct Inner { value: i32 }
+            impl Drop for Inner {
+                fn drop(&mut self) {}
+            }
+
+            struct Outer { inner: Inner, tail: i32 }
+            impl Drop for Outer {
+                fn drop(&mut self) {}
+            }
+            "#,
+        );
+        let outer_move_ctor_start = out
+            .find("Outer(Outer&& other) noexcept : inner(std::move(other.inner)), tail(std::move(other.tail)) {")
+            .expect("missing Outer move constructor");
+        let consume_start = out[outer_move_ctor_start..]
+            .find("if (rusty::mem::consume_forgotten_address(&other)) {")
+            .map(|idx| outer_move_ctor_start + idx)
+            .expect("missing consume branch in Outer move constructor");
+        let else_start = out[consume_start..]
+            .find("} else {")
+            .map(|idx| consume_start + idx)
+            .expect("missing else branch in Outer move constructor");
+        let consume_block = &out[consume_start..else_start];
+        assert_eq!(
+            consume_block.matches("other.rusty_mark_forgotten();").count(),
+            2,
+            "Outer consume branch should emit two source marks when first field has Drop"
+        );
+    }
+
+    #[test]
+    fn test_leaf5187_drop_move_ctor_keeps_single_mark_when_first_field_has_no_drop() {
+        let out = transpile_str(
+            r#"
+            struct Plain { value: i32 }
+            struct Outer { plain: Plain, tail: i32 }
+            impl Drop for Outer {
+                fn drop(&mut self) {}
+            }
+            "#,
+        );
+        let outer_move_ctor_start = out
+            .find("Outer(Outer&& other) noexcept : plain(std::move(other.plain)), tail(std::move(other.tail)) {")
+            .expect("missing Outer move constructor");
+        let consume_start = out[outer_move_ctor_start..]
+            .find("if (rusty::mem::consume_forgotten_address(&other)) {")
+            .map(|idx| outer_move_ctor_start + idx)
+            .expect("missing consume branch in Outer move constructor");
+        let else_start = out[consume_start..]
+            .find("} else {")
+            .map(|idx| consume_start + idx)
+            .expect("missing else branch in Outer move constructor");
+        let consume_block = &out[consume_start..else_start];
+        assert_eq!(
+            consume_block.matches("other.rusty_mark_forgotten();").count(),
+            1,
+            "Outer consume branch should emit one source mark when first field has no Drop"
+        );
     }
 
     #[test]
