@@ -20111,6 +20111,30 @@ impl CodeGen {
             args.push(self.emit_call_arg_with_pass_style(arg, style, arg_expected, false, None));
         }
         let method_template_args = self.emit_method_call_template_args(mc, &args);
+        if method_name == "as_slice"
+            && args.is_empty()
+            && !self.method_receiver_uses_pointer_member_access(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::as_slice({})", receiver);
+        }
+        if method_name == "as_mut_slice"
+            && args.is_empty()
+            && !self.method_receiver_uses_pointer_member_access(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::as_mut_slice({})", receiver);
+        }
         if method_name == "clone_from_slice"
             && args.len() == 1
             && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
@@ -49102,6 +49126,51 @@ mod tests {
         );
         assert!(out.contains("const auto vec = rusty::Vec::new_();"));
         assert!(!out.contains("Holder::borrow(std::move(vec))"));
+    }
+
+    #[test]
+    fn test_leaf5138_array_repeat_as_slice_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let s = alloc::vec::from_elem(99u8, 4).as_slice();
+            }
+        "#,
+        );
+        assert!(out.contains(
+            "const auto s = rusty::as_slice(rusty::array_repeat(static_cast<uint8_t>(99), 4));"
+        ));
+        assert!(!out.contains(".as_slice();"));
+    }
+
+    #[test]
+    fn test_leaf5138_vec_as_slice_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let v = Vec::<u8>::new();
+                let _s = v.as_slice();
+            }
+        "#,
+        );
+        assert!(out.contains("const auto v = rusty::Vec::new_();"));
+        assert!(out.contains("const auto _s = rusty::as_slice(v);"));
+        assert!(!out.contains("v.as_slice()"));
+    }
+
+    #[test]
+    fn test_leaf5138_vec_as_mut_slice_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<u8>::new();
+                let _s = v.as_mut_slice();
+            }
+        "#,
+        );
+        assert!(out.contains("auto v = rusty::Vec::new_();"));
+        assert!(out.contains("const auto _s = rusty::as_mut_slice(v);"));
+        assert!(!out.contains("v.as_mut_slice()"));
     }
 
     #[test]

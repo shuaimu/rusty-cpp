@@ -2397,6 +2397,10 @@ Current status snapshot:
    - using collected function/method pass-style metadata plus owner-scoped associated expected-type fallback to classify ambiguous associated calls (`Owner::from(...)`, `Owner::from_vec(...)`), and
    - forcing immutable consumed locals to lower as non-const storage so `std::move(local)` remains a true move for move-only runtime types.
 78. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3848` (`std::vector<unsigned char>` has no member `as_slice`), followed by downstream runtime/associated-surface gaps (`A::Item` span-return surface, `from_iter`/`from_raw_parts`, iterator adapter coverage, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.37` (fixes stayed shared and metadata/AST-shape-gated, with no crate-specific scripts and no generated-output text patching).
+79. Focused `smallvec` repro after `Leaf 5.1.38` (`/tmp/rusty-parity-matrix-5-1-38a-20260412/smallvec/...`) collapses the prior post-5.1.37 `.as_slice()` non-member surface family by:
+   - lowering non-pointer `.as_slice()` / `.as_mut_slice()` method calls through shared runtime helpers (`rusty::as_slice(...)` / `rusty::as_mut_slice(...)`) instead of direct member-call emission, and
+   - adding shared runtime helper surfaces in `include/rusty/array.hpp` that dispatch through `slice_full(...)` with const/mutable view intent and temporary-receiver support.
+80. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3906` (`std::span<const A::Item>` invalid associated-type surface in lambda return position), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapter methods, `from_iter`/`from_raw_parts`, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.38` (fixes stayed shared and method-shape/runtime-helper-gated, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

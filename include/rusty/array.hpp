@@ -730,6 +730,23 @@ auto slice_full(const Container& container) {
     }
 }
 
+// Explicit helper surface for Rust-style `.as_slice()` lowering.
+// Keeps const-view semantics even for mutable lvalue receivers and supports
+// temporary receivers through forwarding-reference binding.
+template<typename Container>
+auto as_slice(Container&& container) {
+    using Base = std::remove_reference_t<Container>;
+    return slice_full(static_cast<const Base&>(container));
+}
+
+// Explicit helper surface for Rust-style `.as_mut_slice()` lowering.
+// Preserves mutable-view behavior for containers exposing mutable slices and
+// falls back to mutable span construction where applicable.
+template<typename Container>
+auto as_mut_slice(Container&& container) {
+    return slice_full(container);
+}
+
 // Collect a slice-like container into rusty::Vec by value-cloning elements.
 // Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
 template<typename Container>

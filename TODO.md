@@ -4799,6 +4799,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-37a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and metadata/AST-shape-gated in core block pre-scan analysis; no crate-specific scripts, no blanket generated-call rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.38: `smallvec` Stage D `.as_slice()` method-surface fallback on non-member container results (`array_repeat` / `from_elem`) compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime helper hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites non-pointer `.as_slice()` / `.as_mut_slice()` calls to shared runtime helpers (`rusty::as_slice(...)` / `rusty::as_mut_slice(...)`) instead of always emitting direct member calls.
+            - runtime gained shared helper surfaces in `include/rusty/array.hpp`:
+              - `rusty::as_slice(Container&&)` uses const-view `slice_full(...)` dispatch and supports temporary receivers,
+              - `rusty::as_mut_slice(Container&&)` uses mutable-view `slice_full(...)` dispatch.
+            - this collapses the deterministic `runner.cpp:3848` family where `alloc::vec::from_elem(...).as_slice()` lowered to `rusty::array_repeat(...).as_slice()` on `std::vector`, which has no `.as_slice()` member.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5138_array_repeat_as_slice_lowers_to_runtime_helper`
+            - `test_leaf5138_vec_as_slice_lowers_to_runtime_helper`
+            - `test_leaf5138_vec_as_mut_slice_lowers_to_runtime_helper`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5138 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-38a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.37 first-head family at `runner.cpp:3848` (`std::vector<unsigned char>` has no member `as_slice`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3906` (`std::span<const A::Item>` invalid qself-associated `A::Item` surface in test lambda return type), followed by downstream runtime-surface gaps (`Option::value()`, iterator adapters, `from_iter`/`from_raw_parts`, and related test-surface fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-38a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and method-shape/runtime-helper-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
