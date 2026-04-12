@@ -17402,7 +17402,7 @@ impl CodeGen {
         if matches!(method.as_str(), "add" | "offset" | "sub") && mc.args.len() == 1 {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
                 let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
-                if matches!(receiver_ty, syn::Type::Ptr(_)) {
+                if self.is_type_raw_pointer_like(&receiver_ty) {
                     return Some(receiver_ty);
                 }
             }
@@ -17425,7 +17425,7 @@ impl CodeGen {
         if matches!(method.as_str(), "wrapping_add" | "wrapping_sub") && mc.args.len() == 1 {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
                 let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
-                if matches!(receiver_ty, syn::Type::Ptr(_)) {
+                if self.is_type_raw_pointer_like(&receiver_ty) {
                     return Some(receiver_ty);
                 }
             }
@@ -19660,7 +19660,7 @@ impl CodeGen {
         let peeled = self.peel_paren_group_expr(expr);
         if self
             .infer_simple_expr_type(peeled)
-            .is_some_and(|ty| matches!(ty, syn::Type::Ptr(_)))
+            .is_some_and(|ty| self.is_type_raw_pointer_like(&ty))
         {
             return true;
         }
@@ -19669,7 +19669,7 @@ impl CodeGen {
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
                 self.lookup_local_binding_type(&name)
-                    .is_some_and(|ty| matches!(ty, syn::Type::Ptr(_)))
+                    .is_some_and(|ty| self.is_type_raw_pointer_like(&ty))
             }
             syn::Expr::Cast(cast) => matches!(cast.ty.as_ref(), syn::Type::Ptr(_)),
             syn::Expr::MethodCall(mc) => {
@@ -19690,6 +19690,16 @@ impl CodeGen {
             }
             _ => false,
         }
+    }
+
+    fn is_type_raw_pointer_like(&self, ty: &syn::Type) -> bool {
+        if matches!(ty, syn::Type::Ptr(_)) {
+            return true;
+        }
+        let mapped = self.map_type(ty);
+        let canonical = self.canonical_into_target_cpp_type(&mapped);
+        let canonical = canonical.trim();
+        canonical.starts_with("std::add_pointer_t<") || canonical.ends_with('*')
     }
 
     fn is_ptr_add_or_offset_call_path(path: &syn::Path) -> bool {
@@ -21794,8 +21804,9 @@ impl CodeGen {
                     self.emit_expr_to_string_with_expected(&r.expr, expected_ty)
                 } else if let syn::Expr::Unary(un) = self.peel_paren_group_expr(&r.expr) {
                     if matches!(un.op, syn::UnOp::Deref(_)) {
-                        // Rust `&*expr` is a reborrow → just emit `expr` in C++
-                        self.emit_expr_to_string_with_expected(&un.expr, expected_ty)
+                        // Rust `&*expr` is a reborrow. Preserve the deref shape so
+                        // raw-pointer borrows lower as `*ptr` instead of `ptr`.
+                        self.emit_expr_to_string_with_expected(ref_inner, expected_ty)
                     } else {
                         let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                         format!("&{}", inner)
@@ -44806,6 +44817,45 @@ mod tests {
         assert!(out.contains("return layout.size;"), "{out}");
         assert!(!out.contains("layout.size()"), "{out}");
         assert!(!out.contains("layout.align()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5178_mem_swap_raw_pointer_reborrow_args_lower_to_deref_values() {
+        let out = transpile_str(
+            r#"
+            use std::mem;
+
+            unsafe fn f(ptr: *mut i32, r: usize, w: usize) {
+                let p_r = ptr.add(r);
+                let p_w = ptr.add(w);
+                mem::swap(&mut *p_r, &mut *p_w);
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::mem::swap(*p_r, *p_w);"), "{out}");
+        assert!(!out.contains("rusty::mem::swap(p_r, p_w);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5178_closure_call_raw_pointer_reborrow_args_lower_to_deref_values() {
+        let out = transpile_str(
+            r#"
+            fn dedup_like<F: FnMut(&mut i32, &mut i32) -> bool>(
+                mut same_bucket: F,
+                ptr: *mut i32,
+                r: usize,
+                w: usize,
+            ) {
+                unsafe {
+                    let p_r = ptr.add(r);
+                    let p_w = ptr.add(w);
+                    let _ = same_bucket(&mut *p_r, &mut *p_w);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("same_bucket(*p_r, *p_w)"), "{out}");
+        assert!(!out.contains("same_bucket(p_r, p_w);"), "{out}");
     }
 
     #[test]

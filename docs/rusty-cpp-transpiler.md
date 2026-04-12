@@ -2570,6 +2570,11 @@ Current status snapshot:
    - adding shared runtime `rusty::MaybeUninit<T>::new_(T)` and keeping `new_with(T)` as a compatibility alias to the new canonical surface,
    - preserving shared runtime/transpiler behavior (no crate-specific rewriting).
 158. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/mem.hpp:194` (`rusty::mem::swap` invoked as `swap(int* const&, int* const&)`), with adjacent downstream helper/runtime families (`take_next_iter::size_hint` surface at `runner.cpp:2117` and `Result::map_err` payload unification at `runner.cpp:1332`). Guardrail check against §11 remains satisfied for `Leaf 5.1.77` (fix stayed shared and runtime-surface-gated in core `MaybeUninit` API, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+159. Focused `smallvec` repro after `Leaf 5.1.78` (`/tmp/rusty-parity-matrix-5-1-78a-20260412/smallvec/...`) collapses the prior post-5.1.77 `mem::swap` pointer-const first-head family by:
+   - broadening pointer-shape detection to treat alias-pointer surfaces (`std::add_pointer_t<...>`) as raw-pointer-like in shared expression lowering,
+   - propagating pointer-like alias result types through pointer arithmetic local inference (`add`/`offset`/`sub` and wrapping variants),
+   - preserving deref shape for expected-context reborrows (`&*expr` → `*expr`) so pointer-backed borrow calls no longer collapse to bare pointer operands.
+160. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2117` (`take_next_iter<repeat_next_iter<int>>` missing `.size_hint()` surface in `extend` paths), with adjacent downstream payload-family fallout at `runner.cpp:1332` (`Result::map_err` error-payload unification). Guardrail check against §11 remains satisfied for `Leaf 5.1.78` (fixes stayed shared and AST/type-shape-gated in core reborrow/pointer inference paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

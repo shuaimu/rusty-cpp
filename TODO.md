@@ -5765,7 +5765,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-77a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core `MaybeUninit` API; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.78: `smallvec` Stage D `rusty::mem::swap` pointer-const call-surface mismatch (`swap(int* const&, int* const&)` at `include/rusty/mem.hpp:194`) compile-head family collapse
+        - [x] *done* Leaf 5.1.78: `smallvec` Stage D `rusty::mem::swap` pointer-const call-surface mismatch (`swap(int* const&, int* const&)` at `include/rusty/mem.hpp:194`) compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared transpiler reborrow/pointer-shape hardening in `transpiler/src/codegen.rs`:
+            - expanded raw-pointer-like detection to include pointer-alias surfaces (`std::add_pointer_t<...>`) via shared `is_type_raw_pointer_like(...)` and reused this in expression pointer-shape checks.
+            - hardened local method-result inference for pointer arithmetic (`add`/`offset`/`sub`, plus wrapping variants) to propagate pointer-like alias result types, preserving pointer context for downstream reborrow lowering.
+            - corrected reference reborrow lowering in expected-type contexts so `&*expr` preserves deref shape (`*expr`) instead of collapsing to operand-only (`expr`) for pointer-backed paths.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5178_mem_swap_raw_pointer_reborrow_args_lower_to_deref_values`
+            - `codegen::tests::test_leaf5178_closure_call_raw_pointer_reborrow_args_lower_to_deref_values`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5178 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-78a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.77 first-head family at `include/rusty/mem.hpp:194` (`rusty::mem::swap` instantiated as `swap(int* const&, int* const&)`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2117` (`take_next_iter<repeat_next_iter<int>>` missing `.size_hint()` surface in `extend`/`repeat(...).take(...)` paths), with adjacent downstream error-payload unification fallout at `runner.cpp:1332` (`Result::map_err` return-family mismatch).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-78a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core reborrow/pointer inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.79: `smallvec` Stage D iterator adapter surface gap (`take_next_iter<repeat_next_iter<...>>` missing `.size_hint()` at `runner.cpp:2117`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
