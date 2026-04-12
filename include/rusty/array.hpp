@@ -442,7 +442,10 @@ auto collect_range(Range&& range_like) {
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
-        auto iter = std::forward<Range>(range_like);
+        // Consume option-like iterators through a forwarding reference instead of
+        // by-value local materialization. This avoids creating an extra moved-from
+        // iterator owner whose destructor can race ownership-forget bookkeeping.
+        auto&& iter = range_like;
         using NextResult = decltype(iter.next());
         static_assert(
             requires(NextResult& next_item) {

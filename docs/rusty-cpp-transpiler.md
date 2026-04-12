@@ -2602,6 +2602,11 @@ Current status snapshot:
    - hardening shared Rust-layout runtime behavior for `std::array<T, N>` in `mem::size_of`/`mem::align_of` (including `N=0`) to match Rust array layout semantics used by panic-path size/assertion checks,
    - preserving shared transpiler/runtime lowering (no crate-specific rewriting).
 172. `smallvec` deterministic frontier remains in Stage E and moves past `tests_insert_many_panic_panic_*`: that family now passes, and the new first deterministic failure is `tests::into_iter` runtime failure (`Range end out of bounds`) with trailing allocator abort (`free(): double free detected in tcache 2`). Guardrail check against §11 remains satisfied for `Leaf 5.1.84` (fixes stayed shared and AST/runtime-shape-gated in closure lowering and runtime layout helpers, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+173. Focused `smallvec` repro after `Leaf 5.1.85` (`/tmp/rusty-parity-matrix-5-1-85a-20260412/...`) collapses the prior post-5.1.84 `tests::into_iter` Stage E ownership failure family by:
+   - hardening runtime `collect_range` option-like `next()` collection to consume through forwarding reference (`auto&& iter = range_like`) instead of by-value iterator-owner materialization,
+   - removing extra move-created iterator-owner teardown in `collect_range(v.into_iter())` paths that can duplicate moved-from owner destruction for generated `IntoIter`-shaped types,
+   - preserving shared runtime helper behavior (no crate-specific rewriting).
+174. `smallvec` deterministic frontier remains in Stage E and moves past `tests::into_iter`: `tests::into_iter` now passes, and the new first deterministic failure is `tests::into_iter_drop` runtime assertion failure (`assertion failed`) with trailing allocator abort (`free(): double free detected in tcache 2`). Guardrail check against §11 remains satisfied for `Leaf 5.1.85` (fix stayed shared and runtime-shape-gated in core iterator collection helpers, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

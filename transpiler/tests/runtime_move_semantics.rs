@@ -1405,6 +1405,89 @@ fn test_leaf5184_mem_size_of_std_array_uses_rust_layout() {
 }
 
 #[test]
+fn test_leaf5185_collect_range_next_iter_does_not_materialize_extra_owner_move() {
+    let source = r#"
+        #include <rusty/rusty.hpp>
+
+        struct IntoIterLike {
+            rusty::Vec<int> data;
+            size_t current;
+            size_t end;
+
+            IntoIterLike(rusty::Vec<int> data_init, size_t current_init, size_t end_init)
+                : data(std::move(data_init)), current(current_init), end(end_init) {}
+
+            IntoIterLike(const IntoIterLike&) = delete;
+            IntoIterLike& operator=(const IntoIterLike&) = delete;
+
+            IntoIterLike(IntoIterLike&& other) noexcept
+                : data(std::move(other.data)),
+                  current(other.current),
+                  end(other.end) {
+                if (rusty::mem::consume_forgotten_address(&other)) {
+                    this->rusty_mark_forgotten();
+                    other.rusty_mark_forgotten();
+                } else {
+                    other.rusty_mark_forgotten();
+                }
+            }
+
+            IntoIterLike& operator=(IntoIterLike&& other) noexcept {
+                if (this == &other) {
+                    return *this;
+                }
+                this->~IntoIterLike();
+                new (this) IntoIterLike(std::move(other));
+                return *this;
+            }
+
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+
+            rusty::Option<int> next() {
+                if (current == end) {
+                    return rusty::None;
+                }
+                const size_t index = current;
+                current += 1;
+                return rusty::Option<int>(
+                    rusty::ptr::read(rusty::ptr::add(rusty::as_ptr(data), index)));
+            }
+
+            ~IntoIterLike() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                for (auto&& _ : rusty::for_in(rusty::iter(*this))) {
+                }
+            }
+        };
+
+        IntoIterLike make_iter() {
+            auto values = rusty::Vec<int>::new_();
+            values.push(3);
+            values.push(4);
+            values.push(5);
+            return IntoIterLike(std::move(values), 0, 3);
+        }
+
+        int main() {
+            auto collected = rusty::collect_range(make_iter());
+            if (collected.len() != 3) {
+                return 1;
+            }
+            if (collected[0] != 3 || collected[1] != 4 || collected[2] != 5) {
+                return 2;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5185_collect_range_next_iter_owner_move");
+}
+
+#[test]
 fn test_maybe_uninit_new_surface_initializes_value_for_assume_init() {
     let source = r#"
         #include <rusty/maybe_uninit.hpp>
