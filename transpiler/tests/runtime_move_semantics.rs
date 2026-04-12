@@ -130,6 +130,13 @@ fn test_array_eq_supports_as_slice_containers_and_vec() {
             }
         };
 
+        struct IdentitySliceLike {
+            std::array<std::size_t, 2> data{4, 5};
+            const IdentitySliceLike& as_slice() const { return *this; }
+            std::size_t len() const { return data.size(); }
+            const std::size_t* as_ptr() const { return data.data(); }
+        };
+
         int main() {
             const SliceLike s{};
             if (!(s == std::array{0})) {
@@ -153,6 +160,24 @@ fn test_array_eq_supports_as_slice_containers_and_vec() {
             }
             if (!(std::array{3} == v)) {
                 return 6;
+            }
+            const IdentitySliceLike id{};
+            const auto id_view = rusty::as_slice(id);
+            if (!(id_view.size() == 2 && id_view[0] == 4 && id_view[1] == 5)) {
+                return 7;
+            }
+            if (!(id == std::array{4ul, 5ul})) {
+                return 8;
+            }
+            if (!(std::array{4ul, 5ul} == id)) {
+                return 9;
+            }
+            const auto id_span = std::span<const std::size_t>(id.data.data(), id.data.size());
+            if (!(id == id_span)) {
+                return 10;
+            }
+            if (!(id_span == id)) {
+                return 11;
             }
             return 0;
         }

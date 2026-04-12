@@ -5132,6 +5132,29 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-50b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and narrowly shape-gated in transpiler/runtime type-level-size handling; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.51: `smallvec` Stage D `.as_slice()` identity-return container equality-surface compile-head family collapse
+          - Plan/scope check: shared runtime slice/equality hardening plus focused runtime regression updates stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - mixed `std::array`/`std::span` equality operators that consume container `.as_slice()` surfaces now normalize through shared runtime `rusty::as_slice(...)` helper instead of assuming direct `.size()`/`.begin()` member availability on `.as_slice()` results.
+            - `slice_full` mutable/const helpers now detect identity-return `.as_slice()` / `.as_mut_slice()` shapes (returns same container type) and materialize span views via shared `as_ptr`/`as_mut_ptr` + `len` fallback, avoiding self-recursive non-view surfaces.
+            - this collapses the deterministic post-5.1.50 first-head family at `include/rusty/array.hpp:185` (array/span equality on `SmallVec`-like wrappers where `.as_slice()` returns `self`).
+          - Implemented in:
+            - `include/rusty/array.hpp`:
+              - added `rusty::as_slice(...)` forward declaration for early operator usage.
+              - rewired `has_member_as_slice` array/span equality operators to use normalized `rusty::as_slice(...)`.
+              - hardened `slice_full(Container&)` and `slice_full(const Container&)` identity-return detection with span fallback.
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - extended `test_array_eq_supports_as_slice_containers_and_vec` with `IdentitySliceLike` regression coverage (`as_slice() -> self`, `len()`, `as_ptr()`).
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_array_eq_supports_as_slice_containers_and_vec -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-51a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.50 first-head family at `include/rusty/array.hpp:185` (`lhs.as_slice()` direct `.size()`/`.begin()` assumption) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1571` (`Drain<...>` constructor argument shape mismatch: `Iter<const unsigned char>` vs expected mutable iterator), followed by downstream `Drain::for_each` and `NonNull::as_mut` surface gaps.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-51a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime slice/equality helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

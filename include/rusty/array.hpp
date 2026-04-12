@@ -18,6 +18,11 @@
 #include <rusty/vec.hpp>
 #include <rusty/maybe_uninit.hpp>
 
+namespace rusty {
+template<typename Container>
+auto as_slice(Container&& container);
+}
+
 // GCC/libstdc++ C++23 does not provide span equality operators.
 // Keep a narrow value-comparison overload so transpiled Rust slice assertions compile.
 template<typename L, std::size_t LExtent, typename R, std::size_t RExtent>
@@ -181,7 +186,7 @@ struct has_member_as_slice<T, std::void_t<decltype(std::declval<const T&>().as_s
 template<typename L, typename R, std::size_t N>
 requires has_member_as_slice<L>::value
 constexpr bool operator==(const L& lhs, const std::array<R, N>& rhs) {
-    const auto lhs_slice = lhs.as_slice();
+    const auto lhs_slice = rusty::as_slice(lhs);
     if (lhs_slice.size() != rhs.size()) {
         return false;
     }
@@ -208,7 +213,7 @@ constexpr bool operator==(const L& lhs, const std::array<R, N>& rhs) {
 template<typename L, typename R, std::size_t RExtent>
 requires has_member_as_slice<L>::value
 constexpr bool operator==(const L& lhs, std::span<R, RExtent> rhs) {
-    return lhs.as_slice() == rhs;
+    return rusty::as_slice(lhs) == rhs;
 }
 
 template<typename L, std::size_t LExtent, typename R>
@@ -725,10 +730,23 @@ auto filter_map(Range&& range, Func&& func) {
 /// - `x[a..b]` -> `slice(x, a, b)`
 template<typename Container>
 auto slice_full(Container& container) {
+    using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
     if constexpr (requires { container.as_mut_slice(); }) {
-        return container.as_mut_slice();
+        using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_mut_slice())>>;
+        if constexpr (std::is_same_v<Slice, Base>) {
+            using Elem = std::remove_reference_t<decltype(*rusty::as_mut_ptr(container))>;
+            return std::span<Elem>(rusty::as_mut_ptr(container), rusty::len(container));
+        } else {
+            return container.as_mut_slice();
+        }
     } else if constexpr (requires { container.as_slice(); }) {
-        return container.as_slice();
+        using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_slice())>>;
+        if constexpr (std::is_same_v<Slice, Base>) {
+            using Elem = std::remove_reference_t<decltype(*rusty::as_mut_ptr(container))>;
+            return std::span<Elem>(rusty::as_mut_ptr(container), rusty::len(container));
+        } else {
+            return container.as_slice();
+        }
     } else {
         using Elem = std::remove_reference_t<decltype(*rusty::as_mut_ptr(container))>;
         return std::span<Elem>(rusty::as_mut_ptr(container), rusty::len(container));
@@ -737,8 +755,15 @@ auto slice_full(Container& container) {
 
 template<typename Container>
 auto slice_full(const Container& container) {
+    using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
     if constexpr (requires { container.as_slice(); }) {
-        return container.as_slice();
+        using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_slice())>>;
+        if constexpr (std::is_same_v<Slice, Base>) {
+            using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(container))>;
+            return std::span<const Elem>(rusty::as_ptr(container), rusty::len(container));
+        } else {
+            return container.as_slice();
+        }
     } else {
         using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(container))>;
         return std::span<const Elem>(rusty::as_ptr(container), rusty::len(container));
