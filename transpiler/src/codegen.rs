@@ -136,6 +136,43 @@ impl<'ast> Visit<'ast> for AssocCallOwnerTypeCollector<'_> {
     }
 }
 
+#[derive(Default)]
+struct OptionSomeNoneExprCollector {
+    saw_some: bool,
+    saw_none: bool,
+}
+
+impl OptionSomeNoneExprCollector {
+    fn saw_both(&self) -> bool {
+        self.saw_some && self.saw_none
+    }
+}
+
+impl<'ast> Visit<'ast> for OptionSomeNoneExprCollector {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if CodeGen::path_is_option_none(&node.path) {
+            self.saw_none = true;
+        }
+        if self.saw_both() {
+            return;
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path_expr) = node.func.as_ref()
+            && CodeGen::path_is_option_some(&path_expr.path)
+            && node.args.len() == 1
+        {
+            self.saw_some = true;
+        }
+        if self.saw_both() {
+            return;
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
 /// Code generation context tracking indentation and output buffer.
 #[derive(Clone)]
 pub struct CodeGen {
@@ -418,12 +455,19 @@ pub struct CodeGen {
     /// Enables method-signature adjustments (for example Deref view targets) while
     /// impl items are being consumed from `impl_blocks`.
     current_struct_assoc_cpp_types: Vec<HashMap<String, String>>,
+    /// Stack of method return types for the currently emitted struct body.
+    /// Used by expression lowering to infer tuple-returning local methods even
+    /// after `impl_blocks` entries are consumed.
+    current_struct_method_output_types: Vec<HashMap<String, syn::Type>>,
     /// Stack tracking whether current function/method context returns a value.
     /// Used for tail expression lowering decisions (e.g., tail `match`).
     return_value_scopes: Vec<bool>,
     /// Optional concrete return type in current function/method context.
     /// Used to propagate expected type into tail expression lowering.
     return_type_hints: Vec<Option<syn::Type>>,
+    /// Scope stack enabling typed `Option` ctor lowering in auto-return contexts
+    /// that mix `Some(...)` and `None` branches under dependent associated types.
+    force_typed_option_ctor_scopes: Vec<bool>,
     /// Expression-local constructor template hints recovered from nearby context.
     /// Used when no explicit/typed expected Rust type exists.
     constructor_template_hints: Vec<HashMap<String, Vec<String>>>,
@@ -589,8 +633,10 @@ impl CodeGen {
             emitted_method_conflict_keys: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
             current_struct_assoc_cpp_types: Vec::new(),
+            current_struct_method_output_types: Vec::new(),
             return_value_scopes: Vec::new(),
             return_type_hints: Vec::new(),
+            force_typed_option_ctor_scopes: Vec::new(),
             constructor_template_hints: Vec::new(),
             in_async: false,
             block_depth: 0,
@@ -687,8 +733,10 @@ impl CodeGen {
         self.emitted_method_conflict_keys.clear();
         self.emitted_non_method_member_names.clear();
         self.current_struct_assoc_cpp_types.clear();
+        self.current_struct_method_output_types.clear();
         self.return_value_scopes.clear();
         self.return_type_hints.clear();
+        self.force_typed_option_ctor_scopes.clear();
         self.constructor_template_hints.clear();
         self.enum_type_params.clear();
         self.declared_type_params.clear();
@@ -6264,6 +6312,16 @@ impl CodeGen {
             if !matches!(&s.fields, syn::Fields::Unit if methods.is_empty()) {
                 self.newline();
             }
+            let mut method_output_types = HashMap::new();
+            for impl_item in &methods {
+                let syn::ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                let syn::ReturnType::Type(_, ret_ty) = &method.sig.output else {
+                    continue;
+                };
+                method_output_types.insert(method.sig.ident.to_string(), (**ret_ty).clone());
+            }
             let prev_struct = self.current_struct.clone();
             self.current_struct = Some(name_str.clone());
             self.emitted_method_conflict_keys.push(HashSet::new());
@@ -6275,6 +6333,7 @@ impl CodeGen {
                 .push(non_method_member_names);
             self.current_struct_assoc_cpp_types
                 .push(early_assoc_type_cpp_types.clone());
+            self.current_struct_method_output_types.push(method_output_types);
 
             // Collect source modules for using-namespace inside method bodies
             let current_module = self.module_stack.join("::");
@@ -6297,6 +6356,7 @@ impl CodeGen {
                 self.emit_impl_item(impl_item);
             }
             self.merged_method_using_namespaces.clear();
+            self.current_struct_method_output_types.pop();
             self.current_struct_assoc_cpp_types.pop();
             self.emitted_non_method_member_names.pop();
             // Save emitted method names before popping for synthetic check
@@ -8952,6 +9012,10 @@ impl CodeGen {
                 };
             }
         }
+        let should_force_typed_option_ctor = return_type == "auto"
+            && self.should_soften_dependent_assoc_mode()
+            && self.return_type_is_option_like(&method.sig.output)
+            && self.block_contains_option_some_and_none_exprs(block_for_emission);
 
         // Analyze receiver to determine method kind
         let (mut qualifier, mut is_static) = match method.sig.inputs.first() {
@@ -9051,6 +9115,7 @@ impl CodeGen {
         }
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
+        self.push_force_typed_option_ctor_scope(should_force_typed_option_ctor);
         self.push_param_bindings(&method.sig.inputs);
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_deref_method_scope(is_deref_method);
@@ -9070,6 +9135,7 @@ impl CodeGen {
                 self.pop_deref_method_scope();
                 self.pop_self_receiver_ref_scope();
                 self.pop_param_bindings();
+                self.pop_force_typed_option_ctor_scope();
                 self.pop_return_type_hint();
                 self.pop_return_value_scope();
                 self.indent -= 1;
@@ -9083,6 +9149,7 @@ impl CodeGen {
         self.pop_deref_method_scope();
         self.pop_self_receiver_ref_scope();
         self.pop_param_bindings();
+        self.pop_force_typed_option_ctor_scope();
         self.pop_return_type_hint();
         self.pop_return_value_scope();
         if wrap_body_with_partial_ordering {
@@ -16602,6 +16669,57 @@ impl CodeGen {
         }
     }
 
+    fn expr_base_is_tuple_like_for_field_access(&self, base: &syn::Expr) -> bool {
+        if let Some(inferred_ty) = self.infer_simple_expr_type(base) {
+            let inferred_ty = self.peel_reference_paren_group_type(&inferred_ty);
+            if matches!(inferred_ty, syn::Type::Tuple(_)) {
+                return true;
+            }
+        }
+        let base = self.peel_paren_group_expr(base);
+        let syn::Expr::MethodCall(mc) = base else {
+            return false;
+        };
+        let receiver = self.peel_paren_group_expr(&mc.receiver);
+        let receiver_is_self = matches!(receiver, syn::Expr::Path(path)
+            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self");
+        if !receiver_is_self {
+            return false;
+        }
+        let Some(ret_ty) = self.lookup_current_struct_method_return_type(&mc.method.to_string()) else {
+            return false;
+        };
+        matches!(self.peel_reference_paren_group_type(&ret_ty), syn::Type::Tuple(_))
+    }
+
+    fn lookup_current_struct_method_return_type(&self, method_name: &str) -> Option<syn::Type> {
+        if let Some(scope) = self.current_struct_method_output_types.last() {
+            if let Some(ty) = scope.get(method_name) {
+                return Some(ty.clone());
+            }
+        }
+        let struct_name = self.current_struct.as_ref()?;
+        let candidates = [struct_name.clone(), self.scoped_type_key(struct_name)];
+        for key in candidates {
+            let Some(items) = self.impl_blocks.get(&key) else {
+                continue;
+            };
+            for item in items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                if method.sig.ident != method_name {
+                    continue;
+                }
+                let syn::ReturnType::Type(_, ret_ty) = &method.sig.output else {
+                    return None;
+                };
+                return Some((**ret_ty).clone());
+            }
+        }
+        None
+    }
+
     fn extract_callable_return_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
         let ty = self.peel_reference_paren_group_type(ty);
         match ty {
@@ -17988,6 +18106,21 @@ impl CodeGen {
 
     fn in_deref_mut_method_scope(&self) -> bool {
         self.deref_mut_method_scopes
+            .last()
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn push_force_typed_option_ctor_scope(&mut self, enabled: bool) {
+        self.force_typed_option_ctor_scopes.push(enabled);
+    }
+
+    fn pop_force_typed_option_ctor_scope(&mut self) {
+        self.force_typed_option_ctor_scopes.pop();
+    }
+
+    fn should_force_typed_option_ctor_in_current_scope(&self) -> bool {
+        self.force_typed_option_ctor_scopes
             .last()
             .copied()
             .unwrap_or(false)
@@ -20890,14 +21023,13 @@ impl CodeGen {
 
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
-        // In dependent-assoc softening modes, avoid reintroducing associated
-        // projections like `Self::Item` through explicit Option ctor typing in
-        // value position (`rusty::Option<...>(...)`). This keeps value lowering
-        // on `std::nullopt` / `std::make_optional` and avoids requiring skipped
-        // associated aliases (for example `typename IterEither::Item`).
         if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
-            return None;
+            if !self.should_force_typed_option_ctor_in_current_scope() {
+                return None;
+            }
+            return self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty);
         }
+        let mapped_inner_cpp = self.map_type(inner_ty);
 
         let needs_explicit_ctor = matches!(inner_ty, syn::Type::Reference(_))
             || self.type_mentions_in_scope_type_param(inner_ty)
@@ -20906,7 +21038,11 @@ impl CodeGen {
         if !needs_explicit_ctor {
             return None;
         }
-        Some(self.map_type(inner_ty))
+        if mapped_inner_cpp.contains("/* TODO") || type_string_has_auto_placeholder(&mapped_inner_cpp)
+        {
+            return None;
+        }
+        Some(mapped_inner_cpp)
     }
 
     fn expected_option_cpp_type_for_none(&self, expected_ty: Option<&syn::Type>) -> Option<String> {
@@ -20929,18 +21065,79 @@ impl CodeGen {
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
         if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
-            return None;
+            if !self.should_force_typed_option_ctor_in_current_scope() {
+                return None;
+            }
+            let inner_cpp =
+                self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty)?;
+            return Some(format!("rusty::Option<{}>", inner_cpp));
         }
 
         let expected_cpp = self.map_type(ty);
-        if expected_cpp.starts_with("rusty::Option<") {
+        if expected_cpp.starts_with("rusty::Option<")
+            && !expected_cpp.contains("/* TODO")
+            && !type_string_has_auto_placeholder(&expected_cpp)
+        {
             Some(expected_cpp)
         } else {
             None
         }
     }
 
-    fn is_option_none_path(&self, path: &syn::Path) -> bool {
+    fn option_softened_dependent_inner_is_safe(&self, inner_cpp: &str) -> bool {
+        if inner_cpp.contains("/* TODO") || type_string_has_auto_placeholder(inner_cpp) {
+            return false;
+        }
+        let trimmed = inner_cpp.trim();
+        if trimmed == "Item" || trimmed.starts_with("Item::") {
+            return false;
+        }
+        true
+    }
+
+    fn resolve_option_inner_cpp_type_for_forced_softened_scope(
+        &self,
+        inner_ty: &syn::Type,
+    ) -> Option<String> {
+        let mut inner_cpp = self.map_type(inner_ty);
+        if let Some(resolved_inner_cpp) = self.resolve_current_struct_assoc_projection_cpp_type(inner_ty)
+        {
+            inner_cpp = resolved_inner_cpp;
+        }
+        if !self.option_softened_dependent_inner_is_safe(&inner_cpp) {
+            return None;
+        }
+        Some(inner_cpp)
+    }
+
+    fn resolve_current_struct_assoc_projection_cpp_type(&self, ty: &syn::Type) -> Option<String> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        if tp.qself.is_some() || !self.path_is_current_struct_assoc_projection(&tp.path) {
+            return None;
+        }
+        let assoc_seg = tp.path.segments.iter().nth(1)?;
+        let mut resolved_assoc_cpp =
+            self.resolve_current_struct_assoc_cpp_type(&assoc_seg.ident.to_string())?;
+        if tp.path.segments.len() > 2 {
+            let tail = tp
+                .path
+                .segments
+                .iter()
+                .skip(2)
+                .map(|seg| escape_cpp_keyword(&seg.ident.to_string()))
+                .collect::<Vec<_>>()
+                .join("::");
+            if !tail.is_empty() {
+                resolved_assoc_cpp = format!("{}::{}", resolved_assoc_cpp, tail);
+            }
+        }
+        Some(resolved_assoc_cpp)
+    }
+
+    fn path_is_option_none(path: &syn::Path) -> bool {
         if path.segments.last().is_some_and(|seg| seg.ident == "None") {
             if path.segments.len() == 1 {
                 return true;
@@ -20964,6 +21161,32 @@ impl CodeGen {
             joined.as_str(),
             "core::option::Option::None" | "std::option::Option::None"
         )
+    }
+
+    fn path_is_option_some(path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "Some"
+                | "Option::Some"
+                | "core::option::Option::Some"
+                | "std::option::Option::Some"
+        )
+    }
+
+    fn block_contains_option_some_and_none_exprs(&self, block: &syn::Block) -> bool {
+        let mut collector = OptionSomeNoneExprCollector::default();
+        collector.visit_block(block);
+        collector.saw_both()
+    }
+
+    fn is_option_none_path(&self, path: &syn::Path) -> bool {
+        Self::path_is_option_none(path)
     }
 
     fn expected_result_type_arg<'a>(
@@ -23725,7 +23948,13 @@ impl CodeGen {
                                 .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
                             format!("{}.{}", base, emitted)
                         }
-                        syn::Member::Unnamed(idx) => format!("{}._{}", base, idx.index),
+                        syn::Member::Unnamed(idx) => {
+                            if self.expr_base_is_tuple_like_for_field_access(&f.base) {
+                                format!("std::get<{}>({})", idx.index, base)
+                            } else {
+                                format!("{}._{}", base, idx.index)
+                            }
+                        }
                     }
                 }
             }
@@ -29160,6 +29389,13 @@ impl CodeGen {
             return false;
         };
         self.type_references_current_struct_assoc(ty)
+    }
+
+    fn return_type_is_option_like(&self, output: &syn::ReturnType) -> bool {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return false;
+        };
+        self.expected_option_type_arg(Some(ty)).is_some()
     }
 
     fn type_contains_dependent_assoc(&self, ty: &syn::Type) -> bool {
@@ -45834,6 +46070,59 @@ mod tests {
             "#,
         );
         assert!(out.contains("::from_iter(rusty::iter(value))"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5125_tuple_field_projection_on_tuple_receiver_uses_std_get() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn triple(&self) -> (i32, i32, i32) { (1, 2, 3) }
+                fn head(&self) -> i32 { self.triple().0 }
+            }
+            "#,
+        );
+        assert!(out.contains("return std::get<0>(this->triple());"), "{out}");
+        assert!(!out.contains("this->triple()._0"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5125_softened_assoc_option_returns_keep_typed_option_ctor_shapes() {
+        let out = transpile_str_module(
+            r#"
+            trait IteratorLike { type Item; fn next(&mut self) -> Option<Self::Item>; }
+            struct IterEither<L, R> { left: L, right: R }
+            impl<L: IteratorLike, R: IteratorLike<Item = L::Item>> IteratorLike for IterEither<L, R> {
+                type Item = L::Item;
+                fn next(&mut self) -> Option<Self::Item> {
+                    if let Some(value) = self.left.next() {
+                        Some(value)
+                    } else {
+                        None
+                    }
+                }
+            }
+            "#,
+            "leaf5125",
+        );
+        assert!(out.contains("auto next("), "{out}");
+        assert!(
+            out.contains("rusty::Option<rusty::detail::associated_item_t<L>>(rusty::None)")
+                || out.contains("rusty::Option<typename IterEither::Item>(rusty::None)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("return rusty::Option<rusty::detail::associated_item_t<L>>(value);")
+                || out.contains("return rusty::Option<typename IterEither::Item>(value);")
+                || out.contains(
+                    "return rusty::Option<rusty::detail::associated_item_t<L>>(std::move(value));"
+                )
+                || out.contains("return rusty::Option<typename IterEither::Item>(std::move(value));"),
+            "{out}"
+        );
+        assert!(!out.contains("return std::nullopt;"), "{out}");
+        assert!(!out.contains("return std::make_optional("), "{out}");
     }
 
     #[test]

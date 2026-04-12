@@ -2338,6 +2338,11 @@ Current status snapshot:
 47. Focused `smallvec` repro after `Leaf 5.1.24` (`/tmp/rusty-parity-matrix-5-1-24-20260411d/smallvec/...`) collapses the prior post-5.1.23 `into_iter` assertion element-shape first-head family (`runner.cpp:2691/2713`) by making collect-lowering bridge of `.into_iter()` receivers conditional on unresolved/type-parameter receiver shape.
 48. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1966` (`std::tuple<...>` projected via `._0` in `triple()`/`triple_mut()` paths), with adjacent option-return-shape fallout at `runner.cpp:2285/2300` (`std::nullopt_t` vs `std::optional<...>` deduction in iterator `next`/`next_back`).
 49. Guardrail check against §11 remains satisfied for `Leaf 5.1.24`: fix stayed shared and receiver/type-shape-gated in core collect lowering, with no crate-specific ad-hoc scripts and no generated-output text patching.
+50. Focused `smallvec` repro after `Leaf 5.1.25` (`/tmp/rusty-parity-matrix-5-1-25-20260412a/smallvec/...`) collapses the prior post-5.1.24 tuple-field/option-return first-head family by:
+   - lowering tuple unnamed-field projection to `std::get<N>(...)` for tuple-like receivers (including local `self.method().N` tuple-return paths), and
+   - scoping typed `Option` ctor lowering to auto-return methods that mix `Some(...)` and `None` under dependent-assoc softening (removing mixed-branch auto-deduction drift).
+51. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2956` (`template<class T> class rusty::Box used without template arguments`), with adjacent same-family fallout at `runner.cpp:3014` and nearby Box-shape/type-surface errors (`runner.cpp:1387`).
+52. Guardrail check against §11 remains satisfied for `Leaf 5.1.25`: fixes stayed shared and AST/type-shape/context-gated in core lowering paths; no crate-specific ad-hoc scripts and no generated-output text patching were introduced.
 
 Historical active-work chain (retained for traceability):
 

@@ -4524,8 +4524,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-24-20260411d/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core collect lowering; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
-        - [ ] Leaf 5.1.25: `smallvec` Stage D tuple-field projection / option-return-shape compile-head family collapse
-          - Collapse the new post-5.1.24 deterministic `smallvec` Stage D family beginning at `runner.cpp:1966` (`std::tuple<...>` projected with `._0`/`._1` in `triple()` and `triple_mut()` paths), including adjacent `runner.cpp:2285/2300` option-like return-shape drift (`std::nullopt_t` vs `std::optional<...>` in iterator `next`/`next_back`), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
+        - [x] *done* Leaf 5.1.25: `smallvec` Stage D tuple-field projection / option-return-shape compile-head family collapse
+          - Plan/scope check: shared transpiler tuple-field/Option-lowering hardening plus focused regressions stayed below the <1000 LOC guardrail and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - unnamed tuple-field projection now emits `std::get<N>(...)` when receiver type is tuple-like (including local `self.method().N` tuple-return paths), preventing invalid `._N` emission on `std::tuple`.
+            - in constrained dependent-assoc softening mode, typed `Option` ctor lowering is now enabled only for auto-return method scopes that mix `Some(...)` and `None` expressions, so mixed-branch auto deduction no longer drifts to `std::nullopt_t` while preserving prior value-position behavior for non-mixed methods.
+            - associated helper resolution for that forced-typed path remains scoped to current-struct associated projections and shared type-lowering surfaces (no generated-output patching).
+          - Added focused regressions:
+            - `test_leaf5125_tuple_field_projection_on_tuple_receiver_uses_std_get`
+            - `test_leaf5125_softened_assoc_option_returns_keep_typed_option_ctor_shapes`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5125 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10534_deref_view_target_methods_return_value_not_target_reference -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10532_module_mode_assoc_alias_emitted_keeps_explicit_return_type -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10533_assoc_pointer_types_use_add_pointer_hardening -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10529_module_mode_option_none_avoids_assoc_ctor_type_in_value_position -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf10529_module_mode_option_some_avoids_assoc_ctor_type_in_value_position -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf434_expanded_mode_option_none_avoids_assoc_ctor_type_in_value_position -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf434_expanded_mode_option_some_avoids_assoc_ctor_type_in_value_position -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-25-20260412a --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.24 first-head family at `runner.cpp:1966` (`std::tuple<...>` projected as `._0`) with adjacent `runner.cpp:2285/2300` auto-Option return-shape drift (`std::nullopt_t` vs `std::optional<...>`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2956` (`template<class T> class rusty::Box used without template arguments`), with adjacent same-family fallout at `runner.cpp:3014` and downstream Box/iterator/runtime shape errors.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-25-20260412a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape/context-gated in core lowering paths; no generated-output text patching and no crate-specific ad-hoc scripts were introduced.
+        - [ ] Leaf 5.1.26: `smallvec` Stage D `rusty::Box` unspecialized surface compile-head family collapse
+          - Collapse the new post-5.1.25 deterministic `smallvec` Stage D family beginning at `runner.cpp:2956` / `runner.cpp:3014` (`rusty::Box` referenced without template args) and adjacent Box-shape fallout (`runner.cpp:1387` `NonNull<rusty::Box<...>>::new_`/pointer-cast mismatch), add focused fixture-agnostic regressions, then re-run `--crate smallvec`.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
