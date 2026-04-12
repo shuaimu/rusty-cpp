@@ -4,6 +4,7 @@
 #include <optional>
 #include <utility>
 #include <stdexcept>
+#include <cstdlib>
 #include <type_traits>
 
 // Option<T> - Represents an optional value
@@ -208,7 +209,14 @@ public:
         if (has_value) {
             return unwrap();
         }
-        return std::forward<F>(default_fn)();
+        using fallback_result_t = std::invoke_result_t<F&&>;
+        if constexpr (std::is_void_v<fallback_result_t>) {
+            // Diverging Rust fallbacks (for example unreachable!()) can lower as void.
+            std::forward<F>(default_fn)();
+            std::abort();
+        } else {
+            return std::forward<F>(default_fn)();
+        }
     }
 
     // Map function over the value

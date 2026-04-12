@@ -5227,6 +5227,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-54a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and shape-gated in runtime iterator adaptation; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.55: `smallvec` Stage D `Option::unwrap_or_else` divergent-fallback compile-head family collapse
+          - Plan/scope check: shared runtime `Option` surface hardening plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - runtime `Option<T>::unwrap_or_else(F&&)` now accepts divergent/void-shaped fallback callables by invoking the callable and terminating (`std::abort`) when the fallback return type is `void`, while preserving existing typed fallback behavior.
+            - this collapses the deterministic post-5.1.54 first-head family at `include/rusty/option.hpp:211` / `runner.cpp:1731` (`unwrap_or_else([&](){ return rusty::intrinsics::unreachable(); })` lowering failed because callable deduced `void` could not convert to `T`).
+          - Implemented in:
+            - `include/rusty/option.hpp`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5155_option_unwrap_or_else_accepts_void_fallback_for_some_branch`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5155 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-55a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.54 first-head family at `include/rusty/option.hpp:211` (`Option<T>::unwrap_or_else` rejecting void fallback callables in `swap_remove` unreachable-path lowering) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1838` (`DropOnPanic` class template argument deduction failure in `insert_many`), followed by downstream adapter/surface gaps (`iterable.into_iter()` at `runner.cpp:1815`, `range<int>::size_hint` surface, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-55a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and type-shape-gated in runtime `Option` behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -274,6 +274,32 @@ fn test_rc_new_and_static_clone_surface() {
 }
 
 #[test]
+fn test_leaf5155_option_unwrap_or_else_accepts_void_fallback_for_some_branch() {
+    let source = r#"
+        #include <rusty/option.hpp>
+
+        int main() {
+            rusty::Option<int> some(7);
+            int value = some.unwrap_or_else([]() {
+                // Mirrors transpiled unreachable fallback shape: callable returns void.
+            });
+            if (value != 7) {
+                return 1;
+            }
+
+            rusty::Option<int> none(rusty::None);
+            int fallback = none.unwrap_or_else([]() { return 11; });
+            if (fallback != 11) {
+                return 2;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "option_unwrap_or_else_void_fallback_surface");
+}
+
+#[test]
 fn test_slice_scan_runtime_adapter_surface() {
     let source = r#"
         #include <array>
