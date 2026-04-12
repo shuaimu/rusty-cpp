@@ -2480,6 +2480,11 @@ Current status snapshot:
    - preventing expected-associated-target struct-literal lowering from appending spurious owner template arguments (`typename SmallVec::IntoIter` no longer rewritten to `typename SmallVec::IntoIter<A>` in value-construction shape), and
    - bridging direct generic type-parameter `.into_iter()` calls through `rusty::iter(receiver)` while preserving concrete receiver `.into_iter()` member-call surfaces.
 118. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1847` (`insert_many` copies move-only payload before `ptr::write`, causing `use of deleted function ...::PanicOnDoubleDrop(const ...)`), with downstream iterator/runtime surface fallout (`runner.cpp:2081` missing `range<int>::size_hint`, comparison/runtime helper families, and related errors). Guardrail check against §11 remains satisfied for `Leaf 5.1.57` (fixes stayed shared and AST/type-context-gated in core codegen lowering, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+119. Focused `smallvec` repro after `Leaf 5.1.58` (`/tmp/rusty-parity-matrix-5-1-58d-20260412/smallvec/...`) collapses the prior post-5.1.57 move-only `insert_many` copy family by:
+   - adding mapped runtime call-argument consumption fallback for pointer write/copy surfaces during block pre-scan (so value-position locals are not emitted `const` when consumed),
+   - applying consumed-local move semantics in `match ... { Some(x) => x, None => break }` local initializer lowering (`auto element = std::move(x);`), and
+   - making `rusty::for_in` option-like next-iterator dereference mutable in non-const contexts so move-only payload loop tails are no longer forced through const-reference copy paths.
+120. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2081` (`rusty::range<int>` has no member `size_hint()` in `SmallVec::extend`), with adjacent downstream comparison/runtime-surface fallout (`runner.cpp:94/95` span ordering surface and later helper/type-surface families). Guardrail check against §11 remains satisfied for `Leaf 5.1.58` (fixes stayed shared and AST/runtime-shape-gated, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

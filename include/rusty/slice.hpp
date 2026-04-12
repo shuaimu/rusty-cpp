@@ -240,6 +240,10 @@ public:
             }
         }
 
+        decltype(auto) operator*() {
+            return deref_if_pointer(*current_);
+        }
+
         decltype(auto) operator*() const {
             return deref_if_pointer(*current_);
         }

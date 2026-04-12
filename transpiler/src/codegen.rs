@@ -10775,7 +10775,50 @@ impl CodeGen {
             style = Some(self.arg_pass_style_for_type(expected_ty));
         }
 
+        if style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)) {
+            if let Some(mapped_style) =
+                self.lookup_mapped_runtime_call_arg_pass_style_for_consumption(call, arg_idx)
+            {
+                style = Some(mapped_style);
+            }
+        }
+
         style
+    }
+
+    fn lookup_mapped_runtime_call_arg_pass_style_for_consumption(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<ArgPassStyle> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        for candidate in self.call_path_candidates(&path_expr.path) {
+            let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
+            let style = match mapped {
+                "rusty::ptr::read" => (arg_idx == 0).then_some(ArgPassStyle::Pointer),
+                "rusty::ptr::write" => match arg_idx {
+                    0 => Some(ArgPassStyle::Pointer),
+                    1 => Some(ArgPassStyle::Value),
+                    _ => None,
+                },
+                "rusty::ptr::copy" | "rusty::ptr::copy_nonoverlapping" => {
+                    if arg_idx <= 1 {
+                        Some(ArgPassStyle::Pointer)
+                    } else if arg_idx == 2 {
+                        Some(ArgPassStyle::Value)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if style.is_some() {
+                return style;
+            }
+        }
+        None
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
@@ -15460,7 +15503,14 @@ impl CodeGen {
         }
 
         let expected_ty = get_local_type(local).or(inferred_binding_ty);
-        let success_expr = {
+        let local_is_consumed = matches!(
+            &local.pat,
+            syn::Pat::Ident(pat_ident)
+                if self
+                    .consuming_method_receiver_vars
+                    .contains(&pat_ident.ident.to_string())
+        );
+        let mut success_expr = {
             let emitted = self.emit_expr_with_try_style_binding_scope(
                 &success_arm.body,
                 expected_ty,
@@ -15472,6 +15522,9 @@ impl CodeGen {
                 expected_ty,
             )
         };
+        if local_is_consumed {
+            success_expr = format!("std::move({})", success_expr);
+        }
 
         let scrutinee =
             self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
@@ -15658,6 +15711,8 @@ impl CodeGen {
                 }
 
                 if let Some(init) = &local.init {
+                    let force_move_from_consumed_ref_local = is_consumed
+                        && self.should_force_move_consumed_local_initializer_expr(&init.expr);
                     // Special case: `let x = if let Some(y) = ... { ...?... } else { val };`
                     // Emit as statement block to keep ? in outer function scope.
                     if let syn::Expr::If(if_expr) = init.expr.as_ref() {
@@ -15785,6 +15840,11 @@ impl CodeGen {
                             self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
                         } else {
                             self.emit_expr_maybe_move(&init.expr)
+                        };
+                        let expr_str = if force_move_from_consumed_ref_local {
+                            format!("std::move({})", expr_str)
+                        } else {
+                            expr_str
                         };
                         if pushed_hints {
                             self.constructor_template_hints.pop();
@@ -30782,6 +30842,14 @@ impl CodeGen {
         } else {
             inner
         }
+    }
+
+    fn should_force_move_consumed_local_initializer_expr(&self, expr: &syn::Expr) -> bool {
+        let Some(local_name) = extract_simple_local_ident(expr) else {
+            return false;
+        };
+        self.lookup_local_binding_type(&local_name)
+            .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
     }
 
     fn is_associated_const_value_path(&self, path: &syn::Path) -> bool {
@@ -48621,6 +48689,52 @@ mod tests {
         );
         assert!(out.contains("c.into_iter()"), "{out}");
         assert!(!out.contains("rusty::iter(c)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5158_ptr_write_value_arg_marks_local_as_consumed() {
+        let out = transpile_str(
+            r#"
+            fn f(mut opt: Option<Box<i32>>, p: *mut Box<i32>) {
+                let element = match opt.take() {
+                    Some(x) => x,
+                    None => return,
+                };
+                unsafe {
+                    std::ptr::write(p, element);
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto element ="), "{out}");
+        assert!(out.contains("std::move(x)"), "{out}");
+        assert!(!out.contains("auto element = x;"), "{out}");
+        assert!(!out.contains("const auto element ="), "{out}");
+        assert!(out.contains("rusty::ptr::write"), "{out}");
+        assert!(out.contains("std::move(element)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5158_match_break_initializer_moves_consumed_success_binding() {
+        let out = transpile_str(
+            r#"
+            fn f(mut iter: std::vec::IntoIter<Box<i32>>, p: *mut Box<i32>) {
+                let mut n = 0;
+                while n < 1 {
+                    let element = match iter.next() {
+                        Some(x) => x,
+                        None => break,
+                    };
+                    unsafe {
+                        std::ptr::write(p, element);
+                    }
+                    n += 1;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto element = std::move(x);"), "{out}");
+        assert!(!out.contains("auto element = x;"), "{out}");
     }
 
     #[test]

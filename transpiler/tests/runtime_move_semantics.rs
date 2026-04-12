@@ -91,6 +91,47 @@ fn test_ptr_read_const_pointer_supports_move_only_payloads() {
 }
 
 #[test]
+fn test_for_in_next_iter_range_moves_move_only_items() {
+    let source = r#"
+        #include <rusty/slice.hpp>
+        #include <utility>
+
+        struct MoveOnly {
+            int value;
+            explicit MoveOnly(int v) : value(v) {}
+            MoveOnly(const MoveOnly&) = delete;
+            MoveOnly& operator=(const MoveOnly&) = delete;
+            MoveOnly(MoveOnly&&) noexcept = default;
+            MoveOnly& operator=(MoveOnly&&) noexcept = default;
+        };
+
+        struct MoveOnlyIter {
+            int state = 0;
+
+            rusty::Option<MoveOnly> next() {
+                if (state == 0) {
+                    state = 1;
+                    return rusty::Option<MoveOnly>(MoveOnly(9));
+                }
+                return rusty::Option<MoveOnly>(rusty::None);
+            }
+        };
+
+        int main() {
+            MoveOnlyIter iter{};
+            int sum = 0;
+            for (auto&& item : rusty::for_in(iter)) {
+                MoveOnly moved = std::move(item);
+                sum += moved.value;
+            }
+            return sum == 9 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "for_in_next_iter_move_only");
+}
+
+#[test]
 fn test_mem_replace_supports_non_assignable_move_only_payloads() {
     let source = r#"
         #include <rusty/mem.hpp>

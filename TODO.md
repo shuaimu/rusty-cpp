@@ -5289,6 +5289,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-56a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core codegen paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.58: `smallvec` Stage D `insert_many` move-only payload copy compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime updates plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - value-call consumption pre-scan now has mapped runtime pass-style fallback for pointer write/copy functions (`rusty::ptr::write`, `rusty::ptr::copy`, `rusty::ptr::copy_nonoverlapping`), so value-position local arguments are marked as consumed even when signature metadata is otherwise unavailable.
+            - `let`-binding lowering for `match ... { Some(x) => x, None => break }` initializer shapes now applies move semantics when the target local is consumed later in the block (for example `auto element = std::move(x);` in `insert_many`).
+            - runtime `rusty::for_in` option-like next-iterator adapter (`next_iter_range`) now exposes mutable dereference (`operator*()`) for non-const iterator contexts, preventing const-reference iteration of move-only payloads in `for element in iter` tails.
+            - this collapses the deterministic post-5.1.57 move-only copy family at `runner.cpp:1847` (copy before `ptr::write`) and adjacent iterator-tail copy fallout at `runner.cpp:1860`.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+            - `include/rusty/slice.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5158_ptr_write_value_arg_marks_local_as_consumed`
+            - `codegen::tests::test_leaf5158_match_break_initializer_moves_consumed_success_binding`
+            - `runtime_move_semantics::test_for_in_next_iter_range_moves_move_only_items`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5158 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler for_in_next_iter_range_moves_move_only_items -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-58d-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.57 first-head family at `runner.cpp:1847` (`insert_many` move-only payload copy before `ptr::write`) and adjacent `runner.cpp:1860` iterator-tail copy family are collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2081` (`rusty::range<int>` missing `.size_hint()` in `SmallVec::extend`), with adjacent downstream comparison/runtime-surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-58d-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-shape-gated; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
