@@ -349,6 +349,21 @@ struct associated_item_impl<Container, false, true> {
 template<typename Container>
 using associated_item_t = typename associated_item_impl<Container>::type;
 
+template<typename T>
+constexpr size_t type_level_size() {
+    using Raw = std::remove_cv_t<std::remove_reference_t<T>>;
+    if constexpr (requires { std::tuple_size<Raw>::value; }) {
+        return std::tuple_size_v<Raw>;
+    } else if constexpr (requires { Raw::size(); }) {
+        return static_cast<size_t>(Raw::size());
+    } else {
+        static_assert(
+            collect_range_dependent_false_v<Raw>,
+            "type_level_size requires tuple_size or static size() surface");
+        return 0;
+    }
+}
+
 template<typename Ptr>
 using raw_ptr_t = std::remove_cv_t<std::remove_reference_t<Ptr>>;
 

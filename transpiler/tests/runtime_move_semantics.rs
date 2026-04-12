@@ -365,6 +365,25 @@ fn test_slice_get_runtime_helper_surface() {
 }
 
 #[test]
+fn test_array_type_level_size_helper_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+
+        int main() {
+            constexpr size_t n = rusty::detail::type_level_size<std::array<int, 3>>();
+            static_assert(n == 3, "type_level_size should use tuple_size for std::array");
+            if (n != 3) {
+                return 1;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "array_type_level_size_surface");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

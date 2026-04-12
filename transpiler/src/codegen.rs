@@ -24085,6 +24085,25 @@ impl CodeGen {
                 }
             }
         }
+        // Rust generic associated static-style size call shape (`A::size()`).
+        // For type parameters bound to array-like traits this is not a valid C++
+        // static member call on `std::array`, so lower to a shared type-level helper.
+        if let syn::Expr::Path(func_path) = call.func.as_ref() {
+            if func_path.qself.is_none()
+                && call.args.is_empty()
+                && func_path.path.segments.len() == 2
+                && func_path.path.segments[1].ident == "size"
+                && matches!(func_path.path.segments[0].arguments, syn::PathArguments::None)
+            {
+                let owner_name = func_path.path.segments[0].ident.to_string();
+                if self.is_type_param_in_scope(&owner_name) {
+                    return format!(
+                        "rusty::detail::type_level_size<{}>()",
+                        escape_cpp_keyword(&owner_name)
+                    );
+                }
+            }
+        }
 
         let func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         if matches!(
@@ -47917,6 +47936,35 @@ mod tests {
         );
         assert!(out.contains("s.get(1)"), "{out}");
         assert!(!out.contains("rusty::get(s, 1)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5150_type_param_static_size_call_lowers_to_type_level_helper() {
+        let out = transpile_str(
+            r#"
+            fn f<A>() -> usize {
+                A::size()
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::detail::type_level_size<A>()"), "{out}");
+        assert!(!out.contains("A::size()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5150_module_size_function_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            mod m {
+                pub fn size() -> usize { 1 }
+            }
+            fn f() -> usize {
+                m::size()
+            }
+        "#,
+        );
+        assert!(out.contains("return m::size()"), "{out}");
+        assert!(!out.contains("type_level_size<m>()"), "{out}");
     }
 
     #[test]

@@ -5104,6 +5104,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-49c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/container-shape-gated in transpiler/runtime surfaces; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.50: `smallvec` Stage D type-parameter static `A::size()` call-shape compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime type-level-size hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - call-lowering now rewrites type-parameter static call shape `A::size()` (owner is a type parameter in scope, no qself, no call args, two-segment path) to shared runtime helper form `rusty::detail::type_level_size<A>()`.
+            - unrelated module/static functions named `size()` (for example `m::size()`) remain unchanged.
+            - runtime `include/rusty/array.hpp` now provides shared `rusty::detail::type_level_size<T>()` helper with tuple-size and static-member-size detection so type-level container capacity checks no longer require direct static member-call emission.
+            - this collapses the deterministic post-5.1.49 first-head family at `runner.cpp:1466` (`A::size()` emitted as invalid static member-call shape in `SmallVec::new_/inline_capacity` paths).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added type-parameter-shape-gated `A::size()` rewrite to `rusty::detail::type_level_size<A>()`.
+              - added focused regressions:
+                - `test_leaf5150_type_param_static_size_call_lowers_to_type_level_helper`
+                - `test_leaf5150_module_size_function_call_is_unchanged`
+            - `include/rusty/array.hpp`:
+              - added shared runtime helper `rusty::detail::type_level_size<T>()`.
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - added runtime regression `test_array_type_level_size_helper_surface`.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5150 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_array_type_level_size_helper_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-50b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.49 first-head family at `runner.cpp:1466` (`A::size()` static-call shape) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/array.hpp:185` (`operator==(const L&, const std::array<...>&)` assumes `lhs.as_slice()` exposes `.size()`/`.begin()` directly; `SmallVec::as_slice()` shape violates this), followed by downstream drain/`NonNull` surface gaps and related errors.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-50b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and narrowly shape-gated in transpiler/runtime type-level-size handling; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
