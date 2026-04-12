@@ -53,6 +53,14 @@ template<typename T>
 class NonNull {
 private:
     T* ptr_;
+    struct CastProxy {
+        T* ptr_;
+
+        template<typename U>
+        constexpr operator NonNull<U>() const noexcept {
+            return NonNull<U>(reinterpret_cast<U*>(ptr_));
+        }
+    };
 
 public:
     constexpr explicit NonNull(T* ptr) noexcept : ptr_(ptr) {}
@@ -74,6 +82,18 @@ public:
 
     constexpr T& as_mut() noexcept {
         return *ptr_;
+    }
+
+    // Rust `NonNull::cast` supports contextual target inference in chains
+    // like `NonNull::new(ptr).unwrap().cast()`. The proxy overload keeps
+    // that usage valid while the template overload supports explicit targets.
+    constexpr CastProxy cast() const noexcept {
+        return CastProxy{ptr_};
+    }
+
+    template<typename U>
+    constexpr NonNull<U> cast() const noexcept {
+        return NonNull<U>(reinterpret_cast<U*>(ptr_));
     }
 
     friend constexpr bool operator==(NonNull<T> lhs, NonNull<T> rhs) noexcept {

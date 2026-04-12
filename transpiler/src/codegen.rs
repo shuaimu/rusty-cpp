@@ -19870,6 +19870,28 @@ impl CodeGen {
         )
     }
 
+    fn is_known_alloc_layout_type(&self, ty: &syn::Type) -> bool {
+        let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
+        if canonical == "rusty::alloc::Layout" {
+            return true;
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let segs: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        match segs.as_slice() {
+            [single] => single == "Layout",
+            [root, module, leaf, ..] => {
+                matches!(root.as_str(), "std" | "core")
+                    && module == "alloc"
+                    && leaf == "Layout"
+            }
+            [root, leaf] => root == "alloc" && leaf == "Layout",
+            _ => false,
+        }
+    }
+
     fn expected_type_is_string_view(&self, expected_ty: Option<&syn::Type>) -> bool {
         let Some(expected_ty) = expected_ty else {
             return false;
@@ -20427,6 +20449,26 @@ impl CodeGen {
         if mc.method == "len" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::len({})", receiver);
+        }
+        if matches!(mc.method.to_string().as_str(), "size" | "align")
+            && mc.args.is_empty()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .is_some_and(|ty| self.is_known_alloc_layout_type(&ty))
+        {
+            let field_name = if mc.method == "size" { "size" } else { "align" };
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                "->"
+            } else {
+                "."
+            };
+            return format!("{}{}{}", receiver, member_op, field_name);
         }
         // Rust `str::as_bytes()` → `rusty::as_bytes()`.
         // In C++, std::string_view doesn't have as_bytes(), so we use a helper.
@@ -44742,6 +44784,28 @@ mod tests {
         assert!(out.contains("write = rusty::ptr::add(write, 1);"));
         assert!(out.contains("rusty::ptr::write("));
         assert!(!out.contains("write = write.add(1);"));
+    }
+
+    #[test]
+    fn test_leaf5176_alloc_layout_size_and_align_method_calls_lower_to_field_surface() {
+        let out = transpile_str(
+            r#"
+            use std::alloc::Layout;
+
+            fn f(layout: Layout) -> usize {
+                if layout.size() > 0 && layout.align() > 0 {
+                    layout.size()
+                } else {
+                    0
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("layout.size > 0"), "{out}");
+        assert!(out.contains("layout.align > 0"), "{out}");
+        assert!(out.contains("return layout.size;"), "{out}");
+        assert!(!out.contains("layout.size()"), "{out}");
+        assert!(!out.contains("layout.align()"), "{out}");
     }
 
     #[test]

@@ -995,6 +995,37 @@ fn test_ptr_nonnull_as_mut_supports_mutable_reference_surface() {
 }
 
 #[test]
+fn test_ptr_nonnull_cast_supports_contextual_and_explicit_target_surfaces() {
+    let source = r#"
+        #include <cstdint>
+        #include <rusty/ptr.hpp>
+
+        struct Pair {
+            std::uint8_t a;
+            std::uint8_t b;
+        };
+
+        int main() {
+            Pair pair{1, 2};
+            auto raw = rusty::ptr::NonNull<std::uint8_t>::new_unchecked(&pair.a);
+
+            // Contextual cast shape used by transpiled `...unwrap().cast()` chains.
+            rusty::ptr::NonNull<Pair> typed_ctx = raw.cast();
+            auto* pair_ptr = typed_ctx.as_ptr();
+
+            // Explicit target cast remains available.
+            auto typed_explicit = raw.cast<Pair>();
+
+            const bool ok_ctx = pair_ptr == reinterpret_cast<Pair*>(&pair.a);
+            const bool ok_explicit = typed_explicit.as_ptr() == reinterpret_cast<Pair*>(&pair.a);
+            return (ok_ctx && ok_explicit) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "ptr_nonnull_cast_surfaces");
+}
+
+#[test]
 fn test_as_ptr_const_value_supports_nonconst_as_ptr_const_pointer_surface() {
     let source = r#"
         #include <rusty/array.hpp>

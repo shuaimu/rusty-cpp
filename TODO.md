@@ -5729,7 +5729,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-75a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core struct-literal generic recovery paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.76: `smallvec` Stage D `reserve` growth call-surface mismatch around `layout`/`NonNull` (`layout.size()` callable-shape + `NonNull::cast` member-surface fallout at `runner.cpp:1663/1669/1673`) compile-head family collapse
+        - [x] *done* Leaf 5.1.76: `smallvec` Stage D `reserve` growth call-surface mismatch around `layout`/`NonNull` (`layout.size()` callable-shape + `NonNull::cast` member-surface fallout at `runner.cpp:1663/1669/1673`) compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared call-surface hardening in transpiler/runtime:
+            - `transpiler/src/codegen.rs`: added alloc-layout receiver typing gate and lowered zero-arg `layout.size()` / `layout.align()` method surfaces to field surfaces (`layout.size` / `layout.align`) with correct `.`/`->` emission.
+            - `include/rusty/ptr.hpp`: extended `rusty::NonNull<T>` cast surface with contextual `.cast()` (conversion-proxy based) and explicit `.cast<U>()` overloads so transpiled `NonNull::new(...).unwrap().cast()`/typed-cast paths both compile.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5176_alloc_layout_size_and_align_method_calls_lower_to_field_surface`
+            - `runtime_move_semantics::test_ptr_nonnull_cast_supports_contextual_and_explicit_target_surfaces`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf5176_alloc_layout_size_and_align_method_calls_lower_to_field_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_ptr_nonnull_cast_supports_contextual_and_explicit_target_surfaces -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-76a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.75 first-head family at `runner.cpp:1663/1669/1673` (`layout.size()` callable-shape + missing `NonNull::cast` surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1530` (`rusty::MaybeUninit<A>::new_(...)` missing member surface in `SmallVec::from_buf`), with adjacent downstream helper/runtime fallout (`mem::swap` pointer-shape mismatch, iterator `size_hint` surface, `Result::map_err` error-payload unification families).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-76a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.77: `smallvec` Stage D `MaybeUninit` constructor surface gap in `from_buf` (`rusty::MaybeUninit<A>::new_` missing at `runner.cpp:1530`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

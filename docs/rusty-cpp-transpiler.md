@@ -2561,6 +2561,11 @@ Current status snapshot:
    - allowing `DropOnPanic { start, ... }` to specialize as payload item type (`DropOnPanic<associated_item_t<A>>`) when `start` is `*mut A::Item`, instead of forcing owner-type fallback (`DropOnPanic<A>`),
    - preserving shared transpiler lowering (no crate-specific rewriting).
 154. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1663/1669/1673` (`reserve` growth path emits `layout.size()` callable-shape mismatch and `NonNull::cast` member-surface fallout), with adjacent downstream helper/runtime families (`MaybeUninit::new_`, `Result::map_err` payload unification, iterator `size_hint`). Guardrail check against §11 remains satisfied for `Leaf 5.1.75` (fixes stayed shared and AST/type-shape-gated in struct-literal generic recovery paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+155. Focused `smallvec` repro after `Leaf 5.1.76` (`/tmp/rusty-parity-matrix-5-1-76a-20260412/smallvec/...`) collapses the prior post-5.1.75 `reserve` growth `layout`/`NonNull` call-surface family by:
+   - lowering zero-arg `layout.size()` / `layout.align()` method-call surfaces to field access (`layout.size`, `layout.align`) when the receiver is alloc `Layout`,
+   - extending shared runtime `rusty::NonNull<T>` cast surface to support both contextual `.cast()` and explicit `.cast<U>()` forms used by transpiled reserve/growth paths,
+   - preserving shared transpiler/runtime lowering (no crate-specific rewriting).
+156. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1530` (`rusty::MaybeUninit<A>::new_(...)` missing member surface in `SmallVec::from_buf`), with adjacent downstream helper/runtime families (`mem::swap` pointer-shape mismatch, iterator `size_hint` surface, `Result::map_err` payload unification). Guardrail check against §11 remains satisfied for `Leaf 5.1.76` (fixes stayed shared and AST/type-shape-gated in core lowering/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
