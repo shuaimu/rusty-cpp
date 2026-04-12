@@ -20206,6 +20206,12 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::iter_mut({})", receiver);
         }
+        if mc.method == "into_iter" && mc.args.is_empty() {
+            if self.should_bridge_direct_into_iter_receiver_to_iter(&mc.receiver) {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                return format!("rusty::iter({})", receiver);
+            }
+        }
         if mc.method == "collect" && mc.args.is_empty() {
             // For unresolved generic receivers, bridge `.into_iter()` through
             // `rusty::iter(...)` since concrete C++ method surfaces may not exist.
@@ -21582,11 +21588,13 @@ impl CodeGen {
         struct_expr: &syn::ExprStruct,
         expected_ty: Option<&syn::Type>,
     ) -> String {
-        let mut target_name = self
-            .expected_struct_literal_cpp_type(struct_expr, expected_ty)
+        let expected_target_name = self.expected_struct_literal_cpp_type(struct_expr, expected_ty);
+        let has_expected_target_name = expected_target_name.is_some();
+        let mut target_name = expected_target_name
             .or_else(|| self.try_emit_data_enum_variant_struct_literal_target(&struct_expr.path))
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
-        if !target_name.contains('<')
+        if !has_expected_target_name
+            && !target_name.contains('<')
             && struct_expr
                 .path
                 .segments
@@ -27424,6 +27432,25 @@ impl CodeGen {
         let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
             // Preserve historical fallback behavior for unresolved receiver shapes.
             return true;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+    }
+
+    fn should_bridge_direct_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
+        if self.is_iterator_like_receiver_expr(receiver)
+            || self.is_probably_iterator_receiver_expr(receiver)
+        {
+            return false;
+        }
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
         };
         let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
         let syn::Type::Path(tp) = receiver_ty else {
@@ -36345,6 +36372,50 @@ mod tests {
             !out.contains("const auto guard = DropOnPanic{")
                 && !out.contains("const auto guard = DropOnPanic("),
             "guard construction should not rely on unspecialized CTAD path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5157_self_assoc_into_iter_struct_literal_avoids_spurious_alias_template_args() {
+        let out = transpile_str(
+            r#"
+            trait IntoIterLike {
+                type IntoIter;
+                fn into_iter(self) -> Self::IntoIter;
+            }
+            struct IntoIter<A> {
+                data: A,
+                current: usize,
+                end: usize,
+            }
+            struct S<A> {
+                data: A,
+            }
+            impl<A> IntoIterLike for S<A> {
+                type IntoIter = IntoIter<A>;
+                fn into_iter(self) -> Self::IntoIter {
+                    IntoIter { data: self.data, current: 0, end: 0 }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("using IntoIter = IntoIter<A>;")
+                || out.contains("using IntoIter = ::IntoIter<A>;"),
+            "self-associated IntoIter alias should be preserved, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("return typename S::IntoIter(")
+                || out.contains("return typename S::IntoIter{"),
+            "struct literal should lower through associated alias target, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("return typename S::IntoIter<A>(")
+                && !out.contains("return typename S::IntoIter<A>{"),
+            "associated alias target should not gain spurious template args, got:\n{}",
             out
         );
     }
@@ -48515,6 +48586,41 @@ mod tests {
             "#,
         );
         assert!(out.contains("::from_iter(rusty::iter(value))"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5157_generic_into_iter_binding_uses_iter_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f<I>(iterable: I)
+            where
+                I: IntoIterator<Item = i32>,
+            {
+                let iter = iterable.into_iter();
+                let _ = iter.size_hint();
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::iter(iterable)"), "{out}");
+        assert!(!out.contains("iterable.into_iter()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5157_concrete_into_iter_binding_preserves_member_surface() {
+        let out = transpile_str(
+            r#"
+            struct C;
+            impl C {
+                fn into_iter(self) -> std::ops::Range<i32> { 0..1 }
+            }
+            fn f(c: C) {
+                let iter = c.into_iter();
+                let _ = iter.next();
+            }
+            "#,
+        );
+        assert!(out.contains("c.into_iter()"), "{out}");
+        assert!(!out.contains("rusty::iter(c)"), "{out}");
     }
 
     #[test]

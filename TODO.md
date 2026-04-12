@@ -5267,6 +5267,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-56a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core codegen paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.57: `smallvec` Stage D associated-alias struct-literal + generic `into_iter` bridge compile-head family collapse
+          - Plan/scope check: shared transpiler-only lowering updates plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - expected-type-guided struct-literal lowering no longer appends spurious local owner template arguments when the literal target is already resolved from expected associated-alias context (fixes `return typename SmallVec::IntoIter<A>(...)` emission shape).
+            - direct `.into_iter()` method-call lowering now bridges in-scope generic type-parameter receivers via `rusty::iter(receiver)` (without changing concrete receiver call shapes), collapsing missing-member `.into_iter()` failures for iterator-like generic inputs in `insert_many`.
+            - this collapses the deterministic post-5.1.56 first-head family at `runner.cpp:2152` (`SmallVec::into_iter` associated-alias constructor surface mismatch) and the immediate downstream `runner.cpp:1815` missing-member `iterable.into_iter()` family.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5157_self_assoc_into_iter_struct_literal_avoids_spurious_alias_template_args`
+            - `codegen::tests::test_leaf5157_generic_into_iter_binding_uses_iter_bridge`
+            - `codegen::tests::test_leaf5157_concrete_into_iter_binding_preserves_member_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5157 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-56a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.56 first-head family at `runner.cpp:2152` (`typename SmallVec::IntoIter<A>(...)` associated-alias parse/type mismatch) and immediate `runner.cpp:1815` missing `.into_iter()` generic receiver family are collapsed from deterministic first-head slots.
+            - new first hard-error family now starts at `runner.cpp:1847` (`insert_many` copy of move-only payload before `ptr::write`, `use of deleted function ...::PanicOnDoubleDrop(const ...)`), with downstream `size_hint`/comparison/runtime surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-56a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core codegen paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
