@@ -960,6 +960,7 @@ auto split_at(std::span<Elem, Extent> span, Mid mid) {
 }
 
 template<typename Container, typename Mid>
+requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 auto split_at(Container& container, Mid mid) {
     return split_at(slice_full(container), std::forward<Mid>(mid));
 }
@@ -995,16 +996,20 @@ auto slice_to_inclusive(Container& container, End end) {
     return slice_to(container, end_index + 1);
 }
 
+template<typename Start>
+auto slice_from(std::string_view container, Start start) {
+    const size_t start_index = detail::checked_index(start);
+    detail::validate_slice_bounds(container, start_index, container.size());
+    return container.substr(start_index);
+}
+
 template<typename Container, typename Start>
+requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 auto slice_from(Container& container, Start start) {
     auto span = slice_full(container);
     const size_t start_index = detail::checked_index(start);
     detail::validate_slice_bounds(span, start_index, span.size());
-    if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
-        return container.substr(start_index);
-    } else {
-        return span.subspan(start_index);
-    }
+    return span.subspan(start_index);
 }
 
 template<typename Container, typename Start, typename End>

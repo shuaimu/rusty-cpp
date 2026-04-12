@@ -10631,10 +10631,12 @@ impl CodeGen {
         if !owner_looks_like_type {
             return None;
         }
-        let expected = self
-            .lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr)
-            .or_else(|| self.lookup_method_arg_expected_type(&method, arg_idx).cloned())
-            ?;
+        // For explicit associated calls (`Type::method(...)`), avoid falling back
+        // to method-name-only signatures from unrelated owners. That fallback can
+        // cross-wire hints for common names like `new_unchecked` and trigger
+        // invalid coercions at call sites.
+        let expected =
+            self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr)?;
         if let Some(substitutions) =
             self.owner_segment_type_arg_substitutions(&path_expr.path, owner_seg_idx)
         {
@@ -11609,12 +11611,12 @@ impl CodeGen {
             }
             self.writeln(&format!("if ({}) {{", arm_condition));
             self.indent += 1;
+            for binding_line in arm_binding_lines {
+                self.writeln(&binding_line);
+            }
             if let Some(payload_condition) = &arm_payload_condition {
                 self.writeln(&format!("if ({}) {{", payload_condition));
                 self.indent += 1;
-            }
-            for binding_line in arm_binding_lines {
-                self.writeln(&binding_line);
             }
 
             if let Some(guard_condition) = arm_guard_condition {
@@ -15941,7 +15943,17 @@ impl CodeGen {
                 };
 
                 let is_consumed = self.consuming_method_receiver_vars.contains(&name_str);
-                let qualifier = if is_mut
+                // `let ref ... = expr` should stay a reference binding shape even if
+                // conservative move heuristics classify the local as "consumed".
+                let emits_ref_binding = pat_ident.by_ref.is_some()
+                    && !(is_mut
+                        && local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| self.is_rvalue_expr(&init.expr)));
+                let qualifier = if emits_ref_binding {
+                    if is_mut { "" } else { "const " }
+                } else if is_mut
                     || is_consumed
                     || inferred_mut_reference_binding
                     || type_str.trim_start().starts_with("const ")
@@ -15962,13 +15974,7 @@ impl CodeGen {
                 // Exception: `let ref mut r = rvalue_expr;` — when the init is
                 // an rvalue (e.g., function call), binding a mutable reference
                 // to it is invalid in C++. Emit as owned value instead.
-                let ref_suffix = if pat_ident.by_ref.is_some()
-                    && !(is_mut
-                        && local
-                            .init
-                            .as_ref()
-                            .is_some_and(|init| self.is_rvalue_expr(&init.expr)))
-                {
+                let ref_suffix = if emits_ref_binding {
                     "&"
                 } else {
                     ""
@@ -25937,6 +25943,12 @@ impl CodeGen {
             .join("::");
         let last = path.segments.last()?.ident.to_string();
         let is_probably_callable = if path.segments.len() == 1 {
+            // A local binding shadows any same-named function path for this scope.
+            // Detect by-name local bindings even when their inferred type is not yet
+            // available, otherwise value arguments can be mis-lowered as callables.
+            if self.lookup_local_binding_cpp_name(&last).is_some() {
+                return None;
+            }
             if self.lookup_local_binding_type(&last).is_some() || self.is_local_type_name_in_scope(&last) {
                 return None;
             }
@@ -42096,6 +42108,31 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf523_local_value_shadowing_fn_name_is_not_lowered_as_callable() {
+        let out = transpile_str(
+            r#"
+            fn comparator() -> i32 { 0 }
+            fn sink(_: i32) {}
+            fn f() {
+                let comparator = 7;
+                sink(comparator);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("sink(std::move(comparator));")
+                || out.contains("sink(std::move(comparator_shadow1));"),
+            "value argument should lower as moved local, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("sink([&](auto&&... _args)"),
+            "shadowed value path must not be wrapped as callable lambda, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf8_generic_fn_with_fn_path_arg_emits_explicit_template_args() {
         // Regression test for bitflags parity: when calling a generic function like
         // `case<T>(expected: T::Bits, inherent: impl FnOnce() -> T)` with a function path
@@ -42238,6 +42275,55 @@ mod tests {
         assert!(
             !out.contains("std::make_tuple(value, 1 << 1)"),
             "tuple element context should not degrade to untyped make_tuple, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf523_associated_new_unchecked_does_not_apply_name_only_method_hint() {
+        let out = transpile_str(
+            r#"
+            use std::num::NonZeroUsize;
+            unsafe fn f(len: usize) -> NonZeroUsize {
+                NonZeroUsize::new_unchecked(len)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("NonZeroUsize::new_unchecked(std::move(len))"),
+            "associated call should keep raw value argument, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("to_string_view(len)"),
+            "associated call should not inherit unrelated `&str` method hints, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf523_runtime_match_payload_value_is_materialized_before_condition() {
+        let out = transpile_str(
+            r#"
+            fn f(input: &str) -> i32 {
+                match input.as_bytes().get(0) {
+                    Some(b'0'..=b'9') => 1,
+                    _ => 0,
+                }
+            }
+            "#,
+        );
+        let decl = "auto _mv0 = std::as_const(_m).unwrap();";
+        let cond = "if ((_mv0 >= static_cast<uint8_t>(48) && _mv0 <= static_cast<uint8_t>(57)))";
+        let decl_idx = out
+            .find(decl)
+            .expect("expected runtime payload materialization");
+        let cond_idx = out
+            .find(cond)
+            .expect("expected range condition using payload variable");
+        assert!(
+            decl_idx < cond_idx,
+            "payload variable must be declared before payload condition, got:\n{}",
             out
         );
     }
@@ -54740,6 +54826,26 @@ mod tests {
         assert!(
             out.contains("auto string"),
             "ref mut binding to rvalue should emit 'auto string ='\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf523_ref_binding_to_rvalue_stays_const_reference_shape() {
+        let out = transpile_str(
+            r#"
+            fn prerelease(_s: &str) {}
+            fn f() {
+                let mut s = String::new();
+                let ref r = s.repeat(2);
+                prerelease(r);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("const auto& r = s.repeat(2);")
+                || out.contains("const auto& r_shadow1 = s.repeat(2);"),
+            "immutable ref-binding to rvalue should emit const reference local, got:\n{}",
+            out
         );
     }
 
