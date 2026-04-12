@@ -307,6 +307,14 @@ pub struct CodeGen {
     /// Collected method argument type hints keyed by method name.
     /// Mixed signatures are softened to `None` per slot.
     method_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    /// Collected method argument type hints keyed by `Owner::method`.
+    /// This preserves owner-specific signatures for associated-call fallback
+    /// when method names are globally ambiguous (`from`, `new`, etc).
+    owner_method_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    /// Raw owner-scoped method argument signatures keyed by `Owner::method`.
+    /// Used when merged owner hints are ambiguous (`None`) so call-site shape
+    /// can choose a compatible overload hint without losing type context.
+    owner_method_arg_expected_type_variants: HashMap<String, Vec<Vec<Option<syn::Type>>>>,
     /// Set of variable names that are reassigned in the current block.
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
@@ -599,6 +607,8 @@ impl CodeGen {
             function_return_types: HashMap::new(),
             method_arg_pass_styles: HashMap::new(),
             method_arg_expected_types: HashMap::new(),
+            owner_method_arg_expected_types: HashMap::new(),
+            owner_method_arg_expected_type_variants: HashMap::new(),
             reassigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
@@ -776,6 +786,8 @@ impl CodeGen {
         self.function_return_types.clear();
         self.method_arg_pass_styles.clear();
         self.method_arg_expected_types.clear();
+        self.owner_method_arg_expected_types.clear();
+        self.owner_method_arg_expected_type_variants.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
         self.in_progress_local_initializers.clear();
@@ -3920,6 +3932,34 @@ impl CodeGen {
                     self.record_function_return_type(&scoped_name, return_ty);
                 }
                 syn::Item::Impl(impl_block) => {
+                    let mut owner_keys: Vec<String> = Vec::new();
+                    if let syn::Type::Path(tp) = impl_block.self_ty.as_ref()
+                        && tp.qself.is_none()
+                        && !tp.path.segments.is_empty()
+                    {
+                        let joined = tp
+                            .path
+                            .segments
+                            .iter()
+                            .map(|seg| seg.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        if !joined.is_empty() {
+                            owner_keys.push(joined.clone());
+                        }
+                        if let Some(last) = tp.path.segments.last() {
+                            owner_keys.push(last.ident.to_string());
+                        }
+                        if tp.path.segments.len() == 1 && !module_path.is_empty() {
+                            owner_keys.push(format!(
+                                "{}::{}",
+                                module_path.join("::"),
+                                tp.path.segments[0].ident
+                            ));
+                        }
+                        let mut dedup = HashSet::new();
+                        owner_keys.retain(|key| dedup.insert(key.clone()));
+                    }
                     for impl_item in &impl_block.items {
                         let syn::ImplItem::Fn(method) = impl_item else {
                             continue;
@@ -3930,7 +3970,14 @@ impl CodeGen {
                         self.record_method_arg_pass_styles(&method_name, styles);
                         let expected_types =
                             self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true);
-                        self.record_method_arg_expected_types(&method_name, expected_types);
+                        self.record_method_arg_expected_types(&method_name, expected_types.clone());
+                        for owner in &owner_keys {
+                            self.record_owner_method_arg_expected_types(
+                                owner,
+                                &method_name,
+                                expected_types.clone(),
+                            );
+                        }
                     }
                 }
                 syn::Item::Mod(m) => {
@@ -4142,6 +4189,30 @@ impl CodeGen {
             .method_arg_expected_types
             .entry(method_name.to_string())
         {
+            Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
+            Entry::Vacant(vac) => {
+                vac.insert(expected);
+            }
+        }
+    }
+
+    fn owner_method_key(owner: &str, method_name: &str) -> String {
+        format!("{}::{}", owner, method_name)
+    }
+
+    fn record_owner_method_arg_expected_types(
+        &mut self,
+        owner: &str,
+        method_name: &str,
+        expected: Vec<Option<syn::Type>>,
+    ) {
+        use std::collections::hash_map::Entry;
+        let key = Self::owner_method_key(owner, method_name);
+        self.owner_method_arg_expected_type_variants
+            .entry(key.clone())
+            .or_default()
+            .push(expected.clone());
+        match self.owner_method_arg_expected_types.entry(key) {
             Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
             Entry::Vacant(vac) => {
                 vac.insert(expected);
@@ -4614,6 +4685,159 @@ impl CodeGen {
             .get(method_name)
             .and_then(|expected| expected.get(arg_idx))
             .and_then(|ty| ty.as_ref())
+    }
+
+    fn type_is_vec_like_expected_type(&self, ty: &syn::Type) -> bool {
+        let mapped = self.map_type(self.peel_reference_paren_group_type(ty));
+        mapped.starts_with("rusty::Vec<") || mapped.starts_with("std::vector<")
+    }
+
+    fn call_path_is_slice_full(path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(joined.as_str(), "slice_full" | "rusty::slice_full")
+    }
+
+    fn expr_looks_slice_like_for_overload_resolution(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        if let Some(ty) = self.infer_simple_expr_type(expr)
+            && (self.type_is_reference_to_slice(&ty) || self.span_element_type(&ty).is_some())
+        {
+            return true;
+        }
+        match expr {
+            syn::Expr::Array(_) => true,
+            syn::Expr::Reference(r) => {
+                matches!(self.peel_paren_group_expr(&r.expr), syn::Expr::Array(_))
+            }
+            syn::Expr::Index(idx) => self.is_slice_range_index_expr(&idx.index),
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+                    return false;
+                };
+                Self::call_path_is_slice_full(&path_expr.path)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_looks_vec_like_for_overload_resolution(&self, expr: &syn::Expr) -> bool {
+        if let Some(ty) = self.infer_simple_expr_type(expr) {
+            let mapped = self.map_type(&ty);
+            if mapped.starts_with("rusty::Vec<") || mapped.starts_with("std::vector<") {
+                return true;
+            }
+        }
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return false;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        joined == "Vec::new_"
+            || joined == "rusty::Vec::new_"
+            || joined.ends_with("::boxed::into_vec")
+            || joined.ends_with("::into_vec")
+    }
+
+    fn expr_looks_array_like_for_overload_resolution(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        if let Some(ty) = self.infer_simple_expr_type(expr)
+            && matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Array(_))
+        {
+            return true;
+        }
+        match expr {
+            syn::Expr::Array(_) => true,
+            syn::Expr::Reference(r) => {
+                matches!(self.peel_paren_group_expr(&r.expr), syn::Expr::Array(_))
+            }
+            _ => false,
+        }
+    }
+
+    fn arg_expr_matches_expected_type_shape(
+        &self,
+        arg_expr: &syn::Expr,
+        expected_ty: &syn::Type,
+    ) -> bool {
+        if self.type_is_reference_to_slice(expected_ty)
+            || matches!(self.peel_reference_paren_group_type(expected_ty), syn::Type::Slice(_))
+        {
+            return self.expr_looks_slice_like_for_overload_resolution(arg_expr);
+        }
+        if self.type_is_vec_like_expected_type(expected_ty) {
+            return self.expr_looks_vec_like_for_overload_resolution(arg_expr);
+        }
+        if matches!(self.peel_reference_paren_group_type(expected_ty), syn::Type::Array(_)) {
+            return self.expr_looks_array_like_for_overload_resolution(arg_expr);
+        }
+        false
+    }
+
+    fn select_owner_method_arg_expected_type_variant(
+        &self,
+        variants: &[Vec<Option<syn::Type>>],
+        arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        if let Some(arg_expr) = arg_expr {
+            for variant in variants {
+                if let Some(Some(ty)) = variant.get(arg_idx)
+                    && self.arg_expr_matches_expected_type_shape(arg_expr, ty)
+                {
+                    return Some(ty.clone());
+                }
+            }
+        }
+        variants
+            .iter()
+            .find_map(|variant| variant.get(arg_idx).and_then(|ty| ty.clone()))
+    }
+
+    fn lookup_owner_method_arg_expected_type(
+        &self,
+        owner: &str,
+        method_name: &str,
+        arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        let mut keys = Vec::new();
+        keys.push(Self::owner_method_key(owner, method_name));
+        if let Some(last) = owner.rsplit("::").next() {
+            keys.push(Self::owner_method_key(last, method_name));
+        }
+        let mut dedup = HashSet::new();
+        keys.retain(|key| dedup.insert(key.clone()));
+        for key in keys {
+            if let Some(expected) = self.owner_method_arg_expected_types.get(&key)
+                && let Some(Some(ty)) = expected.get(arg_idx)
+            {
+                return Some(ty.clone());
+            }
+            if let Some(variants) = self.owner_method_arg_expected_type_variants.get(&key)
+                && let Some(ty) = self.select_owner_method_arg_expected_type_variant(
+                    variants,
+                    arg_idx,
+                    arg_expr,
+                )
+            {
+                return Some(ty);
+            }
+        }
+        None
     }
 
     fn type_is_reference_to_slice(&self, ty: &syn::Type) -> bool {
@@ -9912,7 +10136,9 @@ impl CodeGen {
             }
             let expected_ty = self
                 .lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
-                .or_else(|| self.lookup_associated_call_arg_expected_type_fallback(call, idx));
+                .or_else(|| {
+                    self.lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))
+                });
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
@@ -9927,6 +10153,7 @@ impl CodeGen {
         &self,
         call: &syn::ExprCall,
         arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return None;
@@ -9955,7 +10182,8 @@ impl CodeGen {
         if !owner_looks_like_type {
             return None;
         }
-        self.lookup_method_arg_expected_type(&method, arg_idx).cloned()
+        self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr)
+            .or_else(|| self.lookup_method_arg_expected_type(&method, arg_idx).cloned())
     }
 
     fn collect_uninitialized_local_type_hints_from_method_call(
@@ -21253,13 +21481,17 @@ impl CodeGen {
                         expected_substitutions.as_ref(),
                     )
                     .or_else(|| {
-                        let fallback = self.lookup_method_arg_expected_type(&rust_method_name, idx)?;
+                        let fallback = self.lookup_associated_call_arg_expected_type_fallback(
+                            call,
+                            idx,
+                            Some(arg),
+                        )?;
                         if let Some(substitutions) = expected_substitutions.as_ref() {
                             return Some(
-                                self.substitute_type_params_in_type(fallback, substitutions),
+                                self.substitute_type_params_in_type(&fallback, substitutions),
                             );
                         }
-                        Some(fallback.clone())
+                        Some(fallback)
                     });
                 self.emit_call_arg_with_pass_style(arg, style, expected_ty.as_ref(), false, None)
             })
@@ -21471,6 +21703,20 @@ impl CodeGen {
                 self.emit_expr_to_string_with_expected_and_move_if_needed(elem, elem_expected)
             })
             .collect();
+        if let Some(elem_ty) = elem_expected {
+            let elem_cpp = self.map_array_element_type(elem_ty);
+            if !elem_cpp.contains("/* TODO")
+                && !type_string_has_auto_placeholder(&elem_cpp)
+                && !self.mapped_type_has_out_of_scope_type_params(&elem_cpp)
+            {
+                return format!(
+                    "std::array<{}, {}>{{{}}}",
+                    elem_cpp,
+                    array_expr.elems.len(),
+                    elems.join(", ")
+                );
+            }
+        }
         format!("std::array{{{}}}", elems.join(", "))
     }
 
@@ -23145,6 +23391,11 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(emitted) =
+            self.try_emit_slice_full_call_with_expected_array_type(call, expected_ty)
+        {
+            return emitted;
+        }
+        if let Some(emitted) =
             self.try_emit_arrayvec_from_repeat_with_fixed_array_arg(call, expected_ty)
         {
             return emitted;
@@ -23637,40 +23888,15 @@ impl CodeGen {
                     call_type_substitutions.as_ref(),
                 );
                 let expected_ty = expected_ty.or_else(|| {
-                    let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-                        return None;
-                    };
-                    if path_expr.path.segments.len() < 2 {
-                        return None;
+                    let fallback = self.lookup_associated_call_arg_expected_type_fallback(
+                        call,
+                        idx,
+                        Some(arg),
+                    )?;
+                    if let Some(substitutions) = call_type_substitutions.as_ref() {
+                        return Some(self.substitute_type_params_in_type(&fallback, substitutions));
                     }
-                    let owner = path_expr
-                        .path
-                        .segments
-                        .iter()
-                        .nth_back(1)
-                        .map(|seg| seg.ident.to_string())
-                        .unwrap_or_default();
-                    let method = path_expr
-                        .path
-                        .segments
-                        .last()
-                        .map(|seg| seg.ident.to_string())
-                        .unwrap_or_default();
-                    let owner_looks_like_type = owner == "Self"
-                        || owner
-                            .chars()
-                            .next()
-                            .is_some_and(|ch| ch.is_ascii_uppercase());
-                    if owner_looks_like_type {
-                        let fallback = self.lookup_method_arg_expected_type(&method, idx)?.clone();
-                        if let Some(substitutions) = call_type_substitutions.as_ref() {
-                            return Some(
-                                self.substitute_type_params_in_type(&fallback, substitutions),
-                            );
-                        }
-                        return Some(fallback);
-                    }
-                    None
+                    Some(fallback)
                 });
                 let callable_bound_arg_intent =
                     self.lookup_callable_param_bound_arg_intent(&call.func, idx);
@@ -26530,6 +26756,35 @@ impl CodeGen {
         Some(format!("rusty::error::description({})", receiver))
     }
 
+    fn try_emit_slice_full_call_with_expected_array_type(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if call.args.len() != 1 {
+            return None;
+        }
+        let expected_ty = expected_ty?;
+        if self.expected_array_element_type(Some(expected_ty)).is_none() {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let path = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(path.as_str(), "slice_full" | "rusty::slice_full") {
+            return None;
+        }
+        let inner = self.emit_expr_to_string_with_expected(&call.args[0], Some(expected_ty));
+        Some(format!("rusty::slice_full({})", inner))
+    }
+
     fn emit_io_read_write_buffer_view_expr(
         &self,
         expr: &syn::Expr,
@@ -26597,7 +26852,7 @@ impl CodeGen {
             syn::Expr::Range(r) => r,
             _ => return None,
         };
-        let base = self.emit_expr_to_string(&idx.expr);
+        let base = self.emit_expr_to_string_with_expected(&idx.expr, expected_ty);
         let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
         let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));
         let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
@@ -28529,15 +28784,20 @@ impl CodeGen {
             if assoc_segments.as_slice() != ["Item"] {
                 return None;
             }
-            let syn::Type::Path(owner_tp) = qself.ty.as_ref() else {
-                return None;
-            };
-            if owner_tp.qself.is_some() || owner_tp.path.segments.len() != 1 {
-                return None;
-            }
-            let owner_name = owner_tp.path.segments[0].ident.to_string();
-            if !self.is_type_param_in_scope(&owner_name) {
-                return None;
+            if let syn::Type::Path(owner_tp) = qself.ty.as_ref()
+                && owner_tp.qself.is_none()
+                && owner_tp.path.segments.len() == 1
+            {
+                let owner_name = owner_tp.path.segments[0].ident.to_string();
+                let owner_looks_like_module_item = owner_name
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase())
+                    && !self.is_type_param_in_scope(&owner_name)
+                    && !self.is_local_type_name_in_scope(&owner_name);
+                if owner_looks_like_module_item {
+                    return None;
+                }
             }
             (*qself.ty).clone()
         } else {
@@ -28556,7 +28816,7 @@ impl CodeGen {
             syn::parse_str::<syn::Type>(&owner_name).ok()?
         };
         let owner_cpp = self.map_type(&owner_ty);
-        if owner_cpp == "auto" || owner_cpp.contains("auto") {
+        if owner_cpp == "auto" || owner_cpp.contains("auto") || owner_cpp.contains("/* TODO") {
             return None;
         }
         Some(format!("rusty::detail::associated_item_t<{}>", owner_cpp))
@@ -42579,7 +42839,7 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("return A{.len_field = 0, .xs = std::array{"));
+        assert!(out.contains("return A{.len_field = 0, .xs = std::array"));
         assert!(!out.contains("return A{.xs = std::array{"));
     }
 
@@ -50647,6 +50907,127 @@ mod tests {
         assert!(
             !out.contains(".from_slice()"),
             "non-self associated from_slice call must not rewrite to receiver method form\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5135_assoc_from_slice_full_array_uses_expected_element_type() {
+        let out = transpile_str(
+            r#"
+            mod rusty {
+                pub fn slice_full<T>(x: T) -> T { x }
+            }
+            struct Buf;
+            impl Buf {
+                fn from(_s: &[u32]) -> Buf { Buf }
+            }
+            fn f() {
+                let _v = Buf::from(rusty::slice_full([1, 2, 3]));
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"
+            ),
+            "associated from call should type the slice_full array literal from expected element type\nGot: {out}"
+        );
+        assert!(
+            !out.contains("slice_full(std::array{1, 2, 3})"),
+            "slice_full array literal should not remain untyped under known expected element type\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5135_owner_scoped_assoc_expected_type_beats_ambiguous_method_name() {
+        let out = transpile_str(
+            r#"
+            mod rusty {
+                pub fn slice_full<T>(x: T) -> T { x }
+            }
+            struct Other;
+            impl Other {
+                fn from(_v: u32) -> Other { Other }
+            }
+            struct SmallVec<A>(A);
+            impl<A> SmallVec<A> {
+                fn from(_s: &[u32]) -> SmallVec<A> { loop {} }
+            }
+            fn f() {
+                let _o = Other::from(1);
+                let _v = SmallVec::<[u32; 2]>::from(rusty::slice_full([1, 2, 3]));
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "SmallVec<std::array<uint32_t, 2>>::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"
+            ),
+            "owner-scoped associated arg expected type should be used even when method name is globally ambiguous\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5135_owner_scoped_assoc_overload_prefers_slice_shape_for_slice_full_arg() {
+        let out = transpile_str(
+            r#"
+            mod rusty {
+                pub fn slice_full<T>(x: T) -> T { x }
+            }
+            struct Buf;
+            impl From<&[u32]> for Buf {
+                fn from(_s: &[u32]) -> Self { Buf }
+            }
+            impl From<Vec<u8>> for Buf {
+                fn from(_v: Vec<u8>) -> Self { Buf }
+            }
+            fn f() {
+                let _v = Buf::from(rusty::slice_full([1, 2, 3]));
+            }
+            "#,
+        );
+        assert!(
+            out.contains(
+                "Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"
+            ),
+            "owner-scoped overload fallback should select slice-like signature for slice_full argument\nGot: {out}"
+        );
+        assert!(
+            !out.contains("slice_full(std::array{1, 2, 3})"),
+            "slice_full argument should not stay untyped when a matching slice overload exists\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5135_assoc_item_projection_with_concrete_owner_uses_runtime_helper_alias() {
+        let out = transpile_str_module(
+            r#"
+            mod rusty {
+                pub fn slice_full<T>(x: T) -> T { x }
+            }
+            trait ArrayLike {
+                type Item;
+            }
+            impl ArrayLike for [u32; 2] {
+                type Item = u32;
+            }
+            struct SmallVec<A>(A);
+            impl<A: ArrayLike> SmallVec<A> {
+                fn from(_s: &[A::Item]) -> SmallVec<A> { loop {} }
+            }
+            fn f() {
+                let _v = SmallVec::<[u32; 2]>::from(rusty::slice_full([1, 2, 3]));
+            }
+            "#,
+            "leaf5135_assoc_item_concrete",
+        );
+        assert!(
+            out.contains("rusty::detail::associated_item_t<A>"),
+            "associated item projection should lower through runtime helper alias in generic signatures\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::array<uint32_t, 2>::Item"),
+            "concrete-owner associated item projection should not emit raw ::Item surface\nGot: {out}"
         );
     }
 

@@ -2381,6 +2381,11 @@ Current status snapshot:
    - preventing UFCS trait-call rewriting for local concrete type owners, and
    - constraining self-UFCS fallback rewriting so constructor/static `from*` associated calls are not rewritten as receiver methods.
 72. New first deterministic Stage D head in `smallvec` remains at `runner.cpp:3729/3747` but moves to the next compile family: valid associated-call shape with mismatched payload typing (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)`), followed by downstream omitted-owner/item-typing conversion fallout (`rusty::Vec` unspecialized owner, `Vec<int>` vs `Vec<unsigned char>`, and related `from_slice` type surfaces); guardrail check against §11 remains satisfied for `Leaf 5.1.34` (fixes stayed shared and shape-gated in UFCS detection/rewrite logic, with no crate-specific scripts and no generated-output text patching).
+73. Focused `smallvec` repro after `Leaf 5.1.35` (`/tmp/rusty-parity-matrix-5-1-35e-20260412/smallvec/...`) collapses the prior post-5.1.34 associated-`from` overload expected-type loss family by:
+   - preserving raw owner-scoped associated-method argument-type variants (alongside merged hints) so overloaded `Owner::from(...)` sites can still recover expected argument type context,
+   - selecting owner-scoped overload hints via call-argument shape (slice-like / vec-like / array-like) when merged hints are ambiguous, and
+   - lowering concrete-owner `::Item` qself projections through `rusty::detail::associated_item_t<Owner>` to avoid invalid concrete `Owner::Item` C++ surfaces.
+74. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3764` (`template<class T> class rusty::Vec used without template arguments` in `const auto vec = rusty::Vec::new_();`), followed by downstream conversion families (`Vec<int>` / `std::array<int,...>` / `std::vector<int>` into `SmallVec<std::array<uint8_t,...>>::from(...)`) and adjacent runtime-surface gaps (`as_slice`, `from_iter`, `from_raw_parts`); guardrail check against §11 remains satisfied for `Leaf 5.1.35` (fixes stayed shared and shape-gated in overload expected-type recovery and associated-item mapping, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

@@ -4736,6 +4736,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-34/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shape-gated and local-type-aware in UFCS detection/rewrite logic; no crate-specific scripts, no blanket method-call rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.35: `smallvec` Stage D associated `from` overload expected-type fallback + concrete `::Item` projection compile-head family collapse
+          - Plan/scope check: shared transpiler-only expected-type fallback/mapping hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - owner-scoped associated-call expected-type collection now preserves raw per-owner/per-method signature variants in addition to merged hints, so ambiguous method names (`from`, `new`, etc.) do not lose all argument-type context after merge softening.
+            - associated-call fallback now uses argument-shape-aware variant selection (slice-like / vec-like / array-like) when merged owner-scoped hints are ambiguous, restoring expected-type propagation for overloaded associated `from(...)` call sites.
+            - `slice_full(...)` argument emission now receives recovered associated expected type in these overload cases, so array literals are typed under the selected overload context instead of remaining untyped `std::array{...}`.
+            - concrete-owner `::Item` qself projections now lower through shared runtime alias `rusty::detail::associated_item_t<Owner>` (while preserving module-path guardrails), preventing invalid `std::array<...>::Item` emission in generated span/array surfaces.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5135_assoc_from_slice_full_array_uses_expected_element_type`
+            - `test_leaf5135_owner_scoped_assoc_expected_type_beats_ambiguous_method_name`
+            - `test_leaf5135_owner_scoped_assoc_overload_prefers_slice_shape_for_slice_full_arg`
+            - `test_leaf5135_assoc_item_projection_with_concrete_owner_uses_runtime_helper_alias`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5135 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-35e-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.34 first-head family at `runner.cpp:3729/3747` (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)` from overload-context type-loss and concrete `::Item` projection fallout) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3764` (`template<class T> class rusty::Vec used without template arguments` in `const auto vec = rusty::Vec::new_();`), followed by downstream conversion families (`Vec<int>` / `std::array<int,...>` / `std::vector<int>` into `SmallVec<std::array<uint8_t,...>>::from(...)`) and adjacent runtime-surface gaps (`as_slice`, `from_iter`, `from_raw_parts`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-35e-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in owner-scoped expected-type recovery + associated-item mapping logic; no crate-specific scripts, no blanket method rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
