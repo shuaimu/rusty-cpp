@@ -5705,7 +5705,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-74a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core iterator-map inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.75: `smallvec` Stage D `DropOnPanic<A>` pointer-owner mismatch in `insert_many` (`std::add_pointer_t<A>` vs payload pointer `A::Item*`) compile-head family collapse
+        - [x] *done* Leaf 5.1.75: `smallvec` Stage D `DropOnPanic<A>` pointer-owner mismatch in `insert_many` (`std::add_pointer_t<A>` vs payload pointer `A::Item*`) compile-head family collapse
+          - Plan/scope check: shared local-generic struct-literal template-arg recovery hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - hardened omitted local generic arg recovery for struct literals to infer type args from field-type/initializer-type pairs before scope-based owner fallback,
+            - this lets `DropOnPanic { start, ... }` in `SmallVec<A>::insert_many` recover payload item type (`associated_item_t<A>`) from `start: *mut A::Item` instead of incorrectly recovering owner type (`A`) from surrounding scope,
+            - this collapses the deterministic post-5.1.74 first-head family at `runner.cpp:1874` (`DropOnPanic<A>(unsigned char*, ...)` no viable constructor due to owner-pointer mismatch).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5175_local_drop_guard_struct_literal_prefers_pointer_item_type_over_owner_scope`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf5156_local_generic_drop_guard_struct_literal_recovers_owner_type_arg`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler test_leaf5175_local_drop_guard_struct_literal_prefers_pointer_item_type_over_owner_scope -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5156_local_generic_drop_guard_struct_literal_recovers_owner_type_arg -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf517 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-75a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.74 first-head family at `runner.cpp:1874` (`DropOnPanic<A>` owner/payload pointer mismatch in `insert_many`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1663/1669/1673` in `reserve` growth path (`layout.size()` method-shape mismatch and missing `NonNull::cast` surface on `rusty::NonNull<...>`), with adjacent downstream helper/runtime surface fallout (`MaybeUninit::new_`, `Result::map_err` payload unification, iterator `size_hint` families).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-75a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core struct-literal generic recovery paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.76: `smallvec` Stage D `reserve` growth call-surface mismatch around `layout`/`NonNull` (`layout.size()` callable-shape + `NonNull::cast` member-surface fallout at `runner.cpp:1663/1669/1673`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

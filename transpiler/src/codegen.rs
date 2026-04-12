@@ -21930,10 +21930,19 @@ impl CodeGen {
                 .segments
                 .last()
                 .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
-            && let Some(recovered) =
-                self.recover_omitted_local_generic_type_args(&struct_expr.path, &target_name)
         {
-            target_name = recovered;
+            if let Some(recovered) = self
+                .recover_omitted_struct_literal_generic_type_args_from_fields(
+                    struct_expr,
+                    &target_name,
+                )
+            {
+                target_name = recovered;
+            } else if let Some(recovered) =
+                self.recover_omitted_local_generic_type_args(&struct_expr.path, &target_name)
+            {
+                target_name = recovered;
+            }
         }
 
         let resolved_struct_name = struct_expr.path.segments.last().map(|seg| {
@@ -29929,6 +29938,220 @@ impl CodeGen {
         Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
 
+    fn recover_omitted_struct_literal_generic_type_args_from_fields(
+        &self,
+        struct_expr: &syn::ExprStruct,
+        mapped_path: &str,
+    ) -> Option<String> {
+        let last_seg = struct_expr.path.segments.last()?;
+        if !matches!(last_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let type_key = self
+            .declared_type_key_for_path(&struct_expr.path)
+            .or_else(|| {
+                if struct_expr.path.segments.len() != 1 {
+                    return None;
+                }
+                let base = struct_expr.path.segments.first()?.ident.to_string();
+                let mut scoped_candidates: Vec<String> = Vec::new();
+                if let Some(current_struct) = &self.current_struct {
+                    scoped_candidates.push(format!("{}::{}", current_struct, base));
+                    if !self.module_stack.is_empty() {
+                        scoped_candidates.push(format!(
+                            "{}::{}::{}",
+                            self.module_stack.join("::"),
+                            current_struct,
+                            base
+                        ));
+                    }
+                }
+                if !self.module_stack.is_empty() {
+                    scoped_candidates.push(format!("{}::{}", self.module_stack.join("::"), base));
+                }
+                scoped_candidates.push(base.clone());
+                for scoped in scoped_candidates {
+                    if let Some(key) = self.lookup_declared_type_key_for_base(&scoped, &base) {
+                        return Some(key);
+                    }
+                }
+                None
+            })?;
+        let params = self.declared_type_params.get(&type_key)?;
+        if params.is_empty() {
+            return None;
+        }
+
+        let resolved_struct_name = {
+            let raw = last_seg.ident.to_string();
+            if raw == "Self" {
+                self.current_struct.clone().unwrap_or(raw)
+            } else {
+                raw
+            }
+        };
+        let param_kinds = self.declared_type_param_kinds.get(&type_key);
+        let mut inferred_args: Vec<Option<String>> = vec![None; params.len()];
+        let mut conflict = false;
+        for field in &struct_expr.fields {
+            let syn::Member::Named(ident) = &field.member else {
+                continue;
+            };
+            let field_name = ident.to_string();
+            let Some(field_ty) = self.lookup_struct_field_type(&resolved_struct_name, &field_name)
+            else {
+                continue;
+            };
+            let Some(expr_ty) = self.infer_simple_expr_type(&field.expr) else {
+                continue;
+            };
+            self.collect_omitted_generic_bindings_from_field_types(
+                &field_ty,
+                &expr_ty,
+                params,
+                param_kinds,
+                &mut inferred_args,
+                &mut conflict,
+            );
+            if conflict {
+                return None;
+            }
+        }
+
+        let defaults = self.declared_type_param_defaults.get(&type_key);
+        let fallback_args_from_current_struct = self.current_struct.as_ref().and_then(|name| {
+            let declared_kinds = param_kinds?;
+            let current_params = self
+                .declared_type_params
+                .get(name)
+                .or_else(|| self.declared_type_params.get(&self.scoped_type_key(name)))?;
+            let current_kinds = self
+                .declared_type_param_kinds
+                .get(name)
+                .or_else(|| {
+                    self.declared_type_param_kinds
+                        .get(&self.scoped_type_key(name))
+                })?;
+            if declared_kinds.len() != params.len()
+                || current_params.len() < params.len()
+                || current_kinds.len() < params.len()
+            {
+                return None;
+            }
+            if declared_kinds
+                .iter()
+                .zip(current_kinds.iter())
+                .take(params.len())
+                .all(|(declared_kind, current_kind)| declared_kind == current_kind)
+            {
+                Some(current_params[..params.len()].to_vec())
+            } else {
+                None
+            }
+        });
+
+        let mut recovered_args: Vec<String> = Vec::new();
+        for (idx, param) in params.iter().enumerate() {
+            if let Some(inferred) = inferred_args.get(idx).and_then(|arg| arg.clone()) {
+                recovered_args.push(inferred);
+                continue;
+            }
+            if let Some(default) = defaults
+                .and_then(|all| all.get(idx))
+                .and_then(|entry| entry.as_ref())
+            {
+                let mapped_default = match default {
+                    GenericParamDefault::Type(t) => self.map_type(t),
+                    GenericParamDefault::Const(c) => self.emit_expr_to_string(c),
+                };
+                recovered_args.push(mapped_default);
+                continue;
+            }
+            if self.is_type_param_in_scope(param) {
+                recovered_args.push(param.clone());
+                continue;
+            }
+            if let Some(fallback) = fallback_args_from_current_struct.as_ref()
+                && let Some(arg) = fallback.get(idx)
+            {
+                recovered_args.push(arg.clone());
+                continue;
+            }
+            return None;
+        }
+
+        if recovered_args.is_empty() {
+            return None;
+        }
+        Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
+    }
+
+    fn collect_omitted_generic_bindings_from_field_types(
+        &self,
+        declared_ty: &syn::Type,
+        inferred_expr_ty: &syn::Type,
+        params: &[String],
+        param_kinds: Option<&Vec<GenericParamKind>>,
+        inferred_args: &mut [Option<String>],
+        conflict: &mut bool,
+    ) {
+        if *conflict {
+            return;
+        }
+        let declared_ty = self.peel_reference_paren_group_type(declared_ty);
+        let inferred_expr_ty = self.peel_reference_paren_group_type(inferred_expr_ty);
+
+        if let syn::Type::Path(tp) = declared_ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+        {
+            let seg = &tp.path.segments[0];
+            if matches!(seg.arguments, syn::PathArguments::None) {
+                let param_name = seg.ident.to_string();
+                if let Some(idx) = params.iter().position(|p| p == &param_name) {
+                    let is_type_param = param_kinds
+                        .and_then(|kinds| kinds.get(idx))
+                        .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+                    if !is_type_param {
+                        return;
+                    }
+                    let candidate = self.map_type(inferred_expr_ty);
+                    match inferred_args.get_mut(idx) {
+                        Some(slot @ None) => *slot = Some(candidate),
+                        Some(Some(existing)) if existing == &candidate => {}
+                        Some(Some(_)) => *conflict = true,
+                        None => {}
+                    }
+                    return;
+                }
+            }
+        }
+
+        match (declared_ty, inferred_expr_ty) {
+            (syn::Type::Ptr(lhs), syn::Type::Ptr(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (syn::Type::Reference(lhs), syn::Type::Reference(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn recover_omitted_owner_generic_args_from_scope(
         &self,
         owner_path: &syn::Path,
@@ -36947,6 +37170,59 @@ mod tests {
             !out.contains("const auto guard = DropOnPanic{")
                 && !out.contains("const auto guard = DropOnPanic("),
             "guard construction should not rely on unspecialized CTAD path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5175_local_drop_guard_struct_literal_prefers_pointer_item_type_over_owner_scope() {
+        let out = transpile_str(
+            r#"
+            trait ArrayLike {
+                type Item;
+            }
+            impl<T, const N: usize> ArrayLike for [T; N] {
+                type Item = T;
+            }
+            struct SmallVec<A> {
+                _a: A,
+            }
+            impl<A: ArrayLike> SmallVec<A> {
+                fn as_mut_ptr(&mut self) -> *mut A::Item {
+                    std::ptr::null_mut()
+                }
+                fn insert_many(&mut self) {
+                    struct DropOnPanic<U> {
+                        start: *mut U,
+                        len: usize,
+                    }
+                    impl<U> Drop for DropOnPanic<U> {
+                        fn drop(&mut self) {}
+                    }
+                    let start = self.as_mut_ptr();
+                    let guard = DropOnPanic {
+                        start,
+                        len: 0,
+                    };
+                    let _ = guard;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("const auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>{")
+                || out.contains(
+                    "const auto guard = DropOnPanic<rusty::detail::associated_item_t<A>>("
+                )
+                || out.contains("const auto guard = DropOnPanic<typename A::Item>{")
+                || out.contains("const auto guard = DropOnPanic<typename A::Item>("),
+            "guard should recover item pointer payload type for local generic arg, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto guard = DropOnPanic<A>{")
+                && !out.contains("const auto guard = DropOnPanic<A>("),
+            "guard should not recover owner type when pointer field indicates item type, got:\n{}",
             out
         );
     }
