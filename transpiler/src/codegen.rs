@@ -31320,7 +31320,8 @@ impl CodeGen {
             }
             syn::Type::Ptr(p) => {
                 let inner = self.map_type(&p.elem);
-                let needs_pointer_trait_hardening = inner.ends_with('&');
+                let needs_pointer_trait_hardening =
+                    inner.ends_with('&') || self.type_references_in_scope_type_param(&p.elem);
                 let needs_assoc_pointer_hardening = self.type_contains_dependent_assoc(&p.elem)
                     || self.type_references_current_struct_assoc(&p.elem);
                 if needs_pointer_trait_hardening {
@@ -34704,6 +34705,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     }
     if let Some(action) = rewrite_std_cmp_import(normalized) {
         return action;
+    }
+    if matches!(normalized, "fmt::Write" | "io::Write") {
+        return UseImportAction::RustOnly;
     }
     if is_rust_only_import(normalized) {
         return UseImportAction::RustOnly;
@@ -42522,6 +42526,28 @@ mod tests {
         assert!(out.contains("using rusty::thread::yield_now;"));
         assert!(!out.contains("using std::thread::Thread"));
         assert!(!out.contains("using std::thread::current"));
+    }
+
+    #[test]
+    fn test_leaf523_fmt_write_alias_trait_import_is_rust_only() {
+        let out = transpile_str(
+            r#"
+            use std::fmt;
+            use fmt::Write;
+        "#,
+        );
+        assert!(out.contains("namespace fmt = rusty::fmt;"));
+        assert!(
+            out.lines()
+                .any(|line| line.contains("Rust-only") && line.contains("using fmt::Write;")),
+            "expected fmt::Write trait import to stay rust-only, got:\n{}",
+            out
+        );
+        assert!(
+            !out.lines().any(|line| line.trim() == "using fmt::Write;"),
+            "fmt::Write should not emit a concrete using declaration, got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -51918,8 +51944,8 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("T* p"));
-        assert!(out.contains("const T* q"));
+        assert!(out.contains("std::add_pointer_t<T> p"));
+        assert!(out.contains("std::add_pointer_t<std::add_const_t<T>> q"));
         assert!(out.contains("std::add_pointer_t<const int32_t&> r"));
         assert!(!out.contains("&*"));
     }
