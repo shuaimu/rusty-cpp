@@ -5396,6 +5396,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-62a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime helper surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.63: `smallvec` Stage D `Vec::from_iter` pointer-item normalization compile-head family collapse
+          - Plan/scope check: shared runtime `Vec` item-normalization hardening plus focused runtime regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - `Vec::from_iter` now normalizes iterator items before `push(...)`, including pointer/reference-wrapper item shapes for value vectors (clone/deref into `T`) while preserving pointer vectors unchanged.
+            - this collapses the deterministic post-5.1.62 first-head family at `include/rusty/vec.hpp:118` (`invalid conversion from const unsigned char* to unsigned char` when collecting `rusty::slice_iter::Iter<const unsigned char>` into `Vec<unsigned char>`).
+          - Implemented in:
+            - `include/rusty/vec.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5163_vec_from_iter_normalizes_pointer_items_for_value_vectors`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5163 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-63a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.62 first-head family at `include/rusty/vec.hpp:118` (pointer item pushed into value vector in `Vec::from_iter`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2031` (`repeat(...)` unresolved in `SmallVec::resize` extension path), with adjacent downstream iterator/string adapter/runtime-surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-63a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/shape-gated in runtime iterator collection surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

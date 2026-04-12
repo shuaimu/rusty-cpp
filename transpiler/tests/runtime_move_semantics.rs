@@ -1270,6 +1270,38 @@ fn test_leaf5162_vec_from_iter_supports_option_like_next_surfaces() {
 }
 
 #[test]
+fn test_leaf5163_vec_from_iter_normalizes_pointer_items_for_value_vectors() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+        #include <rusty/vec.hpp>
+
+        int main() {
+            std::array<unsigned char, 3> bytes{4, 5, 6};
+            auto iter = rusty::iter(bytes);
+
+            auto values = rusty::Vec<unsigned char>::from_iter(iter);
+            if (values.len() != 3 || values[0] != 4 || values[2] != 6) {
+                return 1;
+            }
+
+            auto ptrs = rusty::Vec<const unsigned char*>::from_iter(rusty::iter(bytes));
+            if (ptrs.len() != 3) {
+                return 2;
+            }
+            if (ptrs[0] != &bytes[0] || ptrs[2] != &bytes[2]) {
+                return 3;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5163_vec_from_iter_pointer_item_normalization");
+}
+
+#[test]
 fn test_mem_forget_marks_const_values_with_rusty_drop_guard() {
     let source = r#"
         #include <rusty/mem.hpp>

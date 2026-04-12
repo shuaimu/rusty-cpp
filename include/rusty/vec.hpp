@@ -108,6 +108,35 @@ public:
                 return std::move(*opt);
             }
         };
+        auto normalize_item_for_vec = [](auto&& value) -> T {
+            using Value = std::remove_cvref_t<decltype(value)>;
+            if constexpr (std::is_pointer_v<Value> && !std::is_pointer_v<T>) {
+                using Pointee = std::remove_cv_t<std::remove_pointer_t<Value>>;
+                if constexpr (std::is_convertible_v<Pointee, T>) {
+                    return static_cast<T>(*value);
+                } else {
+                    return T(*value);
+                }
+            } else if constexpr (requires { value.get(); } && !std::is_pointer_v<T>) {
+                using GetType = std::remove_cvref_t<decltype(value.get())>;
+                if constexpr (std::is_pointer_v<GetType>) {
+                    using Pointee = std::remove_cv_t<std::remove_pointer_t<GetType>>;
+                    if constexpr (std::is_convertible_v<Pointee, T>) {
+                        return static_cast<T>(*value.get());
+                    } else {
+                        return T(*value.get());
+                    }
+                } else if constexpr (std::is_convertible_v<decltype(value.get()), T>) {
+                    return static_cast<T>(value.get());
+                } else {
+                    return T(value.get());
+                }
+            } else if constexpr (std::is_convertible_v<decltype(value), T>) {
+                return static_cast<T>(std::forward<decltype(value)>(value));
+            } else {
+                return T(std::forward<decltype(value)>(value));
+            }
+        };
         if constexpr (requires { std::forward<Iter>(iter).next(); }) {
             auto&& next_iter = std::forward<Iter>(iter);
             while (true) {
@@ -115,13 +144,13 @@ public:
                 if (!option_like_has_value(item)) {
                     break;
                 }
-                result.push(option_like_take_value(item));
+                result.push(normalize_item_for_vec(option_like_take_value(item)));
             }
         } else if constexpr (requires { std::forward<Iter>(iter).into_iter(); }) {
             return from_iter(std::forward<Iter>(iter).into_iter());
         } else {
             for (auto&& item : std::forward<Iter>(iter)) {
-                result.push(std::forward<decltype(item)>(item));
+                result.push(normalize_item_for_vec(std::forward<decltype(item)>(item)));
             }
         }
         return result;
