@@ -10785,6 +10785,10 @@ impl CodeGen {
                         // downstream `*right_val` compares stay string-like instead of scalar.
                         inner_raw = string_view_expr;
                     }
+                    inner_raw = self.materialize_unit_rvalue_expr_if_needed(
+                        reference_target,
+                        inner_raw,
+                    );
 
                     let reference_target_raw = self.emit_expr_to_string(reference_target);
                     let is_index_reference_target =
@@ -10832,6 +10836,8 @@ impl CodeGen {
                         elem_expr_raw,
                         tuple_elem_expected_ty,
                     );
+                    let elem_expr =
+                        self.materialize_unit_rvalue_expr_if_needed(elem, elem_expr);
                     self.writeln(&format!("auto {} = {};", elem_name, elem_expr));
                 }
             }
@@ -10984,6 +10990,26 @@ impl CodeGen {
             }
         }
         self.emit_expr_maybe_move(arg)
+    }
+
+    fn expr_is_known_unit_value_expr(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.is_explicit_unit_type(&ty))
+    }
+
+    fn materialize_unit_rvalue_expr_if_needed(
+        &self,
+        expr: &syn::Expr,
+        emitted_expr: String,
+    ) -> String {
+        if !self.expr_is_known_unit_value_expr(expr) {
+            return emitted_expr;
+        }
+        if self.is_stable_reference_lvalue_expr(expr) {
+            return emitted_expr;
+        }
+        format!("[&]() {{ {}; return std::make_tuple(); }}()", emitted_expr)
     }
 
     fn is_binding_only_tuple_arm_pattern(&self, pat: &syn::Pat, arity: usize) -> bool {
@@ -16316,6 +16342,10 @@ impl CodeGen {
             // Return &[u8] so map_type converts it to std::span<const uint8_t>
             return syn::parse_str::<syn::Type>("&[u8]").ok();
         }
+        if method == "hash" && mc.args.len() == 1 {
+            // `Hash::hash` / `.hash(...)` always returns `()`.
+            return Some(parse_quote!(()));
+        }
         // str::bytes() exposes an iterator over u8 values.
         if method == "bytes" && mc.args.is_empty() {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
@@ -20555,6 +20585,12 @@ impl CodeGen {
                 format!("{}[{}]", base, index)
             }
             syn::Expr::Path(path) => {
+                if self.should_coerce_self_path_to_deref_mut(&path.path, expected_ty) {
+                    if let Some(self_name) = self.current_self_path_override() {
+                        return format!("{}.deref_mut()", self_name);
+                    }
+                    return "this->deref_mut()".to_string();
+                }
                 if self.is_option_none_path(&path.path) {
                     if let Some(expected_cpp) = self.expected_option_cpp_type_for_none(expected_ty)
                     {
@@ -20797,6 +20833,52 @@ impl CodeGen {
             syn::Type::Group(g) => self.expected_reference_inner_type(Some(&g.elem)),
             _ => None,
         }
+    }
+
+    fn path_is_simple_self(path: &syn::Path) -> bool {
+        path.segments.len() == 1 && path.segments[0].ident == "self"
+    }
+
+    fn type_is_current_struct_self_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        let ident = tp.path.segments[0].ident.to_string();
+        if ident == "Self" {
+            return true;
+        }
+        self.current_struct
+            .as_ref()
+            .is_some_and(|current| current == &ident)
+    }
+
+    fn should_coerce_self_path_to_deref_mut(
+        &self,
+        path: &syn::Path,
+        expected_ty: Option<&syn::Type>,
+    ) -> bool {
+        if !Self::path_is_simple_self(path) {
+            return false;
+        }
+        let expected_ty = match expected_ty {
+            Some(ty) => self.peel_paren_group_type(ty),
+            None => return false,
+        };
+        let syn::Type::Reference(expected_ref) = expected_ty else {
+            return false;
+        };
+        if expected_ref.mutability.is_none() {
+            return false;
+        }
+        if self.type_is_current_struct_self_type(&expected_ref.elem) {
+            return false;
+        }
+        self.lookup_current_struct_method_return_type("deref_mut")
+            .is_some()
     }
 
     fn expected_tuple_type<'a>(
@@ -36564,6 +36646,26 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5133_self_path_mut_reference_expected_coerces_to_deref_mut() {
+        let out = transpile_str(
+            r#"
+            struct Buf {}
+            impl Buf {
+                fn deref_mut(&mut self) -> &mut [i32] { todo!() }
+                fn as_mut(&mut self) -> &mut [i32] { self }
+                fn borrow_mut(&mut self) -> &mut [i32] { self }
+                fn alias_mut(&mut self) -> &mut Self { self }
+            }
+        "#,
+        );
+        assert!(out.contains("return this->deref_mut();"), "{out}");
+        assert!(out.contains("std::span<int32_t> as_mut() {"), "{out}");
+        assert!(out.contains("std::span<int32_t> borrow_mut() {"), "{out}");
+        assert!(out.contains("Buf& alias_mut() {"), "{out}");
+        assert!(out.contains("return (*this);"), "{out}");
+    }
+
+    #[test]
     fn test_leaf45_mapped_param_type_collision_is_deduped() {
         let out = transpile_str(
             r#"
@@ -47802,6 +47904,52 @@ mod tests {
         assert!(out.contains("auto _m0_tmp = rusty::slice_full(buf);"));
         assert!(out.contains("auto _m1_tmp = rusty::slice_to(mock, rusty::len(buf));"));
         assert!(!out.contains("auto _m1 = &rusty::slice_to(mock, rusty::len(buf));"));
+    }
+
+    #[test]
+    fn test_leaf5133_tuple_match_reference_unit_calls_materialize_unit_values() {
+        let out = transpile_str(
+            r#"
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hash;
+            fn f(a: [u32; 2], b: [u32; 2]) {
+                let mut hasher = DefaultHasher::new();
+                match (&a.hash(&mut hasher), &b.hash(&mut hasher)) {
+                    (left_val, right_val) => {
+                        let _ = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::hash::hash(a, hasher);"), "{out}");
+        assert!(out.contains("rusty::hash::hash(b, hasher);"), "{out}");
+        assert!(out.contains("return std::make_tuple();"), "{out}");
+        assert!(!out.contains("auto _m0_tmp = rusty::hash::hash("), "{out}");
+        assert!(!out.contains("auto _m1_tmp = rusty::hash::hash("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5133_tuple_match_unit_calls_materialize_unit_values() {
+        let out = transpile_str(
+            r#"
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hash;
+            fn f(a: [u32; 2], b: [u32; 2]) {
+                let mut hasher = DefaultHasher::new();
+                match (a.hash(&mut hasher), b.hash(&mut hasher)) {
+                    (left_val, right_val) => {
+                        let _ = left_val == right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::hash::hash(a, hasher);"), "{out}");
+        assert!(out.contains("rusty::hash::hash(b, hasher);"), "{out}");
+        assert!(out.contains("return std::make_tuple();"), "{out}");
+        assert!(!out.contains("auto _m0 = rusty::hash::hash("), "{out}");
+        assert!(!out.contains("auto _m1 = rusty::hash::hash("), "{out}");
     }
 
     #[test]

@@ -4698,6 +4698,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-32/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core inference/rewrite paths; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.33: `smallvec` Stage D tuple-match unit materialization + `as_mut`/`borrow_mut` mutable self-coercion compile-head family collapse
+          - Plan/scope check: shared transpiler-only tuple materialization + self-path expected-type coercion hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - binding-tuple match emission now materializes unit-valued rvalue expressions as explicit unit values (`std::make_tuple()`) while preserving side effects, preventing invalid `auto _m*_tmp = <void expr>` scaffolding in assertion tuple matches.
+            - method return-type inference now records `.hash(...)` as unit-returning (`()`), enabling unit-value materialization in tuple-matching value contexts.
+            - self-path emission in expected mutable-reference contexts now performs shape-gated deref-mut coercion (`self` -> `deref_mut()`) when expected type is `&mut Target` (non-`Self`) and `deref_mut` exists, fixing `as_mut`/`borrow_mut` bodies that previously returned read-only views.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5133_tuple_match_reference_unit_calls_materialize_unit_values`
+            - `test_leaf5133_tuple_match_unit_calls_materialize_unit_values`
+            - `test_leaf5133_self_path_mut_reference_expected_coerces_to_deref_mut`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5133 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-33b --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.32 first-head family at `runner.cpp:3565/3706` (`a.as_mut()[1]`/`a.borrow_mut()[1]` assignment of read-only location) with precursor unit-temp fallout at `runner.cpp:3401/3403/3425/3427` is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3729/3747` (`std::span<const int, ...>` has no member `from`), with adjacent downstream owner/item-shape families (`SmallVec::from(Vec<int>)`, `.from_slice`, and related conversion mismatches).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-33b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in tuple lowering and self-path coercion logic; no crate-specific scripts, no blanket rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

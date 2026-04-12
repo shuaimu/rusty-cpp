@@ -2373,6 +2373,10 @@ Current status snapshot:
    - deriving receiver-item slice expected types from receiver owner generics for `insert_from_slice`/`extend_from_slice` method families (including array-owner `A::Item` extraction), and
    - switching extension-call rewrite collision gating to an inherent-method-only index so local inherent methods block `rusty::method(...)` rewriting without suppressing valid trait-extension rewrites.
 68. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3401/3403` (`auto _m0_tmp/_m1_tmp` deduced from `void` in hash assertion tuple temporaries), with adjacent same-family fallout at `runner.cpp:3425/3427`; guardrail check against §11 remains satisfied for `Leaf 5.1.32` (fixes stayed shared and receiver/type-shape-gated with no crate-specific scripts and no generated-output text patching).
+69. Focused `smallvec` repro after `Leaf 5.1.33` (`/tmp/rusty-parity-matrix-5-1-33b/smallvec/...`) collapses the prior post-5.1.32 unit-temp and mutable-surface first-head family by:
+   - materializing tuple-match unit-valued rvalue expressions as explicit unit values (`std::make_tuple()`) while preserving side effects, and
+   - adding shape-gated `self` mutable-reference coercion to `deref_mut()` for expected `&mut Target` returns (non-`Self`) when `deref_mut` exists.
+70. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3729/3747` (`std::span<const int, ...>` has no member `from`), with adjacent downstream owner/item-shape conversion fallout (`SmallVec::from(Vec<int>)`, `.from_slice`, and related mismatches); guardrail check against §11 remains satisfied for `Leaf 5.1.33` (fixes stayed shared and AST/type-shape-gated with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
