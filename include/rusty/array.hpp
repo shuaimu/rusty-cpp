@@ -784,6 +784,76 @@ auto filter_map(Range&& range, Func&& func) {
 /// - `x[..]` -> `slice_full(x)`
 /// - `x[..n]` -> `slice_to(x, n)`
 /// - `x[a..b]` -> `slice(x, a, b)`
+namespace detail {
+
+template<typename T>
+struct is_std_array_like : std::false_type {};
+
+template<typename T, std::size_t N>
+struct is_std_array_like<std::array<T, N>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_std_array_like_v = is_std_array_like<T>::value;
+
+// Preserve backing storage when `slice_full` is invoked with an rvalue
+// `std::array{...}` temporary. Returning a plain `std::span` here would
+// dangle immediately after the full expression.
+template<typename T, std::size_t N>
+struct owned_array_slice {
+    std::array<T, N> storage;
+
+    constexpr T* data() noexcept {
+        return storage.data();
+    }
+
+    constexpr const T* data() const noexcept {
+        return storage.data();
+    }
+
+    constexpr std::size_t size() const noexcept {
+        return N;
+    }
+
+    constexpr T* begin() noexcept {
+        return storage.data();
+    }
+
+    constexpr const T* begin() const noexcept {
+        return storage.data();
+    }
+
+    constexpr T* end() noexcept {
+        return storage.data() + N;
+    }
+
+    constexpr const T* end() const noexcept {
+        return storage.data() + N;
+    }
+
+    constexpr std::span<T, N> as_mut_slice() noexcept {
+        return std::span<T, N>(storage);
+    }
+
+    constexpr std::span<const T, N> as_slice() const noexcept {
+        return std::span<const T, N>(storage);
+    }
+
+    constexpr operator std::span<T, N>() noexcept {
+        return as_mut_slice();
+    }
+
+    constexpr operator std::span<const T, N>() const noexcept {
+        return as_slice();
+    }
+};
+
+} // namespace detail
+
+template<typename T, std::size_t N>
+auto slice_full(std::array<T, N>&& container) {
+    return detail::owned_array_slice<T, N>{std::move(container)};
+}
+
 template<typename Container>
 auto slice_full(Container& container) {
     using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
@@ -831,8 +901,14 @@ auto slice_full(const Container& container) {
 // temporary receivers through forwarding-reference binding.
 template<typename Container>
 auto as_slice(Container&& container) {
-    using Base = std::remove_reference_t<Container>;
-    return slice_full(static_cast<const Base&>(container));
+    if constexpr (
+        std::is_rvalue_reference_v<Container&&> &&
+        detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Container>>>) {
+        return slice_full(std::forward<Container>(container));
+    } else {
+        using Base = std::remove_reference_t<Container>;
+        return slice_full(static_cast<const Base&>(container));
+    }
 }
 
 // Explicit helper surface for Rust-style `.as_mut_slice()` lowering.
@@ -840,7 +916,7 @@ auto as_slice(Container&& container) {
 // falls back to mutable span construction where applicable.
 template<typename Container>
 auto as_mut_slice(Container&& container) {
-    return slice_full(container);
+    return slice_full(std::forward<Container>(container));
 }
 
 // Explicit helper surface for Rust-style `.get(index)` lowering on

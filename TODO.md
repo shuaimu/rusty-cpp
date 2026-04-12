@@ -5990,7 +5990,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-89b-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and AST/type-shape-gated in generic path coercion lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.90: `smallvec` Stage E `tests_test_double_spill` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.90: `smallvec` Stage E `tests_test_double_spill` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime slice-lifetime hardening for rvalue `std::array` temporaries:
+            - root cause: assertion scaffolding emitted `rusty::slice_full(std::array{...})` in local bindings, producing dangling `std::span` views after full-expression teardown; this made Stage E slice comparisons nondeterministic and surfaced as `tests_test_double_spill` assertion failure.
+            - `include/rusty/array.hpp`:
+              - added `rusty::detail::owned_array_slice<T, N>` to own temporary array storage while still exposing slice-like surfaces (`as_slice`/`as_mut_slice`, `data`/`begin`/`end`/`size`, span conversions),
+              - added `slice_full(std::array<T, N>&&)` overload returning `owned_array_slice<T, N>`,
+              - updated `as_slice`/`as_mut_slice` forwarding so rvalue arrays preserve owned storage instead of degrading to dangling const-span views.
+          - Added focused regressions:
+            - `runtime_move_semantics::test_leaf5190_slice_full_rvalue_array_keeps_owned_storage_alive`
+            - `runtime_move_semantics::test_leaf5190_as_slice_rvalue_array_preserves_value_comparison_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5190 -- --nocapture`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-90e-20260412`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+          - Deterministic frontier movement:
+            - prior post-5.1.89 first Stage E failure (`tests_test_double_spill FAILED: assertion failed`) is collapsed from deterministic first-head slots.
+            - `tests_test_double_spill` now passes; new first deterministic Stage E failure is `tests_test_from FAILED: assertion failed`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-90e-20260412/{baseline.txt,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated (lifetime-safe slice helpers), with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching.
+        - [ ] Leaf 5.1.91: `smallvec` Stage E `tests_test_from` assertion failure (`FAILED: assertion failed`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

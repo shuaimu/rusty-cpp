@@ -196,8 +196,31 @@ inline void write(T* dst, U&& value) {
 
 template<typename T, typename Count>
 inline void copy(const T* src, T* dst, Count count) {
-    auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
-    std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+    const auto element_count = static_cast<std::size_t>(count);
+    if (element_count == 0 || src == dst) {
+        return;
+    }
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        auto byte_count = element_count * sizeof(T);
+        std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+    } else if (dst < src) {
+        // Left-shift overlap patterns (`dst` before `src`) map to move-assignment.
+        for (std::size_t i = 0; i < element_count; ++i) {
+            dst[i] = std::move(const_cast<T&>(src[i]));
+        }
+    } else {
+        // Right-shift overlap patterns need reverse order. Slots beyond source
+        // coverage are newly opened holes and require placement construction.
+        for (std::size_t i = element_count; i-- > 0;) {
+            T* const dst_i = dst + i;
+            T& src_i = const_cast<T&>(src[i]);
+            if (dst_i < src + element_count) {
+                *dst_i = std::move(src_i);
+            } else {
+                std::construct_at(dst_i, std::move(src_i));
+            }
+        }
+    }
 }
 
 template<typename Src, typename Dst, typename Count>
@@ -211,8 +234,18 @@ requires (!std::is_same_v<std::remove_cv_t<Src>, std::remove_cv_t<Dst>>)
 
 template<typename T, typename Count>
 inline void copy_nonoverlapping(const T* src, T* dst, Count count) {
-    auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
-    std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+    const auto element_count = static_cast<std::size_t>(count);
+    if (element_count == 0) {
+        return;
+    }
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        auto byte_count = element_count * sizeof(T);
+        std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+    } else {
+        for (std::size_t i = 0; i < element_count; ++i) {
+            std::construct_at(dst + i, std::move(const_cast<T&>(src[i])));
+        }
+    }
 }
 
 template<typename Src, typename Dst, typename Count>

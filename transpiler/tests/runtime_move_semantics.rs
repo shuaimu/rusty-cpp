@@ -1046,6 +1046,113 @@ fn test_ptr_copy_nonoverlapping_supports_char_to_u8_surface() {
 }
 
 #[test]
+fn test_leaf5190_ptr_copy_nonoverlapping_constructs_non_trivial_elements() {
+    let source = r#"
+        #include <memory>
+        #include <string>
+        #include <type_traits>
+        #include <rusty/ptr.hpp>
+
+        int main() {
+            using Storage = std::aligned_storage_t<sizeof(std::string), alignof(std::string)>;
+            Storage storage[2];
+            auto* dst = reinterpret_cast<std::string*>(storage);
+
+            std::string src[2] = {std::string("hello"), std::string("there")};
+            rusty::ptr::copy_nonoverlapping(src, dst, 2);
+
+            const bool ok = (dst[0] == "hello" && dst[1] == "there");
+            dst[0].~basic_string();
+            dst[1].~basic_string();
+            return ok ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5190_ptr_copy_nonoverlapping_non_trivial");
+}
+
+#[test]
+fn test_leaf5190_ptr_copy_overlap_right_shift_handles_non_trivial_hole() {
+    let source = r#"
+        #include <memory>
+        #include <string>
+        #include <type_traits>
+        #include <rusty/ptr.hpp>
+
+        int main() {
+            using Storage = std::aligned_storage_t<sizeof(std::string), alignof(std::string)>;
+            Storage storage[4];
+            auto* base = reinterpret_cast<std::string*>(storage);
+
+            std::construct_at(base + 0, "a");
+            std::construct_at(base + 1, "b");
+            std::construct_at(base + 2, "c");
+            // `base + 3` intentionally left uninitialized.
+
+            rusty::ptr::copy(base + 0, base + 1, 3);
+            const bool ok = (base[1] == "a" && base[2] == "b" && base[3] == "c");
+
+            base[0].~basic_string();
+            base[1].~basic_string();
+            base[2].~basic_string();
+            base[3].~basic_string();
+            return ok ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5190_ptr_copy_overlap_right_shift_non_trivial");
+}
+
+#[test]
+fn test_leaf5190_slice_full_rvalue_array_keeps_owned_storage_alive() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/string.hpp>
+
+        int main() {
+            auto expected = std::array{
+                rusty::String::from("hello"),
+                rusty::String::from("there"),
+                rusty::String::from("burma"),
+                rusty::String::from("shave")
+            };
+
+            auto view = rusty::slice_full(std::array{
+                rusty::String::from("hello"),
+                rusty::String::from("there"),
+                rusty::String::from("burma"),
+                rusty::String::from("shave")
+            });
+
+            // Force additional stack activity before comparison to catch
+            // dangling-view regressions from rvalue array slicing.
+            auto noise = rusty::String::from("stack-noise");
+            (void)noise;
+
+            return (view == expected) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5190_slice_full_rvalue_array_lifetime");
+}
+
+#[test]
+fn test_leaf5190_as_slice_rvalue_array_preserves_value_comparison_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+
+        int main() {
+            auto view = rusty::as_slice(std::array{1, 2, 3, 4});
+            return (view == std::array{1, 2, 3, 4}) ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5190_as_slice_rvalue_array_surface");
+}
+
+#[test]
 fn test_ptr_nonnull_supports_equality_comparison() {
     let source = r#"
         #include <rusty/ptr.hpp>
