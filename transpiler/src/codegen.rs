@@ -29396,6 +29396,25 @@ impl CodeGen {
         Some(format!("rusty::detail::associated_item_t<{}>", owner_cpp))
     }
 
+    fn type_path_matches_slice_iter_family(path: &syn::Path, family: &str) -> bool {
+        let mut path_idents: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        while matches!(
+            path_idents.first().map(|s| s.as_str()),
+            Some("crate" | "self" | "super")
+        ) {
+            path_idents.remove(0);
+        }
+        let normalized: &[String] = if matches!(
+            path_idents.first().map(|s| s.as_str()),
+            Some("std" | "core" | "alloc")
+        ) {
+            &path_idents[1..]
+        } else {
+            &path_idents
+        };
+        matches!(normalized, [slice, iter] if slice == "slice" && iter == family)
+    }
+
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
@@ -29561,7 +29580,7 @@ impl CodeGen {
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
                         self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);
-                        let generic_args: Vec<String> = args
+                        let mut generic_args: Vec<String> = args
                             .args
                             .iter()
                             .filter_map(|arg| match arg {
@@ -29571,6 +29590,17 @@ impl CodeGen {
                             })
                             .collect();
                         self.type_arg_nesting.set(self.type_arg_nesting.get() - 1);
+
+                        // Rust `slice::Iter<'a, T>` yields immutable references (`&'a T`).
+                        // Model that as `Iter<const T>` while keeping `IterMut<'a, T>` as `Iter<T>`.
+                        if Self::type_path_matches_slice_iter_family(&tp.path, "Iter")
+                            && let Some(elem_ty) = generic_args.first_mut()
+                        {
+                            let trimmed = elem_ty.trim_start();
+                            if !trimmed.starts_with("const ") {
+                                *elem_ty = format!("const {}", elem_ty);
+                            }
+                        }
 
                         if !generic_args.is_empty() {
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
@@ -47965,6 +47995,27 @@ mod tests {
         );
         assert!(out.contains("return m::size()"), "{out}");
         assert!(!out.contains("type_level_size<m>()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5152_slice_iter_type_lowers_with_const_element() {
+        let out = transpile_str(
+            r#"
+            type It<'a, T> = core::slice::Iter<'a, T>;
+        "#,
+        );
+        assert!(out.contains("using It = rusty::slice_iter::Iter<const T>;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5152_slice_itermut_type_keeps_mutable_element() {
+        let out = transpile_str(
+            r#"
+            type ItMut<'a, T> = core::slice::IterMut<'a, T>;
+        "#,
+        );
+        assert!(out.contains("using ItMut = rusty::slice_iter::Iter<T>;"), "{out}");
+        assert!(!out.contains("using ItMut = rusty::slice_iter::Iter<const T>;"), "{out}");
     }
 
     #[test]

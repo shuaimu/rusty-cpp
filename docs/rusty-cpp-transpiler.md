@@ -2453,6 +2453,10 @@ Current status snapshot:
    - normalizing `has_member_as_slice` equality surfaces through shared `rusty::as_slice(...)` instead of directly consuming `.as_slice()` results as `.size()`/`.begin()`-bearing views, and
    - hardening `slice_full` mutable/const helpers to detect identity-return `.as_slice()` / `.as_mut_slice()` shapes and materialize span views via shared `as_ptr`/`as_mut_ptr` + `len` fallback.
 106. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1571` (`Drain<...>` constructor call shape mismatch: `Iter<const unsigned char>` passed where mutable iterator payload is expected), followed by downstream `Drain`/pointer-surface gaps (`Drain::for_each`, `NonNull::as_mut`, iterator adapter fallout, and related errors). Guardrail check against §11 remains satisfied for `Leaf 5.1.51` (fixes stayed shared and shape-gated in runtime slice/equality helpers, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+107. Focused `smallvec` repro after `Leaf 5.1.52` (`/tmp/rusty-parity-matrix-5-1-52a-20260412/smallvec/...`) collapses the prior post-5.1.51 `slice::Iter` constness mismatch family by:
+   - lowering `core/std/alloc::slice::Iter<'a, T>` type surfaces to `rusty::slice_iter::Iter<const T>` while preserving `slice::IterMut<'a, T>` as `rusty::slice_iter::Iter<T>`, and
+   - applying the rewrite through normalized path-shape gating in transpiler type lowering (`map_type`) rather than generated-output patching.
+108. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2211` (`Drain<...>` missing `.for_each` surface, followed by `NonNull::as_mut` at `runner.cpp:2215`), with downstream iterator-adapter/call-shape fallout (`rusty::iter` over `IntoIter`, CTAD mismatch in nested `DropOnPanic`, and related errors). Guardrail check against §11 remains satisfied for `Leaf 5.1.52` (fixes stayed shared and type-shape-gated in transpiler lowering, with no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

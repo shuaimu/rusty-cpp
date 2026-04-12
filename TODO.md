@@ -5155,6 +5155,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-51a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in runtime slice/equality helpers; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.52: `smallvec` Stage D `slice::Iter` constness lowering compile-head family collapse
+          - Plan/scope check: shared transpiler type-lowering hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - type lowering now maps `core/std/alloc::slice::Iter<'a, T>` to `rusty::slice_iter::Iter<const T>` while preserving `slice::IterMut<'a, T>` as `rusty::slice_iter::Iter<T>`.
+            - this collapses the deterministic post-5.1.51 first-head constructor-mismatch family at `runner.cpp:1571` (`Drain<...>` expecting mutable `Iter<T>` while call sites materialize immutable `Iter<const T>` from `from_raw_parts(...).iter()` shape).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added normalized slice-iterator family path detection helper.
+              - added const-qualification adjustment for generic arguments of `slice::Iter` in `map_type(...)`.
+              - added focused regressions:
+                - `test_leaf5152_slice_iter_type_lowers_with_const_element`
+                - `test_leaf5152_slice_itermut_type_keeps_mutable_element`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5152 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-52a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.51 first-head family at `runner.cpp:1571` (`Drain` constructor `Iter<const ...>` vs `Iter<...>`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2211` (`Drain<...>` missing `.for_each` plus `NonNull::as_mut` surface at `runner.cpp:2215`), followed by downstream iterator-adapter and call-shape gaps.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-52a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and narrowly type-shape-gated in transpiler lowering; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
