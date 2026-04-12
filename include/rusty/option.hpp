@@ -202,6 +202,15 @@ public:
         return default_value;
     }
 
+    // Lazily compute fallback value only for None.
+    template<typename F>
+    T unwrap_or_else(F&& default_fn) {
+        if (has_value) {
+            return unwrap();
+        }
+        return std::forward<F>(default_fn)();
+    }
+
     // Map function over the value
     template<typename F>
     // @lifetime: owned
@@ -231,6 +240,24 @@ public:
             return f(value);
         }
         return ResultType(None);
+    }
+
+    // ok_or_else: convert Option<T> to Result<T, E> using closure for error
+    template<typename E>
+    auto ok_or(E err) -> Result<T, E> {
+        if (has_value) {
+            return Result<T, E>::Ok(std::move(value));
+        }
+        return Result<T, E>::Err(std::move(err));
+    }
+
+    // ok_or on const reference
+    template<typename E>
+    auto ok_or(E err) const -> Result<T, E> {
+        if (has_value) {
+            return Result<T, E>::Ok(value);
+        }
+        return Result<T, E>::Err(std::move(err));
     }
 
     // ok_or_else: convert Option<T> to Result<T, E> using closure for error

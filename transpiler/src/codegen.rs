@@ -18673,6 +18673,78 @@ impl CodeGen {
         }
     }
 
+    fn should_lower_swap_method_call_to_index_swap(&self, receiver: &syn::Expr) -> bool {
+        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
+            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
+        {
+            if let Some(current_struct) = self.current_struct.as_ref() {
+                return matches!(
+                    current_struct.as_str(),
+                    "Vec" | "VecDeque" | "ArrayVec" | "SmallVec"
+                );
+            }
+        }
+
+        if self.expr_lowers_to_slice_or_span_view(receiver) {
+            return true;
+        }
+
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        if self.type_is_slice_or_span_like(receiver_ty) {
+            return true;
+        }
+
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let receiver_name = if last.ident == "Self" {
+            self.current_struct
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| "Self".to_string())
+        } else {
+            last.ident.to_string()
+        };
+        matches!(
+            receiver_name.as_str(),
+            "Vec" | "VecDeque" | "ArrayVec" | "SmallVec"
+        )
+    }
+
+    fn should_lower_swap_method_call_via_deref_mut_view(&self, receiver: &syn::Expr) -> bool {
+        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
+            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
+        {
+            return self.current_struct.as_deref() == Some("SmallVec");
+        }
+
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let receiver_name = if last.ident == "Self" {
+            self.current_struct
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| "Self".to_string())
+        } else {
+            last.ident.to_string()
+        };
+        receiver_name == "SmallVec"
+    }
+
     fn type_uses_as_str_string_view_coercion(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
@@ -18986,6 +19058,29 @@ impl CodeGen {
         if mc.method == "to_string" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::to_string({})", receiver);
+        }
+        if mc.method == "swap"
+            && mc.args.len() == 2
+            && self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let lhs_idx = self.emit_expr_to_string(&mc.args[0]);
+            let rhs_idx = self.emit_expr_to_string(&mc.args[1]);
+            let swap_view_expr = if self.should_lower_swap_method_call_via_deref_mut_view(&mc.receiver)
+            {
+                "_swap_recv.deref_mut()"
+            } else {
+                "_swap_recv"
+            };
+            return format!(
+                "[&]() {{ auto&& _swap_recv = {}; auto&& _swap_view = {}; rusty::mem::swap(_swap_view[{}], _swap_view[{}]); }}()",
+                receiver, swap_view_expr, lhs_idx, rhs_idx
+            );
         }
         if mc.method == "to_vec"
             && mc.args.is_empty()
@@ -46296,6 +46391,46 @@ mod tests {
             ),
             "{out}"
         );
+    }
+
+    #[test]
+    fn test_leaf5127_smallvec_swap_on_self_lowers_to_index_swap_helper() {
+        let out = transpile_str(
+            r#"
+            struct SmallVec<T>;
+            impl<T> SmallVec<T> {
+                fn swap_remove_like(&mut self, i: usize, j: usize) {
+                    self.swap(i, j);
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("auto&& _swap_view = _swap_recv.deref_mut();"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rusty::mem::swap(_swap_view[i], _swap_view[j]);"),
+            "{out}"
+        );
+        assert!(!out.contains("this->swap("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5127_custom_swap_method_is_not_rewritten() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn swap(&mut self, _a: i32, _b: i32) {}
+            }
+            fn f(mut s: S) {
+                s.swap(1, 2);
+            }
+            "#,
+        );
+        assert!(out.contains("s.swap(1, 2);"), "{out}");
+        assert!(!out.contains("rusty::mem::swap(_swap_recv["), "{out}");
     }
 
     #[test]

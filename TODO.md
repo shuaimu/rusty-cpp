@@ -4569,6 +4569,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-26-20260412a/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in core lowering/inference paths; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
+        - [x] *done* Leaf 5.1.27: `smallvec` Stage D `swap_remove`/`pop` method-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime surface hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites `receiver.swap(i, j)` for slice/span and sequence-like receivers into a single-evaluation index-swap lambda.
+            - `SmallVec`-shaped swap receivers now route through `deref_mut()` before indexing, preventing const-view element binding in `swap_remove` lowering.
+            - runtime Option/ptr surfaces now include `Option::unwrap_or_else`, `Option::ok_or`, and `rusty::ptr::NonNull<T>::new_` to satisfy adjacent method-surface usage in `smallvec` expanded output.
+          - Added focused regressions:
+            - `test_leaf5127_smallvec_swap_on_self_lowers_to_index_swap_helper`
+            - `test_leaf5127_custom_swap_method_is_not_rewritten`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5127 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-27 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.26 first-head family at `runner.cpp:1730/1731` (`SmallVec<...>::swap` member missing + `Option::unwrap_or_else` surface) with adjacent `runner.cpp:1387` (`NonNull::new_` surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1549` (inconsistent `triple_mut` auto return tuple shape: `len` value vs `len_ptr` pointer), with adjacent fallout at `runner.cpp:1592/1593`.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-27/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core lowering/runtime surfaces; no generated-output patching and no crate-specific ad-hoc scripts were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

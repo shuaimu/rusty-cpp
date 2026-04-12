@@ -34,6 +34,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include "option.hpp"
 
 namespace rusty {
 
@@ -55,6 +56,13 @@ private:
 
 public:
     constexpr explicit NonNull(T* ptr) noexcept : ptr_(ptr) {}
+
+    static Option<NonNull<T>> new_(T* ptr) noexcept {
+        if (ptr == nullptr) {
+            return Option<NonNull<T>>(None);
+        }
+        return Option<NonNull<T>>(NonNull<T>(ptr));
+    }
 
     static constexpr NonNull<T> new_unchecked(T* ptr) noexcept {
         return NonNull<T>(ptr);
