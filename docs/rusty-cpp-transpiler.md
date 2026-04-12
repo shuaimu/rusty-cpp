@@ -2588,6 +2588,11 @@ Current status snapshot:
    - preserving lvalue `next()` iterator receivers by reference in `make_next_iter_range(...)` instead of value-decay move/copy,
    - updating `next_iter_range` storage/iterator cursor shape to support reference-backed iterators safely (`std::remove_reference_t<NextIter>*`), preventing `rusty::for_each(*this, ...)` drop paths from re-entering destructor recursion through temporary iterator-adapter ownership.
 166. `smallvec` deterministic frontier remains in Stage E but moves to runtime semantic/allocator fallout: first failure is `tests_drain` (`assertion failed`) followed by allocator abort (`free(): double free detected in tcache 2`). Guardrail check against §11 remains satisfied for `Leaf 5.1.81` (fix stayed shared and runtime-surface-gated in core iterator ownership/lifetime behavior, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+167. Focused `smallvec` repro after `Leaf 5.1.82` (`/tmp/rusty-parity-matrix-5-1-82c-20260412/smallvec/...`) collapses the prior post-5.1.81 `tests_drain` assertion family by:
+   - hardening tuple destructuring for mutable/reassigned reference elements to pointer-alias form (`len_ref` slot + pointer binding), preserving Rust rebinding semantics (`len = heap_len`) instead of mutating pointees,
+   - routing rebind-reference path/assignment lowering through pointer semantics (auto-deref for value contexts; pointer rebinding for assignments),
+   - adding rebind-assignment RHS address-of fallback for unresolved local lvalues plus owner-method return-type inference fallback on non-`self` receivers (`self.data.heap_mut()`), so nested tuple field-method destructuring does not degrade into value/pointer mismatches.
+168. `smallvec` deterministic frontier remains in Stage E and moves past `tests_drain`: `tests_drain` now passes, and the new first deterministic failure is `tests_drain_forget` allocator abort (`free(): double free detected in tcache 2`). Guardrail check against §11 remains satisfied for `Leaf 5.1.82` (fixes stayed shared and AST/type-shape-gated in core tuple/reference lowering + inference paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

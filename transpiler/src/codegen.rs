@@ -16010,11 +16010,6 @@ impl CodeGen {
                 // THEN allocate shadow names for the pattern elements.
                 // This prevents self-referential initialization like
                 // `auto [major, text_shadow1] = f(text_shadow1)`.
-                let expr_str = if let Some(init) = &local.init {
-                    Some(self.emit_expr_to_string(&init.expr))
-                } else {
-                    None
-                };
                 let inferred_tuple_type = local
                     .init
                     .as_ref()
@@ -16023,6 +16018,11 @@ impl CodeGen {
                         syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
                         _ => None,
                     });
+                let expr_str = if let Some(init) = &local.init {
+                    Some(self.emit_expr_to_string(&init.expr))
+                } else {
+                    None
+                };
                 let rust_binding_names: Vec<Option<String>> = tuple
                     .elems
                     .iter()
@@ -16031,18 +16031,35 @@ impl CodeGen {
                         _ => None,
                     })
                     .collect();
-                let names: Vec<String> = tuple
-                    .elems
-                    .iter()
-                    .map(|p| {
-                        let raw = self.emit_pat_to_string(p);
-                        if raw == "_" {
-                            raw
-                        } else {
-                            self.allocate_local_cpp_name(&raw)
-                        }
-                    })
-                    .collect();
+                let mut tuple_binding_names: Vec<String> = Vec::with_capacity(tuple.elems.len());
+                let mut tuple_rebind_pointer_bindings: Vec<(usize, String, String)> = Vec::new();
+                for (idx, p) in tuple.elems.iter().enumerate() {
+                    let raw = self.emit_pat_to_string(p);
+                    if raw == "_" {
+                        tuple_binding_names.push(raw);
+                        continue;
+                    }
+                    let cpp_name = self.allocate_local_cpp_name(&raw);
+                    let needs_rebind_pointer = matches!(p, syn::Pat::Ident(pi) if pi.mutability.is_some())
+                        && self.reassigned_vars.contains(&raw)
+                        && inferred_tuple_type
+                            .as_ref()
+                            .and_then(|tuple_ty| tuple_ty.elems.iter().nth(idx))
+                            .is_some_and(|elem_ty| {
+                                matches!(
+                                    self.peel_paren_group_type(elem_ty),
+                                    syn::Type::Reference(_)
+                                )
+                            });
+                    if needs_rebind_pointer {
+                        let tuple_slot_name =
+                            self.reserve_synthetic_cpp_name(&format!("{}_ref", cpp_name));
+                        tuple_binding_names.push(tuple_slot_name.clone());
+                        tuple_rebind_pointer_bindings.push((idx, cpp_name, tuple_slot_name));
+                    } else {
+                        tuple_binding_names.push(cpp_name);
+                    }
+                }
                 if let Some(expr_str) = expr_str {
                     // Check if this is a constructor call without template args that would
                     // cause CTAD failure. These have incomplete types and can't be used in
@@ -16056,7 +16073,34 @@ impl CodeGen {
                         // Can't use in structured binding, fall back to void cast.
                         self.writeln(&format!("static_cast<void>({});", expr_str));
                     } else {
-                        self.writeln(&format!("auto [{}] = {};", names.join(", "), expr_str));
+                        self.writeln(&format!(
+                            "auto [{}] = {};",
+                            tuple_binding_names.join(", "),
+                            expr_str
+                        ));
+                        for (idx, cpp_name, tuple_slot_name) in &tuple_rebind_pointer_bindings {
+                            let ptr_ty = inferred_tuple_type
+                                .as_ref()
+                                .and_then(|tuple_ty| tuple_ty.elems.iter().nth(*idx))
+                                .and_then(|elem_ty| {
+                                    let elem_ty = self.peel_paren_group_type(elem_ty);
+                                    if let syn::Type::Reference(reference) = elem_ty {
+                                        let inner = self.map_type(&reference.elem);
+                                        if reference.mutability.is_some() {
+                                            Some(format!("{}*", inner))
+                                        } else {
+                                            Some(format!("const {}*", inner))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or_else(|| "auto*".to_string());
+                            self.writeln(&format!(
+                                "{} {} = &{};",
+                                ptr_ty, cpp_name, tuple_slot_name
+                            ));
+                        }
                         if let Some(tuple_ty) = inferred_tuple_type.as_ref() {
                             for (raw_name, elem_ty) in
                                 rust_binding_names.iter().zip(tuple_ty.elems.iter())
@@ -16311,6 +16355,18 @@ impl CodeGen {
             syn::Type::Group(g) => Self::is_mut_reference_type(&g.elem),
             _ => false,
         }
+    }
+
+    fn is_rebind_reference_binding(&self, name: &str) -> bool {
+        if !self.reassigned_vars.contains(name) {
+            return false;
+        }
+        self.lookup_local_binding_type(name).is_some_and(|ty| {
+            matches!(
+                self.peel_paren_group_type(&ty),
+                syn::Type::Reference(_)
+            )
+        })
     }
 
     fn is_raw_pointer_type(ty: &syn::Type) -> bool {
@@ -17485,6 +17541,67 @@ impl CodeGen {
         if receiver_is_self {
             if let Some(ret_ty) = self.lookup_current_struct_method_return_type(&method) {
                 return Some(ret_ty);
+            }
+        }
+
+        if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some(ret_ty) =
+                self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)
+        {
+            return Some(ret_ty);
+        }
+
+        None
+    }
+
+    fn lookup_owner_method_return_type_from_receiver_type(
+        &self,
+        receiver_ty: &syn::Type,
+        method_name: &str,
+    ) -> Option<syn::Type> {
+        let receiver_ty = self.peel_reference_paren_group_type(receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return None;
+        };
+
+        let mut owner_candidates = Vec::new();
+        let full_owner = tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !full_owner.is_empty() {
+            owner_candidates.push(full_owner.clone());
+        }
+        if let Some(last) = tp.path.segments.last() {
+            owner_candidates.push(last.ident.to_string());
+        }
+        if !full_owner.is_empty() {
+            owner_candidates.push(self.scoped_type_key(&full_owner));
+        }
+        if let Some(last) = tp.path.segments.last() {
+            owner_candidates.push(self.scoped_type_key(&last.ident.to_string()));
+        }
+
+        let mut dedup = HashSet::new();
+        owner_candidates.retain(|candidate| dedup.insert(candidate.clone()));
+        for owner in owner_candidates {
+            let Some(items) = self.impl_blocks.get(&owner) else {
+                continue;
+            };
+            for item in items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                if method.sig.ident != method_name {
+                    continue;
+                }
+                let syn::ReturnType::Type(_, ret_ty) = &method.sig.output else {
+                    return None;
+                };
+                return Some((**ret_ty).clone());
             }
         }
 
@@ -26141,6 +26258,43 @@ impl CodeGen {
         None
     }
 
+    fn emit_rebind_reference_assignment_rhs(&self, rhs: &syn::Expr) -> String {
+        let rhs = self.peel_paren_group_expr(rhs);
+        match rhs {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments[0].ident.to_string();
+                if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
+                    if self.is_rebind_reference_binding(&name) {
+                        return mapped;
+                    }
+                    if let Some(local_ty) = self.lookup_local_binding_type(&name) {
+                        if matches!(self.peel_paren_group_type(&local_ty), syn::Type::Reference(_))
+                        {
+                            return format!("&{}", mapped);
+                        }
+                        return mapped;
+                    }
+                    return format!("&{}", mapped);
+                }
+                if self.is_rebind_reference_binding(&name) {
+                    return escape_cpp_keyword(&name);
+                }
+                if self.lookup_local_binding_type(&name).is_some_and(|ty| {
+                    matches!(
+                        self.peel_paren_group_type(&ty),
+                        syn::Type::Reference(_)
+                    )
+                }) {
+                    return format!("&{}", escape_cpp_keyword(&name));
+                }
+                self.emit_expr_to_string(rhs)
+            }
+            syn::Expr::Paren(paren) => self.emit_rebind_reference_assignment_rhs(&paren.expr),
+            syn::Expr::Group(group) => self.emit_rebind_reference_assignment_rhs(&group.expr),
+            _ => self.emit_expr_to_string(rhs),
+        }
+    }
+
     fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
@@ -26333,6 +26487,18 @@ impl CodeGen {
                 format!("co_await {}", inner)
             }
             syn::Expr::Assign(a) => {
+                if let syn::Expr::Path(path) = self.peel_paren_group_expr(&a.left) {
+                    if path.path.segments.len() == 1 {
+                        let name = path.path.segments[0].ident.to_string();
+                        if self.is_rebind_reference_binding(&name) {
+                            let left = self
+                                .lookup_local_binding_cpp_name(&name)
+                                .unwrap_or_else(|| escape_cpp_keyword(&name));
+                            let right = self.emit_rebind_reference_assignment_rhs(&a.right);
+                            return format!("{} = {}", left, right);
+                        }
+                    }
+                }
                 let mut delayed_init_local: Option<String> = None;
                 let expected_ty = if let syn::Expr::Path(path) = a.left.as_ref() {
                     if path.path.segments.len() == 1 {
@@ -29536,6 +29702,9 @@ impl CodeGen {
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
                 if self.is_delayed_init_local(&name) {
                     return format!("{}.value()", mapped);
+                }
+                if self.is_rebind_reference_binding(&name) {
+                    return format!("*{}", mapped);
                 }
                 return mapped;
             }
@@ -52270,6 +52439,156 @@ mod tests {
         assert!(out.contains("rusty::Result<int32_t, CollectionAllocErr> layout_array()"));
         assert!(out.contains(".map_err([&](auto&& _err) -> CollectionAllocErr { return ("));
         assert!(out.contains("CollectionAllocErr_CapacityOverflow{}"));
+    }
+
+    #[test]
+    fn test_leaf5182_tuple_mut_ref_rebind_uses_pointer_alias_semantics() {
+        let out = transpile_str(
+            r#"
+            struct Holder {
+                a: usize,
+                b: usize,
+            }
+
+            impl Holder {
+                fn triple_mut(&mut self) -> (usize, &mut usize, usize) {
+                    (0, &mut self.a, self.b)
+                }
+
+                fn heap_mut(&mut self) -> (usize, &mut usize) {
+                    (1, &mut self.b)
+                }
+
+                fn bump(&mut self) {
+                    let (mut ptr, mut len, cap) = self.triple_mut();
+                    if len == cap {
+                        let (heap_ptr, heap_len) = self.heap_mut();
+                        ptr = heap_ptr;
+                        len = heap_len;
+                    }
+                    len += 1;
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"), "{out}");
+        assert!(out.contains("size_t* len = &len_ref;"), "{out}");
+        assert!(out.contains("if (*len == cap)"), "{out}");
+        assert!(out.contains("len = &heap_len;"), "{out}");
+        assert!(out.contains("*len += 1;"), "{out}");
+        assert!(!out.contains("len = heap_len;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5182_collect_reassigned_vars_tracks_tuple_target_assignments() {
+        let block: syn::Block = syn::parse_str(
+            r#"
+            {
+                let (mut ptr, mut len, cap) = self.triple_mut();
+                if len == cap {
+                    let (heap_ptr, heap_len) = self.heap_mut();
+                    ptr = heap_ptr;
+                    len = heap_len;
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let reassigned = collect_reassigned_vars(&block.stmts);
+        assert!(reassigned.contains("ptr"), "{reassigned:?}");
+        assert!(reassigned.contains("len"), "{reassigned:?}");
+    }
+
+    #[test]
+    fn test_leaf5182_tuple_mut_ref_rebind_from_field_method_rhs_takes_address() {
+        let out = transpile_str(
+            r#"
+            struct Data {
+                n: usize,
+            }
+
+            impl Data {
+                fn heap_mut(&mut self) -> (usize, &mut usize) {
+                    (1, &mut self.n)
+                }
+            }
+
+            struct Holder {
+                data: Data,
+                a: usize,
+            }
+
+            impl Holder {
+                fn triple_mut(&mut self) -> (usize, &mut usize, usize) {
+                    (0, &mut self.a, self.a + 1)
+                }
+
+                fn bump(&mut self) {
+                    let (mut ptr, mut len, cap) = self.triple_mut();
+                    if len == cap {
+                        let (heap_ptr, heap_len) = self.data.heap_mut();
+                        ptr = heap_ptr;
+                        len = heap_len;
+                    }
+                    len += 1;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"), "{out}");
+        assert!(out.contains("auto [heap_ptr, heap_len] = this->data.heap_mut();"), "{out}");
+        assert!(out.contains("len = &heap_len;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5182_tuple_mut_ref_rebind_from_generic_field_method_rhs_takes_address() {
+        let out = transpile_str(
+            r#"
+            trait Array {
+                type Item;
+            }
+
+            struct U8Arr;
+            impl Array for U8Arr {
+                type Item = u8;
+            }
+
+            struct Data<A: Array> {
+                n: usize,
+                _m: A,
+            }
+
+            impl<A: Array> Data<A> {
+                fn heap_mut(&mut self) -> (A::Item, &mut usize) {
+                    let _ = &self._m;
+                    panic!();
+                }
+            }
+
+            struct Holder<A: Array> {
+                data: Data<A>,
+                a: usize,
+            }
+
+            impl<A: Array> Holder<A> {
+                fn triple_mut(&mut self) -> (A::Item, &mut usize, usize) {
+                    let _ = &self.data._m;
+                    panic!();
+                }
+
+                fn bump(&mut self) {
+                    let (mut ptr, mut len, cap) = self.triple_mut();
+                    if len == cap {
+                        let (heap_ptr, heap_len) = self.data.heap_mut();
+                        ptr = heap_ptr;
+                        len = heap_len;
+                    }
+                    len += 1;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("len = &heap_len;"), "{out}");
     }
 
     #[test]

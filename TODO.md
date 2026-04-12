@@ -5842,7 +5842,28 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-81a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core iterator ownership/lifetime behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.82: `smallvec` Stage E `tests_drain` runtime semantic failure (`assertion failed`) with allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+        - [x] *done* Leaf 5.1.82: `smallvec` Stage E `tests_drain` runtime semantic failure (`assertion failed`) with allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared tuple-reference rebinding hardening in `transpiler/src/codegen.rs`:
+            - tuple destructuring now materializes mutable/reassigned reference elements through pointer aliases (`len_ref` slot + `size_t* len = &len_ref`) so Rust reference rebinding (`len = heap_len`) is preserved instead of mutating pointees.
+            - rebind-reference locals now auto-deref in path emission for value contexts, while assignment lowering handles reference rebinding via pointer assignment semantics.
+            - rebind-assignment RHS lowering now takes address of unresolved local lvalues by default, preventing pointer/value mismatches when tuple-element reference typing cannot be fully inferred at that site.
+            - added owner-method return-type inference fallback for non-`self` method receivers in local result-type inference (`self.data.heap_mut()` shapes), keeping tuple-element reference metadata available across nested field-method destructuring.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5182_tuple_mut_ref_rebind_uses_pointer_alias_semantics`
+            - `codegen::tests::test_leaf5182_collect_reassigned_vars_tracks_tuple_target_assignments`
+            - `codegen::tests::test_leaf5182_tuple_mut_ref_rebind_from_field_method_rhs_takes_address`
+            - `codegen::tests::test_leaf5182_tuple_mut_ref_rebind_from_generic_field_method_rhs_takes_address`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5182 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path tests/transpile_tests/smallvec/Cargo.toml --stop-after run --work-dir /tmp/rusty-parity-matrix-5-1-82c-20260412`
+          - Deterministic frontier movement:
+            - prior post-5.1.81 first Stage E failure family (`tests_drain` assertion failure followed by allocator abort) is collapsed from deterministic first-head slots.
+            - `tests_drain` now passes; new deterministic first Stage E failure is `tests_drain_forget` allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-82c-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core tuple/reference lowering and inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
