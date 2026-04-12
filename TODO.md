@@ -4655,6 +4655,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-30/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and narrowly context-gated to iterator-map callback parameter scopes; no crate-specific scripts and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.31: `smallvec` Stage D `catch_unwind(move || ...)` callable/wrapper/closure-mutability compile-head family collapse
+          - Plan/scope check: shared runtime+transpiler closure/panic-surface hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - runtime panic surface now supports direct callable `catch_unwind(F&&)` in addition to `catch_unwind(AssertUnwindSafe<F>)`, while guarding overload resolution so explicit `AssertUnwindSafe` arguments still route to the wrapped overload.
+            - move-closure emission now appends C++ lambda `mutable` for `[=]` closures, preserving Rust move-closure ability to mutate captured-by-value bindings in closure bodies.
+          - Added focused regressions:
+            - `transpiler/src/codegen.rs`: `test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda`
+            - `transpiler/tests/runtime_move_semantics.rs`: `test_catch_unwind_accepts_plain_callable_without_assert_wrapper`
+            - updated `transpiler/src/codegen.rs` `test_closure_move_capture` to assert move-closure mutable emission shape.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5131 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_closure_move_capture -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler plain_callable_without_assert_wrapper -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-31 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.30 first-head family at `runner.cpp:3171` (`catch_unwind([=](){ vec.insert_many(...) })` const-capture mutation + missing plain-callable overload) with adjacent same-family errors at `runner.cpp:3170/3180/3190/3200/3210` is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3254` (slice element-type mismatch in `insert_from_slice` path: `std::span<const int,2>` to `std::span<const unsigned char,...>`), with adjacent same-family/API-surface fallout at `runner.cpp:3298` and downstream independent compile families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-31/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and semantics-gated in runtime/closure lowering paths (no crate-specific scripts, no generated-output text patching, and no callsite-only post-processing).
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

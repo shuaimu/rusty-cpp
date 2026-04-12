@@ -311,6 +311,24 @@ fn test_vec_drop_panic_is_catchable_via_catch_unwind() {
 }
 
 #[test]
+fn test_catch_unwind_accepts_plain_callable_without_assert_wrapper() {
+    let source = r#"
+        #include <rusty/panic.hpp>
+
+        int main() {
+            int value = 0;
+            auto res = rusty::panic::catch_unwind([=]() mutable {
+                value += 1;
+                rusty::panic::begin_panic("boom");
+            });
+            return res.is_err() ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "catch_unwind_plain_callable");
+}
+
+#[test]
 fn test_ptr_write_supports_non_assignable_move_only_payloads() {
     let source = r#"
         #include <rusty/ptr.hpp>

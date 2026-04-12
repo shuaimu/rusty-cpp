@@ -24,6 +24,12 @@ struct AssertUnwindSafe {
 template<typename F>
 AssertUnwindSafe(F) -> AssertUnwindSafe<F>;
 
+template<typename T>
+struct is_assert_unwind_safe : std::false_type {};
+
+template<typename F>
+struct is_assert_unwind_safe<AssertUnwindSafe<F>> : std::true_type {};
+
 template<typename F>
 auto catch_unwind(AssertUnwindSafe<F> wrapped) {
     using Return = decltype(wrapped.callable());
@@ -41,6 +47,13 @@ auto catch_unwind(AssertUnwindSafe<F> wrapped) {
             return rusty::Result<Return, std::exception_ptr>::Err(std::current_exception());
         }
     }
+}
+
+template<typename F>
+    requires(!is_assert_unwind_safe<std::remove_cvref_t<F>>::value)
+auto catch_unwind(F&& callable) {
+    return catch_unwind(AssertUnwindSafe<std::remove_cvref_t<F>>(
+        std::forward<F>(callable)));
 }
 
 [[noreturn]] inline void resume_unwind(std::exception_ptr payload) {

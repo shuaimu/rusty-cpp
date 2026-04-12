@@ -2364,6 +2364,11 @@ Current status snapshot:
    - collapsing exactly one unary-deref layer only for untyped iterator-map callback parameter paths (`*v -> v`, `**v -> *v`) while keeping non-map closure deref lowering unchanged.
 62. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3171` (`passing const SmallVec<...> as this argument discards qualifiers`) in `catch_unwind([=](){ ... })` closure bodies, with adjacent same-family callable-shape fallout at `runner.cpp:3170/3180/3190/3200/3210` (`catch_unwind` expects `AssertUnwindSafe<F>` wrapper surface).
 63. Guardrail check against §11 remains satisfied for `Leaf 5.1.30`: fix stayed shared and narrowly context-gated to iterator-map callback-parameter scopes; no crate-specific scripts and no generated-output text patching were introduced.
+64. Focused `smallvec` repro after `Leaf 5.1.31` (`/tmp/rusty-parity-matrix-5-1-31/smallvec/...`) collapses the prior post-5.1.30 `catch_unwind(move || ...)` first-head family by:
+   - adding shared runtime `catch_unwind(F&&)` support for plain callables (while preserving explicit `AssertUnwindSafe<F>` overload routing), and
+   - emitting move closures as `[=](...) mutable` so captured-by-value bindings remain mutable in lambda bodies.
+65. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3254` (slice element-type mismatch in `insert_from_slice`: `std::span<const int,2>` cannot convert to `std::span<const unsigned char,...>`), with adjacent same-family/API-surface fallout at `runner.cpp:3298` (`extend_from_slice` shape) and downstream independent compile families.
+66. Guardrail check against §11 remains satisfied for `Leaf 5.1.31`: fixes stayed shared and semantics-gated in runtime/closure lowering paths; no crate-specific scripts and no generated-output text patching were introduced.
 
 Historical active-work chain (retained for traceability):
 
@@ -4828,6 +4833,7 @@ Required approach:
 - for tuple/binding assertion reference scaffolding, do not take addresses of coerced temporary expressions (for example `&std::string_view(expr)`); materialize coercions into stable temporaries before address-taking
 - for closure payload and constructor-hint recovery, do not resolve closure parameter paths through outer local-shadow bindings; bind closure parameters in nested emission scope and avoid in-progress self-binding leakage during hint inference
 - for unary-deref lowering inside closures, do not globally collapse deref on untyped closure params across all closure kinds; restrict deref-collapse to proven callback contexts (for example iterator-map callback parameter scope) and collapse at most one layer per deref expression
+- for move-closure lowering, do not emit bare `[=]` lambdas without mutability in contexts that mutate captured-by-value state (for example `catch_unwind(move || { vec.push(...) })`); preserve Rust move-closure mutability by emitting mutable value-capture lambdas
 - for function-item/path value bindings, do not emit unresolved or overloaded associated-function paths directly as C++ value initializers (for example `const auto s = rusty::String::from;`); lower through context-specialized callable wrappers or disambiguated callable forms
 - for assertion tuple string-literal deref shapes, do not preserve borrowed `&*"literal"` RHS lowering as scalar `const char` comparisons; normalize through string-like coercion materialization (for example `std::string_view`) before tuple compare deref
 - for consuming `self` return-path lowering (for example `into_iter()`), do not pass lvalue `(*this)` into move-only constructor surfaces; emit move/value-safe forms to avoid deleted-copy constructor fallout

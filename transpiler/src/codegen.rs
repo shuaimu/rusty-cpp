@@ -28847,19 +28847,22 @@ impl CodeGen {
         closure: &syn::ExprClosure,
         map_param_scope: Option<HashSet<String>>,
     ) -> String {
+        let is_move_closure = closure.capture.is_some();
         // Determine capture mode
-        let capture = if closure.capture.is_some() {
+        let capture = if is_move_closure {
             // `move` closure → capture by move
             // We'd need to know which variables are captured to emit
             // [var1 = std::move(var1), var2 = std::move(var2)]
             // but without full analysis, we use a simpler approach:
-            // emit [=] (copy capture) as a reasonable default for move closures
-            // since the Rust compiler already verified the moves
+            // emit [=] with `mutable`. Rust move closures can mutate captured
+            // by-value bindings; C++ value-capture lambdas need `mutable` to
+            // allow non-const access to captures in `operator()`.
             "="
         } else {
             // Default: borrow environment → capture by reference
             "&"
         };
+        let lambda_mutability = if is_move_closure { " mutable" } else { "" };
 
         // Build parameter list.
         let mut closure_param_prelude: Vec<String> = Vec::new();
@@ -28905,13 +28908,19 @@ impl CodeGen {
                     }
                     body_str = format!("{}{}", prelude_str, body_str);
                 }
-                format!("[{}]({}) {{\n{}}}", capture, params_str, body_str)
+                format!(
+                    "[{}]({}){} {{\n{}}}",
+                    capture, params_str, lambda_mutability, body_str
+                )
             }
             _ => {
                 // Single expression body → return it
                 let body = inner.emit_expr_to_string(&closure.body);
                 if closure_param_prelude.is_empty() {
-                    format!("[{}]({}) {{ return {}; }}", capture, params_str, body)
+                    format!(
+                        "[{}]({}){} {{ return {}; }}",
+                        capture, params_str, lambda_mutability, body
+                    )
                 } else {
                     let mut prelude_str = String::new();
                     for stmt in &closure_param_prelude {
@@ -28919,8 +28928,8 @@ impl CodeGen {
                         prelude_str.push('\n');
                     }
                     format!(
-                        "[{}]({}) {{\n{}return {};\n}}",
-                        capture, params_str, prelude_str, body
+                        "[{}]({}){} {{\n{}return {};\n}}",
+                        capture, params_str, lambda_mutability, prelude_str, body
                     )
                 }
             }
@@ -37985,7 +37994,23 @@ mod tests {
     #[test]
     fn test_closure_move_capture() {
         let out = transpile_str("fn f() { let c = move || 42; }");
-        assert!(out.contains("[=]()"));
+        assert!(out.contains("[=]() mutable"));
+    }
+
+    #[test]
+    fn test_leaf5131_move_closure_catch_unwind_emits_mutable_lambda() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<i32>::new();
+                let _result = std::panic::catch_unwind(move || {
+                    v.push(1);
+                });
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::panic::catch_unwind([=]() mutable {"), "{out}");
+        assert!(out.contains("v.push(1);"), "{out}");
     }
 
     #[test]
