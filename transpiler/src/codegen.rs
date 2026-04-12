@@ -17436,7 +17436,7 @@ impl CodeGen {
                 let item_ty = self
                     .infer_iter_item_type_from_expr(&mc.receiver)
                     .unwrap_or_else(|| parse_quote!(std::tuple));
-                return Some(parse_quote!(std::optional<#item_ty>));
+                return Some(parse_quote!(Option<#item_ty>));
             }
             let receiver = self.peel_paren_group_expr(&mc.receiver);
             if let syn::Expr::Path(path) = receiver {
@@ -50215,6 +50215,22 @@ mod tests {
         // rewrite only applies when type is confirmed std::optional.
         assert!(out.contains("iter.next().is_some()") || out.contains("iter.next().has_value()"));
         assert!(out.contains("iter.next().unwrap()") || out.contains("iter.next().value()"));
+    }
+
+    #[test]
+    fn test_leaf5173_into_iter_next_keeps_rust_option_surface() {
+        let out = transpile_str(
+            r#"
+            fn f(a: [i32; 3], b: [i32; 3]) {
+                let _a = a.into_iter().next().is_some();
+                let _b = b.into_iter().next().unwrap();
+            }
+            "#,
+        );
+        assert!(out.contains("next().is_some()"), "{out}");
+        assert!(out.contains("next().unwrap()"), "{out}");
+        assert!(!out.contains("next().has_value()"), "{out}");
+        assert!(!out.contains("next().value()"), "{out}");
     }
 
     #[test]

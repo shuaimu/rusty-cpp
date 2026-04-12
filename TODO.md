@@ -5654,7 +5654,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-72a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type-shape-gated in core inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.73: `smallvec` Stage D `Option` surface mismatch (`is_some` lowered to `.has_value()` on `rusty::Option`) compile-head family collapse
+        - [x] *done* Leaf 5.1.73: `smallvec` Stage D `Option` surface mismatch (`is_some` lowered to `.has_value()` on `rusty::Option`) compile-head family collapse
+          - Plan/scope check: shared iterator-next local-inference hardening + focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - hardened local method-call result inference for iterator-like `next`/`next_back` to recover Rust `Option<Item>` surface (instead of `std::optional<Item>`),
+            - preserved `std::optional` method-surface rewrites (`has_value`/`value`) only for genuinely inferred `std::optional` receivers, while keeping Rust `Option` calls (`is_some`/`unwrap`) on iterator-next expressions,
+            - this collapses the deterministic post-5.1.72 first-head family at `runner.cpp:2865` (`v.into_iter().next().is_some()` lowered to `.has_value()` on `rusty::Option<...>`).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5173_into_iter_next_keeps_rust_option_surface`
+          - Guardrail regressions rechecked:
+            - `codegen::tests::test_leaf41543333333327291_next_optional_like_methods_lower_to_optional_surface`
+            - `codegen::tests::test_leaf41543333333327291_next_optional_like_methods_lower_for_type_param_iterator_locals`
+            - `codegen::tests::test_leaf41543333333327291_while_let_iter_next_uses_optional_surface_for_type_param_locals`
+            - `codegen::tests::test_leaf41543333333327291_if_let_expr_iter_next_uses_optional_surface_for_type_param_locals`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5173 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf41543333333327291 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-73a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.72 first-head family at `runner.cpp:2865` (`v.into_iter().next().is_some()` lowering to `.has_value()` on `rusty::Option`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3054` (array literal assertion side typed as `std::array<rusty::detail::associated_item_t<std::array<rusty::Box<uint8_t>, 8>>, 3>{0, 3, 2}` causing `int -> rusty::Box<uint8_t>` conversion failures), with adjacent downstream owner/item-shape fallout (`DropOnPanic<A>` pointer owner mismatch around `runner.cpp:1874` and later helper-surface families).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-73a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and receiver/type-shape-gated in core local inference and method lowering paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.74: `smallvec` Stage D associated-item element-shape mismatch in assertion array literals (`associated_item_t<std::array<rusty::Box<u8>, N>>` forcing `int -> Box<u8>` in `insert_many` parity paths) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
