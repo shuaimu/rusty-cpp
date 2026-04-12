@@ -947,6 +947,12 @@ public:
         return n;
     }
 
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        const size_t remaining = count();
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
 private:
     T end_;
 };
@@ -1017,6 +1023,12 @@ public:
         return n;
     }
 
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        const size_t remaining = count();
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
 private:
     T end_;
     bool done_ = false;
@@ -1052,6 +1064,14 @@ struct range_from {
     /// `start..` is unbounded, so this mirrors an effectively-infinite count.
     size_t count() const {
         return std::numeric_limits<size_t>::max();
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(
+            std::numeric_limits<size_t>::max(),
+            rusty::Option<size_t>(rusty::None)
+        );
     }
 };
 

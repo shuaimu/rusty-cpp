@@ -132,6 +132,53 @@ fn test_for_in_next_iter_range_moves_move_only_items() {
 }
 
 #[test]
+fn test_range_size_hint_reports_remaining_bounds() {
+    let source = r#"
+        #include <cstddef>
+        #include <limits>
+        #include <tuple>
+        #include <rusty/array.hpp>
+
+        int main() {
+            rusty::range r(2, 5);
+            const auto [lower0, upper0] = r.size_hint();
+            if (lower0 != 3 || upper0.is_none() || upper0.unwrap() != 3) {
+                return 1;
+            }
+
+            auto first = r.next();
+            if (!first.has_value() || first.value() != 2) {
+                return 2;
+            }
+
+            const auto [lower1, upper1] = r.size_hint();
+            if (lower1 != 2 || upper1.is_none() || upper1.unwrap() != 2) {
+                return 3;
+            }
+
+            rusty::range_inclusive ri(4, 6);
+            const auto [incl_lower, incl_upper] = ri.size_hint();
+            if (incl_lower != 3 || incl_upper.is_none() || incl_upper.unwrap() != 3) {
+                return 4;
+            }
+
+            rusty::range_from rf{10};
+            const auto [from_lower, from_upper] = rf.size_hint();
+            if (from_lower != std::numeric_limits<std::size_t>::max()) {
+                return 5;
+            }
+            if (!from_upper.is_none()) {
+                return 6;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "range_size_hint_surfaces");
+}
+
+#[test]
 fn test_mem_replace_supports_non_assignable_move_only_payloads() {
     let source = r#"
         #include <rusty/mem.hpp>

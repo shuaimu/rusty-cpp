@@ -5314,6 +5314,25 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-58d-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/runtime-shape-gated; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.59: `smallvec` Stage D range `size_hint` runtime-surface compile-head family collapse
+          - Plan/scope check: shared runtime update plus focused regression coverage stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - runtime `rusty::range`, `rusty::range_inclusive`, and `rusty::range_from` now expose Rust-style `size_hint()` surfaces used by transpiled iterator code (`(remaining, Some(remaining))` for finite ranges and `(usize::MAX, None)` for open-ended `range_from`).
+            - this collapses the deterministic post-5.1.58 first-head family at `runner.cpp:2081` (`rusty::range<int>` missing `.size_hint()` in `SmallVec::extend`).
+          - Implemented in:
+            - `include/rusty/array.hpp`
+            - `transpiler/tests/runtime_move_semantics.rs`
+          - Added focused regressions:
+            - `runtime_move_semantics::test_range_size_hint_reports_remaining_bounds`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler range_size_hint_reports_remaining_bounds -- --nocapture`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-59c-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.58 first-head family at `runner.cpp:2081` (missing range `.size_hint()`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:94/95` (`std::span<...>` ordering surfaces missing `operator<` in assertion compare scaffolding), with downstream comparison/runtime-surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-59c-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and runtime-shape-gated; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

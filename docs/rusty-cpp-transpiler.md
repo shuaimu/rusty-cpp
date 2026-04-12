@@ -2485,6 +2485,10 @@ Current status snapshot:
    - applying consumed-local move semantics in `match ... { Some(x) => x, None => break }` local initializer lowering (`auto element = std::move(x);`), and
    - making `rusty::for_in` option-like next-iterator dereference mutable in non-const contexts so move-only payload loop tails are no longer forced through const-reference copy paths.
 120. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2081` (`rusty::range<int>` has no member `size_hint()` in `SmallVec::extend`), with adjacent downstream comparison/runtime-surface fallout (`runner.cpp:94/95` span ordering surface and later helper/type-surface families). Guardrail check against §11 remains satisfied for `Leaf 5.1.58` (fixes stayed shared and AST/runtime-shape-gated, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+121. Focused `smallvec` repro after `Leaf 5.1.59` (`/tmp/rusty-parity-matrix-5-1-59c-20260412/smallvec/...`) collapses the prior post-5.1.58 range `size_hint` runtime-surface family by:
+   - adding shared Rust-style `size_hint()` surfaces to `rusty::range<T>` and `rusty::range_inclusive<T>` that report exact finite remaining bounds (`(remaining, Some(remaining))`), and
+   - adding shared Rust-style `size_hint()` surface to `rusty::range_from<T>` that reports open-ended bounds (`(usize::MAX, None)`).
+122. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:94/95` (ordering compare scaffolding emits `operator<` on `std::span<...>` payloads, which has no viable overload), with downstream comparison/runtime-surface fallout. Guardrail check against §11 remains satisfied for `Leaf 5.1.59` (fixes stayed shared and runtime-surface-gated, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
