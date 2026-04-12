@@ -11487,7 +11487,6 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
         peer_expr: Option<&syn::Expr>,
     ) -> Option<String> {
-        let _ = expected_ty;
         let peer_expr = peer_expr?;
         let expr = self.extract_value_expr(expr)?;
         let syn::Expr::Call(call) = expr else {
@@ -11509,7 +11508,12 @@ impl CodeGen {
         ) {
             return None;
         }
-        let arg = self.emit_result_ctor_arg_with_peer_context(&call.args[0]);
+        let ctor_idx = if ctor_name == "Ok" { 0 } else { 1 };
+        let peer_result_ty = self.infer_simple_expr_type(peer_expr);
+        let expected_ctor_arg_ty = self
+            .expected_result_type_arg(expected_ty, ctor_idx)
+            .or_else(|| self.expected_result_type_arg(peer_result_ty.as_ref(), ctor_idx));
+        let arg = self.emit_result_ctor_arg_with_peer_context(&call.args[0], expected_ctor_arg_ty);
         let peer = self.emit_expr_to_string(peer_expr);
         Some(format!(
             "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; return _ResultCtorCtx::{}({}); }}()",
@@ -11517,17 +11521,21 @@ impl CodeGen {
         ))
     }
 
-    fn emit_result_ctor_arg_with_peer_context(&self, arg: &syn::Expr) -> String {
+    fn emit_result_ctor_arg_with_peer_context(
+        &self,
+        arg: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
         let value_arg = self.extract_value_expr(arg).unwrap_or(arg);
         if let syn::Expr::Path(path) = value_arg {
             if path.path.segments.len() == 1 {
                 let name = path.path.segments[0].ident.to_string();
                 if self.is_const_local_binding_in_scope(&name) {
-                    return self.emit_expr_to_string(arg);
+                    return self.emit_expr_to_string_with_expected(arg, expected_ty);
                 }
             }
         }
-        self.emit_expr_maybe_move(arg)
+        self.emit_expr_to_string_with_expected_and_move_if_needed(arg, expected_ty)
     }
 
     fn expr_is_known_unit_value_expr(&self, expr: &syn::Expr) -> bool {
@@ -48277,6 +48285,31 @@ mod tests {
         );
         assert!(out.contains("_ResultCtorCtx::Ok("));
         assert!(!out.contains("auto _m1_tmp = Ok("));
+    }
+
+    #[test]
+    fn test_leaf5145_tuple_match_ok_constructor_applies_peer_result_payload_type_context() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Result<[u8; 2], i32>) {
+                match (&v, &Ok([0, 1])) {
+                    (left_val, right_val) => {
+                        let _same = *left_val == *right_val;
+                    }
+                };
+            }
+        "#,
+        );
+        assert!(
+            out.contains("_ResultCtorCtx::Ok(std::array<uint8_t, 2>"),
+            "peer-context Result::Ok should apply payload expected type to array literals, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("_ResultCtorCtx::Ok(std::array{0, 1})"),
+            "peer-context Result::Ok should not emit untyped int array literal for u8 payload, got:\n{}",
+            out
+        );
     }
 
     #[test]

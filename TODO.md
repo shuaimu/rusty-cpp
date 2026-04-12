@@ -4954,6 +4954,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-44a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and container-shape-gated in runtime equality surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.45: `smallvec` Stage D `Result::Ok(std::array{...})` numeric-array payload conversion compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime context-typed constructor hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - peer-context `Ok(...)`/`Err(...)` tuple-match constructor rewriting now propagates expected `Result` payload type from available expected/peer type evidence into constructor argument emission (while preserving by-value move semantics).
+            - runtime `rusty::Result<T,E>::Ok(...)` now includes a shared array-conversion overload for `T = std::array<Elem, N>` so context-typed array literals with convertible numeric elements can materialize `T` payloads directly.
+            - this collapses the deterministic post-5.1.44 first-head family at `runner.cpp:4267` (`_ResultCtorCtx::Ok(std::array{0, 1})` failing conversion to `std::array<uint8_t, 2>` in `test_into_inner`).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - extended `emit_result_ctor_expr_with_peer_context(...)` to derive expected `Result` payload type from expected/peer type context.
+              - updated `emit_result_ctor_arg_with_peer_context(...)` to use expected-type-aware emission with existing move rules.
+            - `include/rusty/result.hpp`:
+              - added `Result::Ok(const std::array<U, N>&)` conversion overload for array payload targets with convertible element types.
+          - Added focused regressions:
+            - `transpiler/src/codegen.rs`:
+              - `test_leaf5145_tuple_match_ok_constructor_applies_peer_result_payload_type_context`
+            - `transpiler/tests/runtime_move_semantics.rs`:
+              - `test_result_ok_supports_cross_numeric_array_literal_conversion`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5145 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_result_ok_supports_cross_numeric_array_literal_conversion -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-45b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.44 first-head family at `runner.cpp:4267` (`Result::Ok(std::array{0,1})` numeric-array conversion mismatch) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4600/4642` (`rusty::Rc` unspecialized owner surface and missing `Rc<int>::new_()`), followed by downstream runtime/adapter/type-surface gaps (`scan`, `filter`, `get`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-45b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and context/shape-gated in core constructor lowering and runtime payload conversion surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

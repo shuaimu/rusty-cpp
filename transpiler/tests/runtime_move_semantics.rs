@@ -198,6 +198,33 @@ fn test_vec_eq_supports_cross_numeric_element_types() {
 }
 
 #[test]
+fn test_result_ok_supports_cross_numeric_array_literal_conversion() {
+    let source = r#"
+        #include <array>
+        #include <cstdint>
+        #include <rusty/result.hpp>
+
+        int main() {
+            using R = rusty::Result<std::array<std::uint8_t, 2>, int>;
+            auto ok = R::Ok(std::array{0, 1});
+            if (!ok.is_ok()) {
+                return 1;
+            }
+            const auto& payload = ok.unwrap();
+            if (payload[0] != static_cast<std::uint8_t>(0)) {
+                return 2;
+            }
+            if (payload[1] != static_cast<std::uint8_t>(1)) {
+                return 3;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "result_ok_array_numeric_convert");
+}
+
+#[test]
 fn test_mem_forgotten_address_tracking_counts_repeated_marks() {
     let source = r#"
         #include <rusty/mem.hpp>

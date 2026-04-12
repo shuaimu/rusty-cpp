@@ -2425,6 +2425,10 @@ Current status snapshot:
    - extending runtime `rusty::Vec` equality/inequality surfaces to support `Vec<L>` vs `Vec<R>` comparisons when element values are comparable (including symmetric fallback and empty-marker element handling), and
    - adding runtime regression coverage for cross-numeric-element `Vec` equality in `transpiler/tests/runtime_move_semantics.rs`.
 92. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4267` (`Result::Ok(std::array{0,1})` array element conversion mismatch from `std::array<int,...>` to `std::array<uint8_t,...>`), followed by downstream runtime/adapter/type-surface gaps (`Rc::new_`, `scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.44` (fix stayed shared and container-shape-gated in runtime equality surfaces, with no crate-specific scripts and no generated-output text patching).
+93. Focused `smallvec` repro after `Leaf 5.1.45` (`/tmp/rusty-parity-matrix-5-1-45b-20260412/smallvec/...`) collapses the prior post-5.1.44 `Result::Ok(std::array{...})` numeric-array conversion family by:
+   - propagating peer-result payload expected type into tuple-match peer-context `Ok(...)`/`Err(...)` argument emission in transpiler core lowering, and
+   - adding shared runtime `Result::Ok(const std::array<U,N>&)` payload conversion support for array targets with convertible element types (`include/rusty/result.hpp`), plus focused regression coverage in transpiler/runtime tests.
+94. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4600/4642` (`rusty::Rc` unspecialized owner surface and missing `Rc<int>::new_()`), followed by downstream runtime/adapter/type-surface gaps (`scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.45` (fixes stayed shared and context/shape-gated in constructor lowering/runtime payload conversion surfaces, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

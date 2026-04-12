@@ -6,6 +6,7 @@
 #include <new>
 #include <type_traits>
 #include <tuple>
+#include <array>
 #include <cstdlib>
 #include <rusty/option.hpp>
 
@@ -26,6 +27,20 @@ namespace rusty {
 template<typename T, typename E>
 class Result {
 private:
+    template<typename X>
+    struct array_meta {
+        static constexpr bool is_array = false;
+        using value_type = void;
+        static constexpr size_t extent = 0;
+    };
+
+    template<typename U, size_t N>
+    struct array_meta<std::array<U, N>> {
+        static constexpr bool is_array = true;
+        using value_type = U;
+        static constexpr size_t extent = N;
+    };
+
     struct UninitTag {};
 
     // Use aligned storage for union-like behavior (C++11 compatible)
@@ -62,6 +77,20 @@ public:
         new (&r.storage.ok_storage) T(std::move(value));
         r.is_ok_value = true;
         return r;
+    }
+
+    template<typename U, size_t N>
+    requires (array_meta<std::remove_cv_t<T>>::is_array
+              && array_meta<std::remove_cv_t<T>>::extent == N
+              && std::is_convertible_v<U, typename array_meta<std::remove_cv_t<T>>::value_type>)
+    static Result Ok(const std::array<U, N>& value) {
+        using target_array = std::remove_cv_t<T>;
+        using target_elem = typename array_meta<target_array>::value_type;
+        target_array converted{};
+        for (size_t i = 0; i < N; ++i) {
+            converted[i] = static_cast<target_elem>(value[i]);
+        }
+        return Ok(std::move(converted));
     }
     
     // Constructors for Err variant
