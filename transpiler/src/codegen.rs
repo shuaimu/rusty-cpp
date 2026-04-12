@@ -20842,15 +20842,30 @@ impl CodeGen {
             return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
         }
         if method_name == "map_err" && mc.args.len() == 1 {
-            if let Some(callable_arg) = self.try_emit_map_err_callable_arg(&mc.args[0]) {
+            let callable_arg = self
+                .try_emit_map_err_callable_arg(&mc.args[0])
+                .unwrap_or_else(|| self.emit_expr_to_string(&mc.args[0]));
+            if let Some(expected_err_ty) = self.expected_result_type_arg(expected_ty, 1) {
+                let expected_err_cpp = self.map_type(expected_err_ty);
+                let typed_callable_arg = format!(
+                    "[&](auto&& _err) -> {} {{ return ({}) (std::forward<decltype(_err)>(_err)); }}",
+                    expected_err_cpp, callable_arg
+                );
                 return self.emit_receiver_member_call(
                     &mc.receiver,
                     &method_name,
                     None,
-                    &[callable_arg],
+                    &[typed_callable_arg],
                     None,
                 );
             }
+            return self.emit_receiver_member_call(
+                &mc.receiver,
+                &method_name,
+                None,
+                &[callable_arg],
+                None,
+            );
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -52233,10 +52248,28 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains(
-            ".map_err([&](auto&& _err) { return std::forward<decltype(_err)>(_err).simplify(); })"
-        ));
+        assert!(out.contains(".map_err("));
+        assert!(out.contains(".simplify();"));
         assert!(!out.contains(".map_err(CapacityError::simplify)"));
+    }
+
+    #[test]
+    fn test_leaf5180_map_err_closure_uses_expected_result_error_family_return_type() {
+        let out = transpile_str(
+            r#"
+            enum CollectionAllocErr {
+                CapacityOverflow,
+                AllocErr { layout: i32 },
+            }
+
+            fn layout_array() -> Result<i32, CollectionAllocErr> {
+                Ok(1).map_err(|_| CollectionAllocErr::CapacityOverflow)
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::Result<int32_t, CollectionAllocErr> layout_array()"));
+        assert!(out.contains(".map_err([&](auto&& _err) -> CollectionAllocErr { return ("));
+        assert!(out.contains("CollectionAllocErr_CapacityOverflow{}"));
     }
 
     #[test]

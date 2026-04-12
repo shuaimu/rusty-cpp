@@ -1678,3 +1678,70 @@ fn test_mem_forget_const_prevents_is_empty_destructor_recursion_shape() {
 
     compile_and_run_cpp(source, "mem_forget_const_recursion_shape");
 }
+
+#[test]
+fn test_leaf5181_for_each_lvalue_next_iter_does_not_move_drop_type() {
+    let source = r#"
+        #include <rusty/mem.hpp>
+        #include <rusty/slice.hpp>
+
+        struct DrainLike {
+            static inline int drop_runs = 0;
+            static inline int move_ctors = 0;
+
+            bool yielded = false;
+
+            DrainLike() = default;
+            DrainLike(const DrainLike&) = delete;
+            DrainLike& operator=(const DrainLike&) = delete;
+
+            DrainLike(DrainLike&& other) noexcept : yielded(other.yielded) {
+                ++move_ctors;
+                if (rusty::mem::consume_forgotten_address(&other)) {
+                    rusty::mem::mark_forgotten_address(this);
+                    rusty::mem::mark_forgotten_address(&other);
+                } else {
+                    rusty::mem::mark_forgotten_address(&other);
+                }
+            }
+
+            void rusty_mark_forgotten() noexcept {
+                rusty::mem::mark_forgotten_address(this);
+            }
+
+            rusty::Option<int> next() {
+                if (yielded) {
+                    return rusty::None;
+                }
+                yielded = true;
+                return rusty::Option<int>(7);
+            }
+
+            ~DrainLike() noexcept(false) {
+                if (rusty::mem::consume_forgotten_address(this)) {
+                    return;
+                }
+                ++drop_runs;
+                rusty::for_each(*this, [&](int) {});
+            }
+        };
+
+        int main() {
+            DrainLike::drop_runs = 0;
+            DrainLike::move_ctors = 0;
+            {
+                DrainLike value{};
+                (void)value.yielded;
+            }
+            if (DrainLike::drop_runs != 1) {
+                return 1;
+            }
+            if (DrainLike::move_ctors != 0) {
+                return 2;
+            }
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5181_for_each_lvalue_next_iter_borrow");
+}

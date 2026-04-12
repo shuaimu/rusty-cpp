@@ -227,15 +227,16 @@ public:
         "rusty::for_in requires next() to return an Option/optional-like value"
     );
 
-    explicit next_iter_range(NextIter iter) : iter_(std::move(iter)) {}
+    explicit next_iter_range(NextIter iter) : iter_(std::forward<NextIter>(iter)) {}
 
     class iterator {
         using item_type = next_item_t<NextIter>;
+        using iter_type = std::remove_reference_t<NextIter>;
 
     public:
         iterator() : iter_(nullptr), at_end_(true) {}
 
-        explicit iterator(NextIter* iter, bool at_end = false)
+        explicit iterator(iter_type* iter, bool at_end = false)
             : iter_(iter), at_end_(at_end) {
             if (!at_end_) {
                 advance();
@@ -271,7 +272,7 @@ public:
             at_end_ = false;
         }
 
-        NextIter* iter_;
+        iter_type* iter_;
         std::optional<item_type> current_;
         bool at_end_;
     };
@@ -716,7 +717,8 @@ private:
 
 template<typename NextIter>
 auto make_next_iter_range(NextIter&& iter) {
-    using stored_iter = std::decay_t<NextIter>;
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<NextIter>, NextIter, std::decay_t<NextIter>>;
     return next_iter_range<stored_iter>(std::forward<NextIter>(iter));
 }
 

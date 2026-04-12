@@ -5803,7 +5803,46 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-79a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core iterator adapters; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.80: `smallvec` Stage D `Result::map_err` payload-family mismatch in `layout_array` (`runner.cpp:1332`) compile-head family collapse
+        - [x] *done* Leaf 5.1.80: `smallvec` Stage D `Result::map_err` payload-family mismatch in `layout_array` (`runner.cpp:1332`) compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared `map_err` expected-error-family typing hardening in `transpiler/src/codegen.rs`:
+            - when `.map_err(...)` appears in a context with known expected `Result<Ok, ErrExpected>` type, the callable argument is now wrapped with an explicit return type `-> ErrExpected`.
+            - preserved existing callable-path normalization (`Type::simplify` helper-path rewrite) and applied expected-family typing on top, so variant-payload expressions are coerced to the full error family instead of leaking narrow payload result types.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5180_map_err_closure_uses_expected_result_error_family_return_type`
+            - updated `codegen::tests::test_leaf415433333335_map_err_assoc_method_path_lowers_to_lambda_dispatch` to assert behavior without over-constraining lambda spelling
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5180 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf415433333335_map_err_assoc_method_path_lowers_to_lambda_dispatch -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-80a-20260412 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior post-5.1.79 first hard-error family at `runner.cpp:1332` (`Result<Layout, CollectionAllocErr_CapacityOverflow>` not convertible to `Result<Layout, CollectionAllocErr>`) is collapsed from deterministic first-head slots.
+            - Stage D now passes for `smallvec`; new deterministic first failure moves to Stage E runtime execution: transpiled runner exits with `SIGSEGV` (`exit 139`) before test output, with gdb backtrace rooted at forgotten-address bookkeeping (`rusty::mem::mark_forgotten_address`) reached from `Drain<...>` teardown (`rusty::for_each`/`next_iter_range` path).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-80a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Additional triage artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-80a-20260412/smallvec/{manual-run.stdout,manual-run.stderr}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and expected-type-gated in core `map_err` lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.81: `smallvec` Stage E runtime crash (`SIGSEGV`) in forgotten-address bookkeeping during `Drain` teardown (`mark_forgotten_address` path) deterministic failure collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime iterator ownership hardening in `include/rusty/slice.hpp`:
+            - changed `make_next_iter_range(...)` to preserve lvalue `next()` iterator receivers by reference instead of decay-copying/moving them into `next_iter_range`.
+            - updated `next_iter_range` storage/iterator plumbing to support reference-backed iterators safely (`std::remove_reference_t<NextIter>*` iterator cursor + forwarding constructor initialization).
+            - this keeps `rusty::for_each(*this, ...)` in drop/teardown paths from moving/copying `self` into a temporary adapter and recursively re-entering destructor chains.
+          - Added focused regression:
+            - `runtime_move_semantics::test_leaf5181_for_each_lvalue_next_iter_does_not_move_drop_type`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5181 -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-81a-20260412 --keep-work-dirs`
+          - Deterministic frontier movement:
+            - prior post-5.1.80 first Stage E failure (`SIGSEGV`/exit 139 before test output, rooted at `rusty::mem::mark_forgotten_address` via `Drain` teardown) is collapsed from deterministic first-head slots.
+            - new deterministic first Stage E failure is runtime semantic fallout in `tests_drain` (`assertion failed`) followed by allocator abort (`free(): double free detected in tcache 2`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-81a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core iterator ownership/lifetime behavior; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.82: `smallvec` Stage E `tests_drain` runtime semantic failure (`assertion failed`) with allocator abort (`free(): double free detected in tcache 2`) deterministic failure collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
