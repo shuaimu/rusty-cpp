@@ -2409,6 +2409,10 @@ Current status snapshot:
    - applying owner-segment generic substitutions to associated-call fallback expected types (`Owner::<...>::method(...)`) before argument lowering, and
    - preserving specialized element context for indexed-slice associated `from(...)` calls so fallback no longer degrades to `std::span<const int>`.
 84. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4087` (`clone_iter.next().value()` lowering to private `Option` member/call surface), followed by downstream runtime/adapter gaps (`IntoIter::skip`, `Vec::from_raw_parts`, `Vec::from_iter`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.40` (fix stayed shared and owner-type-substitution-gated in core associated-call fallback typing, with no crate-specific scripts and no generated-output text patching).
+85. Focused `smallvec` repro after `Leaf 5.1.41` (`/tmp/rusty-parity-matrix-5-1-41a-20260412/smallvec/...`) collapses the prior post-5.1.40 optional-surface unwrap family by:
+   - tightening `unwrap()` method-call rewrite gating from syntactic optional-like receiver checks to inferred `std::optional` receiver type checks, and
+   - preserving Rust runtime `Option` receiver lowering as `.unwrap()` (instead of `.value()`) when receiver inference does not resolve to `std::optional`.
+86. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4124` (`SmallVec::IntoIter` missing `.skip(...)` adapter surface), followed by downstream runtime/type-surface gaps (`Vec::from_raw_parts`, `Vec::from_iter`, literal array element typing, `Rc::new_`, iterator adapter methods, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.41` (fix stayed shared and inference-gated in core method-call lowering, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

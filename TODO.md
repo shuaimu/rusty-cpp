@@ -4863,6 +4863,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-40a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and owner-type-substitution-gated in core associated-call fallback typing; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.41: `smallvec` Stage D `next().unwrap()` optional-surface rewrite overreach compile-head family collapse
+          - Plan/scope check: shared transpiler-only method-call rewrite guard hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering no longer rewrites every `unwrap()` call on a syntactically optional-like receiver to `.value()`.
+            - `unwrap()` rewrite to C++ optional surface is now gated by inferred receiver type (`std::optional` only), so Rust runtime `Option` receivers preserve `.unwrap()` lowering.
+            - this collapses the deterministic `runner.cpp:4087` family (`clone_iter.next().value()` calling private `Option` member surface) while keeping existing `std::optional`-targeted rewrites intact.
+          - Implemented in `transpiler/src/codegen.rs`:
+            - tightened `unwrap` rewrite guard in `emit_expr_method_call_to_string(...)` from syntactic optional-like detection to inferred-type check (`is_std_optional_syn_type(...)`).
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5141_iterator_next_unwrap_keeps_rust_option_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5141 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-41a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.40 first-head family at `runner.cpp:4087` (`clone_iter.next().value()` private `Option` member/call surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:4124` (`SmallVec::IntoIter` missing `.skip(...)` adapter surface), followed by downstream runtime/adapter/type-surface gaps (`Vec::from_raw_parts`, `Vec::from_iter`, literal array element typing, `Rc::new_`, iterator adapters, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-41a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and inference-gated in core method-call lowering; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

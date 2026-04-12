@@ -20052,7 +20052,9 @@ impl CodeGen {
         }
         if mc.method == "unwrap"
             && mc.args.is_empty()
-            && self.is_std_optional_like_receiver_expr(&mc.receiver)
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -48302,6 +48304,24 @@ mod tests {
         // rewrite only applies when type is confirmed std::optional.
         assert!(out.contains("iter.next().is_some()") || out.contains("iter.next().has_value()"));
         assert!(out.contains("iter.next().unwrap()") || out.contains("iter.next().value()"));
+    }
+
+    #[test]
+    fn test_leaf5141_iterator_next_unwrap_keeps_rust_option_surface() {
+        let out = transpile_str(
+            r#"
+            struct Iter;
+            impl Iter {
+                fn next(&mut self) -> Option<u8> { None }
+            }
+            fn f() {
+                let mut iter = Iter;
+                let _x = iter.next().unwrap();
+            }
+            "#,
+        );
+        assert!(out.contains("iter.next().unwrap()"), "{out}");
+        assert!(!out.contains("iter.next().value()"), "{out}");
     }
 
     #[test]
