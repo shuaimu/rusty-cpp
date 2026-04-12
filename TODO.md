@@ -4883,6 +4883,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-41a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and inference-gated in core method-call lowering; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.42: `smallvec` Stage D iterator `.skip(...)` adapter-surface compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime iterator-adapter hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - method-call lowering now rewrites iterator-like `.skip(n)` calls to shared runtime helper form (`rusty::skip(receiver, n)`) instead of preserving direct member-call syntax.
+            - runtime gained shared `rusty::skip(...)` support in `include/rusty/slice.hpp` using a `skip_next_iter` adapter over option-like `next()` iterators, aligned with existing `take/map/rev/enumerate` helper architecture.
+            - this collapses the deterministic `runner.cpp:4124` family (`SmallVec::IntoIter` has no member `skip`) while preserving non-iterator inherent `skip` method calls.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`:
+              - added iterator-gated `.skip(...)` rewrite in `emit_expr_method_call_to_string(...)`.
+            - `include/rusty/slice.hpp`:
+              - added `detail::skip_next_iter`, `detail::make_skip_next_iter(...)`, and public `rusty::skip(...)`.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5142_iterator_skip_lowers_to_runtime_helper`
+            - `test_leaf5142_non_iterator_skip_method_call_is_unchanged`
+            - `test_leaf5142_iterator_skip_count_chain_lowers_to_runtime_helpers`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5142 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-42a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.41 first-head family at `runner.cpp:4124` (`SmallVec::IntoIter` missing `.skip(...)`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1869/1874` (`rusty::Vec<...>::from_raw_parts` and `rusty::Vec<...>::from_iter` missing member surfaces in `SmallVec::into_vec()` paths), followed by downstream runtime/adapter/type-surface gaps (`Result::Ok(std::array{0,1})` element typing, `Rc::new_`, `scan`, `filter`, `get`, and related fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-42a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and iterator-shape/runtime-helper-gated in core lowering/runtime surfaces; no crate-specific scripts, no blanket generated-text rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

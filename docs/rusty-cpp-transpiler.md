@@ -2413,6 +2413,10 @@ Current status snapshot:
    - tightening `unwrap()` method-call rewrite gating from syntactic optional-like receiver checks to inferred `std::optional` receiver type checks, and
    - preserving Rust runtime `Option` receiver lowering as `.unwrap()` (instead of `.value()`) when receiver inference does not resolve to `std::optional`.
 86. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4124` (`SmallVec::IntoIter` missing `.skip(...)` adapter surface), followed by downstream runtime/type-surface gaps (`Vec::from_raw_parts`, `Vec::from_iter`, literal array element typing, `Rc::new_`, iterator adapter methods, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.41` (fix stayed shared and inference-gated in core method-call lowering, with no crate-specific scripts and no generated-output text patching).
+87. Focused `smallvec` repro after `Leaf 5.1.42` (`/tmp/rusty-parity-matrix-5-1-42a-20260412/smallvec/...`) collapses the prior post-5.1.41 iterator `.skip(...)` adapter family by:
+   - rewriting iterator-like `.skip(n)` method calls to shared runtime helper form `rusty::skip(receiver, n)` in core method-call lowering, and
+   - adding shared runtime `rusty::skip(...)` support (`skip_next_iter`) in `include/rusty/slice.hpp` aligned with existing option-like iterator adapter helpers (`take/map/rev/enumerate`).
+88. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1869/1874` (`rusty::Vec<...>::from_raw_parts` / `rusty::Vec<...>::from_iter` missing member surfaces in `SmallVec::into_vec()` paths), followed by downstream runtime/type-surface gaps (`Result::Ok(std::array{0,1})` element typing, `Rc::new_`, `scan`, `filter`, `get`, and related fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.42` (fix stayed shared and iterator-shape/runtime-helper-gated with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

@@ -20003,6 +20003,15 @@ impl CodeGen {
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::take({}, {})", receiver, count);
         }
+        if mc.method == "skip"
+            && mc.args.len() == 1
+            && (self.is_iterator_like_receiver_expr(&mc.receiver)
+                || self.is_probably_iterator_receiver_expr(&mc.receiver))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let count = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::skip({}, {})", receiver, count);
+        }
         if let Some(enumerate_call) = self.try_emit_iter_enumerate_call(mc) {
             return enumerate_call;
         }
@@ -47591,6 +47600,50 @@ mod tests {
         );
         assert!(out.contains("s.by_ref()"));
         assert!(!out.contains("rusty::take(s,"));
+    }
+
+    #[test]
+    fn test_leaf5142_iterator_skip_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut v = Vec::<u8>::new();
+                let _ = v.into_iter().skip(1);
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::skip(v.into_iter(), 1)"), "{out}");
+        assert!(!out.contains("v.into_iter().skip(1)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5142_non_iterator_skip_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn skip(&self, n: usize) {}
+            }
+            fn f(s: S) {
+                s.skip(1);
+            }
+        "#,
+        );
+        assert!(out.contains("s.skip(1)"), "{out}");
+        assert!(!out.contains("rusty::skip(s, 1)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5142_iterator_skip_count_chain_lowers_to_runtime_helpers() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<i32>) -> usize {
+                v.into_iter().skip(1).count()
+            }
+        "#,
+        );
+        assert!(out.contains("return rusty::count(rusty::skip(v.into_iter(), 1));"), "{out}");
+        assert!(!out.contains(".skip(1).count()"), "{out}");
     }
 
     #[test]

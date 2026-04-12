@@ -351,6 +351,38 @@ private:
     size_t remaining_;
 };
 
+template<typename Iter>
+class skip_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<Iter>>,
+        "rusty::skip requires next() to return an Option/optional-like value"
+    );
+
+    skip_next_iter(Iter iter, size_t remaining)
+        : iter_(std::forward<Iter>(iter)), remaining_(remaining) {}
+
+    skip_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        while (remaining_ > 0) {
+            auto skipped = iter_.next();
+            if (!option_has_value(skipped)) {
+                remaining_ = 0;
+                return skipped;
+            }
+            --remaining_;
+        }
+        return iter_.next();
+    }
+
+private:
+    Iter iter_;
+    size_t remaining_;
+};
+
 template<typename NextIter>
 auto make_next_iter_range(NextIter&& iter) {
     using stored_iter = std::decay_t<NextIter>;
@@ -383,6 +415,13 @@ auto make_take_next_iter(Iter&& iter, size_t remaining) {
     using stored_iter =
         std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
     return take_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
+}
+
+template<typename Iter>
+auto make_skip_next_iter(Iter&& iter, size_t remaining) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    return skip_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
 }
 
 template<typename Range>
@@ -570,6 +609,28 @@ decltype(auto) take(Range&& range, size_t remaining) {
             remaining);
     } else {
         return take(
+            iter(std::forward<Range>(range)),
+            remaining);
+    }
+}
+
+template<typename Range>
+decltype(auto) skip(Range&& range, size_t remaining) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_skip_next_iter(
+            std::forward<Range>(range),
+            remaining);
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::skip requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return skip(
+            std::forward<Range>(range).into_iter(),
+            remaining);
+    } else {
+        return skip(
             iter(std::forward<Range>(range)),
             remaining);
     }
