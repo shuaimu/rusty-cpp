@@ -10284,13 +10284,264 @@ impl CodeGen {
         }
     }
 
+    fn collect_consuming_method_receiver_vars_with_signature_hints(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> HashSet<String> {
+        let mut result = collect_consuming_method_receiver_vars(stmts);
+        for stmt in stmts {
+            self.collect_value_call_argument_locals_in_stmt(stmt, &mut result);
+        }
+        result
+    }
+
+    fn collect_value_call_argument_locals_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        result: &mut HashSet<String>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_value_call_argument_locals_in_expr(&init.expr, result);
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_value_call_argument_locals_in_expr(expr, result);
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_value_call_argument_locals_in_expr(
+        &self,
+        expr: &syn::Expr,
+        result: &mut HashSet<String>,
+    ) {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Call(call) => {
+                self.mark_value_call_argument_local_bindings(call, result);
+                self.collect_value_call_argument_locals_in_expr(call.func.as_ref(), result);
+                for arg in &call.args {
+                    self.collect_value_call_argument_locals_in_expr(arg, result);
+                }
+            }
+            syn::Expr::MethodCall(method_call) => {
+                let method_name = method_call.method.to_string();
+                for (idx, arg) in method_call.args.iter().enumerate() {
+                    let style = self
+                        .lookup_method_arg_pass_style(&method_name, idx)
+                        .or_else(|| {
+                            self.lookup_method_arg_expected_type(&method_name, idx)
+                                .map(|ty| self.arg_pass_style_for_type(ty))
+                        });
+                    if matches!(style, Some(ArgPassStyle::Value))
+                        && let Some(name) = extract_simple_local_ident(arg)
+                    {
+                        result.insert(name);
+                    }
+                }
+                self.collect_value_call_argument_locals_in_expr(&method_call.receiver, result);
+                for arg in &method_call.args {
+                    self.collect_value_call_argument_locals_in_expr(arg, result);
+                }
+            }
+            syn::Expr::Binary(bin) => {
+                self.collect_value_call_argument_locals_in_expr(&bin.left, result);
+                self.collect_value_call_argument_locals_in_expr(&bin.right, result);
+            }
+            syn::Expr::Unary(unary) => {
+                self.collect_value_call_argument_locals_in_expr(&unary.expr, result)
+            }
+            syn::Expr::Reference(reference) => {
+                self.collect_value_call_argument_locals_in_expr(&reference.expr, result)
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_value_call_argument_locals_in_expr(&assign.left, result);
+                self.collect_value_call_argument_locals_in_expr(&assign.right, result);
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&if_expr.cond, result);
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_value_call_argument_locals_in_expr(else_expr, result);
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&match_expr.expr, result);
+                for arm in &match_expr.arms {
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_value_call_argument_locals_in_expr(guard, result);
+                    }
+                    self.collect_value_call_argument_locals_in_expr(&arm.body, result);
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&while_expr.cond, result);
+                for stmt in &while_expr.body.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+            }
+            syn::Expr::ForLoop(for_loop) => {
+                self.collect_value_call_argument_locals_in_expr(&for_loop.expr, result);
+                for stmt in &for_loop.body.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+            }
+            syn::Expr::Array(array) => {
+                for elem in &array.elems {
+                    self.collect_value_call_argument_locals_in_expr(elem, result);
+                }
+            }
+            syn::Expr::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_value_call_argument_locals_in_expr(elem, result);
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_value_call_argument_locals_in_expr(&field.expr, result);
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_value_call_argument_locals_in_expr(rest, result);
+                }
+            }
+            syn::Expr::Field(field) => {
+                self.collect_value_call_argument_locals_in_expr(&field.base, result)
+            }
+            syn::Expr::Index(index) => {
+                self.collect_value_call_argument_locals_in_expr(&index.expr, result);
+                self.collect_value_call_argument_locals_in_expr(&index.index, result);
+            }
+            syn::Expr::Cast(cast_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&cast_expr.expr, result)
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&await_expr.base, result)
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&try_expr.expr, result)
+            }
+            syn::Expr::Break(brk) => {
+                if let Some(value) = &brk.expr {
+                    self.collect_value_call_argument_locals_in_expr(value, result);
+                }
+            }
+            syn::Expr::Return(ret) => {
+                if let Some(value) = &ret.expr {
+                    self.collect_value_call_argument_locals_in_expr(value, result);
+                }
+            }
+            syn::Expr::Closure(closure) => {
+                self.collect_value_call_argument_locals_in_expr(&closure.body, result)
+            }
+            syn::Expr::Let(let_expr) => {
+                self.collect_value_call_argument_locals_in_expr(&let_expr.expr, result)
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_value_call_argument_locals_in_stmt(stmt, result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_value_call_argument_local_bindings(
+        &self,
+        call: &syn::ExprCall,
+        result: &mut HashSet<String>,
+    ) {
+        for (idx, arg) in call.args.iter().enumerate() {
+            let style = self.lookup_call_arg_pass_style_for_consumption(call, idx, arg);
+            if !matches!(style, Some(ArgPassStyle::Value)) {
+                continue;
+            }
+            if let Some(name) = extract_simple_local_ident(arg) {
+                result.insert(name);
+            }
+        }
+    }
+
+    fn lookup_call_arg_pass_style_for_consumption(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+        arg_expr: &syn::Expr,
+    ) -> Option<ArgPassStyle> {
+        let mut style = self.lookup_function_arg_pass_style(call.func.as_ref(), arg_idx);
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return style;
+        };
+        let method_name = path_expr
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if method_name.is_empty() {
+            return style;
+        }
+
+        if style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)) {
+            if let Some(method_style) = self.lookup_method_arg_pass_style(&method_name, arg_idx) {
+                if style.is_none() || !matches!(method_style, ArgPassStyle::Mixed) {
+                    style = Some(method_style);
+                }
+            }
+        }
+
+        if (style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)))
+            && path_expr.path.segments.len() >= 2
+        {
+            let owner = path_expr
+                .path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            if !owner.is_empty()
+                && let Some(expected_ty) = self.lookup_owner_method_arg_expected_type(
+                    &owner,
+                    &method_name,
+                    arg_idx,
+                    Some(arg_expr),
+                )
+            {
+                style = Some(self.arg_pass_style_for_type(&expected_ty));
+            }
+        }
+
+        if (style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)))
+            && let Some(expected_ty) = self.lookup_method_arg_expected_type(&method_name, arg_idx)
+        {
+            style = Some(self.arg_pass_style_for_type(expected_ty));
+        }
+
+        style
+    }
+
     fn emit_block(&mut self, block: &syn::Block) {
         // Pre-scan: find variables used multiple times (skip std::move for these)
         let multi_use = collect_multi_use_vars(&block.stmts);
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
-        let consuming = collect_consuming_method_receiver_vars(&block.stmts);
+        let consuming = self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
         self.augment_local_generic_placeholder_hints_from_function_calls(
@@ -48793,6 +49044,64 @@ mod tests {
         );
         assert!(out.contains("const auto res = "));
         assert!(out.contains("const auto _is_err = res.is_err();"));
+    }
+
+    #[test]
+    fn test_leaf5137_function_by_value_call_binding_is_not_const() {
+        let out = transpile_str(
+            r#"
+            fn consume(v: String) {}
+            fn f() {
+                let s = String::from("hi");
+                consume(s);
+            }
+        "#,
+        );
+        assert!(out.contains("auto s = rusty::String::from(\"hi\");"));
+        assert!(!out.contains("const auto s = rusty::String::from(\"hi\");"));
+        assert!(out.contains("consume(std::move(s));"));
+    }
+
+    #[test]
+    fn test_leaf5137_associated_by_value_call_argument_binding_is_not_const() {
+        let out = transpile_str(
+            r#"
+            struct Holder;
+            impl Holder {
+                fn from_vec(v: Vec<u8>) -> Holder {
+                    let _ = v;
+                    Holder
+                }
+            }
+            fn f() {
+                let vec = Vec::<u8>::new();
+                let _holder = Holder::from_vec(vec);
+            }
+        "#,
+        );
+        assert!(out.contains("auto vec = rusty::Vec::new_();"));
+        assert!(!out.contains("const auto vec = rusty::Vec::new_();"));
+        assert!(out.contains("Holder::from_vec(std::move(vec))"));
+    }
+
+    #[test]
+    fn test_leaf5137_associated_borrow_call_argument_binding_stays_const() {
+        let out = transpile_str(
+            r#"
+            struct Holder;
+            impl Holder {
+                fn borrow(v: &Vec<u8>) -> usize {
+                    v.len()
+                }
+            }
+            fn f() {
+                let vec = Vec::<u8>::new();
+                let _len = Holder::borrow(&vec);
+            }
+        "#,
+        );
+        assert!(out.contains("const auto vec = rusty::Vec::new_();"));
+        assert!(!out.contains("Holder::borrow(std::move(vec))"));
     }
 
     #[test]

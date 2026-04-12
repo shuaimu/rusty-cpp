@@ -4779,6 +4779,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-36b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in placeholder-hint and call expected-type plumbing; no crate-specific scripts, no blanket rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.37: `smallvec` Stage D by-value call-argument consumption tracking for immutable locals (`from(...)`/`from_vec(...)` family) compile-head family collapse
+          - Plan/scope check: shared transpiler-only consumption analysis hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - block pre-scan now layers signature-aware by-value call-argument detection on top of existing consuming-receiver/tail-value heuristics, using collected function/method pass-style metadata and owner-scoped associated expected-type fallback for ambiguous method-name families.
+            - immutable locals passed to by-value calls are now marked consumed before local declaration emission, preventing invalid `const auto` storage for move-consumed values (`std::move(const local)` copy fallback on move-only runtime types).
+            - this collapses the deterministic `SmallVec::from(std::move(vec))` / `SmallVec::from_vec(std::move(vec))` deleted-copy family caused by const-local `Vec<u8>` bindings in `smallvec` tests.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5137_function_by_value_call_binding_is_not_const`
+            - `test_leaf5137_associated_by_value_call_argument_binding_is_not_const`
+            - `test_leaf5137_associated_borrow_call_argument_binding_stays_const`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5137 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-37a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.36 first-head family at `runner.cpp:3765` (`use of deleted function rusty::Vec<uint8_t>::Vec(const Vec&)`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3848` (`std::vector<unsigned char>` has no member `as_slice`), followed by downstream runtime/associated-surface gaps (`A::Item` in span return surfaces, `from_iter`/`from_raw_parts`, iterator adapter method coverage, and related test-surface fallout).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-37a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and metadata/AST-shape-gated in core block pre-scan analysis; no crate-specific scripts, no blanket generated-call rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

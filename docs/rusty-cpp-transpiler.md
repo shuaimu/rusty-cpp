@@ -2392,6 +2392,11 @@ Current status snapshot:
    - extending placeholder owner-target coverage to `into_vec(...)` and array/repeat locals, and
    - allowing `into_vec` boxed payload specialization on `Box::new`/`Box::new_` call shapes under recovered element context.
 76. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3765` (`use of deleted function rusty::Vec<uint8_t>::Vec(const Vec&)`), reflecting const-local consumption shape in associated `from(...)` calls after owner/item typing is recovered; downstream gaps now continue at runtime surface families (`as_slice`, `from_iter`, `from_raw_parts`) and unrelated iterator/adapter/test surfaces. Guardrail check against §11 remains satisfied for `Leaf 5.1.36` (fixes stayed shared and AST/type-context-gated, with no crate-specific scripts and no generated-output text patching).
+77. Focused `smallvec` repro after `Leaf 5.1.37` (`/tmp/rusty-parity-matrix-5-1-37a-20260412/smallvec/...`) collapses the prior post-5.1.36 const-local by-value call-argument family by:
+   - layering signature-aware by-value argument consumption analysis on top of existing consuming-receiver/tail-value local detection,
+   - using collected function/method pass-style metadata plus owner-scoped associated expected-type fallback to classify ambiguous associated calls (`Owner::from(...)`, `Owner::from_vec(...)`), and
+   - forcing immutable consumed locals to lower as non-const storage so `std::move(local)` remains a true move for move-only runtime types.
+78. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3848` (`std::vector<unsigned char>` has no member `as_slice`), followed by downstream runtime/associated-surface gaps (`A::Item` span-return surface, `from_iter`/`from_raw_parts`, iterator adapter coverage, and related test-surface fallout). Guardrail check against §11 remains satisfied for `Leaf 5.1.37` (fixes stayed shared and metadata/AST-shape-gated, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
