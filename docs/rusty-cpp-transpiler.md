@@ -2386,6 +2386,12 @@ Current status snapshot:
    - selecting owner-scoped overload hints via call-argument shape (slice-like / vec-like / array-like) when merged hints are ambiguous, and
    - lowering concrete-owner `::Item` qself projections through `rusty::detail::associated_item_t<Owner>` to avoid invalid concrete `Owner::Item` C++ surfaces.
 74. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3764` (`template<class T> class rusty::Vec used without template arguments` in `const auto vec = rusty::Vec::new_();`), followed by downstream conversion families (`Vec<int>` / `std::array<int,...>` / `std::vector<int>` into `SmallVec<std::array<uint8_t,...>>::from(...)`) and adjacent runtime-surface gaps (`as_slice`, `from_iter`, `from_raw_parts`); guardrail check against §11 remains satisfied for `Leaf 5.1.35` (fixes stayed shared and shape-gated in overload expected-type recovery and associated-item mapping, with no crate-specific scripts and no generated-output text patching).
+75. Focused `smallvec` repro after `Leaf 5.1.36` (`/tmp/rusty-parity-matrix-5-1-36b-20260412/smallvec/...`) collapses the prior post-5.1.35 local-placeholder-associated-`from(...)` family by:
+   - collecting initialized-local placeholder hints from associated-call expected-type fallback (not only direct function metadata),
+   - applying owner substitutions from statement-local expected context (`let x: Owner<...> = Owner::from(arg)`) before deriving placeholder hints,
+   - extending placeholder owner-target coverage to `into_vec(...)` and array/repeat locals, and
+   - allowing `into_vec` boxed payload specialization on `Box::new`/`Box::new_` call shapes under recovered element context.
+76. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3765` (`use of deleted function rusty::Vec<uint8_t>::Vec(const Vec&)`), reflecting const-local consumption shape in associated `from(...)` calls after owner/item typing is recovered; downstream gaps now continue at runtime surface families (`as_slice`, `from_iter`, `from_raw_parts`) and unrelated iterator/adapter/test surfaces. Guardrail check against §11 remains satisfied for `Leaf 5.1.36` (fixes stayed shared and AST/type-context-gated, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

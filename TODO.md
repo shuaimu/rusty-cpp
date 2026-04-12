@@ -4758,6 +4758,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-35e-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and shape-gated in owner-scoped expected-type recovery + associated-item mapping logic; no crate-specific scripts, no blanket method rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.36: `smallvec` Stage D local placeholder recovery for associated `from(...)` value arguments (`Vec::new_` / `into_vec` / array-repeat locals) compile-head family collapse
+          - Plan/scope check: shared transpiler-only placeholder-hint/context substitution hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - associated-call placeholder hint collection for initialized locals now uses associated expected-type fallback (not only direct function metadata) and applies owner substitutions from statement-local expected type context (`let x: Owner<...> = Owner::from(arg)`), so unresolved `A::Item` hints no longer leak into free-function locals.
+            - placeholder owner-target detection now includes untyped array/repeat locals and `into_vec(...)` initializer calls, allowing later associated-call usage to provide element hints for locals that previously stayed unconstrained.
+            - placeholder hint extraction now accepts sequence-shaped expected arguments (`Vec<T>`, `&[T]`, `[T; N]`) for `Vec`/array owner targets; local placeholder specialization now applies those hints to `Vec::new_`, `into_vec(Box::new(...))`, and array/repeat initializers.
+            - `into_vec` boxed payload specialization now recognizes `Box::new`/`Box::new_` constructor spellings (in addition to `boxed::box_new`), preserving element-type coercion under recovered expected context.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5136_vec_new_local_uses_assoc_from_element_hint`
+            - `test_leaf5136_into_vec_local_uses_assoc_from_element_hint`
+            - `test_leaf5136_array_local_uses_assoc_from_element_hint`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5136 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-36b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.35 first-head family at `runner.cpp:3764` (`rusty::Vec::new_()` unspecialized owner-template surface plus adjacent `Vec<int>`/array-repeat conversion fallout in `SmallVec::from(...)` tests) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3765` (`use of deleted function rusty::Vec<uint8_t>::Vec(const Vec&)`) due const-local consumption shape in `from(...)` call arguments, followed by downstream runtime-surface gaps (`as_slice`, `from_iter`, `from_raw_parts`) and unrelated adapter/test-surface fallout.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-36b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-context-gated in placeholder-hint and call expected-type plumbing; no crate-specific scripts, no blanket rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

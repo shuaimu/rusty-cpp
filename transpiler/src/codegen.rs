@@ -9592,9 +9592,11 @@ impl CodeGen {
         match stmt {
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
+                    let context_expected_ty = get_local_type(local);
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         &init.expr,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9603,6 +9605,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     expr,
                     candidate_owner_targets,
+                    None,
                     hints,
                 );
             }
@@ -9614,6 +9617,7 @@ impl CodeGen {
         &self,
         expr: &syn::Expr,
         candidate_owner_targets: &HashMap<String, String>,
+        context_expected_ty: Option<&syn::Type>,
         hints: &mut HashMap<String, syn::Type>,
     ) {
         match expr {
@@ -9621,17 +9625,20 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_from_call(
                     call,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &call.func,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for arg in &call.args {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         arg,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9640,12 +9647,14 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &method_call.receiver,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for arg in &method_call.args {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         arg,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9654,11 +9663,13 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &assign.left,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &assign.right,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9675,6 +9686,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &if_expr.cond,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for stmt in &if_expr.then_branch.stmts {
@@ -9688,6 +9700,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         else_expr,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9696,6 +9709,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &while_expr.cond,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for stmt in &while_expr.body.stmts {
@@ -9719,6 +9733,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &for_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for stmt in &for_expr.body.stmts {
@@ -9733,6 +9748,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &match_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
                 for arm in &match_expr.arms {
@@ -9740,12 +9756,14 @@ impl CodeGen {
                         self.collect_local_generic_placeholder_function_call_hints_in_expr(
                             guard,
                             candidate_owner_targets,
+                            context_expected_ty,
                             hints,
                         );
                     }
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         &arm.body,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9755,6 +9773,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         &field.expr,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9762,6 +9781,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         rest,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9771,6 +9791,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         elem,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9780,6 +9801,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         elem,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9797,6 +9819,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &closure_expr.body,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9804,6 +9827,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &await_expr.base,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9811,6 +9835,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &try_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9819,6 +9844,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         value,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9828,6 +9854,7 @@ impl CodeGen {
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         value,
                         candidate_owner_targets,
+                        context_expected_ty,
                         hints,
                     );
                 }
@@ -9836,6 +9863,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &reference_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9843,6 +9871,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &unary_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9850,6 +9879,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &paren_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9857,6 +9887,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &group_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9864,6 +9895,7 @@ impl CodeGen {
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &let_expr.expr,
                     candidate_owner_targets,
+                    context_expected_ty,
                     hints,
                 );
             }
@@ -9875,12 +9907,20 @@ impl CodeGen {
         &self,
         call: &syn::ExprCall,
         candidate_owner_targets: &HashMap<String, String>,
+        context_expected_ty: Option<&syn::Type>,
         hints: &mut HashMap<String, syn::Type>,
     ) {
         let syn::Expr::Path(_) = call.func.as_ref() else {
             return;
         };
-        let substitutions = self.function_call_type_arg_substitutions(call);
+        let mut merged_substitutions = self.function_call_type_arg_substitutions(call)
+            .unwrap_or_default();
+        if let Some(expected_substitutions) =
+            self.call_owner_type_arg_substitutions_from_expected_type(call, context_expected_ty)
+        {
+            merged_substitutions.extend(expected_substitutions);
+        }
+        let substitutions = (!merged_substitutions.is_empty()).then_some(merged_substitutions);
         for (idx, arg) in call.args.iter().enumerate() {
             let Some(name) = extract_simple_local_ident(arg) else {
                 continue;
@@ -9891,9 +9931,17 @@ impl CodeGen {
             let Some(owner_target) = candidate_owner_targets.get(&name) else {
                 continue;
             };
-            let Some(expected_ty) =
-                self.lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
-            else {
+            let expected_ty = self
+                .lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
+                .or_else(|| {
+                    let fallback =
+                        self.lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))?;
+                    if let Some(substitutions) = substitutions.as_ref() {
+                        return Some(self.substitute_type_params_in_type(&fallback, substitutions));
+                    }
+                    Some(fallback)
+                });
+            let Some(expected_ty) = expected_ty else {
                 continue;
             };
             let Some(hint_ty) =
@@ -10225,7 +10273,9 @@ impl CodeGen {
         expected_ty: &syn::Type,
     ) -> Option<syn::Type> {
         match owner_target {
-            "Vec" => extract_vec_element_type_for_hint(expected_ty),
+            "Vec" => extract_vec_element_type_for_hint(expected_ty)
+                .or_else(|| extract_sequence_element_type_for_hint(expected_ty)),
+            "Array" => extract_sequence_element_type_for_hint(expected_ty),
             "SmallVec" => {
                 let array_ty = extract_smallvec_array_type_for_hint(expected_ty)?;
                 Some(parse_quote!(SmallVec<#array_ty>))
@@ -14996,9 +15046,10 @@ impl CodeGen {
                     .init
                     .as_ref()
                     .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr));
-                if inferred_binding_ty.is_none() {
-                    inferred_binding_ty =
-                        self.infer_local_type_from_placeholder_hint(local, &name_str);
+                if let Some(placeholder_ty) =
+                    self.infer_local_type_from_placeholder_hint(local, &name_str)
+                {
+                    inferred_binding_ty = Some(placeholder_ty);
                 }
                 if inferred_binding_ty.is_none() {
                     inferred_binding_ty =
@@ -16044,13 +16095,43 @@ impl CodeGen {
     ) -> Option<syn::Type> {
         let hint = self.lookup_local_placeholder_type_hint(binding_name)?;
         let init = local.init.as_ref()?;
-        let call = match self.peel_paren_group_expr(&init.expr) {
+
+        let init_expr = self.peel_paren_group_expr(&init.expr);
+        if let Some(cap_expr) = self.infer_array_capacity_arg_for_expr(init_expr) {
+            let elem_ty = extract_array_element_type_for_hint(hint)
+                .or_else(|| extract_sequence_element_type_for_hint(hint))
+                .unwrap_or_else(|| hint.clone());
+            if let Ok(cap_expr) = syn::parse_str::<syn::Expr>(&cap_expr) {
+                return Some(parse_quote!([#elem_ty; #cap_expr]));
+            }
+        }
+
+        let call = match init_expr {
             syn::Expr::Call(call) => call,
             _ => return None,
         };
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return None;
         };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if matches!(
+            joined.as_str(),
+            "rusty::boxed::into_vec"
+                | "into_vec"
+                | "alloc::boxed::into_vec"
+                | "std::boxed::into_vec"
+        ) {
+            let elem_ty = extract_vec_element_type_for_hint(hint)
+                .or_else(|| extract_sequence_element_type_for_hint(hint))
+                .unwrap_or_else(|| hint.clone());
+            return Some(parse_quote!(Vec<#elem_ty>));
+        }
         if path_expr.path.segments.len() < 2 {
             return None;
         }
@@ -16081,8 +16162,15 @@ impl CodeGen {
         } else {
             let owner_name = owner_seg.ident.to_string();
             if matches!(owner_name.as_str(), "Cell" | "Vec") {
+                let hint = if owner_name == "Vec" {
+                    extract_vec_element_type_for_hint(hint)
+                        .or_else(|| extract_sequence_element_type_for_hint(hint))
+                        .unwrap_or_else(|| hint.clone())
+                } else {
+                    hint.clone()
+                };
                 let mut args = syn::punctuated::Punctuated::new();
-                args.push(syn::GenericArgument::Type(hint.clone()));
+                args.push(syn::GenericArgument::Type(hint));
                 owner_seg.arguments =
                     syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
                         colon2_token: None,
@@ -22480,14 +22568,29 @@ impl CodeGen {
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        if !matches!(
+        let use_boxed_helper = matches!(
             joined.as_str(),
             "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
-        ) {
+        );
+        let use_box_ctor = matches!(
+            joined.as_str(),
+            "Box::new"
+                | "Box::new_"
+                | "rusty::Box::new"
+                | "rusty::Box::new_"
+                | "alloc::boxed::Box::new"
+                | "std::boxed::Box::new"
+        );
+        if !use_boxed_helper && !use_box_ctor {
             return None;
         }
         let payload = self.try_emit_boxed_u8_array_expr(&box_call.args[0])?;
-        Some(format!("rusty::boxed::box_new({})", payload))
+        let ctor = if use_box_ctor {
+            "rusty::Box::new_"
+        } else {
+            "rusty::boxed::box_new"
+        };
+        Some(format!("{}({})", ctor, payload))
     }
 
     fn try_emit_into_vec_box_new_with_expected_tuple_payload(
@@ -22511,17 +22614,32 @@ impl CodeGen {
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        if !matches!(
+        let use_boxed_helper = matches!(
             joined.as_str(),
             "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
-        ) {
+        );
+        let use_box_ctor = matches!(
+            joined.as_str(),
+            "Box::new"
+                | "Box::new_"
+                | "rusty::Box::new"
+                | "rusty::Box::new_"
+                | "alloc::boxed::Box::new"
+                | "std::boxed::Box::new"
+        );
+        if !use_boxed_helper && !use_box_ctor {
             return None;
         }
         let payload = self.try_emit_boxed_tuple_array_expr_with_expected_tuple(
             &box_call.args[0],
             expected_tuple_ty,
         )?;
-        Some(format!("rusty::boxed::box_new({})", payload))
+        let ctor = if use_box_ctor {
+            "rusty::Box::new_"
+        } else {
+            "rusty::boxed::box_new"
+        };
+        Some(format!("{}({})", ctor, payload))
     }
 
     fn try_emit_into_vec_box_new_with_inferred_tuple_payload(
@@ -22544,15 +22662,30 @@ impl CodeGen {
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        if !matches!(
+        let use_boxed_helper = matches!(
             joined.as_str(),
             "rusty::boxed::box_new" | "box_new" | "alloc::boxed::box_new" | "std::boxed::box_new"
-        ) {
+        );
+        let use_box_ctor = matches!(
+            joined.as_str(),
+            "Box::new"
+                | "Box::new_"
+                | "rusty::Box::new"
+                | "rusty::Box::new_"
+                | "alloc::boxed::Box::new"
+                | "std::boxed::Box::new"
+        );
+        if !use_boxed_helper && !use_box_ctor {
             return None;
         }
         let payload = self
             .try_emit_boxed_tuple_array_expr_with_inferred_tuple_harmonization(&box_call.args[0])?;
-        Some(format!("rusty::boxed::box_new({})", payload))
+        let ctor = if use_box_ctor {
+            "rusty::Box::new_"
+        } else {
+            "rusty::boxed::box_new"
+        };
+        Some(format!("{}({})", ctor, payload))
     }
 
     fn extract_iter_item_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
@@ -32894,12 +33027,30 @@ fn replace_type_infer_placeholders(ty: &mut syn::Type, hint: &syn::Type) -> bool
 }
 
 fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
-    let syn::Expr::Call(call) = peel_paren_group_expr(expr) else {
+    let expr = peel_paren_group_expr(expr);
+    if matches!(expr, syn::Expr::Array(_) | syn::Expr::Repeat(_)) {
+        return Some("Array".to_string());
+    }
+
+    let syn::Expr::Call(call) = expr else {
         return None;
     };
     let syn::Expr::Path(path_expr) = call.func.as_ref() else {
         return None;
     };
+    let joined = path_expr
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if matches!(
+        joined.as_str(),
+        "rusty::boxed::into_vec" | "into_vec" | "alloc::boxed::into_vec" | "std::boxed::into_vec"
+    ) {
+        return Some("Vec".to_string());
+    }
     if path_expr.path.segments.len() < 2 {
         return None;
     }
@@ -33233,6 +33384,28 @@ fn extract_vec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
         }
         _ => None,
     })
+}
+
+fn extract_slice_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    match ty {
+        syn::Type::Slice(slice) => Some((*slice.elem).clone()),
+        _ => None,
+    }
+}
+
+fn extract_array_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    match ty {
+        syn::Type::Array(array) => Some((*array.elem).clone()),
+        _ => None,
+    }
+}
+
+fn extract_sequence_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    extract_vec_element_type_for_hint(ty)
+        .or_else(|| extract_slice_element_type_for_hint(ty))
+        .or_else(|| extract_array_element_type_for_hint(ty))
 }
 
 fn extract_arrayvec_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
@@ -51028,6 +51201,90 @@ mod tests {
         assert!(
             !out.contains("std::array<uint32_t, 2>::Item"),
             "concrete-owner associated item projection should not emit raw ::Item surface\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5136_vec_new_local_uses_assoc_from_element_hint() {
+        let out = transpile_str(
+            r#"
+            struct Buf;
+            impl From<&[u8]> for Buf {
+                fn from(_s: &[u8]) -> Self { Buf }
+            }
+            impl From<Vec<u8>> for Buf {
+                fn from(_v: Vec<u8>) -> Self { Buf }
+            }
+            fn f() {
+                let vec = Vec::new();
+                let _ = Buf::from(vec);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Vec<uint8_t>::new_()") || out.contains("rusty::Vec<uint8_t>::new()"),
+            "Vec local should specialize from associated from(...) usage context\nGot: {out}"
+        );
+        assert!(
+            !out.contains("rusty::Vec::new_()") && !out.contains("rusty::Vec::new()"),
+            "Vec local should not remain unspecialized\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5136_into_vec_local_uses_assoc_from_element_hint() {
+        let out = transpile_str(
+            r#"
+            struct Buf;
+            impl From<&[u8]> for Buf {
+                fn from(_s: &[u8]) -> Self { Buf }
+            }
+            impl From<Vec<u8>> for Buf {
+                fn from(_v: Vec<u8>) -> Self { Buf }
+            }
+            fn f() {
+                let vec = <[_]>::into_vec(Box::new([1, 2, 3]));
+                let _ = Buf::from(vec);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::array{static_cast<uint8_t>(1), static_cast<uint8_t>(2), static_cast<uint8_t>(3)}")
+                || out.contains("std::array<uint8_t, 3>{1, 2, 3}"),
+            "into_vec boxed-array payload should receive uint8_t element specialization from associated from(...) usage\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::array{1, 2, 3}"),
+            "into_vec boxed-array payload should not remain untyped under known element context\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5136_array_local_uses_assoc_from_element_hint() {
+        let out = transpile_str(
+            r#"
+            struct Buf;
+            impl From<&[u8]> for Buf {
+                fn from(_s: &[u8]) -> Self { Buf }
+            }
+            impl<const N: usize> From<[u8; N]> for Buf {
+                fn from(_a: [u8; N]) -> Self { Buf }
+            }
+            fn f() {
+                let array = [1];
+                let _ = Buf::from(array);
+                let repeated = [99; 4];
+                let _ = Buf::from(repeated);
+            }
+            "#,
+        );
+        assert!(
+            out.contains("std::array<uint8_t, 1>{1}"),
+            "array local should specialize element type from associated from(...) usage\nGot: {out}"
+        );
+        assert!(
+            out.contains("static_cast<uint8_t>("),
+            "repeat-array local should cast integer seed under inferred uint8_t element context\nGot: {out}"
         );
     }
 
