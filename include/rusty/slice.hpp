@@ -1,6 +1,7 @@
 #ifndef RUSTY_SLICE_HPP
 #define RUSTY_SLICE_HPP
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -443,13 +444,86 @@ public:
         }
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
+            remaining_ = 0;
             return next_result(rusty::None);
         }
         --remaining_;
         return next_result(option_like_take_value(item));
     }
 
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        if (remaining_ == 0) {
+            return std::make_tuple(0, rusty::Option<size_t>(0));
+        }
+
+        if constexpr (requires { iter_.size_hint(); }) {
+            auto hint = iter_.size_hint();
+            const size_t lower_bound = std::min(hint_lower_bound(hint), remaining_);
+            auto upper_bound = hint_upper_bound(hint);
+            if (upper_bound.is_some()) {
+                const size_t bounded_upper =
+                    std::min(static_cast<size_t>(upper_bound.unwrap()), remaining_);
+                return std::make_tuple(lower_bound, rusty::Option<size_t>(bounded_upper));
+            }
+            return std::make_tuple(lower_bound, rusty::Option<size_t>(remaining_));
+        }
+
+        if constexpr (requires { iter_.count(); }) {
+            const size_t bounded_count =
+                std::min(static_cast<size_t>(iter_.count()), remaining_);
+            return std::make_tuple(bounded_count, rusty::Option<size_t>(bounded_count));
+        }
+
+        return std::make_tuple(0, rusty::Option<size_t>(remaining_));
+    }
+
 private:
+    template<typename Hint>
+    static size_t hint_lower_bound(const Hint& hint) {
+        if constexpr (requires { std::get<0>(hint); }) {
+            return static_cast<size_t>(std::get<0>(hint));
+        } else if constexpr (requires { hint._0; }) {
+            return static_cast<size_t>(hint._0);
+        } else {
+            static_assert(
+                dependent_false_v<Hint>,
+                "rusty::take::size_hint requires lower-bound tuple-like access");
+            return 0;
+        }
+    }
+
+    template<typename Upper>
+    static rusty::Option<size_t> normalize_upper_bound(const Upper& upper) {
+        if constexpr (requires { upper.is_some(); upper.unwrap(); }) {
+            if (upper.is_some()) {
+                return rusty::Option<size_t>(static_cast<size_t>(upper.unwrap()));
+            }
+        } else if constexpr (requires { upper.has_value(); upper.value(); }) {
+            if (upper.has_value()) {
+                return rusty::Option<size_t>(static_cast<size_t>(upper.value()));
+            }
+        } else if constexpr (requires { static_cast<bool>(upper); *upper; }) {
+            if (static_cast<bool>(upper)) {
+                return rusty::Option<size_t>(static_cast<size_t>(*upper));
+            }
+        }
+        return rusty::Option<size_t>(rusty::None);
+    }
+
+    template<typename Hint>
+    static rusty::Option<size_t> hint_upper_bound(const Hint& hint) {
+        if constexpr (requires { std::get<1>(hint); }) {
+            return normalize_upper_bound(std::get<1>(hint));
+        } else if constexpr (requires { hint._1; }) {
+            return normalize_upper_bound(hint._1);
+        } else {
+            static_assert(
+                dependent_false_v<Hint>,
+                "rusty::take::size_hint requires upper-bound tuple-like access");
+            return rusty::Option<size_t>(rusty::None);
+        }
+    }
+
     Iter iter_;
     size_t remaining_;
 };

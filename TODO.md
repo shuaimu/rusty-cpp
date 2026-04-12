@@ -5784,7 +5784,26 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-78a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in core reborrow/pointer inference paths; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.79: `smallvec` Stage D iterator adapter surface gap (`take_next_iter<repeat_next_iter<...>>` missing `.size_hint()` at `runner.cpp:2117`) compile-head family collapse
+        - [x] *done* Leaf 5.1.79: `smallvec` Stage D iterator adapter surface gap (`take_next_iter<repeat_next_iter<...>>` missing `.size_hint()` at `runner.cpp:2117`) compile-head family collapse
+          - Plan/scope check: implementation + focused regressions stayed below the <1000 LOC target; no additional decomposition was required.
+          - Implemented shared runtime iterator-adapter hardening in `include/rusty/slice.hpp`:
+            - added `rusty::detail::take_next_iter::size_hint()` with bounded `take` semantics (`lower = min(inner_lower, remaining)`, `upper = min(inner_upper, remaining)` when known, conservative `Some(remaining)` upper fallback when inner upper is unknown).
+            - added generic tuple/struct (`std::get` / `._0` / `._1`) size-hint bound extraction and option-like upper normalization so shared adapters can propagate bounds without crate-specific handling.
+            - tightened `take_next_iter::next()` exhaustion behavior by collapsing `remaining_` to `0` when the wrapped iterator ends early, keeping subsequent `size_hint()` calls deterministic (`(0, Some(0))`).
+          - Added focused regression:
+            - `runtime_move_semantics::test_leaf5179_take_runtime_adapter_exposes_size_hint`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5179 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_leaf5164_repeat_runtime_adapter_supports_take_and_for_in -- --nocapture`
+            - `timeout 900 cargo test -p rusty-cpp-transpiler`
+            - `timeout 300 tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-79a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.78 first-head family at `runner.cpp:2117` (`take_next_iter<repeat_next_iter<int>>` missing `.size_hint()` surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:1332` (`layout_array(...).map_err(...)` payload mismatch: `Result<Layout, CollectionAllocErr_CapacityOverflow>` cannot convert to `Result<Layout, CollectionAllocErr>`), with repeated instantiations across `layout_array<T>` call sites.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-79a-20260412/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix stayed shared and runtime-surface-gated in core iterator adapters; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.80: `smallvec` Stage D `Result::map_err` payload-family mismatch in `layout_array` (`runner.cpp:1332`) compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

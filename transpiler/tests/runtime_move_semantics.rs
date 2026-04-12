@@ -670,6 +670,95 @@ fn test_leaf5164_repeat_runtime_adapter_supports_take_and_for_in() {
 }
 
 #[test]
+fn test_leaf5179_take_runtime_adapter_exposes_size_hint() {
+    let source = r#"
+        #include <rusty/slice.hpp>
+
+        struct CountingIter {
+            int current;
+            int end;
+
+            rusty::Option<int> next() {
+                if (current >= end) {
+                    return rusty::None;
+                }
+                return rusty::Option<int>(current++);
+            }
+        };
+
+        int main() {
+            auto repeated = rusty::take(rusty::repeat(9), 5);
+            const auto [rep_lower0, rep_upper0] = repeated.size_hint();
+            if (rep_lower0 != 5) {
+                return 1;
+            }
+            if (!rep_upper0.is_some() || rep_upper0.unwrap() != 5) {
+                return 2;
+            }
+
+            int rep_sum = 0;
+            for (size_t i = 0; i < 5; ++i) {
+                auto value = repeated.next();
+                if (!value.is_some()) {
+                    return 3;
+                }
+                rep_sum += value.unwrap();
+            }
+            if (rep_sum != 45) {
+                return 4;
+            }
+            if (repeated.next().is_some()) {
+                return 5;
+            }
+
+            const auto [rep_lower_done, rep_upper_done] = repeated.size_hint();
+            if (rep_lower_done != 0) {
+                return 6;
+            }
+            if (!rep_upper_done.is_some() || rep_upper_done.unwrap() != 0) {
+                return 7;
+            }
+
+            auto counted = rusty::take(CountingIter{0, 2}, 5);
+            const auto [count_lower0, count_upper0] = counted.size_hint();
+            if (count_lower0 != 0) {
+                return 8;
+            }
+            if (!count_upper0.is_some() || count_upper0.unwrap() != 5) {
+                return 9;
+            }
+
+            int count_sum = 0;
+            for (int i = 0; i < 2; ++i) {
+                auto value = counted.next();
+                if (!value.is_some()) {
+                    return 10;
+                }
+                count_sum += value.unwrap();
+            }
+            if (count_sum != 1) {
+                return 11;
+            }
+            if (counted.next().is_some()) {
+                return 12;
+            }
+
+            const auto [count_lower_done, count_upper_done] = counted.size_hint();
+            if (count_lower_done != 0) {
+                return 13;
+            }
+            if (!count_upper_done.is_some() || count_upper_done.unwrap() != 0) {
+                return 14;
+            }
+
+            return 0;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "leaf5179_take_size_hint_surface");
+}
+
+#[test]
 fn test_slice_get_runtime_helper_surface() {
     let source = r#"
         #include <array>

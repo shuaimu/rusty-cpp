@@ -2575,6 +2575,11 @@ Current status snapshot:
    - propagating pointer-like alias result types through pointer arithmetic local inference (`add`/`offset`/`sub` and wrapping variants),
    - preserving deref shape for expected-context reborrows (`&*expr` → `*expr`) so pointer-backed borrow calls no longer collapse to bare pointer operands.
 160. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2117` (`take_next_iter<repeat_next_iter<int>>` missing `.size_hint()` surface in `extend` paths), with adjacent downstream payload-family fallout at `runner.cpp:1332` (`Result::map_err` error-payload unification). Guardrail check against §11 remains satisfied for `Leaf 5.1.78` (fixes stayed shared and AST/type-shape-gated in core reborrow/pointer inference paths, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+161. Focused `smallvec` repro after `Leaf 5.1.79` (`/tmp/rusty-parity-matrix-5-1-79a-20260412/smallvec/...`) collapses the prior post-5.1.78 `take_next_iter::size_hint` first-head family by:
+   - adding shared runtime `take_next_iter::size_hint()` with bounded `take` semantics over inner iterator hints (`lower/upper` clipped by `remaining`),
+   - normalizing inner size-hint extraction across tuple-like and struct-like (`_0/_1`) bound carriers with option-like upper conversion,
+   - collapsing `remaining_` to zero when `next()` observes early source exhaustion so post-exhaustion hint surfaces are deterministic.
+162. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:1332` (`layout_array(...).map_err(...)` payload-family mismatch: `Result<Layout, CollectionAllocErr_CapacityOverflow>` cannot convert to `Result<Layout, CollectionAllocErr>`), with repeated instantiation fallout across `layout_array<T>` call sites. Guardrail check against §11 remains satisfied for `Leaf 5.1.79` (fix stayed shared and runtime-surface-gated in core iterator adapters, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 
