@@ -23237,6 +23237,10 @@ impl CodeGen {
                     method_name.as_str(),
                     "new"
                         | "new_"
+                        | "from"
+                        | "try_from"
+                        | "from_slice"
+                        | "from_vec"
                         | "empty"
                         | "all"
                         | "from_bits"
@@ -23247,8 +23251,16 @@ impl CodeGen {
                         | "default_"
                         | "from_iter"
                 );
-                if is_current_struct && !is_constructor {
-                    let arg = &call.args[0];
+                let arg = &call.args[0];
+                let arg_is_self_like = {
+                    let peeled_arg = self.peel_paren_group_expr(arg);
+                    matches!(peeled_arg, syn::Expr::Path(path)
+                        if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
+                        || self
+                            .infer_simple_expr_type(peeled_arg)
+                            .is_some_and(|ty| self.type_is_current_struct_self_type(&ty))
+                };
+                if is_current_struct && !is_constructor && arg_is_self_like {
                     let receiver = match arg {
                         syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
                         _ => self.emit_expr_to_string(arg),
@@ -24258,6 +24270,13 @@ impl CodeGen {
         if !trait_segment.starts_with(|c: char| c.is_uppercase()) {
             return None;
         }
+        // Do not treat local concrete types as UFCS trait owners.
+        // This preserves associated static calls like `Type::from_slice(&[..])`.
+        if self.local_declared_types.contains(&trait_segment) {
+            return None;
+        }
+
+        let method_name = func_path.segments.last()?.ident.to_string();
 
         // First argument must be an explicit reference: `&receiver` or `&mut receiver`.
         let receiver_ref = match call.args.first() {
@@ -24265,7 +24284,6 @@ impl CodeGen {
             _ => return None,
         };
 
-        let method_name = func_path.segments.last()?.ident.to_string();
         // Constructor-like calls (notably `Type::new(&...)`) are ordinary static
         // functions in Rust path space, not UFCS trait-method dispatch.
         if matches!(method_name.as_str(), "new" | "new_") {
@@ -50590,6 +50608,45 @@ mod tests {
         assert!(
             !out.contains("Flags::bits((*this))"),
             "Should NOT emit static UFCS call\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5134_self_ufcs_rewrite_requires_self_like_argument() {
+        let out = transpile_str(
+            r#"
+            struct Flags(u8);
+            impl Flags {
+                fn bits(&self) -> u8 { self.0 }
+                fn from(_v: u8) -> Self { Flags(0) }
+                fn from_slice(_xs: &[u8]) -> Self { Flags(0) }
+                fn make(&self) {
+                    let _ = Flags::from(1);
+                    let _ = Flags::from_slice(&[1][..]);
+                    let _ = Flags::bits(self);
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("(*this).bits()"),
+            "self-like UFCS call should still rewrite to dot-call\nGot: {out}"
+        );
+        assert!(
+            out.contains("Flags::from(1)"),
+            "non-self static from call should stay associated\nGot: {out}"
+        );
+        assert!(
+            out.contains("Flags::from_slice("),
+            "non-self static from_slice call should stay associated\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".from()"),
+            "non-self associated from call must not rewrite to receiver method form\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".from_slice()"),
+            "non-self associated from_slice call must not rewrite to receiver method form\nGot: {out}"
         );
     }
 

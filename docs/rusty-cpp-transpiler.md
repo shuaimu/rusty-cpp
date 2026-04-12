@@ -2377,6 +2377,10 @@ Current status snapshot:
    - materializing tuple-match unit-valued rvalue expressions as explicit unit values (`std::make_tuple()`) while preserving side effects, and
    - adding shape-gated `self` mutable-reference coercion to `deref_mut()` for expected `&mut Target` returns (non-`Self`) when `deref_mut` exists.
 70. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:3729/3747` (`std::span<const int, ...>` has no member `from`), with adjacent downstream owner/item-shape conversion fallout (`SmallVec::from(Vec<int>)`, `.from_slice`, and related mismatches); guardrail check against §11 remains satisfied for `Leaf 5.1.33` (fixes stayed shared and AST/type-shape-gated with no crate-specific scripts and no generated-output text patching).
+71. Focused `smallvec` repro after `Leaf 5.1.34` (`/tmp/rusty-parity-matrix-5-1-34/smallvec/...`) collapses the prior post-5.1.33 UFCS overreach family by:
+   - preventing UFCS trait-call rewriting for local concrete type owners, and
+   - constraining self-UFCS fallback rewriting so constructor/static `from*` associated calls are not rewritten as receiver methods.
+72. New first deterministic Stage D head in `smallvec` remains at `runner.cpp:3729/3747` but moves to the next compile family: valid associated-call shape with mismatched payload typing (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)`), followed by downstream omitted-owner/item-typing conversion fallout (`rusty::Vec` unspecialized owner, `Vec<int>` vs `Vec<unsigned char>`, and related `from_slice` type surfaces); guardrail check against §11 remains satisfied for `Leaf 5.1.34` (fixes stayed shared and shape-gated in UFCS detection/rewrite logic, with no crate-specific scripts and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

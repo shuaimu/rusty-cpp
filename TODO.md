@@ -4718,6 +4718,24 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-33b/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated in tuple lowering and self-path coercion logic; no crate-specific scripts, no blanket rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.34: `smallvec` Stage D UFCS trait-rewrite overreach on associated `from*` calls compile-head family collapse
+          - Plan/scope check: shared transpiler-only UFCS rewrite gating hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - UFCS trait-call detection now rejects local concrete type owners before applying `Trait::method(&receiver)` -> `receiver.method(...)` rewrites.
+            - self-UFCS fallback rewrite (`Type::method(arg)` -> `arg.method()`) now excludes constructor/static-associated `from*` families (`from`, `try_from`, `from_slice`, `from_vec`) and keeps the rewrite gated to self-like receiver arguments.
+            - this removes invalid rewrites such as `rusty::slice_full(...).from()` / `.from_slice()` for `SmallVec::from(...)` and `SmallVec::from_slice(...)` call sites.
+          - Added focused regressions in `transpiler/src/codegen.rs`:
+            - `test_leaf5134_self_ufcs_rewrite_requires_self_like_argument`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5134 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-34 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.33 first-head family at `runner.cpp:3729/3747` (invalid `.from()` / `.from_slice()` member rewrites on slice/span temporaries) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:3729/3747` with valid associated call shape but mismatched payload typing (`SmallVec<std::array<uint32_t,2>>::from(std::span<const int, ...>)`), followed by downstream omitted-owner/item-typing and conversion families (`rusty::Vec` unspecialized owner, `Vec<int>` vs `Vec<unsigned char>`, and related `from_slice` type surfaces).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-34/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fix is shape-gated and local-type-aware in UFCS detection/rewrite logic; no crate-specific scripts, no blanket method-call rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
