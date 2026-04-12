@@ -396,6 +396,11 @@ pub struct CodeGen {
     /// Closure-parameter name scopes for iterator `map` closure bodies where
     /// Rust `*param` should collapse one reference layer for untyped params.
     iterator_map_closure_param_scopes: Vec<HashSet<String>>,
+    /// Closure-parameter name scopes for untyped closure params where unary
+    /// deref should remain reference-aware (`rusty::deref_mut(param)`).
+    /// This preserves `*param` semantics for closures inferred as `&T`/`&mut T`
+    /// without breaking pointer-shaped params.
+    untyped_closure_param_scopes: Vec<HashSet<String>>,
     /// Closure-parameter name scopes for char-like iterator item bindings
     /// (for example `scan(chars(...), |_, ch| ...)` item params).
     /// Used to enable shape-gated lowering of char predicate method calls on
@@ -637,6 +642,7 @@ impl CodeGen {
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
             iterator_map_closure_param_scopes: Vec::new(),
+            untyped_closure_param_scopes: Vec::new(),
             char_predicate_closure_param_scopes: Vec::new(),
             self_path_overrides: Vec::new(),
             module_name: None,
@@ -815,6 +821,7 @@ impl CodeGen {
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
         self.iterator_map_closure_param_scopes.clear();
+        self.untyped_closure_param_scopes.clear();
         self.char_predicate_closure_param_scopes.clear();
         self.self_path_overrides.clear();
         self.block_depth = 0;
@@ -19669,6 +19676,22 @@ impl CodeGen {
         self.lookup_local_binding_type(name).is_none()
     }
 
+    fn push_untyped_closure_param_scope(&mut self, names: HashSet<String>) {
+        self.untyped_closure_param_scopes.push(names);
+    }
+
+    fn should_lower_untyped_closure_param_deref(&self, name: &str) -> bool {
+        if !self
+            .untyped_closure_param_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+        {
+            return false;
+        }
+        self.lookup_local_binding_type(name).is_none()
+    }
+
     fn push_char_predicate_closure_param_scope(&mut self, names: HashSet<String>) {
         self.char_predicate_closure_param_scopes.push(names);
     }
@@ -20859,7 +20882,7 @@ impl CodeGen {
         }
         if mc.method == "into_iter" && mc.args.is_empty() {
             if self.should_bridge_direct_into_iter_receiver_to_iter(&mc.receiver) {
-                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = self.emit_expr_maybe_move(&mc.receiver);
                 return format!("rusty::iter({})", receiver);
             }
         }
@@ -20869,7 +20892,7 @@ impl CodeGen {
             let receiver = if let syn::Expr::MethodCall(inner_mc) = &*mc.receiver {
                 if inner_mc.method == "into_iter" && inner_mc.args.is_empty() {
                     if self.should_bridge_into_iter_receiver_to_iter(&inner_mc.receiver) {
-                        let inner = self.emit_expr_to_string(&inner_mc.receiver);
+                        let inner = self.emit_expr_maybe_move(&inner_mc.receiver);
                         format!("rusty::iter({})", inner)
                     } else {
                         self.emit_expr_to_string(&mc.receiver)
@@ -26558,6 +26581,10 @@ impl CodeGen {
                             if self.should_collapse_untyped_iterator_map_param_deref(&name) {
                                 return self.emit_expr_to_string(&un.expr);
                             }
+                            if self.should_lower_untyped_closure_param_deref(&name) {
+                                let operand = self.emit_expr_to_string(&un.expr);
+                                return format!("rusty::deref_mut({})", operand);
+                            }
                         }
                     }
                     if self.is_expr_reference_like(&un.expr)
@@ -28466,7 +28493,7 @@ impl CodeGen {
                     if !self.is_iterator_like_receiver_expr(&inner_mc.receiver)
                         && !self.is_probably_iterator_receiver_expr(&inner_mc.receiver)
                     {
-                        let inner = self.emit_expr_to_string(&inner_mc.receiver);
+                        let inner = self.emit_expr_maybe_move(&inner_mc.receiver);
                         format!("rusty::iter({})", inner)
                     } else {
                         self.emit_expr_to_string(&mc.receiver)
@@ -30174,11 +30201,98 @@ impl CodeGen {
         Some(rewritten)
     }
 
+    fn extract_simple_type_param_name(&self, ty: &syn::Type) -> Option<String> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let seg = tp.path.segments.first()?;
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        Some(seg.ident.to_string())
+    }
+
+    fn extract_simple_const_param_name(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Path(path_expr) = expr else {
+            return None;
+        };
+        if path_expr.path.segments.len() != 1 {
+            return None;
+        }
+        let seg = path_expr.path.segments.first()?;
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        Some(seg.ident.to_string())
+    }
+
+    fn should_elide_shadowed_current_struct_local_type_args(
+        &self,
+        path: &syn::Path,
+        args: &syn::AngleBracketedGenericArguments,
+    ) -> bool {
+        if path.segments.len() != 1 {
+            return false;
+        }
+        let Some(current_struct) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let Some(type_name) = path.segments.first().map(|seg| seg.ident.to_string()) else {
+            return false;
+        };
+        let scoped_key = format!("{}::{}", current_struct, type_name);
+        let Some(expected_params) = self.declared_type_params.get(&scoped_key) else {
+            return false;
+        };
+        if expected_params.is_empty() {
+            return false;
+        }
+
+        let mut provided: Vec<String> = Vec::new();
+        for arg in &args.args {
+            match arg {
+                syn::GenericArgument::Type(ty) => {
+                    let Some(name) = self.extract_simple_type_param_name(ty) else {
+                        return false;
+                    };
+                    provided.push(name);
+                }
+                syn::GenericArgument::Const(expr) => {
+                    let Some(name) = self.extract_simple_const_param_name(expr) else {
+                        return false;
+                    };
+                    provided.push(name);
+                }
+                syn::GenericArgument::Lifetime(_) => {}
+                _ => return false,
+            }
+        }
+
+        if provided.len() != expected_params.len() {
+            return false;
+        }
+
+        expected_params
+            .iter()
+            .zip(provided.iter())
+            .all(|(expected_name, provided_name)| {
+                self.is_type_param_in_scope(expected_name) && expected_name == provided_name
+            })
+    }
+
     fn emit_expr_path_template_args(&self, path: &syn::Path) -> Option<String> {
         let last = path.segments.last()?;
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
             return None;
         };
+        if self.should_elide_shadowed_current_struct_local_type_args(path, args) {
+            return None;
+        }
         if path.segments.len() == 1 {
             let local_name = last.ident.to_string();
             if self.is_local_type_name_in_scope(&local_name) {
@@ -30316,6 +30430,34 @@ impl CodeGen {
         self.declared_type_param_defaults.get(&key)
     }
 
+    fn should_elide_shadowed_current_struct_local_recovered_args(
+        &self,
+        type_key: &str,
+        params: &[String],
+        recovered_args: &[String],
+    ) -> bool {
+        if params.is_empty() || params.len() != recovered_args.len() {
+            return false;
+        }
+        let Some(current_struct) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let base = type_key.rsplit("::").next().unwrap_or(type_key);
+        let scoped_key = format!("{}::{}", current_struct, base);
+        let Some(scoped_params) = self.declared_type_params.get(&scoped_key) else {
+            return false;
+        };
+        if scoped_params != params {
+            return false;
+        }
+        params
+            .iter()
+            .zip(recovered_args.iter())
+            .all(|(param, recovered)| {
+                self.is_type_param_in_scope(param) && param == recovered
+            })
+    }
+
     fn recover_omitted_local_generic_type_args(
         &self,
         path: &syn::Path,
@@ -30421,6 +30563,13 @@ impl CodeGen {
         }
         if recovered_args.is_empty() {
             return None;
+        }
+        if self.should_elide_shadowed_current_struct_local_recovered_args(
+            &type_key,
+            params,
+            &recovered_args,
+        ) {
+            return Some(mapped_path.to_string());
         }
         Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
@@ -30569,6 +30718,16 @@ impl CodeGen {
 
         if recovered_args.is_empty() {
             return None;
+        }
+        if recovered_args.len() != params.len() {
+            return None;
+        }
+        if self.should_elide_shadowed_current_struct_local_recovered_args(
+            &type_key,
+            params,
+            &recovered_args,
+        ) {
+            return Some(mapped_path.to_string());
         }
         Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
@@ -31081,11 +31240,10 @@ impl CodeGen {
                                 return assoc_segments.join("::");
                             }
                         }
-                        return self.maybe_prefix_typename_for_dependent_path(format!(
-                            "{}::{}",
-                            self_type,
-                            assoc_segments.join("::")
-                        ));
+                        return self.maybe_prefix_typename_for_dependent_type_path(
+                            tp,
+                            format!("{}::{}", self_type, assoc_segments.join("::")),
+                        );
                     }
                     return self_type;
                 }
@@ -31239,11 +31397,16 @@ impl CodeGen {
                             if self.current_struct.is_some() && base.starts_with("Self::") {
                                 base = base.trim_start_matches("Self::").to_string();
                             }
-                            return self.maybe_prefix_typename_for_dependent_path(format!(
-                                "{}<{}>",
-                                base,
-                                generic_args.join(", ")
-                            ));
+                            if self.should_elide_shadowed_current_struct_local_type_args(
+                                &tp.path, args,
+                            ) {
+                                return self
+                                    .maybe_prefix_typename_for_dependent_type_path(tp, base);
+                            }
+                            return self.maybe_prefix_typename_for_dependent_type_path(
+                                tp,
+                                format!("{}<{}>", base, generic_args.join(", ")),
+                            );
                         }
                     }
                 }
@@ -31252,12 +31415,13 @@ impl CodeGen {
                     if let Some(recovered) =
                         self.recover_omitted_local_generic_type_args(&tp.path, &path_str)
                     {
-                        return self.maybe_prefix_typename_for_dependent_path(recovered);
+                        return self
+                            .maybe_prefix_typename_for_dependent_type_path(tp, recovered);
                     }
                 }
 
                 if path_str.contains("::") {
-                    return self.maybe_prefix_typename_for_dependent_path(path_str);
+                    return self.maybe_prefix_typename_for_dependent_type_path(tp, path_str);
                 }
                 path_str
             }
@@ -31594,6 +31758,7 @@ impl CodeGen {
         map_param_scope: Option<HashSet<String>>,
         char_predicate_param_scope: Option<HashSet<String>>,
     ) -> String {
+        let untyped_param_scope = self.collect_untyped_closure_param_names_for_scope(closure);
         let is_move_closure = closure.capture.is_some();
         // Determine capture mode
         let capture = if is_move_closure {
@@ -31635,6 +31800,9 @@ impl CodeGen {
 
         let mut inner = self.new_inner_for_block();
         inner.bind_closure_params_for_emission(closure);
+        if !untyped_param_scope.is_empty() {
+            inner.push_untyped_closure_param_scope(untyped_param_scope);
+        }
         if let Some(names) = map_param_scope {
             inner.push_iterator_map_closure_param_scope(names);
         }
@@ -32046,6 +32214,32 @@ impl CodeGen {
             self.collect_closure_param_names_from_pat(input, &mut names);
         }
         names
+    }
+
+    fn collect_untyped_closure_param_names_for_scope(
+        &self,
+        closure: &syn::ExprClosure,
+    ) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for input in &closure.inputs {
+            self.collect_untyped_closure_param_names_from_pat(input, &mut names);
+        }
+        names
+    }
+
+    fn collect_untyped_closure_param_names_from_pat(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.ident != "_" {
+                    out.insert(pi.ident.to_string());
+                }
+            }
+            syn::Pat::Paren(p) => self.collect_untyped_closure_param_names_from_pat(&p.pat, out),
+            syn::Pat::Type(_) => {}
+            syn::Pat::Reference(_) => {}
+            syn::Pat::Tuple(_) | syn::Pat::TupleStruct(_) | syn::Pat::Struct(_) => {}
+            _ => {}
+        }
     }
 
     fn collect_closure_param_names_from_pat(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
@@ -32950,6 +33144,78 @@ impl CodeGen {
                 !params.is_empty() && (key == first || key.ends_with(&format!("::{}", first)))
             });
         if first == "Self" || self.is_type_param_in_scope(first) || current_struct_is_generic {
+            return format!("typename {}", path);
+        }
+        path
+    }
+
+    fn path_arguments_contain_dependent_type_param(
+        &self,
+        args: &syn::PathArguments,
+    ) -> bool {
+        match args {
+            syn::PathArguments::AngleBracketed(angle) => angle.args.iter().any(|arg| match arg {
+                syn::GenericArgument::Type(inner_ty) => {
+                    self.type_mentions_in_scope_type_param(inner_ty)
+                        || self.type_contains_dependent_assoc(inner_ty)
+                        || self.type_references_current_struct_assoc(inner_ty)
+                }
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    fn type_path_requires_typename_prefix(&self, tp: &syn::TypePath) -> bool {
+        if let Some(qself) = &tp.qself
+            && (self.type_mentions_in_scope_type_param(&qself.ty)
+                || self.type_contains_dependent_assoc(&qself.ty)
+                || self.type_references_current_struct_assoc(&qself.ty))
+        {
+            return true;
+        }
+
+        let segment_count = tp.path.segments.len();
+        if tp.qself.is_none() && segment_count >= 2 {
+            if let Some(first) = tp.path.segments.first().map(|s| s.ident.to_string()) {
+                let current_struct_is_generic = self
+                    .current_struct
+                    .as_ref()
+                    .is_some_and(|name| name == &first)
+                    && self.declared_type_params.iter().any(|(key, params)| {
+                        !params.is_empty()
+                            && (key == &first || key.ends_with(&format!("::{}", first)))
+                    });
+                if first == "Self"
+                    || self.is_type_param_in_scope(&first)
+                    || current_struct_is_generic
+                {
+                    return true;
+                }
+            }
+
+            // Handles dependent qualified names whose first segment is a namespace
+            // (e.g. `rusty::detail::associated_item_t<I>::IntoIter`).
+            for seg in tp.path.segments.iter().take(segment_count.saturating_sub(1)) {
+                if self.path_arguments_contain_dependent_type_param(&seg.arguments) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn maybe_prefix_typename_for_dependent_type_path(
+        &self,
+        tp: &syn::TypePath,
+        path: String,
+    ) -> String {
+        let path = self.maybe_prefix_typename_for_dependent_path(path);
+        if path.starts_with("typename ") {
+            return path;
+        }
+        if self.type_path_requires_typename_prefix(tp) {
             return format!("typename {}", path);
         }
         path
@@ -38195,6 +38461,40 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5297_shadowed_local_generic_args_are_elided_for_hoisted_local_struct() {
+        let out = transpile_str(
+            r#"
+            struct Outer<T, const N: usize> {
+                _value: T,
+            }
+            impl<T, const N: usize> Outer<T, N> {
+                fn guard(&mut self) {
+                    struct Guard<'a, T, const N: usize> {
+                        outer: &'a mut Outer<T, N>,
+                    }
+                    impl<T, const N: usize> Drop for Guard<'_, T, N> {
+                        fn drop(&mut self) {}
+                    }
+                    let _guard = Guard::<T, N> { outer: self };
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("struct Guard {"),
+            "hoisted local guard struct should emit without a shadowing template prefix, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("Guard<T, N>")
+                && !out.contains("Guard<T,N>")
+                && !out.contains("Guard< T, N >"),
+            "uses of hoisted guard should drop redundant shadowed owner args, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf5175_local_drop_guard_struct_literal_prefers_pointer_item_type_over_owner_scope() {
         let out = transpile_str(
             r#"
@@ -41154,6 +41454,33 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5298_untyped_closure_param_deref_lowers_via_deref_mut_helper() {
+        let out = transpile_str(
+            r#"
+            fn apply(mut f: impl FnMut(&mut i32)) {
+                let mut x = 0;
+                f(&mut x);
+            }
+            fn g() {
+                apply(|elt| {
+                    *elt += 1;
+                });
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::deref_mut(elt) += 1;"),
+            "untyped closure deref should lower through reference-aware helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("*elt += 1;"),
+            "raw pointer-style unary deref should not be emitted for untyped closure refs, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10538_iter_count_after_iter_call_lowers_to_runtime_count() {
         let out = transpile_str(
             r#"
@@ -41265,7 +41592,7 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::map(rusty::iter(value),"));
+        assert!(out.contains("rusty::map(rusty::iter(std::move(value)),"));
         assert!(!out.contains("rusty::map(value.into_iter(),"));
     }
 
@@ -51339,7 +51666,10 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("::from_iter(rusty::iter(value))"), "{out}");
+        assert!(
+            out.contains("::from_iter(rusty::iter(std::move(value)))"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -51355,7 +51685,10 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::iter(iterable)"), "{out}");
+        assert!(
+            out.contains("rusty::iter(std::move(iterable))"),
+            "{out}"
+        );
         assert!(!out.contains("iterable.into_iter()"), "{out}");
     }
 
@@ -54359,6 +54692,42 @@ mod tests {
         assert!(
             !out.contains("associated_item_t<m"),
             "module item paths must not be rewritten via associated_item_t helper, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5117_dependent_helper_qualified_assoc_type_is_prefixed_with_typename() {
+        let out = transpile_str_module(
+            r#"
+            trait ArrayLike {
+                type Item;
+            }
+            trait IntoIterLike {
+                type IntoIter;
+            }
+
+            fn pass_nested<H>(
+                value: <H::Item as IntoIterLike>::IntoIter
+            ) -> <H::Item as IntoIterLike>::IntoIter
+            where
+                H: ArrayLike,
+                H::Item: IntoIterLike,
+            {
+                value
+            }
+            "#,
+            "leaf5117_nested_assoc",
+        );
+
+        assert!(
+            out.contains("typename rusty::detail::associated_item_t<H>::IntoIter pass_nested("),
+            "dependent helper-qualified assoc type should carry typename prefix, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("typename typename rusty::detail::associated_item_t<H>::IntoIter"),
+            "helper-qualified assoc type should not be double-prefixed with typename, got:\n{}",
             out
         );
     }

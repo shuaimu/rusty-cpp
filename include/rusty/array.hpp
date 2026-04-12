@@ -228,6 +228,12 @@ constexpr bool operator==(const std::array<L, N>& lhs, const R& rhs) {
     return rhs == lhs;
 }
 
+template<typename L, typename R>
+requires (has_member_as_slice<L>::value && has_member_as_slice<R>::value)
+constexpr bool operator==(const L& lhs, const R& rhs) {
+    return rusty::as_slice(lhs) == rusty::as_slice(rhs);
+}
+
 namespace rusty {
 
 namespace detail {
@@ -847,11 +853,77 @@ struct owned_array_slice {
     }
 };
 
+// Preserve backing storage when `slice_full` is invoked with an rvalue
+// non-array container (for example `rusty::Vec` or transpiled `SmallVec`).
+// Returning a plain `std::span` from a temporary container would dangle
+// immediately after the full expression.
+template<typename Container>
+struct owned_container_slice {
+    using storage_type = std::remove_cv_t<std::remove_reference_t<Container>>;
+    using elem_type = std::remove_cv_t<
+        std::remove_reference_t<decltype(*rusty::as_mut_ptr(std::declval<storage_type&>()))>>;
+
+    storage_type storage;
+
+    elem_type* data() noexcept {
+        return rusty::as_mut_ptr(storage);
+    }
+
+    const elem_type* data() const noexcept {
+        return rusty::as_ptr(storage);
+    }
+
+    std::size_t size() const noexcept {
+        return rusty::len(storage);
+    }
+
+    elem_type* begin() noexcept {
+        return data();
+    }
+
+    const elem_type* begin() const noexcept {
+        return data();
+    }
+
+    elem_type* end() noexcept {
+        return data() + size();
+    }
+
+    const elem_type* end() const noexcept {
+        return data() + size();
+    }
+
+    std::span<elem_type> as_mut_slice() noexcept {
+        return std::span<elem_type>(data(), size());
+    }
+
+    std::span<const elem_type> as_slice() const noexcept {
+        return std::span<const elem_type>(data(), size());
+    }
+
+    operator std::span<elem_type>() noexcept {
+        return as_mut_slice();
+    }
+
+    operator std::span<const elem_type>() const noexcept {
+        return as_slice();
+    }
+};
+
 } // namespace detail
 
 template<typename T, std::size_t N>
 auto slice_full(std::array<T, N>&& container) {
     return detail::owned_array_slice<T, N>{std::move(container)};
+}
+
+template<typename Container>
+requires (
+    !std::is_lvalue_reference_v<Container&&> &&
+    !detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Container>>>)
+auto slice_full(Container&& container) {
+    return detail::owned_container_slice<std::remove_cv_t<std::remove_reference_t<Container>>>{
+        std::forward<Container>(container)};
 }
 
 template<typename Container>
@@ -901,9 +973,7 @@ auto slice_full(const Container& container) {
 // temporary receivers through forwarding-reference binding.
 template<typename Container>
 auto as_slice(Container&& container) {
-    if constexpr (
-        std::is_rvalue_reference_v<Container&&> &&
-        detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Container>>>) {
+    if constexpr (std::is_rvalue_reference_v<Container&&>) {
         return slice_full(std::forward<Container>(container));
     } else {
         using Base = std::remove_reference_t<Container>;

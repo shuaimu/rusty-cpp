@@ -803,8 +803,11 @@ decltype(auto) iter(Range&& range) {
         return detail::preserve_for_in_range(std::forward<Range>(range));
     } else if constexpr (requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }) {
         auto&& view = std::forward<Range>(range);
+        using view_type = std::remove_reference_t<decltype(view)>;
         using elem_ptr = decltype(view.data());
-        using elem_type = std::remove_pointer_t<elem_ptr>;
+        using raw_elem_type = std::remove_pointer_t<elem_ptr>;
+        using elem_type =
+            std::conditional_t<std::is_const_v<view_type>, std::add_const_t<raw_elem_type>, raw_elem_type>;
         auto* data = view.data();
         return slice_iter::Iter<elem_type>(data, data + view.size());
     } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {

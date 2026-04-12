@@ -34,6 +34,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include "mem.hpp"
 #include "option.hpp"
 
 namespace rusty {
@@ -191,6 +192,10 @@ inline T read(T* src) {
 
 template<typename T, typename U>
 inline void write(T* dst, U&& value) {
+    // A moved-from value may have left a forgotten-address marker at `dst`.
+    // Writing a fresh value into that slot must clear stale marker state so
+    // the new object's destructor is not skipped.
+    rusty::mem::clear_forgotten_address_range(static_cast<const void*>(dst), sizeof(T));
     std::construct_at(dst, std::forward<U>(value));
 }
 
