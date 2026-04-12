@@ -10,3 +10,4 @@ build/*
 build-tests/
 .apas
 .rusty-parity/
+.rusty-parity-matrix/
