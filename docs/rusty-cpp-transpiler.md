@@ -2510,6 +2510,11 @@ Current status snapshot:
    - extending iterator-like receiver inference to recognize `repeat(...)` call expressions so adapter chains lower through shared helper surfaces,
    - adding shared runtime `rusty::repeat(...)` option-like iterator adapter (`next` + `size_hint`) compatible with existing `take`/`for_in` flows.
 132. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:4890` (`char32_t` receiver emitted with `.is_whitespace()` in `scan(chars(...))` lambda), with adjacent downstream callable/iterator fallout at `include/rusty/slice.hpp:552` (`std::invoke` mismatch for `scan`) and `include/rusty/slice.hpp:684` (`rusty::iter` static assertion on the derived scan iterator). Guardrail check against §11 remains satisfied for `Leaf 5.1.64` (fixes stayed shared and iterator-shape-gated in transpiler/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
+133. Focused `smallvec` repro after `Leaf 5.1.65` (`/tmp/rusty-parity-matrix-5-1-65a-20260412/smallvec/...`) collapses the prior post-5.1.64 char predicate/member-call family by:
+   - adding shape-gated lowering for `is_whitespace()` method calls to shared runtime `rusty::char_runtime::is_whitespace(...)` when receiver is char-like,
+   - extending scan-closure emission for `chars`-sourced iterators to track item-parameter names so untyped closure params (`|_, ch|`) can still use char-predicate lowering without blanket method rewrites,
+   - extending runtime fallback helper surface with `char_runtime::is_whitespace(char32_t)` and marker detection support.
+134. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2117` (`scan_next_iter<...>` has no `size_hint()` member in `SmallVec::extend`), with adjacent downstream optional-interface and data-layout families. Guardrail check against §11 remains satisfied for `Leaf 5.1.65` (fixes stayed shared and type/context-gated in transpiler lowering, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

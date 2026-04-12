@@ -396,6 +396,11 @@ pub struct CodeGen {
     /// Closure-parameter name scopes for iterator `map` closure bodies where
     /// Rust `*param` should collapse one reference layer for untyped params.
     iterator_map_closure_param_scopes: Vec<HashSet<String>>,
+    /// Closure-parameter name scopes for char-like iterator item bindings
+    /// (for example `scan(chars(...), |_, ch| ...)` item params).
+    /// Used to enable shape-gated lowering of char predicate method calls on
+    /// untyped closure params without rewriting unrelated method surfaces.
+    char_predicate_closure_param_scopes: Vec<HashSet<String>>,
     /// Optional scoped replacement for Rust `self` path lowering.
     /// Default `self` lowering is `(*this)` for member methods; extension free
     /// function emission overrides it to a local receiver parameter (for example `self_`).
@@ -632,6 +637,7 @@ impl CodeGen {
             deref_method_scopes: Vec::new(),
             deref_mut_method_scopes: Vec::new(),
             iterator_map_closure_param_scopes: Vec::new(),
+            char_predicate_closure_param_scopes: Vec::new(),
             self_path_overrides: Vec::new(),
             module_name: None,
             crate_name: None,
@@ -809,6 +815,7 @@ impl CodeGen {
         self.deref_method_scopes.clear();
         self.deref_mut_method_scopes.clear();
         self.iterator_map_closure_param_scopes.clear();
+        self.char_predicate_closure_param_scopes.clear();
         self.self_path_overrides.clear();
         self.block_depth = 0;
         self.cyclic_type_names.clear();
@@ -19260,6 +19267,22 @@ impl CodeGen {
         self.lookup_local_binding_type(name).is_none()
     }
 
+    fn push_char_predicate_closure_param_scope(&mut self, names: HashSet<String>) {
+        self.char_predicate_closure_param_scopes.push(names);
+    }
+
+    fn should_lower_char_predicate_on_untyped_closure_param(&self, name: &str) -> bool {
+        if !self
+            .char_predicate_closure_param_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+        {
+            return false;
+        }
+        self.lookup_local_binding_type(name).is_none()
+    }
+
     fn push_force_typed_option_ctor_scope(&mut self, enabled: bool) {
         self.force_typed_option_ctor_scopes.push(enabled);
     }
@@ -20150,6 +20173,78 @@ impl CodeGen {
         )
     }
 
+    fn emit_scan_callable_arg(&self, receiver: &syn::Expr, scanner_arg: &syn::Expr) -> String {
+        if self.expr_is_chars_iterator_source(receiver) {
+            let scanner_expr = self.peel_paren_group_expr(scanner_arg);
+            if let syn::Expr::Closure(closure) = scanner_expr {
+                let scope = self.collect_scan_char_item_param_scope(closure);
+                if !scope.is_empty() {
+                    return self.emit_closure_to_string_with_char_predicate_context(closure, scope);
+                }
+            }
+        }
+        self.emit_expr_maybe_move(scanner_arg)
+    }
+
+    fn collect_scan_char_item_param_scope(&self, closure: &syn::ExprClosure) -> HashSet<String> {
+        let mut names = HashSet::new();
+        if let Some(item_pat) = closure.inputs.iter().nth(1) {
+            self.collect_closure_param_names_from_pat(item_pat, &mut names);
+        }
+        names.retain(|name| name != "_");
+        names
+    }
+
+    fn expr_is_chars_iterator_source(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::MethodCall(mc) => mc.method == "chars" && mc.args.is_empty(),
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+                    return false;
+                };
+                let joined = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                matches!(
+                    joined.as_str(),
+                    "chars" | "str_runtime::chars" | "rusty::str_runtime::chars"
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn should_lower_char_is_whitespace_method_call(&self, receiver: &syn::Expr) -> bool {
+        if self.expr_is_char_like(receiver) {
+            return true;
+        }
+        let Some(name) = extract_simple_local_ident(receiver) else {
+            return false;
+        };
+        self.should_lower_char_predicate_on_untyped_closure_param(&name)
+    }
+
+    fn expr_is_char_like(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.type_is_char_like(&ty))
+    }
+
+    fn type_is_char_like(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "char" | "char32_t"))
+    }
+
     fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
@@ -20365,7 +20460,7 @@ impl CodeGen {
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let state = self.emit_expr_maybe_move(&mc.args[0]);
-            let scanner = self.emit_expr_maybe_move(&mc.args[1]);
+            let scanner = self.emit_scan_callable_arg(&mc.receiver, &mc.args[1]);
             return format!("rusty::scan({}, {}, {})", receiver, state, scanner);
         }
         if mc.method == "filter"
@@ -20598,6 +20693,18 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::char_runtime::len_utf8({})", receiver);
+        }
+        if method_name == "is_whitespace"
+            && args.is_empty()
+            && self.should_lower_char_is_whitespace_method_call(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::char_runtime::is_whitespace({})", receiver);
         }
         if method_name == "is_char_boundary" && args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -30433,7 +30540,7 @@ impl CodeGen {
     /// - Type paths / constants (ALL_CAPS names)
     /// Emit a closure expression as a C++ lambda.
     fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
-        self.emit_closure_to_string_with_map_param_scope(closure, None)
+        self.emit_closure_to_string_with_param_scopes(closure, None, None)
     }
 
     fn emit_closure_to_string_with_iterator_map_context(
@@ -30441,13 +30548,26 @@ impl CodeGen {
         closure: &syn::ExprClosure,
     ) -> String {
         let param_scope = self.collect_closure_param_names_for_scope(closure);
-        self.emit_closure_to_string_with_map_param_scope(closure, Some(param_scope))
+        self.emit_closure_to_string_with_param_scopes(closure, Some(param_scope), None)
     }
 
-    fn emit_closure_to_string_with_map_param_scope(
+    fn emit_closure_to_string_with_char_predicate_context(
+        &self,
+        closure: &syn::ExprClosure,
+        char_predicate_param_scope: HashSet<String>,
+    ) -> String {
+        self.emit_closure_to_string_with_param_scopes(
+            closure,
+            None,
+            Some(char_predicate_param_scope),
+        )
+    }
+
+    fn emit_closure_to_string_with_param_scopes(
         &self,
         closure: &syn::ExprClosure,
         map_param_scope: Option<HashSet<String>>,
+        char_predicate_param_scope: Option<HashSet<String>>,
     ) -> String {
         let is_move_closure = closure.capture.is_some();
         // Determine capture mode
@@ -30487,6 +30607,9 @@ impl CodeGen {
         inner.bind_closure_params_for_emission(closure);
         if let Some(names) = map_param_scope {
             inner.push_iterator_map_closure_param_scope(names);
+        }
+        if let Some(names) = char_predicate_param_scope {
+            inner.push_char_predicate_closure_param_scope(names);
         }
 
         // Determine if the body is a block or a single expression
@@ -32126,6 +32249,7 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::str_runtime::split(",
         "rusty::char_runtime::from_u32",
         "rusty::char_runtime::len_utf8(",
+        "rusty::char_runtime::is_whitespace(",
         "rusty::is_empty(",
         "rusty::deref_ref(",
         "rusty::deref_mut(",
@@ -32826,6 +32950,16 @@ inline std::size_t len_utf8(char32_t ch) {\n\
     if (code < 0x800) return 2;\n\
     if (code < 0x10000) return 3;\n\
     return 4;\n\
+}\n\
+inline bool is_whitespace(char32_t ch) {\n\
+    const auto code = static_cast<uint32_t>(ch);\n\
+    if (code == 0x0009 || code == 0x000A || code == 0x000B || code == 0x000C || code == 0x000D || code == 0x0020) {\n\
+        return true;\n\
+    }\n\
+    if (code == 0x0085 || code == 0x00A0 || code == 0x1680 || code == 0x2028 || code == 0x2029 || code == 0x202F || code == 0x205F || code == 0x3000) {\n\
+        return true;\n\
+    }\n\
+    return code >= 0x2000 && code <= 0x200A;\n\
 }\n\
 }\n\
 template<typename T>\n\
@@ -48473,6 +48607,65 @@ mod tests {
         assert!(out.contains("rusty::take(rusty::repeat("), "{out}");
         assert!(!out.contains("rusty::take(repeat("), "{out}");
         assert!(!out.contains("repeat(value).take(2)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5165_char_is_whitespace_method_call_uses_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(ch: char) -> bool {
+                ch.is_whitespace()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::char_runtime::is_whitespace(ch)"), "{out}");
+        assert!(!out.contains("ch.is_whitespace()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5165_scan_chars_item_param_is_whitespace_uses_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(s: &str) {
+                let _ = s.chars().scan(0, |_, ch| {
+                    if ch.is_whitespace() {
+                        None
+                    } else {
+                        Some(ch)
+                    }
+                });
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"), "{out}");
+        assert!(out.contains("rusty::char_runtime::is_whitespace(ch)"), "{out}");
+        assert!(!out.contains("ch.is_whitespace()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5165_non_char_is_whitespace_method_call_is_unchanged() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn is_whitespace(&self) -> bool { true }
+            }
+            fn f(s: S) -> bool {
+                s.is_whitespace()
+            }
+            "#,
+        );
+        assert!(out.contains("s.is_whitespace()"), "{out}");
+        assert!(!out.contains("rusty::char_runtime::is_whitespace(s)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5165_runtime_has_char_is_whitespace_helper() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains("is_whitespace(char32_t ch)"),
+            "runtime should have char is_whitespace helper"
+        );
     }
 
     #[test]

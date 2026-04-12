@@ -5442,7 +5442,31 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-64a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and iterator-shape-gated in runtime/transpiler surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
-        - [ ] Leaf 5.1.65: `smallvec` Stage D `char32_t` predicate-method lowering (`is_whitespace`) and `scan(chars(...))` callable item-shape compile-head family collapse
+        - [x] *done* Leaf 5.1.65: `smallvec` Stage D `char32_t` predicate-method lowering (`is_whitespace`) and `scan(chars(...))` callable item-shape compile-head family collapse
+          - Plan/scope check: transpiler-only lowering hardening plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - `is_whitespace()` method calls now lower to shared runtime `rusty::char_runtime::is_whitespace(...)` for char-like receivers, preserving non-char `is_whitespace` method surfaces unchanged.
+            - `scan(chars(...), |state, item| ...)` closure emission now tracks char-like item parameter names, enabling shape-gated lowering for untyped closure item bindings (`|_, ch| ch.is_whitespace()`).
+            - runtime fallback helpers now include `rusty::char_runtime::is_whitespace(char32_t)` and detection marker coverage for emitted helper paths.
+            - this collapses the deterministic post-5.1.64 first-head family at `runner.cpp:4890` (`char32_t` receiver emitted with `.is_whitespace()` in `scan(chars(...))` lambda).
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5165_char_is_whitespace_method_call_uses_runtime_helper`
+            - `codegen::tests::test_leaf5165_scan_chars_item_param_is_whitespace_uses_runtime_helper`
+            - `codegen::tests::test_leaf5165_non_char_is_whitespace_method_call_is_unchanged`
+            - `codegen::tests::test_leaf5165_runtime_has_char_is_whitespace_helper`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5165 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-65a-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.64 first-head family at `runner.cpp:4890` (`char32_t` `.is_whitespace()` member-call surface) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `runner.cpp:2117` (`scan_next_iter<...>` missing `.size_hint()` in `SmallVec::extend`), with adjacent downstream optional-surface and data-layout families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-65a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and type/context-gated in transpiler lowering; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
+        - [ ] Leaf 5.1.66: `smallvec` Stage D `scan_next_iter` `size_hint` runtime-surface compile-head family collapse
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
