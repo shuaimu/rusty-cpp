@@ -2457,6 +2457,13 @@ Current status snapshot:
    - lowering `core/std/alloc::slice::Iter<'a, T>` type surfaces to `rusty::slice_iter::Iter<const T>` while preserving `slice::IterMut<'a, T>` as `rusty::slice_iter::Iter<T>`, and
    - applying the rewrite through normalized path-shape gating in transpiler type lowering (`map_type`) rather than generated-output patching.
 108. New first deterministic Stage D head in `smallvec` now starts at `runner.cpp:2211` (`Drain<...>` missing `.for_each` surface, followed by `NonNull::as_mut` at `runner.cpp:2215`), with downstream iterator-adapter/call-shape fallout (`rusty::iter` over `IntoIter`, CTAD mismatch in nested `DropOnPanic`, and related errors). Guardrail check against §11 remains satisfied for `Leaf 5.1.52` (fixes stayed shared and type-shape-gated in transpiler lowering, with no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching).
+109. Focused `smallvec` repro after `Leaf 5.1.53` (`/tmp/rusty-parity-matrix-5-1-53b-20260412/smallvec/...`) collapses the prior post-5.1.52 missing `for_each`/`NonNull::as_mut` family by:
+   - lowering iterator-like `.for_each(...)` receiver calls to shared runtime `rusty::for_each(...)` with inherent-method preservation and self-receiver iterator fallback gated by `next` surface detection,
+   - preserving callable function-item argument wrapping for rewritten `for_each` calls via shared call-argument pass-style emission (avoids invalid direct move of overloaded function surfaces),
+   - adding shared runtime `rusty::for_each(...)` helper in `include/rusty/slice.hpp`,
+   - adding shared runtime `NonNull<T>::as_mut()` surface in `include/rusty/ptr.hpp`, and
+   - hardening local-binding inference/emission so `let x = ptr.as_mut()` preserves mutable-reference declaration shape instead of decaying to `const auto` copy.
+110. New first deterministic Stage D head in `smallvec` now starts at `include/rusty/slice.hpp:583` (`rusty::iter requires iter(), data()/size(), or dereferenceable receiver`) with adjacent `runner.cpp:2273` invalid-void-expression fallout and downstream iterator/option-surface gaps. Guardrail check against §11 remains satisfied for `Leaf 5.1.53` (fixes stayed shared and AST/type-shape-gated across transpiler/runtime surfaces, with no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching).
 
 Historical active-work chain (retained for traceability):
 

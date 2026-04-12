@@ -15337,9 +15337,18 @@ impl CodeGen {
                 } else {
                     None
                 };
+                let inferred_mut_reference_binding = inferred_binding_ty
+                    .as_ref()
+                    .is_some_and(|ty| Self::is_mut_reference_type(ty));
 
                 let type_str = if let Some(ty) = get_local_type(local) {
                     self.map_type(ty)
+                } else if local.init.is_some() && inferred_mut_reference_binding {
+                    self.map_type(
+                        inferred_binding_ty
+                            .as_ref()
+                            .expect("mutable reference inference should exist when selected"),
+                    )
                 } else if local.init.is_none()
                     && uninitialized_inferred_ty
                         .as_ref()
@@ -15365,12 +15374,15 @@ impl CodeGen {
                 };
 
                 let is_consumed = self.consuming_method_receiver_vars.contains(&name_str);
-                let qualifier =
-                    if is_mut || is_consumed || type_str.trim_start().starts_with("const ") {
-                        ""
-                    } else {
-                        "const "
-                    };
+                let qualifier = if is_mut
+                    || is_consumed
+                    || inferred_mut_reference_binding
+                    || type_str.trim_start().starts_with("const ")
+                {
+                    ""
+                } else {
+                    "const "
+                };
                 // For immutable `let p: *mut T = ...`, preserve Rust binding immutability
                 // without changing mutable pointee semantics:
                 // emit `T* const p`, not `const T* p`.
@@ -15774,15 +15786,20 @@ impl CodeGen {
                     } else {
                         self.map_type(&resolved_ty)
                     };
+                    let resolved_mut_reference_binding =
+                        Self::is_mut_reference_type(&resolved_ty);
                     let is_consumed = self
                         .consuming_method_receiver_vars
                         .contains(&name.to_string());
-                    let qualifier =
-                        if is_mut || is_consumed || ty.trim_start().starts_with("const ") {
-                            ""
-                        } else {
-                            "const "
-                        };
+                    let qualifier = if is_mut
+                        || is_consumed
+                        || resolved_mut_reference_binding
+                        || ty.trim_start().starts_with("const ")
+                    {
+                        ""
+                    } else {
+                        "const "
+                    };
                     let decl_type = if qualifier == "const "
                         && Self::is_mut_raw_pointer_type(&resolved_ty)
                         && ty.contains('*')
@@ -15886,6 +15903,15 @@ impl CodeGen {
             syn::Type::Ptr(ptr) => ptr.mutability.is_some(),
             syn::Type::Paren(p) => Self::is_mut_raw_pointer_type(&p.elem),
             syn::Type::Group(g) => Self::is_mut_raw_pointer_type(&g.elem),
+            _ => false,
+        }
+    }
+
+    fn is_mut_reference_type(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Reference(reference) => reference.mutability.is_some(),
+            syn::Type::Paren(p) => Self::is_mut_reference_type(&p.elem),
+            syn::Type::Group(g) => Self::is_mut_reference_type(&g.elem),
             _ => false,
         }
     }
@@ -16919,6 +16945,18 @@ impl CodeGen {
                 return Some(parse_quote!(*mut #pointee_ty));
             }
             return Some(parse_quote!(*const #pointee_ty));
+        }
+
+        if method == "as_mut" && mc.args.is_empty() {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                if let Some((pointee_ty, is_mut_ptr)) =
+                    self.extract_pointer_pointee_info_from_type(&receiver_ty)
+                {
+                    if is_mut_ptr {
+                        return Some(parse_quote!(&mut #pointee_ty));
+                    }
+                }
+            }
         }
 
         // str::as_bytes() on &str / &str arguments returns std::span<const uint8_t>
@@ -20123,6 +20161,9 @@ impl CodeGen {
         }
         if let Some(count_call) = self.try_emit_iter_count_call(mc) {
             return count_call;
+        }
+        if let Some(for_each_call) = self.try_emit_iter_for_each_call(mc) {
+            return for_each_call;
         }
 
         let method_name = mc.method.to_string();
@@ -27256,6 +27297,34 @@ impl CodeGen {
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         Some(format!("rusty::count({})", receiver))
+    }
+
+    fn try_emit_iter_for_each_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "for_each" || mc.args.len() != 1 {
+            return None;
+        }
+        if self.receiver_has_inherent_method_named(&mc.receiver, "for_each") {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        let receiver_is_self_path = matches!(
+            self.peel_paren_group_expr(&mc.receiver),
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
+        );
+        let receiver_is_self_iterator =
+            receiver_is_self_path && self.lookup_current_struct_method_return_type("next").is_some();
+        if !receiver_is_self_iterator
+            && !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let func = self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None);
+        Some(format!("rusty::for_each({}, {})", receiver, func))
     }
 
     fn is_ordering_like_type(&self, ty: &syn::Type) -> bool {
@@ -50633,6 +50702,83 @@ mod tests {
         assert!(
             !out.contains("std::move(rusty::mem::drop)"),
             "function item callables should not be moved, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5153_iterator_for_each_without_inherent_method_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            struct Drain<T>;
+
+            impl<T> Drain<T> {
+                fn next(&mut self) -> Option<T> {
+                    None
+                }
+            }
+
+            impl<T> Drop for Drain<T> {
+                fn drop(&mut self) {
+                    self.for_each(std::mem::drop);
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("rusty::for_each("),
+            "iterator for_each without inherent method should lower to runtime helper, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("this->for_each("),
+            "missing inherent for_each should not emit unresolved receiver method call, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5153_nonnull_as_mut_local_binding_uses_mut_reference_type() {
+        let out = transpile_str(
+            r#"
+            use core::ptr::NonNull;
+
+            struct Buf {
+                len: usize,
+            }
+
+            impl Buf {
+                fn set_len(&mut self, len: usize) {
+                    self.len = len;
+                }
+            }
+
+            struct Holder {
+                ptr: NonNull<Buf>,
+            }
+
+            impl Holder {
+                fn touch(&mut self) {
+                    unsafe {
+                        let source_vec = self.ptr.as_mut();
+                        source_vec.set_len(1);
+                    }
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("& source_vec = ")
+                && (out.contains("source_vec = this->ptr.as_mut()")
+                    || out.contains("source_vec = (*this).ptr.as_mut()")),
+            "NonNull::as_mut local binding should keep mutable reference shape, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("const auto source_vec ="),
+            "NonNull::as_mut local binding should not decay to const auto copy, got:\n{}",
             out
         );
     }

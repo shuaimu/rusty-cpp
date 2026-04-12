@@ -364,6 +364,24 @@ fn test_slice_filter_runtime_adapter_surface() {
 }
 
 #[test]
+fn test_slice_for_each_runtime_adapter_surface() {
+    let source = r#"
+        #include <array>
+        #include <rusty/array.hpp>
+        #include <rusty/slice.hpp>
+
+        int main() {
+            std::array<int, 4> values{1, 2, 3, 4};
+            int sum = 0;
+            rusty::for_each(rusty::iter(values), [&](int value) { sum += value; });
+            return sum == 10 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "slice_for_each_runtime_surface");
+}
+
+#[test]
 fn test_slice_get_runtime_helper_surface() {
     let source = r#"
         #include <array>
@@ -634,6 +652,28 @@ fn test_ptr_nonnull_supports_equality_comparison() {
     "#;
 
     compile_and_run_cpp(source, "ptr_nonnull_equality");
+}
+
+#[test]
+fn test_ptr_nonnull_as_mut_supports_mutable_reference_surface() {
+    let source = r#"
+        #include <rusty/ptr.hpp>
+
+        struct Buffer {
+            int len;
+            void set_len(int next) { len = next; }
+        };
+
+        int main() {
+            Buffer buf{1};
+            auto ptr = rusty::ptr::NonNull<Buffer>::new_unchecked(&buf);
+            auto& alias = ptr.as_mut();
+            alias.set_len(7);
+            return buf.len == 7 ? 0 : 1;
+        }
+    "#;
+
+    compile_and_run_cpp(source, "ptr_nonnull_as_mut_surface");
 }
 
 #[test]

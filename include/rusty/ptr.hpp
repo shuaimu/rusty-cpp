@@ -72,6 +72,10 @@ public:
         return ptr_;
     }
 
+    constexpr T& as_mut() noexcept {
+        return *ptr_;
+    }
+
     friend constexpr bool operator==(NonNull<T> lhs, NonNull<T> rhs) noexcept {
         return lhs.ptr_ == rhs.ptr_;
     }

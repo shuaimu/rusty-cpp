@@ -5177,6 +5177,35 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-5-1-52a-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
           - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and narrowly type-shape-gated in transpiler lowering; no crate-specific scripts, no blanket callsite rewrites, and no generated-output text patching were introduced.
+        - [x] *done* Leaf 5.1.53: `smallvec` Stage D iterator `for_each` + `NonNull::as_mut` compile-head family collapse
+          - Plan/scope check: shared transpiler/runtime fixes plus focused regressions stayed below the <1000 LOC target and required no additional decomposition.
+          - Deterministic failure family addressed (shared fixes only, no crate-specific scripts):
+            - iterator method-call lowering now recognizes `for_each` on iterator-shaped receivers and rewrites to shared runtime helper `rusty::for_each(...)`; self-receiver fallback is gated to iterator-like impl contexts (presence of `next`) and still preserves inherent receiver methods when present.
+            - `for_each` callable-argument emission now reuses call-argument pass-style lowering, preserving function-item wrapper emission and avoiding invalid direct move/callable overload surfaces.
+            - runtime `NonNull<T>` now exposes shared mutable-reference surface `as_mut()`, and local-binding type inference recognizes pointer-wrapper `.as_mut()` calls as `&mut T`.
+            - untyped local declaration emission now preserves inferred mutable-reference bindings as explicit reference declarations (non-const), preventing `const auto` copy decay for `let x = ptr.as_mut()` flows.
+            - shared runtime helper surface now includes `rusty::for_each(...)` in `include/rusty/slice.hpp`.
+          - Implemented in:
+            - `transpiler/src/codegen.rs`
+            - `include/rusty/slice.hpp`
+            - `include/rusty/ptr.hpp`
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5153_iterator_for_each_without_inherent_method_lowers_to_runtime_helper`
+            - `codegen::tests::test_leaf5153_nonnull_as_mut_local_binding_uses_mut_reference_type`
+            - `runtime_move_semantics::test_slice_for_each_runtime_adapter_surface`
+            - `runtime_move_semantics::test_ptr_nonnull_as_mut_supports_mutable_reference_surface`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5153 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics slice_for_each_runtime_adapter_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler --test runtime_move_semantics ptr_nonnull_as_mut_supports_mutable_reference_surface -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate smallvec --work-root /tmp/rusty-parity-matrix-5-1-53b-20260412 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior post-5.1.52 first-head family at `runner.cpp:2211/2215` (`Drain<...>` missing `.for_each` and `NonNull<...>` missing `.as_mut`) is collapsed from deterministic first-head slots.
+            - new first hard-error family starts at `include/rusty/slice.hpp:583` (`rusty::iter requires iter(), data()/size(), or dereferenceable receiver`) with adjacent `runner.cpp:2273` invalid-void-expression fallout and downstream iterator/option-surface gaps.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-matrix-5-1-53b-20260412/smallvec/{baseline.txt,build.log,run.log,matrix.log}`
+          - Guardrail check against wrong-approach section (`docs/rusty-cpp-transpiler.md` §11): fixes stayed shared and AST/type-shape-gated across transpiler/runtime surfaces; no crate-specific scripts, no blanket generated-output rewrites, and no generated-output text patching were introduced.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

@@ -813,6 +813,13 @@ decltype(auto) scan(Range&& range, State&& state, Func&& func) {
     }
 }
 
+template<typename Range, typename Func>
+void for_each(Range&& range, Func&& func) {
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        std::invoke(func, std::forward<decltype(item)>(item));
+    }
+}
+
 template<typename Range, typename Pred>
 bool all(Range&& range, Pred&& pred) {
     for (auto&& item : for_in(std::forward<Range>(range))) {
