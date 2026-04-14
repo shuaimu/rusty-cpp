@@ -7647,6 +7647,29 @@ impl CodeGen {
         }
     }
 
+    fn mapped_assoc_type_contains_unbound_placeholder(&self, mapped: &str) -> bool {
+        mapped
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|token| {
+                if token.is_empty() {
+                    return false;
+                }
+                if token == "Self" {
+                    return true;
+                }
+                let is_unbound_generic_like = token.len() == 1
+                    && token
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+                    && !self.is_type_param_in_scope(token)
+                    && !self.is_local_type_name_in_scope(token)
+                    && !self.declared_item_names.contains(token)
+                    && types::map_primitive_type(token).is_none();
+                is_unbound_generic_like
+            })
+    }
+
     fn scoped_alias_key(&self, alias_name: &str) -> String {
         if self.module_stack.is_empty() {
             alias_name.to_string()
@@ -31232,7 +31255,9 @@ impl CodeGen {
                             if let Some(resolved) =
                                 self.resolve_assoc_type_from_impl_blocks(&self_type, assoc_name)
                             {
-                                return resolved;
+                                if !self.mapped_assoc_type_contains_unbound_placeholder(&resolved) {
+                                    return resolved;
+                                }
                             }
                         }
                         if let Some(struct_name) = &self.current_struct {
@@ -54728,6 +54753,80 @@ mod tests {
         assert!(
             !out.contains("typename typename rusty::detail::associated_item_t<H>::IntoIter"),
             "helper-qualified assoc type should not be double-prefixed with typename, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5192_qself_assoc_alias_body_prevents_unbound_t_leak() {
+        let out = transpile_str_module(
+            r#"
+            mod merge_join {
+                trait IteratorLike {
+                    type Item;
+                }
+
+                trait FuncLR<L, R> {
+                    type T;
+                }
+
+                impl<L, R, T, F: FnMut(&L, &R) -> T> FuncLR<L, R> for F {
+                    type T = T;
+                }
+
+                struct MergeBy<I, J, F>(I, J, F);
+                struct MergeFuncLR<F, T>(F, T);
+
+                type MergeJoinBy<I, J, F> =
+                    MergeBy<I, J, MergeFuncLR<F, <F as FuncLR<<I as IteratorLike>::Item, <J as IteratorLike>::Item>>::T>>;
+            }
+            "#,
+            "leaf5192_assoc_alias_t",
+        );
+
+        assert!(
+            out.contains("using MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, typename F::T>>;"),
+            "qself associated projection in alias body should preserve owner substitution in module mode, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("using MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>;"),
+            "alias body must not leak unbound generic placeholder T, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5192_qself_assoc_alias_body_prevents_unbound_self_leak() {
+        let out = transpile_str_module(
+            r#"
+            mod nested {
+                trait Assoc {
+                    type Out;
+                }
+
+                struct Wrap<T> {
+                    value: T,
+                }
+
+                impl<T> Assoc for Wrap<T> {
+                    type Out = Self;
+                }
+
+                type Alias<T> = <Wrap<T> as Assoc>::Out;
+            }
+            "#,
+            "leaf5192_assoc_alias_self",
+        );
+
+        assert!(
+            out.contains("using Alias = typename Wrap<T>::Out;"),
+            "qself associated projection in alias body should preserve owner-qualified dependent path, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("using Alias = Self;"),
+            "alias body must not leak unbound Self placeholder, got:\n{}",
             out
         );
     }

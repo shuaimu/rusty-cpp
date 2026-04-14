@@ -4014,11 +4014,17 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Added dedicated `parity-matrix` CI job in `.github/workflows/ci.yml` (runs after `build-and-test`) that executes `tests/transpile_tests/run_parity_matrix.sh --work-root "$RUNNER_TEMP/rusty-parity-matrix"`
           - [x] *done* Added failure-only artifact archival in CI via `actions/upload-artifact@v4` with per-crate paths for `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, and `bitflags` under `${{ runner.temp }}/rusty-parity-matrix/<crate>/`
           - [x] *done* Added workflow regression checks in `transpiler/tests/parity_matrix_harness.rs` to assert CI job presence, matrix invocation command, and failure-path per-crate artifact uploads
-      - [ ] Leaf 5.1: Stabilize expanded ten-crate parity matrix (`smallvec`, `itertools`, `once_cell`)
-        - Current status snapshot (2026-04-11): `7/10` pass from `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-priority-20260411`
-          - pass: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`
-          - fail: `smallvec`, `itertools`, `once_cell`
-          - canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`
+      - [ ] Leaf 5.1: Stabilize expanded ten-crate parity matrix (`itertools`, `once_cell`)
+        - Current status snapshot (2026-04-14): `8/10` pass on clean `main`
+          - full-matrix deterministic first failure: `tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-full-clean-1776196475 --keep-work-dirs` => `total=9 pass=8 fail=1`, first failing crate `itertools`
+          - focused failing crates:
+            - `itertools`: `/tmp/rusty-parity-plan-io-1776197333/itertools/{baseline.txt,build.log,run.log,matrix.log}`
+            - `once_cell`: `/tmp/rusty-parity-plan-io-1776197333/once_cell/{baseline.txt,build.log,run.log,matrix.log}`
+          - pass set now includes `smallvec` (and still includes `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`)
+        - Generic-first execution plan for remaining two crates (no crate-specific scripts/patching):
+          - collapse deterministic first compile head for `itertools`, add fixture-agnostic regressions, then re-probe to the next head
+          - collapse deterministic first compile head for `once_cell`, add fixture-agnostic regressions, then re-probe to the next head
+          - after both targeted leaves move their fronts, run full ten-crate matrix and keep only shared/runtime/transpiler fixes that preserve current 8-pass baseline
         - [x] *done* Expand matrix harness/CI coverage from seven crates to ten crates and add harness regression checks for the new matrix shape
           - Added matrix entries/version pins for `smallvec`, `itertools`, and `once_cell` in `tests/transpile_tests/run_parity_matrix.sh` and `tests/transpile_tests/run_tests.sh`
           - Extended CI parity artifact upload paths and parity harness assertions for the ten-crate list
@@ -6031,6 +6037,84 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - `smallvec` parity now reaches full pass (`62/62`) on the matrix harness.
           - Canonical artifacts:
             - `/tmp/rusty-parity-matrix-smallvec-now/smallvec/{baseline.txt,matrix.log,build.log,runner.cpp,run.log}`
+        - [x] *done* Leaf 5.1.92: `itertools` Stage D first deterministic compile-head family collapse (`MergeJoinBy` alias uses unbound `T` at `runner.cpp:1276`)
+          - Plan/scope check: shared associated-projection hardening in `map_type` + focused regressions stayed well below the <500 LOC target, so no additional decomposition was required.
+          - Implemented generic alias-projection hardening in `transpiler/src/codegen.rs` (no crate-specific logic):
+            - added `mapped_assoc_type_contains_unbound_placeholder(...)` to detect leaked unresolved placeholders (`T`, `Self`) in impl-resolved associated-type aliases.
+            - in qself associated projection lowering (`<Owner as Trait>::Assoc`), impl-block resolution now only applies when the resolved type does not leak unbound placeholders; otherwise lowering falls back to owner-qualified dependent projection (`typename Owner::Assoc`) so alias/type-position output keeps owner substitution.
+            - this specifically fixed `MergeJoinBy` alias lowering in module parity output, removing bare `T` emission in alias body type arguments.
+          - Added fixture-agnostic regressions in `transpiler/src/codegen.rs`:
+            - `codegen::tests::test_leaf5192_qself_assoc_alias_body_prevents_unbound_t_leak`
+            - `codegen::tests::test_leaf5192_qself_assoc_alias_body_prevents_unbound_self_leak`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5192 -- --nocapture`
+            - `cargo test`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5192-verify-1776205317 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior first compile head at `runner.cpp:1276` (`using MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>;` with unbound `T`) is collapsed.
+            - new deterministic first hard-error family starts at `runner.cpp:1403` (`ziptuple::Zip` unresolved type surface), followed by downstream `Either*` / runtime rebasing families.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5192-verify-1776205317/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+        - [ ] Leaf 5.1.93: `itertools` Stage D post-5.1.92 namespace/type-surface family collapse (`ziptuple::Zip`, `Either*`, and imported runtime symbol rebasing)
+          - Current downstream heads from canonical `itertools` build log:
+            - unresolved adapter/type surfaces (`ziptuple::Zip`, `Either`, `Either_Left`, `Either_Right`)
+            - incorrect nested-namespace runtime paths (`groupbylazy::rusty::*`) and missing path rewrites (`Some`, `size_hint`, `left`/`right`)
+          - Generic fix scope (no crate-specific logic):
+            - unify imported-symbol rebasing so generated paths to `rusty::*` helpers stay crate-global even inside nested module namespaces.
+            - broaden adapter/either surface mapping to preserve template-parameterized type names in alias/field/function signatures.
+          - Required regressions:
+            - add fixture-agnostic tests for nested-module runtime-path rebasing and adapter/either type-surface mapping in type-position emissions.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5193 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - rerun `itertools` parity and capture next deterministic head.
+        - [ ] Leaf 5.1.94: `itertools` parity closure checkpoint
+          - Run `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root <new-work-root> --keep-work-dirs`.
+          - If Stage D/E still fails, append the next deterministic head as a new leaf with the same generic-first constraints before touching `once_cell`.
+        - [ ] Leaf 5.1.95: `once_cell` Stage D first deterministic pointer-address helper family collapse (`addr(...)`/`map_addr(...)` on pointer-shaped values)
+          - Repro command/artifacts:
+            - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-plan-io-1776197333 --keep-work-dirs`
+            - canonical artifacts: `/tmp/rusty-parity-plan-io-1776197333/once_cell/{baseline.txt,build.log,run.log,matrix.log}`
+          - Generic fix scope (no crate-specific logic):
+            - harden pointer-value method-call lowering (`addr`, `map_addr`, pointer-cast helpers) so pointer/referent categories are preserved through `remove_reference`/cast contexts and call signatures match runtime helper surfaces.
+          - Required regressions:
+            - add fixture-agnostic tests for pointer helper call-shapes across `*mut T`, `*const T`, and `T*`-aliased paths in expression/type positions.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5195 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - rerun `once_cell` parity and capture next deterministic Stage D head.
+        - [ ] Leaf 5.1.96: `once_cell` Stage D post-5.1.95 path/constructor surface family collapse (`NonZero*::new_`, `ptr::null_mut`, `Box` owner-arity, `cast_const` pathing)
+          - Current downstream heads from canonical `once_cell` build log:
+            - unresolved path/runtime surfaces (`ptr::null_mut`, `cast_const`, strict/wrapping pointer helper paths)
+            - owner/template recovery failures (`rusty::Box` used without template args)
+            - constructor/method mapping gaps (`NonZeroUsize::new_`)
+          - Generic fix scope (no crate-specific logic):
+            - extend shared std/core path mapping for pointer/num helpers and constructor-call owner recovery in associated-call contexts.
+            - ensure expected-type/owner-hint propagation covers raw-pointer and boxed-owner call chains.
+          - Required regressions:
+            - add fixture-agnostic tests for `null_mut`/`NonZero*::new` mapping and owner-template recovery for `Box` associated calls.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5196 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - rerun `once_cell` parity and capture next deterministic head.
+        - [ ] Leaf 5.1.97: `once_cell` Stage D post-5.1.96 impl/member-surface family collapse (`OnceCell::init`, channel/join/atomic call-shape parity)
+          - Current downstream heads from canonical `once_cell` build log:
+            - missing inherent members (`OnceCell<...>::init`)
+            - call-shape/constness mismatches (`JoinHandle::join`, atomic operation routing through `Arc<Atomic*>`)
+          - Generic fix scope (no crate-specific logic):
+            - harden impl-merge/member emission so inherent methods survive generic/constrained impl lowering.
+            - improve call-shape lowering for method dispatch through wrapped ownership types (`Arc<T>`) and non-copy consuming methods.
+          - Required regressions:
+            - add fixture-agnostic tests for inherent-method emission from constrained impls and wrapped-ownership method dispatch.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf5197 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - rerun `once_cell` parity and capture next deterministic head.
+        - [ ] Leaf 5.1.98: Full ten-crate parity closure rerun (`itertools` + `once_cell` integrated)
+          - Run `tests/transpile_tests/run_parity_matrix.sh --work-root <new-work-root> --keep-work-dirs`.
+          - Acceptance criteria:
+            - preserve existing 8-pass baseline with no regressions.
+            - either reach `10/10` pass, or record new deterministic first failing head with canonical artifacts and append next leaf under 5.1.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
