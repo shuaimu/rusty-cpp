@@ -6076,9 +6076,33 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - adjacent callable payload typing failure at `runner.cpp:1972` (`const void* disp` lambda payload used as `disp->fmt(f)`).
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5193-verify-1776213098/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.94: `itertools` parity closure checkpoint
-          - Run `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root <new-work-root> --keep-work-dirs`.
-          - If Stage D/E still fails, append the next deterministic head as a new leaf with the same generic-first constraints before touching `once_cell`.
+        - [x] *done* Leaf 5.1.94: `itertools` parity closure checkpoint
+          - Plan/scope check: verification-only leaf (single-crate parity rerun + deterministic frontier capture + TODO bookkeeping) stayed well below the <500 LOC target and required no decomposition.
+          - Re-ran parity checkpoint:
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5194-verify-1776213359 --keep-work-dirs`
+          - Outcome:
+            - Stage D still fails for `itertools` (`total=1`, `pass=0`, `fail=1`), confirming deterministic continuation of the post-5.1.93 frontier.
+          - Deterministic frontier confirmation:
+            - first hard error remains `runner.cpp:1602` unresolved `Some` constructor path (`Some` not in scope; expected runtime/global rewrite surface).
+            - adjacent first family member remains `runner.cpp:1972` callable payload typing failure (`const void* disp` used as `disp->fmt(f)`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5194-verify-1776213359/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+        - [ ] Leaf 5.1.94.1: `itertools` Stage D post-checkpoint constructor/callable-payload surface family collapse (`Some` path rewrite + callable payload type recovery)
+          - Repro command/artifacts:
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5194-verify-1776213359 --keep-work-dirs`
+            - canonical artifacts: `/tmp/rusty-parity-leaf5194-verify-1776213359/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+          - Deterministic first heads:
+            - `runner.cpp:1602`: unresolved `Some` constructor path in `EitherOrBoth::left_and_right` (`Some` vs `rusty::Some` rewrite/import surface).
+            - `runner.cpp:1972`: callable payload type erased to `const void*` while member call shape requires typed payload (`disp->fmt(f)`).
+          - Generic fix scope (no crate-specific logic):
+            - harden constructor-path rewriting/import mapping so `Some` used as a callable/value path in type-erased adapter sites resolves through shared runtime surfaces consistently.
+            - tighten callable parameter type recovery for closure/lambda payloads in formatter-style call sites so member-call lowering preserves typed receiver surfaces instead of `void*`.
+          - Required regressions:
+            - add fixture-agnostic tests for callable-position `Some` path rewriting and callable payload type preservation in member-call lambda bodies.
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler leaf51941 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler`
+            - rerun `itertools` parity and capture the next deterministic head.
         - [ ] Leaf 5.1.95: `once_cell` Stage D first deterministic pointer-address helper family collapse (`addr(...)`/`map_addr(...)` on pointer-shaped values)
           - Repro command/artifacts:
             - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-plan-io-1776197333 --keep-work-dirs`
