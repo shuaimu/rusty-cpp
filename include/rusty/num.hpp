@@ -34,6 +34,16 @@ public:
         return value_;
     }
 
+    constexpr bool operator==(const NonZero& other) const noexcept {
+        return value_ == other.value_;
+    }
+    constexpr bool operator!=(const NonZero& other) const noexcept {
+        return value_ != other.value_;
+    }
+    constexpr auto operator<=>(const NonZero& other) const noexcept {
+        return value_ <=> other.value_;
+    }
+
     constexpr int leading_zeros() const noexcept {
         using UnsignedT = std::make_unsigned_t<T>;
         return static_cast<int>(std::countl_zero(static_cast<UnsignedT>(value_)));
