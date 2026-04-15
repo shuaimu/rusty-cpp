@@ -21642,6 +21642,19 @@ impl CodeGen {
                 return format!("rusty::ptr::write({}, {})", receiver, args[0]);
             }
         }
+        if method_name == "read" && args.is_empty() {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver_is_raw_pointer = self.is_expr_raw_pointer_like(&mc.receiver)
+                || Self::emitted_pointer_add_or_offset_call(&raw_receiver);
+            if receiver_is_raw_pointer {
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("rusty::ptr::read({})", receiver);
+            }
+        }
         // Rust `ptr.is_null()` → C++ `ptr == nullptr`
         if method_name == "is_null" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -24805,6 +24818,78 @@ impl CodeGen {
                     None
                 }
             }
+            "Box" => {
+                if method_name == "from_raw" {
+                    let inferred_from_type = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                            _ => None,
+                        });
+                    let inferred_from_decltype = call.args.first().map(|arg| {
+                        let arg_cpp = self.emit_expr_to_string(arg);
+                        format!(
+                            "std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>",
+                            arg_cpp
+                        )
+                    });
+                    let inferred = match (inferred_from_type, inferred_from_decltype) {
+                        (Some(from_type), Some(from_decltype))
+                            if from_type == "auto"
+                                || from_type.contains("/* TODO")
+                                || (from_type
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase())
+                                    && from_type
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '_')) =>
+                        {
+                            Some(from_decltype)
+                        }
+                        (Some(from_type), _) => Some(from_type),
+                        (None, from_decltype) => from_decltype,
+                    };
+                    inferred.map(|inner| vec![Some(inner)])
+                } else if method_name == "into_raw" {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg_ty| {
+                            let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+                            let syn::Type::Path(tp) = arg_ty else {
+                                return None;
+                            };
+                            let last = tp.path.segments.last()?;
+                            if last.ident != "Box" {
+                                return None;
+                            }
+                            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                                return None;
+                            };
+                            args.args.iter().find_map(|arg| match arg {
+                                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                                _ => None,
+                            })
+                        })
+                        .or_else(|| {
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                                .map(|arg_ty| {
+                                    let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+                                    self.map_type(arg_ty)
+                                })
+                                .filter(|mapped| mapped != "auto" && !mapped.contains("/* TODO"))
+                        });
+                    inferred.map(|inner| vec![Some(inner)])
+                } else {
+                    None
+                }
+            }
             "Rc" => {
                 if matches!(method_name, "new" | "new_") {
                     let inferred = call
@@ -24913,6 +24998,7 @@ impl CodeGen {
             && matches!(method_name.as_str(), "from_raw_parts" | "from_raw_parts_in");
         let vec_from_raw_parts_explicit_recovery =
             owner_has_explicit_args && vec_from_raw_parts_recovery;
+        let box_owner_recovery_enabled = matches!(method_name.as_str(), "from_raw" | "into_raw");
         let owner_is_supported_explicit_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -24923,7 +25009,7 @@ impl CodeGen {
                 | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
-        );
+        ) || (owner_name == "Box" && box_owner_recovery_enabled);
         let owner_is_supported_omitted_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -24935,7 +25021,7 @@ impl CodeGen {
                 | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
-        );
+        ) || (owner_name == "Box" && box_owner_recovery_enabled);
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
             && !vec_from_raw_parts_explicit_recovery
@@ -25444,6 +25530,17 @@ impl CodeGen {
         // static member parse surfaces.
         if let syn::Expr::Path(func_path) = call.func.as_ref() {
             if let Some(qself) = &func_path.qself {
+                if func_path.path.segments.len() == 1 && call.args.len() == 1 {
+                    let helper = match func_path.path.segments[0].ident.to_string().as_str() {
+                        "cast_mut" => Some("rusty::ptr::cast_mut"),
+                        "cast_const" => Some("rusty::ptr::cast_const"),
+                        _ => None,
+                    };
+                    if let Some(helper) = helper {
+                        let arg = self.emit_expr_to_string(&call.args[0]);
+                        return format!("{}({})", helper, arg);
+                    }
+                }
                 if func_path.path.segments.len() == 1
                     && func_path.path.segments[0].ident == "parse_hex"
                     && call.args.len() == 1
@@ -25453,6 +25550,25 @@ impl CodeGen {
                         let input = self.emit_expr_maybe_move(&call.args[0]);
                         return format!("rusty::parse_hex<{}>({})", target_cpp, input);
                     }
+                }
+            }
+        }
+        // Lower static-style Box::into_raw(value) to receiver-form into_raw().
+        // This avoids fragile owner-template recovery when the value expression
+        // type is only available as a local placeholder-like surface.
+        if let syn::Expr::Path(func_path) = call.func.as_ref() {
+            if call.args.len() == 1 && func_path.path.segments.len() >= 2 {
+                let owner = func_path.path.segments.iter().nth_back(1);
+                let method = func_path.path.segments.last();
+                if matches!(
+                    owner.map(|seg| seg.ident.to_string()).as_deref(),
+                    Some("Box")
+                ) && matches!(
+                    method.map(|seg| seg.ident.to_string()).as_deref(),
+                    Some("into_raw")
+                ) {
+                    let receiver = self.emit_expr_maybe_move(&call.args[0]);
+                    return format!("({}).into_raw()", receiver);
                 }
             }
         }
@@ -26723,7 +26839,18 @@ impl CodeGen {
     fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
         match expr {
             syn::Expr::Lit(lit) => self.emit_lit(&lit.lit),
-            syn::Expr::Path(path) => self.emit_expr_path_to_string(&path.path),
+            syn::Expr::Path(path) => {
+                if let Some(_qself) = &path.qself {
+                    if path.path.segments.len() == 1 {
+                        match path.path.segments[0].ident.to_string().as_str() {
+                            "cast_mut" => return "rusty::ptr::cast_mut".to_string(),
+                            "cast_const" => return "rusty::ptr::cast_const".to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+                self.emit_expr_path_to_string(&path.path)
+            }
             syn::Expr::Group(group) => self.emit_expr_to_string(&group.expr),
             syn::Expr::Binary(bin) => {
                 let left = self.emit_expr_to_string(&bin.left);
@@ -27124,6 +27251,29 @@ impl CodeGen {
         // If used as an expression (e.g., `let x = if c { 1 } else { 2 };`)
         // -> C++ ternary when branches are simple single-expression values.
         let Some((_, else_branch)) = &if_expr.else_branch else {
+            if !self.block_contains_early_return_or_try(&if_expr.then_branch) {
+                let cond = self.emit_expr_to_string(&if_expr.cond);
+                let then_body = if_expr
+                    .then_branch
+                    .stmts
+                    .iter()
+                    .map(|stmt| match stmt {
+                        syn::Stmt::Expr(expr, None) => {
+                            let expr_str = self.emit_expr_to_string(expr);
+                            format!("{};", expr_str)
+                        }
+                        _ => self.emit_stmt_to_string(stmt),
+                    })
+                    .filter(|stmt| !stmt.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                // Rust permits `if cond { ... }` expression form only for unit.
+                // Lower to an IIFE so expression-position unit initializers compile.
+                return format!(
+                    "[&]() {{ if ({}) {{ {} }} return std::tuple<>(); }}()",
+                    cond, then_body
+                );
+            }
             return "/* TODO: if-expression */".to_string();
         };
         let cond = self.emit_expr_to_string(&if_expr.cond);
@@ -46711,6 +46861,99 @@ mod tests {
         assert!(out.contains(
             "strict::addr<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(queue)))>>>(std::move(queue))"
         ));
+    }
+
+    #[test]
+    fn test_leaf5196_qself_pointer_cast_helpers_lower_to_runtime_ptr_helpers() {
+        let out = transpile_str(
+            r#"
+            fn casts<T>(value: &T, ptr: *mut T) -> (*mut T, *const T) {
+                (<*const T>::cast_mut(value), <*mut T>::cast_const(ptr))
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::cast_mut(value)"), "{out}");
+        assert!(out.contains("rusty::ptr::cast_const(ptr)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5196_qself_pointer_cast_path_value_lowers_to_runtime_helper_path() {
+        let out = transpile_str(
+            r#"
+            fn f<T>() {
+                let _ = <*mut T>::cast_const;
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::cast_const"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5196_raw_pointer_read_method_lowers_to_runtime_ptr_read() {
+        let out = transpile_str(
+            r#"
+            fn read_u(p: *const usize) -> usize {
+                unsafe { p.read() }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::read("), "{out}");
+        assert!(!out.contains("p->read()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5196_box_assoc_calls_recover_owner_template_args() {
+        let out = transpile_str(
+            r#"
+            fn from_ptr<T>(p: *mut T) {
+                let _ = unsafe { Box::from_raw(p) };
+            }
+            fn into_ptr<T, E>(res: Result<Box<T>, E>) -> Result<*mut T, E> {
+                let val = res?;
+                Ok(Box::into_raw(val))
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Box<") && out.contains("::from_raw("),
+            "{out}"
+        );
+        assert!(out.contains(".into_raw()"), "{out}");
+        assert!(!out.contains("Box::from_raw("), "{out}");
+        assert!(!out.contains("Box::into_raw("), "{out}");
+        assert!(!out.contains("Box<val>::into_raw("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5196_ptr_null_mut_maps_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f() -> *mut i32 {
+                std::ptr::null_mut()
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::ptr::null_mut()"), "{out}");
+        assert!(!out.contains("std::ptr::null_mut"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5196_if_expression_without_else_in_unit_context_avoids_todo_placeholder() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                const _ALIGNMENT_COMPATIBLE: () = if !(std::mem::align_of::<u64>() % std::mem::align_of::<u32>() == 0) {
+                    panic!("bad alignment");
+                };
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("/* TODO: if-expression */"),
+            "unit if-expression without else should lower via IIFE, got:\n{}",
+            out
+        );
+        assert!(out.contains("return std::tuple<>()"), "{out}");
     }
 
     #[test]

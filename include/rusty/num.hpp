@@ -19,6 +19,13 @@ private:
 public:
     constexpr explicit NonZero(T value) noexcept : value_(value) {}
 
+    static Option<NonZero<T>> new_(T value) noexcept {
+        if (value == static_cast<T>(0)) {
+            return Option<NonZero<T>>(rusty::None);
+        }
+        return Option<NonZero<T>>(NonZero<T>(value));
+    }
+
     static constexpr NonZero<T> new_unchecked(T value) noexcept {
         return NonZero<T>(value);
     }

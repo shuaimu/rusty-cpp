@@ -177,6 +177,30 @@ namespace ptr {
 template<typename T>
 using NonNull = ::rusty::NonNull<T>;
 
+inline constexpr std::nullptr_t null_mut() noexcept {
+    return nullptr;
+}
+
+template<typename T>
+inline constexpr T* cast_mut(const T* ptr) noexcept {
+    return const_cast<T*>(ptr);
+}
+
+template<typename T>
+inline constexpr T* cast_mut(const T& value) noexcept {
+    return const_cast<T*>(&value);
+}
+
+template<typename T>
+inline constexpr const T* cast_const(T* ptr) noexcept {
+    return ptr;
+}
+
+template<typename T>
+inline constexpr const T* cast_const(T& value) noexcept {
+    return &value;
+}
+
 template<typename T>
 inline T read(const T* src) {
     // Mirror Rust `ptr::read` move-out semantics even from `*const T`-shaped

@@ -6139,20 +6139,40 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - `runner.cpp:1709`: unresolved `ptr::null_mut` path surface.
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5195-verify-1776216763/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.96: `once_cell` Stage D post-5.1.95 path/constructor surface family collapse (`NonZero*::new_`, `ptr::null_mut`, `Box` owner-arity, `cast_const` pathing)
-          - Current downstream heads from canonical `once_cell` build log:
-            - unresolved path/runtime surfaces (`ptr::null_mut`, `cast_const`, strict/wrapping pointer helper paths)
-            - owner/template recovery failures (`rusty::Box` used without template args)
-            - constructor/method mapping gaps (`NonZeroUsize::new_`)
-          - Generic fix scope (no crate-specific logic):
-            - extend shared std/core path mapping for pointer/num helpers and constructor-call owner recovery in associated-call contexts.
-            - ensure expected-type/owner-hint propagation covers raw-pointer and boxed-owner call chains.
-          - Required regressions:
-            - add fixture-agnostic tests for `null_mut`/`NonZero*::new` mapping and owner-template recovery for `Box` associated calls.
+        - [x] *done* Leaf 5.1.96: `once_cell` Stage D post-5.1.95 path/constructor surface family collapse (`NonZero*::new_`, `ptr::null_mut`, `Box` owner-arity, `cast_const` pathing)
+          - Plan/scope check: shared transpiler/runtime hardening + focused regressions stayed below the <500 LOC target (net diff: ~288 lines across 4 files), so no additional decomposition was required.
+          - Implemented generic (non-crate-specific) fixes:
+            - pointer and constructor surface lowering in `transpiler/src/codegen.rs`:
+              - lowered qself pointer cast helpers (`<*const T>::cast_mut`, `<*mut T>::cast_const`) to runtime `rusty::ptr::{cast_mut,cast_const}` for both call and callable-path positions.
+              - lowered raw-pointer method call `p.read()` to `rusty::ptr::read(...)` (matching existing runtime helper style).
+              - lowered static-style `Box::into_raw(value)` to receiver form `(<value>).into_raw()` to avoid placeholder-like owner specialization surfaces (`Box<val>::...`) while preserving semantics.
+              - retained owner-template recovery for `Box::{from_raw,into_raw}` only, so unrelated constructor mapping (for example `Box::new`) keeps normal function-path rewrites.
+            - function/path mapping updates:
+              - added `ptr::null_mut` family mapping (`std/core/ptr`) to `rusty::ptr::null_mut` in `transpiler/src/types.rs`.
+            - runtime support updates:
+              - added `rusty::ptr::null_mut`, `rusty::ptr::cast_mut`, and `rusty::ptr::cast_const` in `include/rusty/ptr.hpp`.
+              - added `NonZero<T>::new_(T) -> Option<NonZero<T>>` in `include/rusty/num.hpp`.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5196_qself_pointer_cast_helpers_lower_to_runtime_ptr_helpers`
+            - `codegen::tests::test_leaf5196_qself_pointer_cast_path_value_lowers_to_runtime_helper_path`
+            - `codegen::tests::test_leaf5196_raw_pointer_read_method_lowers_to_runtime_ptr_read`
+            - `codegen::tests::test_leaf5196_box_assoc_calls_recover_owner_template_args`
+            - `codegen::tests::test_leaf5196_ptr_null_mut_maps_to_runtime_helper`
+            - `codegen::tests::test_leaf5196_if_expression_without_else_in_unit_context_avoids_todo_placeholder`
+            - plus `types::tests::test_map_function_path` assertions for `ptr::null_mut`.
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf5196 -- --nocapture`
-            - `cargo test -p rusty-cpp-transpiler`
-            - rerun `once_cell` parity and capture next deterministic head.
+            - `cargo test -p rusty-cpp-transpiler test_box_new_mapping -- --nocapture`
+            - `cargo test --workspace -q`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-leaf5196-verify3-1776222770 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - collapsed prior first-head family (`NonZeroUsize::new_`, `/* TODO: if-expression */`, `p->read()`, `ptr::null_mut`, `Box<val>::into_raw`, and associated `cast_const/cast_mut` pathing).
+            - new downstream deterministic heads begin at:
+              - `runner.cpp:1876` tuple `match` lowered through `std::visit` with unhandled-pattern placeholder lambdas.
+              - `runner.cpp:1920` missing inherent member surface `OnceCell<...>::init`.
+              - `runner.cpp:1961` channel call-shape template deduction (`channel()` without recoverable item type).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5196-verify3-1776222770/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
         - [ ] Leaf 5.1.97: `once_cell` Stage D post-5.1.96 impl/member-surface family collapse (`OnceCell::init`, channel/join/atomic call-shape parity)
           - Current downstream heads from canonical `once_cell` build log:
             - missing inherent members (`OnceCell<...>::init`)

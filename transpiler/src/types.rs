@@ -188,6 +188,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "core::panicking::unreachable_display" => Some("rusty::panicking::unreachable_display"),
+        "std::ptr::null_mut" | "core::ptr::null_mut" | "ptr::null_mut" => {
+            Some("rusty::ptr::null_mut")
+        }
         "std::ptr::read" | "ptr::read" => Some("rusty::ptr::read"),
         "std::ptr::write" | "ptr::write" => Some("rusty::ptr::write"),
         "core::ptr::mut_ptr::add" | "std::ptr::mut_ptr::add" | "ptr::mut_ptr::add" => {
@@ -671,6 +674,14 @@ mod tests {
         assert_eq!(
             map_function_path("std::ptr::read"),
             Some("rusty::ptr::read")
+        );
+        assert_eq!(
+            map_function_path("core::ptr::null_mut"),
+            Some("rusty::ptr::null_mut")
+        );
+        assert_eq!(
+            map_function_path("ptr::null_mut"),
+            Some("rusty::ptr::null_mut")
         );
         assert_eq!(map_function_path("ptr::write"), Some("rusty::ptr::write"));
         assert_eq!(
