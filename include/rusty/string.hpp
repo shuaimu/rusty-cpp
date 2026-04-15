@@ -356,11 +356,14 @@ public:
     bool operator==(const char* cstr) const {
         if (!cstr) return !data_ || len_ == 0;
         if (!data_) return std::strlen(cstr) == 0;  // Empty string equals empty cstring
-        
+
         size_t cstr_len = std::strlen(cstr);
         if (len_ != cstr_len) return false;
         if (len_ == 0) return true;  // Both empty
         return std::memcmp(data_, cstr, len_) == 0;
+    }
+    bool operator==(const std::string& other) const {
+        return as_str() == std::string_view(other);
     }
     
     bool operator!=(const String& other) const { return !(*this == other); }
