@@ -25991,6 +25991,17 @@ impl CodeGen {
                 .collect();
             return format!("{}({})", func, args.join(", "));
         }
+        // Qualify unqualified Ok/Err with rusty:: prefix when they have
+        // explicit template args (turbofish), e.g., `Ok::<_, ()>(value)` →
+        // `rusty::Ok<auto, std::tuple<>>(value)`. Plain `Ok(value)` is
+        // handled by expected-type-aware Result constructor lowering above.
+        let func = if (func.starts_with("Ok<") || func.starts_with("Err<"))
+            && !func.starts_with("rusty::")
+        {
+            format!("rusty::{}", func)
+        } else {
+            func
+        };
         if matches!(
             func.as_str(),
             "rusty::str_runtime::from_utf8"
