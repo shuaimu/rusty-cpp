@@ -6115,18 +6115,30 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - `runner.cpp:2232`: unresolved element-type placeholder (`rusty::Vec<elt>`).
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf51941-verify-1776216192/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.95: `once_cell` Stage D first deterministic pointer-address helper family collapse (`addr(...)`/`map_addr(...)` on pointer-shaped values)
-          - Repro command/artifacts:
-            - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-plan-io-1776197333 --keep-work-dirs`
-            - canonical artifacts: `/tmp/rusty-parity-plan-io-1776197333/once_cell/{baseline.txt,build.log,run.log,matrix.log}`
-          - Generic fix scope (no crate-specific logic):
-            - harden pointer-value method-call lowering (`addr`, `map_addr`, pointer-cast helpers) so pointer/referent categories are preserved through `remove_reference`/cast contexts and call signatures match runtime helper surfaces.
-          - Required regressions:
-            - add fixture-agnostic tests for pointer helper call-shapes across `*mut T`, `*const T`, and `T*`-aliased paths in expression/type positions.
+        - [x] *done* Leaf 5.1.95: `once_cell` Stage D first deterministic pointer-address helper family collapse (`addr(...)`/`map_addr(...)` on pointer-shaped values)
+          - Plan/scope check: shared transpiler metadata/template-deduction hardening plus focused regressions stayed below the <500 LOC target; no further decomposition was needed.
+          - Implemented generic (non-crate-specific) fixes in `transpiler/src/codegen.rs`:
+            - pointer-helper expected-type template recovery now recognizes hardened pointer aliases in signatures:
+              - `std::add_pointer_t<T>`
+              - `std::add_pointer_t<std::add_const_t<T>>`
+            - relative multi-segment call-path candidate expansion now includes module-prefixed candidates (except explicit `crate/self/super` roots), so metadata lookup resolves module-local helper paths like `strict::addr`/`strict::map_addr` through `imp::strict::...`.
+          - Added regressions in `transpiler/src/codegen.rs`:
+            - `codegen::tests::test_leaf5195_pointer_helper_const_ptr_call_recovers_template_arg_for_add_pointer_t_const`
+            - `codegen::tests::test_leaf5195_pointer_helper_mut_ptr_call_recovers_template_arg_for_add_pointer_t`
+            - `codegen::tests::test_leaf5195_relative_module_path_pointer_helpers_recover_template_args`
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf5195 -- --nocapture`
-            - `cargo test -p rusty-cpp-transpiler`
-            - rerun `once_cell` parity and capture next deterministic Stage D head.
+            - `cargo test --workspace`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-leaf5195-verify-1776216763 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - collapsed first-head `strict::addr`/`strict::map_addr` template-deduction failures (`runner.cpp:1088`, `runner.cpp:1108`) by emitting explicit helper template args for pointer-shaped values.
+            - new downstream deterministic heads start at:
+              - `runner.cpp:1613`: unresolved `NonZeroUsize::new_` constructor surface.
+              - `runner.cpp:1619`: remaining `if` expression TODO lowering site.
+              - `runner.cpp:1623`: `p->read()` emitted on non-class type.
+              - `runner.cpp:1709`: unresolved `ptr::null_mut` path surface.
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5195-verify-1776216763/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
         - [ ] Leaf 5.1.96: `once_cell` Stage D post-5.1.95 path/constructor surface family collapse (`NonZero*::new_`, `ptr::null_mut`, `Box` owner-arity, `cast_const` pathing)
           - Current downstream heads from canonical `once_cell` build log:
             - unresolved path/runtime surfaces (`ptr::null_mut`, `cast_const`, strict/wrapping pointer helper paths)

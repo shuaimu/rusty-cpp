@@ -4261,7 +4261,12 @@ impl CodeGen {
 
         out.push(joined.clone());
 
-        if path.segments.len() == 1 && !self.module_stack.is_empty() {
+        if !self.module_stack.is_empty()
+            && path
+                .segments
+                .first()
+                .is_some_and(|seg| !matches!(seg.ident.to_string().as_str(), "crate" | "self" | "super"))
+        {
             out.push(format!("{}::{}", self.module_stack.join("::"), joined));
         }
 
@@ -5841,18 +5846,8 @@ impl CodeGen {
             return None;
         }
         let first_expected = self.lookup_function_arg_expected_type(call.func.as_ref(), 0)?;
-        let first_expected = self.peel_reference_paren_group_type(first_expected);
-        let syn::Type::Ptr(ptr_ty) = first_expected else {
-            return None;
-        };
-        let pointee = self.peel_reference_paren_group_type(&ptr_ty.elem);
-        let syn::Type::Path(pointee_path) = pointee else {
-            return None;
-        };
-        if pointee_path.qself.is_some() || pointee_path.path.segments.len() != 1 {
-            return None;
-        }
-        let pointee_ident = pointee_path.path.segments[0].ident.to_string();
+        let pointee_ident =
+            self.extract_pointer_like_expected_type_param_name(first_expected)?;
         if pointee_ident != type_params[0] {
             return None;
         }
@@ -5861,6 +5856,46 @@ impl CodeGen {
             "std::remove_pointer_t<std::remove_cvref_t<decltype(({}))>>",
             first_arg_cpp
         )])
+    }
+
+    fn extract_pointer_like_expected_type_param_name(&self, ty: &syn::Type) -> Option<String> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Ptr(ptr_ty) => self.extract_simple_type_param_name(&ptr_ty.elem),
+            syn::Type::Path(tp) => {
+                let outer_seg = tp.path.segments.last()?;
+                if outer_seg.ident != "add_pointer_t" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(outer_args) = &outer_seg.arguments else {
+                    return None;
+                };
+                let outer_inner = outer_args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })?;
+                if let Some(name) = self.extract_simple_type_param_name(outer_inner) {
+                    return Some(name);
+                }
+                let outer_inner = self.peel_reference_paren_group_type(outer_inner);
+                let syn::Type::Path(inner_path) = outer_inner else {
+                    return None;
+                };
+                let inner_seg = inner_path.path.segments.last()?;
+                if inner_seg.ident != "add_const_t" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(inner_args) = &inner_seg.arguments else {
+                    return None;
+                };
+                let inner_inner = inner_args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })?;
+                self.extract_simple_type_param_name(inner_inner)
+            }
+            _ => None,
+        }
     }
 
     /// Infer template arguments from a function-path argument's return type.
@@ -46614,6 +46649,68 @@ mod tests {
             "raw_ptr_add<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this)))))>>>(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))),"
         ));
         assert!(!out.contains("raw_ptr_add(rusty::as_mut_ptr((*this)),"));
+    }
+
+    #[test]
+    fn test_leaf5195_pointer_helper_const_ptr_call_recovers_template_arg_for_add_pointer_t_const() {
+        let out = transpile_str(
+            r#"
+            fn addr<T>(ptr: *const T) -> usize {
+                0
+            }
+            fn f(queue: *const i32) -> usize {
+                addr(queue)
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "addr<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(queue)))>>>(std::move(queue))"
+        ));
+        assert!(!out.contains("addr(std::move(queue))"));
+    }
+
+    #[test]
+    fn test_leaf5195_pointer_helper_mut_ptr_call_recovers_template_arg_for_add_pointer_t() {
+        let out = transpile_str(
+            r#"
+            fn map_addr<T>(ptr: *mut T, f: impl FnOnce(usize) -> usize) -> *mut T {
+                ptr
+            }
+            fn f(queue: *mut i32) -> *mut i32 {
+                map_addr(queue, |q| q | 1)
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "map_addr<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(queue)))>>>(std::move(queue),"
+        ));
+        assert!(!out.contains("map_addr(std::move(queue),"));
+    }
+
+    #[test]
+    fn test_leaf5195_relative_module_path_pointer_helpers_recover_template_args() {
+        let out = transpile_str(
+            r#"
+            mod imp {
+                mod strict {
+                    pub fn addr<T>(ptr: *const T) -> usize { 0 }
+                    pub fn map_addr<T>(ptr: *const T, f: impl FnOnce(usize) -> usize) -> *const T {
+                        ptr
+                    }
+                }
+                pub fn f(queue: *const i32) -> usize {
+                    let _waiter = strict::map_addr(queue, |q| q & 7);
+                    strict::addr(queue)
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "strict::map_addr<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(queue)))>>>(std::move(queue),"
+        ));
+        assert!(out.contains(
+            "strict::addr<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(queue)))>>>(std::move(queue))"
+        ));
     }
 
     #[test]
