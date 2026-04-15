@@ -5677,6 +5677,48 @@ impl CodeGen {
         result_segments.join("::")
     }
 
+    /// Apply module namespace renames to a path string.
+    /// E.g., `sync::Lazy` → `sync_mod::Lazy` when sync was renamed.
+    fn apply_module_renames_to_path(&self, path: &str) -> String {
+        // Handle leading :: prefix
+        let (prefix, path_body) = if let Some(stripped) = path.strip_prefix("::") {
+            ("::", stripped)
+        } else {
+            ("", path)
+        };
+        let segments: Vec<&str> = path_body.split("::").collect();
+        let mut result: Vec<String> = Vec::new();
+        let mut prefix_parts: Vec<String> = Vec::new();
+        for seg in &segments {
+            let clean_seg = seg.trim();
+            if clean_seg.is_empty() {
+                continue;
+            }
+            let qualified = if prefix_parts.is_empty() {
+                clean_seg.to_string()
+            } else {
+                format!("{}::{}", prefix_parts.join("::"), clean_seg)
+            };
+            // Check explicit renames first, then check global symbol conflicts
+            if let Some(renamed) = self.module_namespace_renames.get(&qualified) {
+                result.push(renamed.clone());
+            } else if Self::module_name_conflicts_with_global_symbol(clean_seg)
+                && prefix_parts.is_empty()
+                && !path.contains("rusty::")
+                && !path.contains("std::")
+            {
+                // Top-level crate-internal module names that conflict with C
+                // globals (e.g., sync, free) get _mod suffix. Skip paths
+                // through rusty:: or std:: namespaces (those are library paths).
+                result.push(format!("{}_mod", clean_seg));
+            } else {
+                result.push(clean_seg.to_string());
+            }
+            prefix_parts.push(clean_seg.to_string());
+        }
+        format!("{}{}", prefix, result.join("::"))
+    }
+
     fn has_rustc_test_marker_attr(attrs: &[syn::Attribute]) -> bool {
         attrs
             .iter()
@@ -8650,9 +8692,17 @@ impl CodeGen {
                     }
                     let using_path = make_using_path_cpp_legal(&mapped_path);
                     if let Some(namespace_target) = using_path.strip_prefix("namespace ") {
-                        self.emit_namespace_using_import(namespace_target.trim());
+                        let ns = namespace_target.trim();
+                        if !ns.is_empty() {
+                            // Apply module renames to namespace target
+                            let renamed_ns = self.apply_module_renames_to_path(ns);
+                            self.emit_namespace_using_import(&renamed_ns);
+                        }
                         continue;
                     }
+                    // Apply module namespace renames (e.g., sync → sync_mod)
+                    // to using declaration paths.
+                    let using_path = self.apply_module_renames_to_path(&using_path);
                     // Check if this is an enum variant import (e.g., Ordering::SeqCst).
                     // C++ enum class values can't be imported with `using`.
                     // Emit `constexpr auto SeqCst = ...::Ordering::SeqCst;` instead.
