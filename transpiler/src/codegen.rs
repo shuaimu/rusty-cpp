@@ -16441,7 +16441,21 @@ impl CodeGen {
                 // Exception: `let ref mut r = rvalue_expr;` — when the init is
                 // an rvalue (e.g., function call), binding a mutable reference
                 // to it is invalid in C++. Emit as owned value instead.
-                let ref_suffix = if emits_ref_binding {
+                // Detect method calls that return references (not values).
+                // Without this, `auto r = cell.get_or_init(...)` copies the result
+                // instead of binding by reference, causing deleted-copy errors.
+                let init_returns_reference = local.init.as_ref().is_some_and(|init| {
+                    if let syn::Expr::MethodCall(mc) = init.expr.as_ref() {
+                        let method = mc.method.to_string();
+                        matches!(method.as_str(),
+                            "get_or_init" | "get_or_try_init" | "get_mut"
+                            | "get_unchecked" | "wait" | "force"
+                        )
+                    } else {
+                        false
+                    }
+                });
+                let ref_suffix = if emits_ref_binding || init_returns_reference {
                     "&"
                 } else {
                     ""
