@@ -1317,7 +1317,44 @@ mod tests {
         );
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.contains("static_cast<void>(rusty::tap(10));"));
+        assert!(output.contains("static_cast<void>(rusty_ext::tap(10));"));
+    }
+
+    #[test]
+    fn test_transpile_with_runtime_extension_hints_keeps_rusty_namespace() {
+        let mut hints = HashSet::new();
+        hints.insert("size_hint".to_string());
+        let result = transpile_with_type_map_and_extension_hints(
+            "fn f(iter: std::ops::Range<i32>) { let _ = iter.size_hint(); }",
+            None,
+            &UserTypeMap::default(),
+            &hints,
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("rusty::size_hint(iter)"));
+    }
+
+    #[test]
+    fn test_transpile_with_external_tap_err_hint_routes_to_rusty_ext() {
+        let mut hints = HashSet::new();
+        hints.insert("tap_err".to_string());
+        let result = transpile_with_type_map_and_extension_hints(
+            r#"
+            fn f(result: Result<i32, i32>) {
+                let _ = result.tap_err(|e| {
+                    let _ = *e;
+                });
+            }
+            "#,
+            None,
+            &UserTypeMap::default(),
+            &hints,
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("rusty_ext::tap_err(result,"));
+        assert!(!output.contains("rusty::tap_err("));
     }
 
     #[test]

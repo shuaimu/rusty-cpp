@@ -6203,11 +6203,43 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - `runner.cpp:2144` strict helper qualification/pathing mismatch (`::strict::addr` surface).
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5197-verify4-1776226903/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.98: Full ten-crate parity closure rerun (`itertools` + `once_cell` integrated)
-          - Run `tests/transpile_tests/run_parity_matrix.sh --work-root <new-work-root> --keep-work-dirs`.
-          - Acceptance criteria:
-            - preserve existing 8-pass baseline with no regressions.
-            - either reach `10/10` pass, or record new deterministic first failing head with canonical artifacts and append next leaf under 5.1.
+        - [x] *done* Leaf 5.1.98: Full ten-crate parity closure rerun (`itertools` + `once_cell` integrated)
+          - Plan/scope check: integrated rerun + deterministic continuation stayed within small-leaf scope (<500 LOC in transpiler changes/tests/TODO updates), so no extra decomposition was needed.
+          - Implemented generic hardening used by this rerun:
+            - extension-method hint routing now prefers `rusty_ext::...` for cross-source hints (runtime helper exceptions remain on `rusty::...`).
+            - crate-name import stripping now preserves `crate_name::...` when the crate name is also a declared module name.
+            - impl target qualification now prefers unique scoped local owner paths before top-level fallback (prevents re-export alias owner drift).
+            - parity Stage D compiler selection now respects `$CXX` (fallback `g++`) so matrix reruns can avoid deterministic local `g++` compile stalls.
+          - Added focused regressions:
+            - `codegen::tests::test_leaf5198_crate_named_module_reexport_keeps_namespace_prefix`
+            - `codegen::tests::test_leaf5198_reexported_imported_impl_target_keeps_actual_owner_path`
+            - `transpile::tests::test_transpile_with_runtime_extension_hints_keeps_rusty_namespace`
+            - `transpile::tests::test_transpile_with_external_tap_err_hint_routes_to_rusty_ext`
+            - `main::tests::test_parity_cpp_compiler_from_env_defaults_to_gpp`
+            - `main::tests::test_parity_cpp_compiler_from_env_uses_non_empty_value`
+            - `main::tests::test_parity_cpp_compiler_from_env_trims_and_falls_back_on_empty`
+          - Verification:
+            - `cargo test -p rusty-cpp-transpiler parity_cpp_compiler -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler leaf5198 -- --nocapture`
+            - `cargo test -p rusty-cpp-transpiler test_transpile_with_ -- --nocapture`
+            - `CXX=clang++ tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-leaf5198-full2-1776233529 --keep-work-dirs`
+            - `CXX=clang++ tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5198-itertools-full2-1776234489 --keep-work-dirs`
+            - `CXX=clang++ tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-leaf5198-oncecell-full2-1776234583 --keep-work-dirs`
+          - Integrated rerun status:
+            - confirmed pass on matrix order prefix: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`.
+            - `smallvec` stage-D compile in the integrated run hit host-level uninterruptible compiler IO (`clang -cc1` `D` state); run was terminated after collecting completed-prefix evidence and continued deterministically with per-crate parity runs.
+            - deterministic first failing crate remains `itertools` (first matrix fail after the stable pass prefix), with first compile heads at:
+              - `runner.cpp:1681` / `runner.cpp:1688` self-referential `auto right/left = rusty::ptr::read(&right/&left)` emissions.
+              - `runner.cpp:1683` / `runner.cpp:1690` member-function value/call-shape fallout on `left`/`right`.
+              - `runner.cpp:2047` missing `fmt::Display` surface (`fmt::Display::fmt`).
+              - adjacent same-family fallout (`runner.cpp:2119` `Self::Key`, `runner.cpp:2232` `Vec<elt>`, etc.) remains downstream.
+            - downstream `once_cell` remains non-green with first heads now including `runner.cpp:1775` (`export using` emitted into non-module runner), plus prior strict-pointer family (`runner.cpp:2139`, `runner.cpp:2144`).
+          - Canonical artifacts:
+            - integrated run root: `/tmp/rusty-parity-leaf5198-full2-1776233529`
+            - first deterministic failure: `/tmp/rusty-parity-leaf5198-itertools-full2-1776234489/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+            - downstream once_cell reference: `/tmp/rusty-parity-leaf5198-oncecell-full2-1776234583/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
+        - [ ] Leaf 5.1.99: `itertools` Stage D post-5.1.98 compile-head family collapse (`left`/`right` self-read lowering, `fmt::Display` path, unresolved `Self`/placeholder type names)
+          - Collapse the deterministic first-head family at `runner.cpp:1681/1688/1683/1690/2047` and ensure next frontier moves downstream with preserved pass baseline.
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.

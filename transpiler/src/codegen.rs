@@ -251,8 +251,9 @@ pub struct CodeGen {
     /// Used to rewrite method calls as `rusty_ext::method(receiver, args...)`.
     extension_method_names: HashSet<String>,
     /// Subset of extension method names emitted in this source.
-    /// Calls to these names use `rusty_ext::...`; external hints route through
-    /// runtime `rusty::...` helpers.
+    /// Calls to these names use `rusty_ext::...`; cross-source hint names
+    /// also route through `rusty_ext::...` unless a method is a known runtime
+    /// helper (`size_hint`, `left`, `right`, `write_hex`).
     local_extension_method_names: HashSet<String>,
     /// Cross-source extension method names supplied by higher-level orchestrators
     /// (for example parity multi-target transpilation).
@@ -8856,14 +8857,33 @@ impl CodeGen {
         };
 
         let normalized = normalize_use_import_path(path);
-        if normalized.is_empty() || normalized.starts_with("::") || normalized.starts_with("namespace ") {
+        if normalized.is_empty()
+            || normalized.starts_with("::")
+            || normalized.starts_with("namespace ")
+        {
             return path.to_string();
         }
 
+        // `crate::foo::Bar` can flatten to `crate_name::...` when `foo` equals the
+        // crate name. Preserve that namespace prefix if it is also a local module;
+        // stripping it would emit invalid bare imports (`using ::Bar;`).
+        let preserve_crate_named_module_prefix = self.declared_module_names.contains(crate_name);
+
         if let Some((alias, target)) = split_use_import_alias(normalized) {
+            if preserve_crate_named_module_prefix
+                && target.starts_with(&format!("{}::", crate_name))
+            {
+                return path.to_string();
+            }
             if let Some(stripped) = target.strip_prefix(&format!("{}::", crate_name)) {
                 return format!("{} = {}", alias, stripped);
             }
+            return path.to_string();
+        }
+
+        if preserve_crate_named_module_prefix
+            && normalized.starts_with(&format!("{}::", crate_name))
+        {
             return path.to_string();
         }
 
@@ -22384,9 +22404,13 @@ impl CodeGen {
         all_args.extend(args.iter().cloned());
         let should_prefer_runtime_namespace =
             matches!(method_name.as_str(), "size_hint" | "left" | "right" | "write_hex");
+        let is_cross_source_extension_hint =
+            self.external_extension_method_hints.contains(&method_name);
         let extension_ns = if should_prefer_runtime_namespace {
             "rusty"
-        } else if self.local_extension_method_names.contains(&method_name) {
+        } else if self.local_extension_method_names.contains(&method_name)
+            || is_cross_source_extension_hint
+        {
             "rusty_ext"
         } else {
             "rusty"
@@ -35439,21 +35463,11 @@ fn qualify_impl_type_name(
         }
         // Prefer nearest ancestor scope when a nested module imports a parent
         // type with `use super::Type; impl Type { ... }`.
-        for depth in (0..module_path.len()).rev() {
-            let ancestor = if depth == 0 {
-                raw.to_string()
-            } else {
-                format!("{}::{}", module_path[..depth].join("::"), raw)
-            };
+        for depth in (1..module_path.len()).rev() {
+            let ancestor = format!("{}::{}", module_path[..depth].join("::"), raw);
             if local_declared_types.contains(&ancestor) {
                 return ancestor;
             }
-        }
-        // If a nested module `impl` targets a top-level type imported from
-        // `super`/`crate` (for example `use super::Either; impl Iterator for Either`),
-        // keep the top-level name so methods merge into the real type definition.
-        if top_level_declared_item_names.contains(raw) {
-            return raw.to_string();
         }
         let mut local_candidates: Vec<&String> = local_declared_types
             .iter()
@@ -35463,6 +35477,12 @@ fn qualify_impl_type_name(
         local_candidates.dedup();
         if local_candidates.len() == 1 {
             return local_candidates[0].clone();
+        }
+        // If a nested module `impl` targets a top-level type imported from
+        // `super`/`crate` (for example `use super::Either; impl Iterator for Either`),
+        // keep the top-level name so methods merge into the real type definition.
+        if top_level_declared_item_names.contains(raw) {
+            return raw.to_string();
         }
         return module_scoped;
     }
@@ -56281,6 +56301,71 @@ mod tests {
         assert!(
             !out.contains("using rusty::Right;"),
             "self-crate `either::Right` import must not rewrite to runtime\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5198_crate_named_module_reexport_keeps_namespace_prefix() {
+        let code = r#"
+            mod arrayvec {
+                pub struct ArrayVec;
+                pub struct IntoIter;
+                pub struct Drain;
+            }
+            pub use crate::arrayvec::{ArrayVec, IntoIter, Drain};
+        "#;
+        let file: syn::File = syn::parse_str(code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_crate_name("arrayvec");
+        cg.emit_file(&file, None);
+        let out = cg.into_output();
+        assert!(
+            out.contains("using arrayvec::ArrayVec;"),
+            "crate-named module reexport should keep namespace-qualified using\nGot: {out}"
+        );
+        assert!(
+            out.contains("using arrayvec::IntoIter;"),
+            "crate-named module reexport should keep namespace-qualified using\nGot: {out}"
+        );
+        assert!(
+            out.contains("using arrayvec::Drain;"),
+            "crate-named module reexport should keep namespace-qualified using\nGot: {out}"
+        );
+        assert!(
+            !out.contains("using ::ArrayVec;"),
+            "crate-named module reexport must not degrade to bare global import\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5198_reexported_imported_impl_target_keeps_actual_owner_path() {
+        let out = transpile_str(
+            r#"
+            mod parse {
+                pub struct Error {}
+            }
+
+            mod error {
+                use crate::parse::Error;
+                use core::fmt::{self, Display};
+
+                impl Display for Error {
+                    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str("display-ok")
+                    }
+                }
+            }
+
+            pub use crate::parse::Error;
+            "#,
+        );
+        assert!(
+            out.contains("formatter.write_str(\"display-ok\")"),
+            "Display impl on imported sibling type should be preserved even when re-exported at crate root\nGot: {out}"
+        );
+        assert!(
+            !out.contains("std::runtime_error(\"Unimplemented method fmt\")"),
+            "fmt should not degrade to unimplemented placeholder\nGot: {out}"
         );
     }
 

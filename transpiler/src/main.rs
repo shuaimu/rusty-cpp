@@ -551,6 +551,16 @@ fn test_label_from_fn_name(fn_name: &str) -> String {
         .to_string()
 }
 
+fn parity_cpp_compiler_from_env(cxx: Option<String>) -> String {
+    cxx.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "g++".to_string())
+}
+
+fn parity_cpp_compiler() -> String {
+    parity_cpp_compiler_from_env(std::env::var("CXX").ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +651,31 @@ export void rusty_test_tests_regular_case() {
     fn test_is_workspace_package_miss_detects_non_member_dev_dependency_error() {
         let stderr = "error: package `bitflags` cannot be tested because it requires dev-dependencies and is not a member of the workspace";
         assert!(is_workspace_package_miss(stderr));
+    }
+
+    #[test]
+    fn test_parity_cpp_compiler_from_env_defaults_to_gpp() {
+        assert_eq!(parity_cpp_compiler_from_env(None), "g++");
+    }
+
+    #[test]
+    fn test_parity_cpp_compiler_from_env_uses_non_empty_value() {
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("clang++".to_string())),
+            "clang++"
+        );
+    }
+
+    #[test]
+    fn test_parity_cpp_compiler_from_env_trims_and_falls_back_on_empty() {
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("  ".to_string())),
+            "g++"
+        );
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string())),
+            "/usr/bin/clang++"
+        );
     }
 }
 
@@ -1164,7 +1199,7 @@ fn reset_target_artifacts(
     Ok(target_dirs)
 }
 
-/// Run the parity test pipeline: cargo test → cargo expand → transpile → g++ → run → compare.
+/// Run the parity test pipeline: cargo test → cargo expand → transpile → C++ compile → run → compare.
 fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let manifest = std::fs::canonicalize(&args.manifest_path)
         .map_err(|_| format!("Manifest not found: {}", args.manifest_path.display()))?;
@@ -1454,10 +1489,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // Find rusty-cpp include path (relative to the transpiler binary)
     let include_dir = find_rusty_include_dir();
 
+    let cpp_compiler = parity_cpp_compiler();
+
     if args.dry_run {
         println!(
-            "  [dry-run] g++ -std=c++20 -I {} -o runner ...",
-            include_dir.display()
+            "  [dry-run] {} -std=c++20 -I {} -o runner ...",
+            cpp_compiler,
+            include_dir.display(),
         );
     } else {
         // Generate a runner .cpp that includes all transpiled code + test main
@@ -1722,8 +1760,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             test_entries.len()
         );
 
-        // Compile with g++
-        let compile_output = std::process::Command::new("g++")
+        // Compile with selected C++ compiler (`$CXX` or g++).
+        let compile_output = std::process::Command::new(&cpp_compiler)
             .arg("-std=c++20")
             .arg("-Wall")
             .arg("-Wno-unused-variable")
@@ -1733,7 +1771,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .arg(&binary_path)
             .arg(&runner_path)
             .output()
-            .map_err(|e| format!("Failed to run g++: {}", e))?;
+            .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
 
         let compile_stderr = String::from_utf8_lossy(&compile_output.stderr);
         std::fs::write(&build_log_path, compile_stderr.as_ref())
