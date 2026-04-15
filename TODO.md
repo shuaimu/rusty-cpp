@@ -6055,19 +6055,27 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - new deterministic first hard-error family starts at `runner.cpp:1403` (`ziptuple::Zip` unresolved type surface), followed by downstream `Either*` / runtime rebasing families.
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5192-verify-1776205317/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.93: `itertools` Stage D post-5.1.92 namespace/type-surface family collapse (`ziptuple::Zip`, `Either*`, and imported runtime symbol rebasing)
-          - Current downstream heads from canonical `itertools` build log:
-            - unresolved adapter/type surfaces (`ziptuple::Zip`, `Either`, `Either_Left`, `Either_Right`)
-            - incorrect nested-namespace runtime paths (`groupbylazy::rusty::*`) and missing path rewrites (`Some`, `size_hint`, `left`/`right`)
-          - Generic fix scope (no crate-specific logic):
-            - unify imported-symbol rebasing so generated paths to `rusty::*` helpers stay crate-global even inside nested module namespaces.
-            - broaden adapter/either surface mapping to preserve template-parameterized type names in alias/field/function signatures.
-          - Required regressions:
-            - add fixture-agnostic tests for nested-module runtime-path rebasing and adapter/either type-surface mapping in type-position emissions.
+        - [x] *done* Leaf 5.1.93: `itertools` Stage D post-5.1.92 namespace/type-surface family collapse (`ziptuple::Zip`, `Either*`, and imported runtime symbol rebasing)
+          - Plan/scope check: fixes stayed under the <500 LOC target in shared transpiler logic (`transpiler/src/codegen.rs`) plus focused regressions; no further decomposition required.
+          - Implemented generic (non-crate-specific) rebasing/type-surface hardening:
+            - normalized `use` import handling so current-crate-prefixed imports are stripped before external-mapping classification (`strip_current_crate_prefix_from_import_path` + `emit_use` external-root guard against `self.crate_name`).
+            - corrected `either` runtime constructor surfacing to avoid nested-namespace/ADL collisions by mapping external constructor imports/calls to `rusty::either::{Left,Right}` while preserving `rusty::Either*` type mappings.
+            - tightened constructor emission so runtime `Either` expected-type paths use fully qualified runtime ctors, but local enum `Left/Right` constructor emission stays local (no over-disambiguating `::Left`/`::Right` prefixes).
+          - Added/updated focused regressions in `transpiler/src/codegen.rs`:
+            - `codegen::tests::test_leaf5193_current_crate_prefixed_either_import_does_not_rewrite_to_runtime`
+            - restored/kept local-constructor expectations across `leaf423`, `leaf425`, `leaf427`, and `leaf1052` families after runtime ctor namespace rebasing.
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf5193 -- --nocapture`
-            - `cargo test -p rusty-cpp-transpiler`
-            - rerun `itertools` parity and capture next deterministic head.
+            - `cargo test -p rusty-cpp-transpiler --test either_parity_harness test_either_parity_harness_stop_after_run_passes_as_control_crate -- --nocapture`
+            - `cargo test --workspace`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5193-verify-1776213098 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - prior first hard-error family (`ziptuple::Zip` / `Either*` unresolved type-surface + imported runtime rebasing fallout) is collapsed from first-head position.
+            - new first deterministic head starts at:
+              - `runner.cpp:1602` unresolved `Some` constructor path in `either_or_both::EitherOrBoth::left_and_right` (`Some` vs `rusty::Some` import-rewrite surface).
+              - adjacent callable payload typing failure at `runner.cpp:1972` (`const void* disp` lambda payload used as `disp->fmt(f)`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5193-verify-1776213098/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
         - [ ] Leaf 5.1.94: `itertools` parity closure checkpoint
           - Run `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root <new-work-root> --keep-work-dirs`.
           - If Stage D/E still fails, append the next deterministic head as a new leaf with the same generic-first constraints before touching `once_cell`.

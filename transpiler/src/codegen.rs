@@ -245,11 +245,15 @@ pub struct CodeGen {
     /// lowering (`Foo` in value position -> `Foo{}`).
     unit_struct_types: HashSet<String>,
     /// Extension-style trait impl methods keyed by scoped trait name.
-    /// Methods in these impls are emitted as `rusty::` free functions.
+    /// Methods in these impls are emitted as `rusty_ext::` free functions.
     extension_trait_impl_methods: HashMap<String, Vec<ExtensionImplMethod>>,
     /// Method names emitted/recognized as extension free functions.
-    /// Used to rewrite method calls as `rusty::method(receiver, args...)`.
+    /// Used to rewrite method calls as `rusty_ext::method(receiver, args...)`.
     extension_method_names: HashSet<String>,
+    /// Subset of extension method names emitted in this source.
+    /// Calls to these names use `rusty_ext::...`; external hints route through
+    /// runtime `rusty::...` helpers.
+    local_extension_method_names: HashSet<String>,
     /// Cross-source extension method names supplied by higher-level orchestrators
     /// (for example parity multi-target transpilation).
     external_extension_method_hints: HashSet<String>,
@@ -599,6 +603,7 @@ impl CodeGen {
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
+            local_extension_method_names: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
@@ -784,6 +789,7 @@ impl CodeGen {
         self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
         self.extension_method_names.clear();
+        self.local_extension_method_names.clear();
         self.data_enum_types.clear();
         self.data_enum_unit_variants.clear();
         self.data_enum_variants_by_enum.clear();
@@ -5178,8 +5184,9 @@ impl CodeGen {
                                 &merged.sig.generics,
                                 &merged.sig.inputs,
                             );
-                        self.extension_method_names
-                            .insert(merged.sig.ident.to_string());
+                        let method_name = merged.sig.ident.to_string();
+                        self.extension_method_names.insert(method_name.clone());
+                        self.local_extension_method_names.insert(method_name);
                         entry.push(ExtensionImplMethod {
                             self_ty: (*impl_block.self_ty).clone(),
                             method: merged,
@@ -6386,6 +6393,25 @@ impl CodeGen {
                 .iter()
                 .any(|item| matches!(item, syn::ImplItem::Const(c) if c.ident == "FLAGS"))
         });
+        let has_bitflags_api_signal = merged_impl_items.as_ref().is_some_and(|items| {
+            items.iter().any(|item| match item {
+                syn::ImplItem::Const(c) => c.ident == "FLAGS",
+                syn::ImplItem::Fn(method) => {
+                    let ident = method.sig.ident.to_string();
+                    matches!(
+                        ident.as_str(),
+                        "bits"
+                            | "from_bits_retain"
+                            | "from_bits_truncate"
+                            | "contains"
+                            | "intersects"
+                            | "iter"
+                            | "iter_names"
+                    )
+                }
+                _ => false,
+            })
+        });
 
         // Emit doc comments
         self.emit_doc_comments(&s.attrs);
@@ -6885,7 +6911,16 @@ impl CodeGen {
                     .operator_renames
                     .keys()
                     .any(|(type_key, _)| *type_key == name_str || *type_key == scoped_key);
-                if has_operators && has_bitflags_flags_const {
+                let has_bitand_operator = self.operator_renames.iter().any(
+                    |((type_key, _), op)| {
+                        (*type_key == name_str || *type_key == scoped_key) && op == "operator&"
+                    },
+                );
+                let should_emit_bitflags_synthetic = has_operators
+                    && (has_bitflags_flags_const
+                        || has_bitflags_api_signal
+                        || has_bitand_operator);
+                if should_emit_bitflags_synthetic {
                     let n = name.to_string();
                     // Use the saved emitted method names from before the pop.
                     let merged_methods = &emitted_methods_in_struct;
@@ -8171,10 +8206,10 @@ impl CodeGen {
         methods: &[ExtensionImplMethod],
     ) {
         self.writeln(&format!(
-            "// Extension trait {} lowered to rusty:: free functions",
+            "// Extension trait {} lowered to rusty_ext:: free functions",
             trait_name
         ));
-        self.writeln("namespace rusty {");
+        self.writeln("namespace rusty_ext {");
         self.indent += 1;
 
         let mut seen = HashSet::new();
@@ -8462,6 +8497,7 @@ impl CodeGen {
             root_ident.as_str(),
             "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp"
         ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase())
+            && self.crate_name.as_deref() != Some(root_ident.as_str())
             && !self.declared_item_names.contains(&root_ident)
             && !self.import_alias_names.contains(&root_ident);
 
@@ -8497,6 +8533,7 @@ impl CodeGen {
                 continue;
             }
             let resolved_path = self.resolve_unqualified_local_import_path(path);
+            let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             self.record_option_alias_import(&resolved_path);
             if is_pub
                 && self.module_name.is_some()
@@ -8523,12 +8560,16 @@ impl CodeGen {
                 ));
                 continue;
             }
+            let use_action = classify_use_import(&resolved_path);
             if is_external {
-                self.writeln(&format!(
-                    "// Rust-only unresolved import: using {};",
-                    resolved_path
-                ));
-                continue;
+                let allow_external_mapping = is_supported_external_import_mapping(&resolved_path);
+                if !allow_external_mapping || matches!(use_action, UseImportAction::RustOnly) {
+                    self.writeln(&format!(
+                        "// Rust-only unresolved import: using {};",
+                        resolved_path
+                    ));
+                    continue;
+                }
             }
             if let Some(namespace_target) =
                 self.resolve_bare_module_namespace_import(&resolved_path)
@@ -8536,7 +8577,7 @@ impl CodeGen {
                 self.emit_namespace_alias_import(&namespace_target);
                 continue;
             }
-            match classify_use_import(&resolved_path) {
+            match use_action {
                 UseImportAction::RustOnly => {
                     self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 }
@@ -8772,6 +8813,30 @@ impl CodeGen {
         } else {
             resolved.clone()
         }
+    }
+
+    fn strip_current_crate_prefix_from_import_path(&self, path: &str) -> String {
+        let Some(crate_name) = self.crate_name.as_deref() else {
+            return path.to_string();
+        };
+
+        let normalized = normalize_use_import_path(path);
+        if normalized.is_empty() || normalized.starts_with("::") || normalized.starts_with("namespace ") {
+            return path.to_string();
+        }
+
+        if let Some((alias, target)) = split_use_import_alias(normalized) {
+            if let Some(stripped) = target.strip_prefix(&format!("{}::", crate_name)) {
+                return format!("{} = {}", alias, stripped);
+            }
+            return path.to_string();
+        }
+
+        if let Some(stripped) = normalized.strip_prefix(&format!("{}::", crate_name)) {
+            return stripped.to_string();
+        }
+
+        path.to_string()
     }
 
     fn is_skipped_module_trait_import(&self, path: &str) -> bool {
@@ -14582,6 +14647,13 @@ impl CodeGen {
             if let Some(variant) = path.segments.last() {
                 base = format!("rusty::Bound_{}", variant.ident);
             }
+        }
+        if matches!(enum_name.as_deref(), Some("Either"))
+            && !self.is_local_type_name_in_scope("Either")
+            && !self.local_declared_types.contains("Either")
+            && !base.starts_with("rusty::")
+        {
+            base = format!("rusty::{}", base);
         }
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
@@ -22055,8 +22127,18 @@ impl CodeGen {
         let mut all_args = Vec::with_capacity(args.len() + 1);
         all_args.push(receiver);
         all_args.extend(args.iter().cloned());
+        let should_prefer_runtime_namespace =
+            matches!(method_name.as_str(), "size_hint" | "left" | "right" | "write_hex");
+        let extension_ns = if should_prefer_runtime_namespace {
+            "rusty"
+        } else if self.local_extension_method_names.contains(&method_name) {
+            "rusty_ext"
+        } else {
+            "rusty"
+        };
         Some(format!(
-            "rusty::{}({})",
+            "{}::{}({})",
+            extension_ns,
             escape_cpp_keyword(&method_name),
             all_args.join(", ")
         ))
@@ -26421,6 +26503,7 @@ impl CodeGen {
         } else {
             expected_args[1].as_str()
         };
+        let is_left_or_right_ctor = matches!(ctor_name.as_str(), "Left" | "Right");
 
         let args: Vec<String> = call
             .args
@@ -26428,9 +26511,17 @@ impl CodeGen {
             .map(|a| self.emit_from_conversion_to_target(a, target_cpp_ty))
             .collect();
 
+        let ctor_cpp = if is_left_or_right_ctor
+            && self.map_type(expected_ty).starts_with("rusty::Either<")
+        {
+            format!("rusty::either::{}", ctor_name)
+        } else {
+            ctor_name.clone()
+        };
+
         Some(format!(
             "{}<{}>({})",
-            ctor_name,
+            ctor_cpp,
             expected_args.join(", "),
             args.join(", ")
         ))
@@ -29457,9 +29548,18 @@ impl CodeGen {
                             return_ctor_args[1].as_str()
                         };
                         let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
+                        let mut ctor_cpp = ctor_name.clone();
+                        if matches!(ctor_name.as_str(), "Left" | "Right") {
+                            let return_is_runtime_either = self
+                                .current_return_type_hint()
+                                .is_some_and(|ty| self.map_type(ty).starts_with("rusty::Either<"));
+                            if return_is_runtime_either {
+                                ctor_cpp = format!("rusty::either::{}", ctor_name);
+                            }
+                        }
                         return format!(
                             "return {}<{}, {}>({})",
-                            ctor_name, return_ctor_args[0], return_ctor_args[1], arg
+                            ctor_cpp, return_ctor_args[0], return_ctor_args[1], arg
                         );
                     }
                 }
@@ -29801,6 +29901,25 @@ impl CodeGen {
         if segments.len() >= 3 && segments[0] == "std" && segments[1] == "thread" {
             let mut resolved = vec!["rusty".to_string(), "thread".to_string()];
             resolved.extend(segments[2..].iter().cloned());
+            for seg in &mut resolved {
+                *seg = escape_cpp_keyword(seg);
+            }
+            return resolved.join("::");
+        }
+        if segments.len() >= 3 && matches!(segments[0].as_str(), "std" | "core") && segments[1] == "fmt" {
+            let mut resolved = vec!["rusty".to_string(), "fmt".to_string()];
+            resolved.extend(segments[2..].iter().cloned());
+            for seg in &mut resolved {
+                *seg = escape_cpp_keyword(seg);
+            }
+            return resolved.join("::");
+        }
+        if segments.len() >= 2 && segments[0] == "either" {
+            let mut resolved = vec!["rusty".to_string()];
+            if matches!(segments[1].as_str(), "Left" | "Right") {
+                resolved.push("either".to_string());
+            }
+            resolved.extend(segments[1..].iter().cloned());
             for seg in &mut resolved {
                 *seg = escape_cpp_keyword(seg);
             }
@@ -30190,6 +30309,28 @@ impl CodeGen {
             }
         }
         let mut emitted = self.emit_path_to_string(path);
+        if path.segments.len() == 1
+            && matches!(path.segments[0].ident.to_string().as_str(), "Left" | "Right")
+            && !emitted.contains("::")
+        {
+            if let syn::PathArguments::AngleBracketed(args) = &path.segments[0].arguments {
+                let has_rusty_type_arg = args.args.iter().any(|arg| {
+                    if let syn::GenericArgument::Type(ty) = arg {
+                        self.map_type(ty).starts_with("rusty::")
+                    } else {
+                        false
+                    }
+                });
+                let in_either_crate = self.crate_name.as_deref() == Some("either");
+                if has_rusty_type_arg || in_either_crate {
+                    emitted = if self.module_stack.is_empty() {
+                        format!("::{}", emitted)
+                    } else {
+                        format!("{}::{}", self.module_stack.join("::"), emitted)
+                    };
+                }
+            }
+        }
         if let Some(template_args) = self.emit_expr_path_template_args(path) {
             emitted.push_str(&template_args);
         }
@@ -30989,6 +31130,20 @@ impl CodeGen {
         mapped
     }
 
+    fn local_declared_type_has_matching_arity(&self, type_name: &str, arity: usize) -> bool {
+        if type_name.is_empty() {
+            return false;
+        }
+        self.declared_type_params.iter().any(|(key, params)| {
+            (key == type_name
+                || key
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == type_name))
+                && params.len() == arity
+        })
+    }
+
     fn try_map_iterator_adapter_type(&self, tp: &syn::TypePath) -> Option<String> {
         if tp.qself.is_some() {
             return None;
@@ -31115,7 +31270,11 @@ impl CodeGen {
             let mapped_args = self.map_angle_bracketed_type_args(args);
             if last_ident == "Intersperse"
                 && mapped_args.len() == 1
-                && !self.local_declared_types.contains("Intersperse")
+                && (!self.local_declared_types.contains("Intersperse")
+                    || !self.local_declared_type_has_matching_arity(
+                        "Intersperse",
+                        mapped_args.len(),
+                    ))
             {
                 return Some(format!(
                     "decltype(std::declval<{}>().intersperse(std::declval<typename {}::Item>()))",
@@ -31124,7 +31283,11 @@ impl CodeGen {
             }
             if last_ident == "IntersperseWith"
                 && mapped_args.len() == 2
-                && !self.local_declared_types.contains("IntersperseWith")
+                && (!self.local_declared_types.contains("IntersperseWith")
+                    || !self.local_declared_type_has_matching_arity(
+                        "IntersperseWith",
+                        mapped_args.len(),
+                    ))
             {
                 return Some(format!(
                     "decltype(std::declval<{}>().intersperse_with(std::declval<{}>()))",
@@ -31133,7 +31296,11 @@ impl CodeGen {
             }
             if last_ident == "Zip"
                 && mapped_args.len() == 2
-                && !self.local_declared_types.contains("Zip")
+                && (!self.local_declared_types.contains("Zip")
+                    || !self.local_declared_type_has_matching_arity(
+                        "Zip",
+                        mapped_args.len(),
+                    ))
             {
                 return Some(format!(
                     "decltype(rusty::zip(std::declval<{}>(), std::declval<{}>()))",
@@ -31304,6 +31471,13 @@ impl CodeGen {
                 {
                     path_str = "rusty::range".to_string();
                 }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Either"
+                    && !self.is_local_type_name_in_scope("Either")
+                    && !self.local_declared_types.contains("Either")
+                {
+                    path_str = "rusty::Either".to_string();
+                }
                 if let Some(mapped_iter_adapter) = self.try_map_iterator_adapter_type(tp) {
                     return mapped_iter_adapter;
                 }
@@ -31416,6 +31590,16 @@ impl CodeGen {
                         }
 
                         if !generic_args.is_empty() {
+                            if tp.path.segments.last().is_some_and(|seg| seg.ident == "Zip")
+                                && generic_args.len() == 2
+                                && (!self.local_declared_types.contains("Zip")
+                                    || !self.local_declared_type_has_matching_arity("Zip", 2))
+                            {
+                                return format!(
+                                    "decltype(rusty::zip(std::declval<{}>(), std::declval<{}>()))",
+                                    generic_args[0], generic_args[1]
+                                );
+                            }
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
                             // iterator::IterEither) are preserved for generic type paths.
                             let mut base = path_str.clone();
@@ -33997,6 +34181,30 @@ auto clone(const T& value) {\n\
         return value;\n\
     }\n\
 }\n\
+template<typename Iter>\n\
+auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {\n\
+    return iter.size_hint();\n\
+}\n\
+template<typename Value>\n\
+decltype(auto) left(Value&& value) {\n\
+    return std::forward<Value>(value).left();\n\
+}\n\
+template<typename Value>\n\
+decltype(auto) right(Value&& value) {\n\
+    return std::forward<Value>(value).right();\n\
+}\n\
+template<typename L, typename R>\n\
+struct Either_Left { L _0; };\n\
+template<typename L, typename R>\n\
+struct Either_Right { R _0; };\n\
+template<typename L, typename R>\n\
+using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;\n\
+namespace either {\n\
+template<typename L, typename R>\n\
+Either_Left<L, R> Left(L _0) { return Either_Left<L, R>{std::forward<L>(_0)}; }\n\
+template<typename L, typename R>\n\
+Either_Right<L, R> Right(R _0) { return Either_Right<L, R>{std::forward<R>(_0)}; }\n\
+}\n\
 // Display-oriented conversion helper used by format_args lowering.\n\
 template<typename T>\n\
 std::string to_string(const T& value);\n\
@@ -34105,9 +34313,15 @@ struct Formatter {\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
+    static Result debug_tuple_field2_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
+    template<typename... Args>\n\
     static Result debug_struct_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
     static Result debug_struct_field2_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
+    template<typename... Args>\n\
+    static Result debug_struct_field3_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
+    template<typename... Args>\n\
+    static Result debug_struct_field4_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
     Result write_fmt(Args&&... args) const { (append_one(std::forward<Args>(args)), ...); return Result::Ok(std::make_tuple()); }\n\
     rusty::Option<size_t> width() const { return rusty::Option<size_t>(rusty::None); }\n\
@@ -34928,6 +35142,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if is_either_variant_reexport(normalized) {
         return UseImportAction::RustOnly;
     }
+    if let Some(action) = rewrite_either_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_panic_import(normalized) {
         return action;
     }
@@ -35125,6 +35342,32 @@ fn enum_is_c_like(item: &syn::ItemEnum) -> bool {
             .variants
             .iter()
             .all(|variant| variant.fields.is_empty())
+}
+
+fn rewrite_either_import(path: &str) -> Option<UseImportAction> {
+    if path == "either" {
+        return Some(UseImportAction::Raw(
+            "namespace either = rusty;".to_string(),
+        ));
+    }
+
+    let item = path.strip_prefix("either::")?;
+    let action = match item {
+        "Either" | "Either_Left" | "Either_Right" => {
+            UseImportAction::Using(format!("rusty::{}", item))
+        }
+        "Left" | "Right" => UseImportAction::Using(format!("rusty::either::{}", item)),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn is_supported_external_import_mapping(path: &str) -> bool {
+    let normalized = normalize_use_import_path(path);
+    if let Some((_, target)) = split_use_import_alias(normalized) {
+        return target == "either" || target.starts_with("either::");
+    }
+    normalized == "either" || normalized.starts_with("either::")
 }
 
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
@@ -35576,10 +35819,19 @@ fn rewrite_std_slice_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::option::Option" {
-        return Some(UseImportAction::Using("rusty::Option".to_string()));
-    }
-    None
+    let action = match path {
+        "std::option::Option" | "core::option::Option" => {
+            UseImportAction::Using("rusty::Option".to_string())
+        }
+        "std::option::Option::Some" | "core::option::Option::Some" => {
+            UseImportAction::Using("rusty::Some".to_string())
+        }
+        "std::option::Option::None" | "core::option::Option::None" => {
+            UseImportAction::Using("rusty::None".to_string())
+        }
+        _ => return None,
+    };
+    Some(action)
 }
 
 fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
@@ -37837,9 +38089,9 @@ mod tests {
             fn f() { let _ = 10.tap(); }
         "#,
         );
-        assert!(out.contains("namespace rusty {"));
+        assert!(out.contains("namespace rusty_ext {"));
         assert!(out.contains("T tap(T self_) {"));
-        assert!(out.contains("static_cast<void>(rusty::tap(10));"));
+        assert!(out.contains("static_cast<void>(rusty_ext::tap(10));"));
     }
 
     #[test]
@@ -37852,7 +38104,7 @@ mod tests {
         "#,
         );
         assert!(out.contains("foo.tap();"));
-        assert!(!out.contains("rusty::tap(foo"));
+        assert!(!out.contains("rusty_ext::tap(foo"));
     }
 
     #[test]
@@ -37878,8 +38130,8 @@ mod tests {
             out.contains("v->extend_from_slice(") || out.contains("v.extend_from_slice("),
             "{out}"
         );
-        assert!(!out.contains("rusty::extend_from_slice(v"), "{out}");
-        assert!(!out.contains("rusty::extend_from_slice((*v)"), "{out}");
+        assert!(!out.contains("rusty_ext::extend_from_slice(v"), "{out}");
+        assert!(!out.contains("rusty_ext::extend_from_slice((*v)"), "{out}");
     }
 
     #[test]
@@ -37931,7 +38183,7 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("rusty::tap_none(rusty::Option<int32_t>(rusty::None),"));
+        assert!(out.contains("rusty_ext::tap_none(rusty::Option<int32_t>(rusty::None),"));
     }
 
     #[test]
@@ -38020,8 +38272,11 @@ mod tests {
             "#,
         );
         assert!(out.contains("static_cast<void>(f(&self_));"));
-        assert!(out.contains("rusty::tap("));
-        assert!(out.contains("foo += *v"));
+        assert!(out.contains("rusty_ext::tap("));
+        assert!(
+            out.contains("foo += *v") || out.contains("foo += rusty::deref_mut(v)"),
+            "{out}"
+        );
         assert!(!out.contains("10.tap("));
     }
 
@@ -38044,8 +38299,11 @@ mod tests {
             "#,
         );
         assert!(out.contains("static_cast<void>(f(&val));"));
-        assert!(out.contains("rusty::tap_err("));
-        assert!(out.contains("foo += *error"));
+        assert!(out.contains("rusty_ext::tap_err("));
+        assert!(
+            out.contains("foo += *error") || out.contains("foo += rusty::deref_mut(error)"),
+            "{out}"
+        );
         assert!(!out.contains("result.tap_err("));
     }
 
@@ -38068,8 +38326,11 @@ mod tests {
             "#,
         );
         assert!(out.contains("static_cast<void>(f(&val));"));
-        assert!(out.contains("rusty::tap_some("));
-        assert!(out.contains("foo += *value"));
+        assert!(out.contains("rusty_ext::tap_some("));
+        assert!(
+            out.contains("foo += *value") || out.contains("foo += rusty::deref_mut(value)"),
+            "{out}"
+        );
         assert!(!out.contains("opt.tap_some("));
     }
 
@@ -38219,7 +38480,7 @@ mod tests {
         "#,
         );
         assert!(out.contains("rusty::filter_map(values,"));
-        assert!(out.contains("rusty::tap_err("));
+        assert!(out.contains("rusty_ext::tap_err("));
         assert!(!out.contains("result.tap_err("));
     }
 
@@ -48672,6 +48933,81 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5193_imported_zip_alias_with_assoc_args_lowers_to_runtime_zip_decltype() {
+        let out = transpile_str(
+            r#"
+            mod ziptuple {
+                pub struct Zip<T> { pub t: T }
+            }
+            use ziptuple::Zip;
+            fn f<I, J>(i: I, j: J) -> Zip<I::IntoIter, J::IntoIter> {
+                todo!()
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains(
+                "decltype(rusty::zip(std::declval<typename I::IntoIter>(), std::declval<typename J::IntoIter>())) f(I i, J j)"
+            ),
+            "expected Zip<I::IntoIter, J::IntoIter> to lower via runtime zip decltype, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5193_either_import_rewrites_to_runtime_surface_and_variant_match_types() {
+        let out = transpile_str(
+            r#"
+            use either::Either;
+            fn is_left<A, B>(e: Either<A, B>) -> bool {
+                match e {
+                    Either::Left(_) => true,
+                    Either::Right(_) => false,
+                }
+            }
+            "#,
+        );
+
+        assert!(out.contains("using rusty::Either;"), "{out}");
+        assert!(out.contains("const rusty::Either_Left<A, B>& _v"), "{out}");
+        assert!(out.contains("const rusty::Either_Right<A, B>& _v"), "{out}");
+        assert!(!out.contains("Rust-only unresolved import: using either::Either;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5193_bare_some_path_rewrites_to_runtime_option_constructor() {
+        let out = transpile_str(
+            r#"
+            use std::option::Option::Some;
+            fn mk(v: i32) -> Option<i32> {
+                Some(v)
+            }
+            "#,
+        );
+        assert!(out.contains("using rusty::Some;"), "{out}");
+        assert!(out.contains("return std::make_optional(v);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5193_std_fmt_paths_rewrite_to_rusty_fmt_surfaces() {
+        let out = transpile_str(
+            r#"
+            use std::fmt;
+
+            struct S;
+            impl fmt::Debug for S {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("S")
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::fmt::Result"), "{out}");
+        assert!(!out.contains("std::fmt::Result"), "{out}");
+    }
+
+    #[test]
     fn test_leaf515_non_recursive_data_enum_forward_decl_uses_variant_alias_not_struct() {
         let out = transpile_str(
             r#"
@@ -48942,6 +49278,20 @@ mod tests {
     fn test_leaf10535_runtime_fallback_formatter_supports_debug_struct_field2_finish() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("static Result debug_struct_field2_finish(Args&&...)"));
+    }
+
+    #[test]
+    fn test_leaf5193_runtime_fallback_exposes_extended_debug_helpers_and_either_runtime() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(helpers.contains("static Result debug_tuple_field2_finish(Args&&...)"));
+        assert!(helpers.contains("static Result debug_struct_field3_finish(Args&&...)"));
+        assert!(helpers.contains("static Result debug_struct_field4_finish(Args&&...)"));
+        assert!(helpers.contains("auto size_hint(const Iter& iter) -> decltype(iter.size_hint())"));
+        assert!(helpers.contains("decltype(auto) left(Value&& value)"));
+        assert!(helpers.contains("decltype(auto) right(Value&& value)"));
+        assert!(helpers.contains("struct Either_Left { L _0; };"));
+        assert!(helpers.contains("struct Either_Right { R _0; };"));
+        assert!(helpers.contains("using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;"));
     }
 
     #[test]
@@ -55053,6 +55403,33 @@ mod tests {
         assert!(
             out.contains("assert_send_sync<Version>()"),
             "should emit assert_send_sync<Version>()\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5193_current_crate_prefixed_either_import_does_not_rewrite_to_runtime() {
+        let code = r#"
+            struct Either;
+            fn Left() {}
+            fn Right() {}
+            use either::{Either, Left, Right};
+        "#;
+        let file: syn::File = syn::parse_str(code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_crate_name("either");
+        cg.emit_file(&file, None);
+        let out = cg.into_output();
+        assert!(
+            !out.contains("using rusty::Either;"),
+            "self-crate `either::Either` import must not rewrite to runtime\nGot: {out}"
+        );
+        assert!(
+            !out.contains("using rusty::Left;"),
+            "self-crate `either::Left` import must not rewrite to runtime\nGot: {out}"
+        );
+        assert!(
+            !out.contains("using rusty::Right;"),
+            "self-crate `either::Right` import must not rewrite to runtime\nGot: {out}"
         );
     }
 
