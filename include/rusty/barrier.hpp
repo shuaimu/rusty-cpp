@@ -51,6 +51,8 @@ public:
         }
     }
 
+    static Barrier new_(std::size_t count) { return Barrier(count); }
+
     // Wait for all threads to arrive at the barrier
     // Returns a BarrierWaitResult indicating if this thread is the leader
     BarrierWaitResult wait() {

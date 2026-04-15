@@ -36119,6 +36119,7 @@ fn rewrite_std_thread_import(path: &str) -> Option<UseImportAction> {
     let thread_item = path.strip_prefix("std::thread::")?;
     let action = match thread_item {
         "spawn" => UseImportAction::Using("rusty::thread::spawn".to_string()),
+        "scope" => UseImportAction::Using("rusty::thread::scope".to_string()),
         "Thread" => UseImportAction::Using("rusty::thread::Thread".to_string()),
         "current" => UseImportAction::Using("rusty::thread::current".to_string()),
         "park" => UseImportAction::Using("rusty::thread::park".to_string()),
