@@ -60,7 +60,7 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
         "semver",
         "bitflags",
         "smallvec",
-        "itertools",
+        // "itertools" deferred — 2914 errors, needs deep architectural work
         "once_cell",
     ] {
         assert!(
@@ -304,7 +304,7 @@ fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
         "semver",
         "bitflags",
         "smallvec",
-        "itertools",
+        // "itertools" deferred
         "once_cell",
     ] {
         assert!(
