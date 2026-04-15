@@ -21,11 +21,13 @@ namespace rusty {
 //
 class Barrier {
 private:
-    std::mutex mtx_;
-    std::condition_variable cv_;
+    // Mutable to support Rust's interior mutability pattern:
+    // Rust Barrier::wait(&self) takes shared reference.
+    mutable std::mutex mtx_;
+    mutable std::condition_variable cv_;
     std::size_t threshold_;
-    std::size_t count_;
-    std::size_t generation_;
+    mutable std::size_t count_;
+    mutable std::size_t generation_;
 
 public:
     // Result of a barrier wait operation
@@ -55,7 +57,7 @@ public:
 
     // Wait for all threads to arrive at the barrier
     // Returns a BarrierWaitResult indicating if this thread is the leader
-    BarrierWaitResult wait() {
+    BarrierWaitResult wait() const {
         std::unique_lock<std::mutex> lock(mtx_);
         std::size_t gen = generation_;
 
