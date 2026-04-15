@@ -23668,6 +23668,39 @@ impl CodeGen {
         )
     }
 
+    fn trait_path_is_fmt_display(path: &syn::Path) -> bool {
+        let joined = path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        matches!(
+            joined.as_str(),
+            "fmt::Display"
+                | "core::fmt::Display"
+                | "std::fmt::Display"
+                | "rusty::fmt::Display"
+        )
+    }
+
+    fn trait_object_is_fmt_display_only(to: &syn::TypeTraitObject) -> bool {
+        let mut saw_trait = false;
+        for bound in &to.bounds {
+            match bound {
+                syn::TypeParamBound::Trait(tb) => {
+                    if !Self::trait_path_is_fmt_display(&tb.path) {
+                        return false;
+                    }
+                    saw_trait = true;
+                }
+                syn::TypeParamBound::Lifetime(_) => {}
+                _ => return false,
+            }
+        }
+        saw_trait
+    }
+
     fn block_contains_option_some_and_none_exprs(&self, block: &syn::Block) -> bool {
         let mut collector = OptionSomeNoneExprCollector::default();
         collector.visit_block(block);
@@ -25648,7 +25681,7 @@ impl CodeGen {
         }
 
         // Map Rust Option::Some(x) → std::optional{x}
-        if func == "Some" && call.args.len() == 1 {
+        if matches!(func.as_str(), "Some" | "rusty::Some") && call.args.len() == 1 {
             let expected_inner_ty = self.expected_option_type_arg(expected_ty);
             if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
                 let arg = self.emit_expr_to_string_with_expected(&call.args[0], expected_inner_ty);
@@ -30133,6 +30166,9 @@ impl CodeGen {
                 return escape_cpp_keyword(&name);
             }
         }
+        if Self::path_is_option_some(path) {
+            return "rusty::Some".to_string();
+        }
         if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
             if let Some(template_args) = self.emit_expr_path_template_args(path) {
                 rewritten.push_str(&template_args);
@@ -31653,6 +31689,9 @@ impl CodeGen {
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 if let syn::Type::TraitObject(to) = r.elem.as_ref() {
+                    if r.mutability.is_none() && Self::trait_object_is_fmt_display_only(to) {
+                        return "rusty::fmt::DisplayRef".to_string();
+                    }
                     // Check for Fn first
                     if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
                         if let Some(fn_type) = self.try_map_fn_trait(tb) {
@@ -42250,6 +42289,38 @@ mod tests {
     }
 
     #[test]
+    fn test_module_fmt_display_dyn_param_maps_to_display_ref() {
+        let out = transpile_str_module("fn f(x: &dyn core::fmt::Display) {}", "my_crate");
+        assert!(out.contains("void f(rusty::fmt::DisplayRef x)"));
+        assert!(!out.contains("const void* x"));
+    }
+
+    #[test]
+    fn test_module_fmt_display_closure_payload_preserves_fmt_surface() {
+        let out = transpile_str_module(
+            r#"
+            fn apply<F>(
+                mut format: F,
+                mut f: &mut core::fmt::Formatter
+            ) -> core::fmt::Result
+            where
+                F: FnMut(
+                    i32,
+                    &mut dyn FnMut(&dyn core::fmt::Display) -> core::fmt::Result
+                ) -> core::fmt::Result,
+            {
+                format(1, &mut |disp: &dyn core::fmt::Display| disp.fmt(f))
+            }
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains("rusty::fmt::DisplayRef disp"), "{out}");
+        assert!(out.contains("disp.fmt(f)"), "{out}");
+        assert!(!out.contains("const void* disp"), "{out}");
+        assert!(!out.contains("disp->fmt(f)"), "{out}");
+    }
+
+    #[test]
     fn test_unresolved_box_dyn_trait_param_falls_back_to_void_ptr() {
         let out = transpile_str("fn f(x: Box<dyn std::error::Error>) {}");
         assert!(out.contains("void f(void* x)"));
@@ -43174,6 +43245,32 @@ mod tests {
         let out = transpile_str("fn f() { let x = 2; let y = Some(&x); }");
         assert!(out.contains("rusty::SomeRef(x)"));
         assert!(!out.contains("rusty::SomeRef(&x)"));
+    }
+
+    #[test]
+    fn test_leaf51941_option_some_callable_path_rewrites_to_rusty_some() {
+        let out = transpile_str_module(
+            r#"
+            fn map_any<F, G>(f: F, g: G) {
+                let _ = (f, g);
+            }
+            fn f() { map_any(Some, Some); }
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains("map_any(rusty::Some, rusty::Some);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf51941_option_some_constructor_still_uses_option_ctor_lowering() {
+        let out = transpile_str("fn f() { let x = Some(1); }");
+        assert!(!out.contains("rusty::Some(1)"), "{out}");
+        assert!(
+            out.contains("std::make_optional(1)")
+                || out.contains("rusty::Option<int32_t>(1)")
+                || out.contains("rusty::Option<int32_t>(static_cast<int32_t>(1))"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -6087,22 +6087,34 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - adjacent first family member remains `runner.cpp:1972` callable payload typing failure (`const void* disp` used as `disp->fmt(f)`).
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5194-verify-1776213359/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.94.1: `itertools` Stage D post-checkpoint constructor/callable-payload surface family collapse (`Some` path rewrite + callable payload type recovery)
-          - Repro command/artifacts:
-            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf5194-verify-1776213359 --keep-work-dirs`
-            - canonical artifacts: `/tmp/rusty-parity-leaf5194-verify-1776213359/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-          - Deterministic first heads:
-            - `runner.cpp:1602`: unresolved `Some` constructor path in `EitherOrBoth::left_and_right` (`Some` vs `rusty::Some` rewrite/import surface).
-            - `runner.cpp:1972`: callable payload type erased to `const void*` while member call shape requires typed payload (`disp->fmt(f)`).
-          - Generic fix scope (no crate-specific logic):
-            - harden constructor-path rewriting/import mapping so `Some` used as a callable/value path in type-erased adapter sites resolves through shared runtime surfaces consistently.
-            - tighten callable parameter type recovery for closure/lambda payloads in formatter-style call sites so member-call lowering preserves typed receiver surfaces instead of `void*`.
-          - Required regressions:
-            - add fixture-agnostic tests for callable-position `Some` path rewriting and callable payload type preservation in member-call lambda bodies.
+        - [x] *done* Leaf 5.1.94.1: `itertools` Stage D post-checkpoint constructor/callable-payload surface family collapse (`Some` path rewrite + callable payload type recovery)
+          - Plan/scope check: shared transpiler/runtime fixes plus focused regressions stayed well below the <500 LOC target; no further decomposition needed.
+          - Implemented generic (non-crate-specific) fixes:
+            - callable/value-path `Some` rewrite hardening in `transpiler/src/codegen.rs`:
+              - expression-path lowering now rewrites Option constructor item paths (`Some`, `Option::Some`, core/std qualified) to `rusty::Some`.
+              - Option constructor call lowering preserves constructor semantics after rewrite (`Some(x)` and `rusty::Some(x)` both route through Option ctor lowering instead of raw helper calls).
+            - callable payload type recovery for formatter-style closures in module mode:
+              - introduced `rusty::fmt::DisplayRef` typed-erased runtime wrapper in `include/rusty/fmt.hpp` (with `fmt(...)` surface).
+              - reference trait-object mapping now detects `&dyn fmt::Display` and lowers to `rusty::fmt::DisplayRef` instead of `const void*`, preserving typed member-call lowering (`disp.fmt(f)`).
+          - Added regressions in `transpiler/src/codegen.rs`:
+            - `codegen::tests::test_leaf51941_option_some_callable_path_rewrites_to_rusty_some`
+            - `codegen::tests::test_leaf51941_option_some_constructor_still_uses_option_ctor_lowering`
+            - `codegen::tests::test_module_fmt_display_dyn_param_maps_to_display_ref`
+            - `codegen::tests::test_module_fmt_display_closure_payload_preserves_fmt_surface`
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf51941 -- --nocapture`
-            - `cargo test -p rusty-cpp-transpiler`
-            - rerun `itertools` parity and capture the next deterministic head.
+            - `cargo test --workspace`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate itertools --work-root /tmp/rusty-parity-leaf51941-verify-1776216192 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - collapsed first-head family:
+              - `runner.cpp:1602` now lowers to `map_any(rusty::Some, rusty::Some)`.
+              - formatter callback payload now lowers as `rusty::fmt::DisplayRef disp` with `disp.fmt(f)` (no `const void* disp` / `disp->fmt(f)`).
+            - new deterministic first heads start at:
+              - `runner.cpp:2047`: unresolved `fmt::Display::fmt` path surface.
+              - `runner.cpp:2119`: unresolved `Self::...` in extension-surface signature context.
+              - `runner.cpp:2232`: unresolved element-type placeholder (`rusty::Vec<elt>`).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf51941-verify-1776216192/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
         - [ ] Leaf 5.1.95: `once_cell` Stage D first deterministic pointer-address helper family collapse (`addr(...)`/`map_addr(...)` on pointer-shaped values)
           - Repro command/artifacts:
             - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-plan-io-1776197333 --keep-work-dirs`
