@@ -291,4 +291,16 @@ void scope(F&& func) {
     // s destructor blocks until all threads complete
 }
 
+/// Sleep the current thread for the specified duration.
+/// Maps Rust's std::thread::sleep(Duration).
+template<typename Rep, typename Period>
+inline void sleep(const std::chrono::duration<Rep, Period>& duration) {
+    std::this_thread::sleep_for(duration);
+}
+
+/// Convenience overload accepting a raw seconds count.
+inline void sleep(unsigned long secs) {
+    std::this_thread::sleep_for(std::chrono::seconds(secs));
+}
+
 } // namespace rusty::thread

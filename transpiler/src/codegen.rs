@@ -30632,10 +30632,15 @@ impl CodeGen {
             }
         }
 
-        // Map remaining `core::` and `alloc::` prefixed paths to `rusty::`
-        // This catches paths like `core::fmt::Formatter::write_str` that weren't
-        // handled by more specific pattern matchers above.
-        if segments.len() >= 2 && matches!(segments[0].as_str(), "core" | "alloc") {
+        // Map remaining `core::`, `alloc::`, and specific `std::` submodule
+        // paths to `rusty::`. This catches paths like `core::fmt::Formatter::write_str`
+        // and `std::time::Duration::from_secs` that weren't handled above.
+        let is_std_rusty_submodule = segments.len() >= 2
+            && segments[0] == "std"
+            && matches!(segments[1].as_str(), "time" | "path" | "ffi");
+        if segments.len() >= 2
+            && (matches!(segments[0].as_str(), "core" | "alloc") || is_std_rusty_submodule)
+        {
             let mut resolved = vec!["rusty".to_string()];
             resolved.extend(segments[1..].iter().cloned());
             for seg in &mut resolved {
@@ -35146,6 +35151,16 @@ constexpr decltype(auto) format_numeric_arg(T&& value) {\n\
 namespace path {\n\
 using Path = std::string;\n\
 }\n\
+namespace time {\n\
+struct Duration {\n\
+    std::chrono::nanoseconds inner;\n\
+    static Duration from_secs(unsigned long secs) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(secs))}; }\n\
+    static Duration from_millis(unsigned long ms) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(ms))}; }\n\
+    static Duration from_nanos(unsigned long ns) { return Duration{std::chrono::nanoseconds(ns)}; }\n\
+    template<typename Rep, typename Period>\n\
+    operator std::chrono::duration<Rep, Period>() const { return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(inner); }\n\
+};\n\
+}\n\
 namespace ffi {\n\
 using OsStr = std::string;\n\
 using CStr = std::string;\n\
@@ -35888,6 +35903,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_path_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_time_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_alloc_import(normalized) {
         return action;
     }
@@ -36320,6 +36338,21 @@ fn rewrite_std_any_import(path: &str) -> Option<UseImportAction> {
         "Any" => UseImportAction::RustOnly,
         // Keep TypeId-shaped imports concrete and compile-safe.
         "TypeId" => UseImportAction::Using("std::type_index".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_time_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::time" {
+        return Some(UseImportAction::Raw(
+            "namespace time = rusty::time;".to_string(),
+        ));
+    }
+    let item = path.strip_prefix("std::time::")?;
+    let action = match item {
+        "Duration" => UseImportAction::Using("rusty::time::Duration".to_string()),
+        "Instant" | "SystemTime" => UseImportAction::RustOnly,
         _ => UseImportAction::RustOnly,
     };
     Some(action)
