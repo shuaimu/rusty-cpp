@@ -8615,7 +8615,31 @@ impl CodeGen {
             }
             match use_action {
                 UseImportAction::RustOnly => {
-                    self.writeln(&format!("// Rust-only: using {};", resolved_path));
+                    // Check if this is an enum variant import that we can emit
+                    // as constexpr auto (e.g., Ordering::SeqCst from std::sync::atomic).
+                    let parts: Vec<&str> = resolved_path.split("::").collect();
+                    let emitted_as_enum_const = if parts.len() >= 2 {
+                        let variant = *parts.last().unwrap_or(&"");
+                        let parent = parts[parts.len() - 2];
+                        let is_atomic_ordering = parent == "Ordering"
+                            && matches!(variant,
+                                "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
+                            );
+                        if is_atomic_ordering {
+                            self.writeln(&format!(
+                                "constexpr auto {} = rusty::sync::atomic::Ordering::{};",
+                                variant, variant
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !emitted_as_enum_const {
+                        self.writeln(&format!("// Rust-only: using {};", resolved_path));
+                    }
                 }
                 UseImportAction::Using(mapped_path) => {
                     if let Some(template_alias_stmt) =
