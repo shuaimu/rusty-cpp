@@ -16467,7 +16467,23 @@ impl CodeGen {
                         if pushed_hints {
                             self.constructor_template_hints.pop();
                         }
-                        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
+                        // Detect self-reference: if the initializer expression
+                        // references the same name being declared (e.g.,
+                        // `auto right = ptr::read(&right)`), use a temporary
+                        // to avoid C++ UB from reading an uninitialized variable.
+                        let escaped_cpp = escape_cpp_keyword(&name_str);
+                        let self_ref = cpp_name == escaped_cpp
+                            && (expr_str.contains(&format!("&{}", escaped_cpp))
+                                || expr_str.contains(&format!("({})", escaped_cpp))
+                                || expr_str.contains(&format!("{},", escaped_cpp))
+                                || expr_str.contains(&format!(", {}", escaped_cpp)));
+                        if self_ref && shadows_outer {
+                            // Emit: auto _tmp = init; auto name = _tmp;
+                            self.writeln(&format!("{} _self_ref_tmp = {};", decl_type, expr_str));
+                            self.writeln(&format!("{} {} = std::move(_self_ref_tmp);", decl_type, cpp_name));
+                        } else {
+                            self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
+                        }
                     }
                 } else {
                     // `let x: T;` can be initialized later; emit mutable storage.
@@ -58110,6 +58126,28 @@ mod tests {
         assert!(
             out.contains("if (_m == true || _m == false)"),
             "Simple bool OR pattern should emit if-expression\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_self_referencing_local_init_uses_temp() {
+        // `let right = ptr::read(&right)` shadows an outer `right`.
+        // C++ `auto right = ptr::read(&right)` creates a self-reference.
+        // The transpiler should use a temp to break the cycle.
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let right = 42;
+                {
+                    let right = std::ptr::read(&right);
+                    drop(right);
+                }
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("auto right = rusty::ptr::read(&right)"),
+            "Should NOT self-reference: auto right = ptr::read(&right)\nGot: {out}"
         );
     }
 }
