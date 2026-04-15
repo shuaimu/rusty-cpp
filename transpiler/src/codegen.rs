@@ -8629,7 +8629,30 @@ impl CodeGen {
                         self.emit_namespace_using_import(namespace_target.trim());
                         continue;
                     }
-                    self.writeln(&format!("{}using {};", export_prefix, using_path));
+                    // Check if this is an enum variant import (e.g., Ordering::SeqCst).
+                    // C++ enum class values can't be imported with `using`.
+                    // Emit `constexpr auto SeqCst = ...::Ordering::SeqCst;` instead.
+                    let using_segments: Vec<&str> = using_path.split("::").collect();
+                    let is_enum_variant_import = if using_segments.len() >= 2 {
+                        let variant = *using_segments.last().unwrap_or(&"");
+                        let parent = using_segments[using_segments.len() - 2];
+                        let key = format!("{}_{}", parent, variant);
+                        self.c_like_enum_consts.contains(&key)
+                            || (parent == "Ordering" && matches!(variant,
+                                "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
+                            ))
+                    } else {
+                        false
+                    };
+                    if is_enum_variant_import {
+                        let variant_name = using_segments.last().unwrap();
+                        self.writeln(&format!(
+                            "{}constexpr auto {} = {};",
+                            export_prefix, variant_name, using_path
+                        ));
+                    } else {
+                        self.writeln(&format!("{}using {};", export_prefix, using_path));
+                    }
                     // When importing a data enum type, also import its namespace
                     // so variant structs (EnumName_VariantName) are accessible.
                     let imported_name = mapped_path.rsplit("::").next().unwrap_or(&mapped_path);
@@ -58148,6 +58171,26 @@ mod tests {
         assert!(
             !out.contains("auto right = rusty::ptr::read(&right)"),
             "Should NOT self-reference: auto right = ptr::read(&right)\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_enum_variant_import_uses_constexpr_auto() {
+        // `use std::sync::atomic::Ordering::SeqCst;` should emit
+        // `constexpr auto SeqCst = ...::Ordering::SeqCst;` not `using`.
+        let out = transpile_str(
+            r#"
+            enum Ordering { SeqCst, Acquire, Release }
+            fn f() {
+                use crate::Ordering::SeqCst;
+                let x = SeqCst;
+            }
+            "#,
+        );
+        // Should NOT emit `using ...::SeqCst` (invalid for enum class)
+        assert!(
+            !out.contains("using") || !out.contains("SeqCst"),
+            "enum variant import should not use 'using' declaration\nGot: {out}"
         );
     }
 }

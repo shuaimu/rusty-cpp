@@ -6238,8 +6238,11 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
             - integrated run root: `/tmp/rusty-parity-leaf5198-full2-1776233529`
             - first deterministic failure: `/tmp/rusty-parity-leaf5198-itertools-full2-1776234489/itertools/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
             - downstream once_cell reference: `/tmp/rusty-parity-leaf5198-oncecell-full2-1776234583/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.99: `itertools` Stage D post-5.1.98 compile-head family collapse (`left`/`right` self-read lowering, `fmt::Display` path, unresolved `Self`/placeholder type names)
-          - Collapse the deterministic first-head family at `runner.cpp:1681/1688/1683/1690/2047` and ensure next frontier moves downstream with preserved pass baseline.
+        - [x] *done* Leaf 5.1.99: `itertools`/`once_cell` compile-head fixes
+          - Fixed `left`/`right` self-referencing local variable initializer (commit 4790b2f)
+          - Fixed enum variant imports (`use Ordering::SeqCst`) — emit `constexpr auto` instead of invalid `using` for `enum class` values (fixes 43 once_cell errors)
+          - `fmt::Display` path (1 error) and `Self`/placeholder (0 errors) resolved by prior fixes
+          - Remaining: itertools 2914 errors (full 26K-line expand), once_cell ~324 errors — need further sub-leaf breakdown
     - [x] *done* Phase 22: C++ module interop via Rust grammar imports (`use cpp::...`) — no bridge wrappers (see docs/rusty-cpp-transpiler.md §3.13)
       - [x] *done* Leaf 22.1: Parse and classify `use cpp::...` imports as foreign C++ module imports (not normal Rust `use` lowering)
         - Plan/scope check: implementation + focused regressions stayed well below the <1000 LOC target and required no additional decomposition.
