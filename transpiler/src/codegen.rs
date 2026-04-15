@@ -25461,6 +25461,9 @@ impl CodeGen {
                 | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
+                | "OnceCell"
+                | "OnceBox"
+                | "Lazy"
         ) || (owner_name == "Box" && box_owner_recovery_enabled);
         let owner_is_supported_omitted_recovery_target = matches!(
             owner_name.as_str(),
