@@ -16531,9 +16531,30 @@ impl CodeGen {
                                 ) {
                                     self.emit_expr_maybe_move(&init.expr)
                                 } else {
+                                    // For zero-arg generic constructor calls (OnceCell::new_(), Box::new()),
+                                    // wrap the inferred inner type T into Owner<T> so the call
+                                    // handler can recover template args.
+                                    let is_zero_arg_ctor = local.init.as_ref()
+                                        .is_some_and(|init| matches!(init.expr.as_ref(), syn::Expr::Call(c) if c.args.is_empty()));
+                                    let effective_ty = if is_zero_arg_ctor {
+                                        local.init.as_ref()
+                                            .and_then(|init| call_owner_placeholder_target(&init.expr))
+                                            .and_then(|owner| {
+                                                if matches!(owner.as_str(), "OnceCell" | "OnceBox" | "Lazy") {
+                                                    syn::parse_str::<syn::Type>(
+                                                        &format!("{}<{}>", owner, quote::quote!(#ty))
+                                                    ).ok()
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                    } else {
+                                        None
+                                    };
+                                    let expected = effective_ty.as_ref().unwrap_or(ty);
                                     self.emit_expr_to_string_with_expected_and_move_if_needed(
                                         &init.expr,
-                                        Some(ty),
+                                        Some(expected),
                                     )
                                 }
                             } else {
@@ -25402,6 +25423,9 @@ impl CodeGen {
                 | "Rc"
                 | "SmallVec"
                 | "SmallVecData"
+                | "OnceCell"
+                | "OnceBox"
+                | "Lazy"
         ) || (owner_name == "Box" && box_owner_recovery_enabled);
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
