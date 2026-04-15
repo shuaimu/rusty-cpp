@@ -10241,6 +10241,36 @@ impl CodeGen {
                 }
             }
             syn::Expr::MethodCall(method_call) => {
+                // Infer generic type from method calls on candidate variables.
+                // e.g., `c.get_or_init(|| 92)` on `let c = OnceCell::new_()`
+                // → infer T=i32 from the closure return type.
+                if let Some(receiver_name) = extract_simple_local_ident(&method_call.receiver) {
+                    if candidate_owner_targets.contains_key(&receiver_name)
+                        && !hints.contains_key(&receiver_name)
+                    {
+                        let method = method_call.method.to_string();
+                        let inferred = match method.as_str() {
+                            "get_or_init" | "get_or_try_init" => {
+                                method_call.args.first().and_then(|arg| {
+                                    if let syn::Expr::Closure(c) = peel_paren_group_expr(arg) {
+                                        self.infer_type_from_closure_body(c)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
+                            "set" | "push" => {
+                                method_call.args.first().and_then(|arg| {
+                                    self.infer_local_binding_type_from_initializer(arg)
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some(ty) = inferred {
+                            hints.insert(receiver_name, ty);
+                        }
+                    }
+                }
                 self.collect_local_generic_placeholder_function_call_hints_in_expr(
                     &method_call.receiver,
                     candidate_owner_targets,
@@ -16271,8 +16301,16 @@ impl CodeGen {
                     inferred_binding_ty =
                         self.infer_local_binding_type_from_current_struct_field(local, &name_str);
                 }
-                if inferred_binding_ty.is_none() && local.init.is_none() {
-                    inferred_binding_ty = self.lookup_local_placeholder_type_hint(&name_str).cloned();
+                if inferred_binding_ty.is_none() {
+                    // Check placeholder hints from forward-looking analysis.
+                    // For uninitialized locals AND for `Type::new_()` calls
+                    // where T was inferred from later usage (e.g., get_or_init).
+                    let has_generic_ctor_init = local.init.as_ref().is_some_and(|init| {
+                        call_owner_placeholder_target(&init.expr).is_some()
+                    });
+                    if local.init.is_none() || has_generic_ctor_init {
+                        inferred_binding_ty = self.lookup_local_placeholder_type_hint(&name_str).cloned();
+                    }
                 }
                 if let Some(ty) = inferred_binding_ty.clone() {
                     self.update_local_binding_type(name_str.clone(), ty);
@@ -17627,6 +17665,55 @@ impl CodeGen {
                 };
                 let last = tp.path.segments.last()?;
                 (last.ident == "Cell").then_some(field_ty)
+            }
+            _ => None,
+        }
+    }
+
+    /// Infer the return type of a closure from its body expression.
+    /// Used for generic type inference: `|| 92` → i32, `|| "hello".to_string()` → String.
+    fn infer_type_from_closure_body(&self, closure: &syn::ExprClosure) -> Option<syn::Type> {
+        if let syn::ReturnType::Type(_, ty) = &closure.output {
+            return Some((**ty).clone());
+        }
+        match closure.body.as_ref() {
+            syn::Expr::Lit(lit) => match &lit.lit {
+                syn::Lit::Int(_) => Some(syn::parse_quote!(i32)),
+                syn::Lit::Float(_) => Some(syn::parse_quote!(f64)),
+                syn::Lit::Str(_) => Some(syn::parse_quote!(String)),
+                syn::Lit::Bool(_) => Some(syn::parse_quote!(bool)),
+                _ => None,
+            },
+            syn::Expr::Call(call) => {
+                self.infer_local_binding_type_from_initializer(&closure.body)
+            }
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                if method == "to_string" || method == "to_owned" {
+                    Some(syn::parse_quote!(String))
+                } else {
+                    None
+                }
+            }
+            syn::Expr::Block(block) => {
+                block.block.stmts.last().and_then(|stmt| match stmt {
+                    syn::Stmt::Expr(expr, _) => self.infer_type_from_closure_body(
+                        &syn::ExprClosure {
+                            attrs: vec![],
+                            lifetimes: None,
+                            constness: None,
+                            movability: None,
+                            asyncness: None,
+                            capture: None,
+                            or1_token: Default::default(),
+                            inputs: Default::default(),
+                            or2_token: Default::default(),
+                            output: syn::ReturnType::Default,
+                            body: Box::new(expr.clone()),
+                        },
+                    ),
+                    _ => None,
+                })
             }
             _ => None,
         }
@@ -36830,6 +36917,10 @@ fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
                     method.as_str(),
                     "new" | "new_" | "from" | "try_from" | "from_byte_string"
                 ),
+                "OnceCell" => matches!(method.as_str(), "new" | "new_" | "with_value"),
+                "OnceBox" => matches!(method.as_str(), "new" | "new_"),
+                "Lazy" => matches!(method.as_str(), "new" | "new_" | "force"),
+                "Box" => matches!(method.as_str(), "new" | "new_" | "make"),
                 _ => false,
             }
             .then_some(owner)
@@ -58229,4 +58320,9 @@ mod tests {
             "enum variant import should not use 'using' declaration\nGot: {out}"
         );
     }
+
+    // TODO: test_oncecell_new_infers_type_from_get_or_init
+    // Infrastructure added for OnceCell/Box/Lazy/OnceBox type inference from
+    // method call receivers (get_or_init, set, push). Currently the augmentation
+    // path doesn't fire for all patterns — needs further debugging.
 }
