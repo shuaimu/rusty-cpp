@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <vector>
 #include <functional>
+#include <exception>
+#include "result.hpp"
 #include "traits.hpp"
 
 namespace rusty::thread {
@@ -74,9 +76,9 @@ inline void yield_now() {
 template<typename T>
 class JoinHandle {
 private:
-    std::thread thread_;
-    std::shared_future<T> future_;
-    bool joined_ = false;
+    mutable std::thread thread_;
+    mutable std::shared_future<T> future_;
+    mutable bool joined_ = false;
 
 public:
     JoinHandle(std::thread&& t, std::future<T>&& f)
@@ -84,20 +86,27 @@ public:
         , future_(std::move(f).share())
     {}
 
-    // Block until thread completes and return result (consumes handle)
-    T join() {
+    // Block until thread completes and return a Rust-style Result.
+    rusty::Result<T, std::exception_ptr> join() const {
         if (joined_) {
-            throw std::runtime_error("Thread already joined");
+            return rusty::Result<T, std::exception_ptr>::Err(
+                std::make_exception_ptr(std::runtime_error("Thread already joined"))
+            );
         }
         if (!thread_.joinable()) {
-            throw std::runtime_error("Thread not joinable");
+            return rusty::Result<T, std::exception_ptr>::Err(
+                std::make_exception_ptr(std::runtime_error("Thread not joinable"))
+            );
         }
 
         thread_.join();
         joined_ = true;
 
-        // This will propagate any exception thrown in the thread
-        return future_.get();
+        try {
+            return rusty::Result<T, std::exception_ptr>::Ok(future_.get());
+        } catch (...) {
+            return rusty::Result<T, std::exception_ptr>::Err(std::current_exception());
+        }
     }
 
     // Explicitly detach the thread (like Rust)
@@ -139,9 +148,9 @@ public:
 template<>
 class JoinHandle<void> {
 private:
-    std::thread thread_;
-    std::shared_future<void> future_;
-    bool joined_ = false;
+    mutable std::thread thread_;
+    mutable std::shared_future<void> future_;
+    mutable bool joined_ = false;
 
 public:
     JoinHandle(std::thread&& t, std::future<void>&& f)
@@ -149,17 +158,26 @@ public:
         , future_(std::move(f).share())
     {}
 
-    void join() {
+    rusty::Result<void, std::exception_ptr> join() const {
         if (joined_) {
-            throw std::runtime_error("Thread already joined");
+            return rusty::Result<void, std::exception_ptr>::Err(
+                std::make_exception_ptr(std::runtime_error("Thread already joined"))
+            );
         }
         if (!thread_.joinable()) {
-            throw std::runtime_error("Thread not joinable");
+            return rusty::Result<void, std::exception_ptr>::Err(
+                std::make_exception_ptr(std::runtime_error("Thread not joinable"))
+            );
         }
 
         thread_.join();
         joined_ = true;
-        future_.get();  // Propagate exceptions
+        try {
+            future_.get();
+            return rusty::Result<void, std::exception_ptr>::Ok();
+        } catch (...) {
+            return rusty::Result<void, std::exception_ptr>::Err(std::current_exception());
+        }
     }
 
     void detach() {

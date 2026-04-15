@@ -6173,19 +6173,36 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
               - `runner.cpp:1961` channel call-shape template deduction (`channel()` without recoverable item type).
           - Canonical artifacts:
             - `/tmp/rusty-parity-leaf5196-verify3-1776222770/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
-        - [ ] Leaf 5.1.97: `once_cell` Stage D post-5.1.96 impl/member-surface family collapse (`OnceCell::init`, channel/join/atomic call-shape parity)
-          - Current downstream heads from canonical `once_cell` build log:
-            - missing inherent members (`OnceCell<...>::init`)
-            - call-shape/constness mismatches (`JoinHandle::join`, atomic operation routing through `Arc<Atomic*>`)
-          - Generic fix scope (no crate-specific logic):
-            - harden impl-merge/member emission so inherent methods survive generic/constrained impl lowering.
-            - improve call-shape lowering for method dispatch through wrapped ownership types (`Arc<T>`) and non-copy consuming methods.
-          - Required regressions:
-            - add fixture-agnostic tests for inherent-method emission from constrained impls and wrapped-ownership method dispatch.
+        - [x] *done* Leaf 5.1.97: `once_cell` Stage D post-5.1.96 impl/member-surface family collapse (`OnceCell::init`, channel/join/atomic call-shape parity)
+          - Plan/scope check: implementation + focused regressions stayed within the expected small-leaf scope (<500 LOC net in transpiler/runtime code, plus TODO documentation) and did not require further decomposition.
+          - Implemented generic lowering/runtime fixes (no crate-specific branching):
+            - hardened impl/member merge resolution so inherited/inherent methods from parent-module imported impl targets (for example `use super::Type; impl Type { ... }`) attach to the owning type surface, recovering missing members such as `OnceCell::init`.
+            - added tuple-scrutinee statement-`match` runtime lowering path (ordered condition chains) to avoid invalid `std::visit` emission for non-variant tuple scrutinees and preserve pattern/guard semantics.
+            - extended runtime pattern-condition extraction for `Pat::TupleStruct`, `Pat::Path`, `Pat::Or`, and richer `Pat::Ident` const-like handling so tuple statement matches with option/callable payloads lower without placeholder lambdas.
+            - fixed member-call dispatch for wrapped ownership receivers (`Arc<T>` autoderef) so non-inherent wrapper method calls route through pointee access (`->`) while keeping inherent `Arc` methods on wrapper surface.
+            - aligned runtime call-shape support:
+              - `JoinHandle<T>::join()` / `JoinHandle<void>::join()` now return `rusty::Result<..., std::exception_ptr>` with const-call compatibility.
+              - added zero-arg `rusty::sync::mpsc::channel()` overload for unit payload shape (`std::tuple<>`).
+              - added `is_send<std::tuple<Ts...>>` trait support.
+          - Added focused regressions:
+            - `test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members`
+            - `test_leaf5197_tuple_statement_match_lowers_to_runtime_if_chain`
+            - `test_leaf5197_tuple_statement_match_with_option_fnmut_payload_avoids_visit`
+            - `test_leaf5197_arc_wrapped_atomic_method_call_uses_arrow_dispatch`
+            - `test_leaf5197_tuple_statement_match_fnmut_payload_ast_shape`
+            - `test_leaf5197_tuple_statement_match_fnmut_payload_patterns_are_runtime_match_compatible`
           - Verification:
             - `cargo test -p rusty-cpp-transpiler leaf5197 -- --nocapture`
             - `cargo test -p rusty-cpp-transpiler`
-            - rerun `once_cell` parity and capture next deterministic head.
+            - `cargo test --workspace -q`
+            - `tests/transpile_tests/run_parity_matrix.sh --crate once_cell --work-root /tmp/rusty-parity-leaf5197-verify4-1776226903 --keep-work-dirs`
+          - Deterministic Stage D frontier movement:
+            - collapsed prior first-head family (`std::visit` tuple scrutinee lowering placeholders, missing `OnceCell::init` surface, and channel/join/Arc atomic call-shape parity mismatches).
+            - new downstream deterministic heads begin at:
+              - `runner.cpp:2139` invalid member call form on strict-pointer helper path (`->wrapping_offset` emitted on non-pointer receiver).
+              - `runner.cpp:2144` strict helper qualification/pathing mismatch (`::strict::addr` surface).
+          - Canonical artifacts:
+            - `/tmp/rusty-parity-leaf5197-verify4-1776226903/once_cell/{baseline.txt,build.log,run.log,matrix.log,runner.cpp}`
         - [ ] Leaf 5.1.98: Full ten-crate parity closure rerun (`itertools` + `once_cell` integrated)
           - Run `tests/transpile_tests/run_parity_matrix.sh --work-root <new-work-root> --keep-work-dirs`.
           - Acceptance criteria:

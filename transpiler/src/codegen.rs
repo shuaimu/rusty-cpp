@@ -11489,6 +11489,9 @@ impl CodeGen {
         if self.try_emit_binding_tuple_match(match_expr) {
             return;
         }
+        if self.try_emit_runtime_tuple_match_stmt(match_expr) {
+            return;
+        }
 
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
@@ -11518,6 +11521,81 @@ impl CodeGen {
             }
         }
         self.emit_expr_to_string_with_variant_ctx(expr, variant_ctx)
+    }
+
+    fn try_emit_runtime_tuple_match_stmt(&mut self, match_expr: &syn::ExprMatch) -> bool {
+        let tuple_expr = self.peel_paren_group_expr(&match_expr.expr);
+        let syn::Expr::Tuple(tuple_scrutinee) = tuple_expr else {
+            return false;
+        };
+        if tuple_scrutinee.elems.is_empty() {
+            return false;
+        }
+
+        let tuple_value_names: Vec<String> = (0..tuple_scrutinee.elems.len())
+            .map(|idx| format!("_m{}", idx))
+            .collect();
+        let tuple_value_exprs: Vec<String> = tuple_scrutinee
+            .elems
+            .iter()
+            .map(|elem| self.emit_match_visit_scrutinee(elem, None))
+            .collect();
+
+        let mut arm_plans = Vec::with_capacity(match_expr.arms.len());
+        for arm in &match_expr.arms {
+            let mut arm_bindings = Vec::new();
+            let Some(arm_condition) = self.collect_runtime_match_binding_stmts_and_condition(
+                &arm.pat,
+                "_m_tuple",
+                &mut arm_bindings,
+                None,
+            ) else {
+                return false;
+            };
+            let guard_condition = arm.guard.as_ref().map(|(_, g)| self.emit_expr_to_string(g));
+            arm_plans.push((
+                arm_condition.unwrap_or_else(|| "true".to_string()),
+                arm_bindings,
+                guard_condition,
+            ));
+        }
+
+        self.writeln("{");
+        self.indent += 1;
+        for (idx, elem_value) in tuple_value_exprs.iter().enumerate() {
+            let elem_name = &tuple_value_names[idx];
+            self.writeln(&format!("auto&& {} = {};", elem_name, elem_value));
+        }
+        self.writeln(&format!(
+            "auto _m_tuple = std::forward_as_tuple({});",
+            tuple_value_names.join(", ")
+        ));
+        self.writeln("bool _m_matched = false;");
+        for (arm, (arm_condition, arm_bindings, guard_condition)) in
+            match_expr.arms.iter().zip(arm_plans.into_iter())
+        {
+            self.writeln(&format!("if (!_m_matched && ({})) {{", arm_condition));
+            self.indent += 1;
+            for binding in arm_bindings {
+                self.writeln(&binding);
+            }
+            if let Some(guard_condition) = guard_condition {
+                self.writeln(&format!("if ({}) {{", guard_condition));
+                self.indent += 1;
+                self.emit_arm_body(&arm.body);
+                self.writeln("_m_matched = true;");
+                self.indent -= 1;
+                self.writeln("}");
+            } else {
+                self.emit_arm_body(&arm.body);
+                self.writeln("_m_matched = true;");
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        true
     }
 
     fn try_emit_runtime_match_stmt(
@@ -11550,6 +11628,7 @@ impl CodeGen {
                             &ts.elems[0],
                             &matched_value,
                             &mut binding_stmts,
+                            variant_ctx,
                         )
                     else {
                         return false;
@@ -11624,6 +11703,7 @@ impl CodeGen {
                                         &ts_case.elems[0],
                                         &tuple_matched_value,
                                         &mut case_binding_stmts,
+                                        variant_ctx,
                                     )
                                 else {
                                     return false;
@@ -12658,10 +12738,37 @@ impl CodeGen {
         pat: &syn::Pat,
         source_expr: &str,
         out: &mut Vec<String>,
+        variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<Option<String>> {
         match pat {
-            syn::Pat::Ident(_) | syn::Pat::Wild(_) => {
+            syn::Pat::Wild(_) => {
                 if self.collect_pattern_binding_stmts(pat, source_expr, out) {
+                    Some(None)
+                } else {
+                    None
+                }
+            }
+            syn::Pat::Ident(pi) => {
+                if let Some(cond_method) = self.runtime_ident_match_condition_method(pi, variant_ctx)
+                {
+                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
+                    let ident_name = pi.ident.to_string();
+                    let looks_like_const = ident_name
+                        .chars()
+                        .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit());
+                    if self.is_const_local_binding_in_scope(&ident_name) || looks_like_const {
+                        Some(Some(format!(
+                            "{} == {}",
+                            source_expr,
+                            escape_cpp_keyword(&ident_name)
+                        )))
+                    } else if self.collect_pattern_binding_stmts(pat, source_expr, out) {
+                        Some(None)
+                    } else {
+                        None
+                    }
+                } else if self.collect_pattern_binding_stmts(pat, source_expr, out) {
                     Some(None)
                 } else {
                     None
@@ -12672,13 +12779,44 @@ impl CodeGen {
                 for (i, elem_pat) in tuple_pat.elems.iter().enumerate() {
                     let elem_expr = format!("std::get<{}>({})", i, source_expr);
                     let elem_condition = self.collect_runtime_match_binding_stmts_and_condition(
-                        elem_pat, &elem_expr, out,
+                        elem_pat,
+                        &elem_expr,
+                        out,
+                        variant_ctx,
                     )?;
                     if let Some(cond) = elem_condition {
                         conditions.push(cond);
                     }
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                let (cond_method, unwrap_method) =
+                    self.runtime_tuple_struct_match_methods(&tuple_struct_pat.path, variant_ctx)?;
+                if tuple_struct_pat.elems.len() != 1 {
+                    return None;
+                }
+                let matched_value = format!("std::as_const({}).{}()", source_expr, unwrap_method);
+                let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
+                let payload_condition = self.collect_runtime_match_binding_stmts_and_condition(
+                    tuple_struct_pat.elems.first()?,
+                    &matched_value,
+                    out,
+                    variant_ctx,
+                )?;
+                if let Some(payload_condition) = payload_condition {
+                    conditions.push(payload_condition);
+                }
+                Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::Path(path_pat) => {
+                if let Some(cond_method) =
+                    self.runtime_path_match_condition_method(&path_pat.path, variant_ctx)
+                {
+                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                } else {
+                    self.tuple_pattern_elem_value_condition(pat, source_expr)
+                }
             }
             syn::Pat::Struct(struct_pat) => {
                 let variant_cpp = self.variant_pattern_cpp_type(&struct_pat.path, None);
@@ -12707,6 +12845,7 @@ impl CodeGen {
                         &field_pat.pat,
                         &field_expr,
                         out,
+                        variant_ctx,
                     )?;
                     if let Some(cond) = field_condition {
                         conditions.push(cond);
@@ -12714,14 +12853,49 @@ impl CodeGen {
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
             }
+            syn::Pat::Or(or_pat) => {
+                let mut conditions = Vec::new();
+                for case in &or_pat.cases {
+                    let mut case_bindings = Vec::new();
+                    let case_condition = self.collect_runtime_match_binding_stmts_and_condition(
+                        case,
+                        source_expr,
+                        &mut case_bindings,
+                        variant_ctx,
+                    )?;
+                    if !case_bindings.is_empty() {
+                        return None;
+                    }
+                    if case_condition.is_none() {
+                        return Some(None);
+                    }
+                    conditions.push(case_condition.unwrap_or_default());
+                }
+                if conditions.is_empty() {
+                    Some(None)
+                } else if conditions.len() == 1 {
+                    Some(Some(conditions.remove(0)))
+                } else {
+                    Some(Some(format!("({})", conditions.join(" || "))))
+                }
+            }
             syn::Pat::Type(pt) => self.collect_runtime_match_binding_stmts_and_condition(
-                &pt.pat, source_expr, out,
+                &pt.pat,
+                source_expr,
+                out,
+                variant_ctx,
             ),
             syn::Pat::Reference(r) => self.collect_runtime_match_binding_stmts_and_condition(
-                &r.pat, source_expr, out,
+                &r.pat,
+                source_expr,
+                out,
+                variant_ctx,
             ),
             syn::Pat::Paren(p) => self.collect_runtime_match_binding_stmts_and_condition(
-                &p.pat, source_expr, out,
+                &p.pat,
+                source_expr,
+                out,
+                variant_ctx,
             ),
             _ => self.tuple_pattern_elem_value_condition(pat, source_expr),
         }
@@ -14128,6 +14302,7 @@ impl CodeGen {
                             &ts.elems[0],
                             &matched_value,
                             &mut binding_stmts,
+                            variant_ctx,
                         )?;
                     let needs_payload_materialization = !binding_stmts.is_empty()
                         || payload_match_condition.is_some()
@@ -20764,6 +20939,36 @@ impl CodeGen {
         true
     }
 
+    fn receiver_is_arc_wrapper_type(&self, receiver: &syn::Expr) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Arc")
+    }
+
+    fn arc_wrapper_method_is_inherent(method_name: &str) -> bool {
+        matches!(
+            method_name,
+            "clone" | "get" | "is_valid" | "strong_count" | "weak_count" | "get_mut" | "as_ptr"
+        )
+    }
+
+    fn method_receiver_uses_wrapper_autoderef_member_access(
+        &self,
+        receiver: &syn::Expr,
+        method_name: &str,
+    ) -> bool {
+        self.receiver_is_arc_wrapper_type(receiver)
+            && !Self::arc_wrapper_method_is_inherent(method_name)
+    }
+
     fn emit_receiver_member_call(
         &self,
         receiver_expr: &syn::Expr,
@@ -20782,7 +20987,9 @@ impl CodeGen {
         } else {
             raw_receiver
         };
-        let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr) {
+        let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr)
+            || self.method_receiver_uses_wrapper_autoderef_member_access(receiver_expr, method_name)
+        {
             "->"
         } else {
             "."
@@ -35230,6 +35437,18 @@ fn qualify_impl_type_name(
         if local_declared_types.contains(&module_scoped) {
             return module_scoped;
         }
+        // Prefer nearest ancestor scope when a nested module imports a parent
+        // type with `use super::Type; impl Type { ... }`.
+        for depth in (0..module_path.len()).rev() {
+            let ancestor = if depth == 0 {
+                raw.to_string()
+            } else {
+                format!("{}::{}", module_path[..depth].join("::"), raw)
+            };
+            if local_declared_types.contains(&ancestor) {
+                return ancestor;
+            }
+        }
         // If a nested module `impl` targets a top-level type imported from
         // `super`/`crate` (for example `use super::Either; impl Iterator for Either`),
         // keep the top-level name so methods merge into the real type definition.
@@ -46954,6 +47173,201 @@ mod tests {
             out
         );
         assert!(out.contains("return std::tuple<>()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5197_nested_module_impl_on_parent_type_merges_inherent_members() {
+        let out = transpile_str(
+            r#"
+            struct OnceCell<T>(Option<T>);
+            impl<T> OnceCell<T> {
+                fn new_() -> Self { OnceCell(None) }
+            }
+            mod tests {
+                use super::OnceCell;
+                impl<T> OnceCell<T> {
+                    fn init<F: FnOnce() -> T>(&self, _f: F) {}
+                }
+            }
+            fn f(cell: OnceCell<i32>) {
+                cell.init(|| 1);
+            }
+            "#,
+        );
+        assert!(out.contains("struct OnceCell"), "{out}");
+        assert!(out.contains("void init("), "{out}");
+        assert!(out.contains("cell.init("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5197_tuple_statement_match_lowers_to_runtime_if_chain() {
+        let out = transpile_str(
+            r#"
+            fn f(mut init: Option<i32>) {
+                let curr_state = 0usize;
+                match (curr_state, &mut init) {
+                    (2, _) => {}
+                    (0, Some(v)) => {
+                        let _ = v;
+                    }
+                    (0, None) | (1, _) => {}
+                    _ => {}
+                }
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "tuple statement match should not lower to std::visit over tuple scrutinee:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("// TODO: unhandled match pattern"),
+            "tuple statement match should avoid unhandled-pattern placeholders:\n{}",
+            out
+        );
+        assert!(out.contains("is_some()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5197_tuple_statement_match_with_option_fnmut_payload_avoids_visit() {
+        let out = transpile_str(
+            r#"
+            fn f(mut init: Option<&mut dyn FnMut() -> bool>, curr_state: usize) {
+                const COMPLETE: usize = 2;
+                const INCOMPLETE: usize = 0;
+                const RUNNING: usize = 1;
+                match (curr_state, &mut init) {
+                    (COMPLETE, _) => return,
+                    (INCOMPLETE, Some(init)) => {
+                        init();
+                        return;
+                    }
+                    (INCOMPLETE, None) | (RUNNING, _) => {}
+                    _ => {}
+                }
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("std::visit(overloaded {"),
+            "tuple statement match should not lower to std::visit for Option<&mut dyn FnMut()> payloads:\n{}",
+            out
+        );
+        assert!(out.contains("is_some()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5197_tuple_statement_match_fnmut_payload_ast_shape() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            fn f(mut init: Option<&mut dyn FnMut() -> bool>, curr_state: usize) {
+                const COMPLETE: usize = 2;
+                const INCOMPLETE: usize = 0;
+                const RUNNING: usize = 1;
+                match (curr_state, &mut init) {
+                    (COMPLETE, _) => return,
+                    (INCOMPLETE, Some(init)) => {
+                        init();
+                        return;
+                    }
+                    (INCOMPLETE, None) | (RUNNING, _) => {}
+                    _ => {}
+                }
+            }
+            "#,
+        )
+        .expect("parse snippet");
+
+        let syn::Item::Fn(fun) = &file.items[0] else {
+            panic!("expected function item");
+        };
+        let match_stmt = fun
+            .block
+            .stmts
+            .iter()
+            .find_map(|stmt| match stmt {
+                syn::Stmt::Expr(expr, _) => Some(expr),
+                _ => None,
+            })
+            .expect("match statement");
+        let syn::Expr::Match(match_expr) = match_stmt else {
+            panic!("expected match expression");
+        };
+        assert!(matches!(&*match_expr.expr, syn::Expr::Tuple(_)));
+        assert!(matches!(match_expr.arms[0].pat, syn::Pat::Tuple(_)));
+        assert!(matches!(match_expr.arms[1].pat, syn::Pat::Tuple(_)));
+        assert!(matches!(match_expr.arms[2].pat, syn::Pat::Or(_)));
+        assert!(matches!(match_expr.arms[3].pat, syn::Pat::Wild(_)));
+    }
+
+    #[test]
+    fn test_leaf5197_tuple_statement_match_fnmut_payload_patterns_are_runtime_match_compatible() {
+        let file: syn::File = syn::parse_str(
+            r#"
+            fn f(mut init: Option<&mut dyn FnMut() -> bool>, curr_state: usize) {
+                const COMPLETE: usize = 2;
+                const INCOMPLETE: usize = 0;
+                const RUNNING: usize = 1;
+                match (curr_state, &mut init) {
+                    (COMPLETE, _) => return,
+                    (INCOMPLETE, Some(init)) => {
+                        init();
+                        return;
+                    }
+                    (INCOMPLETE, None) | (RUNNING, _) => {}
+                    _ => {}
+                }
+            }
+            "#,
+        )
+        .expect("parse snippet");
+
+        let syn::Item::Fn(fun) = &file.items[0] else {
+            panic!("expected function item");
+        };
+        let match_stmt = fun
+            .block
+            .stmts
+            .iter()
+            .find_map(|stmt| match stmt {
+                syn::Stmt::Expr(expr, _) => Some(expr),
+                _ => None,
+            })
+            .expect("match statement");
+        let syn::Expr::Match(match_expr) = match_stmt else {
+            panic!("expected match expression");
+        };
+
+        let cg = CodeGen::new();
+        for (idx, arm) in match_expr.arms.iter().enumerate() {
+            let mut bindings = Vec::new();
+            let matched = cg.collect_runtime_match_binding_stmts_and_condition(
+                &arm.pat,
+                "_m_tuple",
+                &mut bindings,
+                None,
+            );
+            assert!(matched.is_some(), "arm {} unsupported: {:?}", idx, arm.pat);
+        }
+    }
+
+    #[test]
+    fn test_leaf5197_arc_wrapped_atomic_method_call_uses_arrow_dispatch() {
+        let out = transpile_str(
+            r#"
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            fn f(total: Arc<AtomicUsize>) {
+                total.fetch_add(1, Ordering::SeqCst);
+                total.fetch_sub(1, Ordering::SeqCst);
+            }
+            "#,
+        );
+        assert!(out.contains("total->fetch_add("), "{out}");
+        assert!(out.contains("total->fetch_sub("), "{out}");
+        assert!(!out.contains("total.fetch_add("), "{out}");
+        assert!(!out.contains("total.fetch_sub("), "{out}");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 #include <queue>
 #include <atomic>
 #include <type_traits>
+#include <tuple>
 #include "../option.hpp"
 #include "../result.hpp"
 #include "../send_trait.hpp"
@@ -341,6 +342,15 @@ std::pair<Sender<T>, Receiver<T>> channel() {
     );
 }
 #endif
+
+// Unit-channel overload for Rust call sites that use `channel()` with `()`.
+inline std::pair<Sender<std::tuple<>>, Receiver<std::tuple<>>> channel() {
+    auto state = std::make_shared<ChannelState<std::tuple<>>>();
+    return std::make_pair(
+        Sender<std::tuple<>>(state),
+        Receiver<std::tuple<>>(state)
+    );
+}
 
 } // namespace mpsc
 } // namespace sync

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "send_trait.hpp"
+#include <tuple>
 
 // Send implementations for rusty types
 // Mark which rusty types are thread-safe to send
@@ -32,5 +33,9 @@ template<typename T, typename E>
 struct is_send<Result<T, E>> : std::bool_constant<
     is_send<T>::value && is_send<E>::value
 > {};
+
+// std::tuple<Ts...> is Send if all tuple elements are Send.
+template<typename... Ts>
+struct is_send<std::tuple<Ts...>> : std::bool_constant<(is_send<Ts>::value && ...)> {};
 
 } // namespace rusty
