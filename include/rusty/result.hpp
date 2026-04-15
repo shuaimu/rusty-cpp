@@ -57,9 +57,9 @@ private:
     // Construct storage without materializing either payload variant.
     explicit Result(UninitTag) noexcept : is_ok_value(false) {}
     
-    T& ok_ref() { return *reinterpret_cast<T*>(&storage.ok_storage); }
-    const T& ok_ref() const { return *reinterpret_cast<const T*>(&storage.ok_storage); }
-    E& err_ref() { return *reinterpret_cast<E*>(&storage.err_storage); }
+    T& ok_ref() { return *reinterpret_cast<std::remove_reference_t<T>*>(&storage.ok_storage); }
+    const T& ok_ref() const { return *reinterpret_cast<const std::remove_reference_t<T>*>(&storage.ok_storage); }
+    E& err_ref() { return *reinterpret_cast<std::remove_reference_t<E>*>(&storage.err_storage); }
     const E& err_ref() const { return *reinterpret_cast<const E*>(&storage.err_storage); }
     
     void destroy() {
@@ -180,23 +180,30 @@ public:
     }
 
     // Borrow payload by pointer without moving the Result value.
-    Result<const T*, const E*> as_ref() const & {
+    // Uses remove_reference_t to avoid forming pointer-to-reference
+    // when T or E is a reference type (e.g., Result<const int&, Error>).
+    using AsRefOk = const std::remove_reference_t<T>*;
+    using AsRefErr = const std::remove_reference_t<E>*;
+    using AsMutOk = std::remove_reference_t<T>*;
+    using AsMutErr = std::remove_reference_t<E>*;
+
+    Result<AsRefOk, AsRefErr> as_ref() const & {
         if (is_ok_value) {
-            return Result<const T*, const E*>::Ok(&ok_ref());
+            return Result<AsRefOk, AsRefErr>::Ok(&ok_ref());
         }
-        return Result<const T*, const E*>::Err(&err_ref());
+        return Result<AsRefOk, AsRefErr>::Err(&err_ref());
     }
 
-    Result<T*, E*> as_mut() & {
+    Result<AsMutOk, AsMutErr> as_mut() & {
         if (is_ok_value) {
-            return Result<T*, E*>::Ok(&ok_ref());
+            return Result<AsMutOk, AsMutErr>::Ok(&ok_ref());
         }
-        return Result<T*, E*>::Err(&err_ref());
+        return Result<AsMutOk, AsMutErr>::Err(&err_ref());
     }
 
-    Result<const T*, const E*> as_ref() && = delete;
-    Result<const T*, const E*> as_ref() const && = delete;
-    Result<T*, E*> as_mut() && = delete;
+    Result<AsRefOk, AsRefErr> as_ref() && = delete;
+    Result<AsRefOk, AsRefErr> as_ref() const && = delete;
+    Result<AsMutOk, AsMutErr> as_mut() && = delete;
     
     // Unwrap Ok value (panics if Err)
     T unwrap() {
