@@ -25887,9 +25887,15 @@ impl CodeGen {
                 return emitted;
             }
         }
+        // For Ok/Err calls inside closures, the closure's return type hint may be more
+        // relevant than any outer expected type (closure return type overrides).
+        let ok_err_hint = if expected_ty.is_none() {
+            self.current_return_type_hint()
+        } else {
+            None
+        };
         if expected_ty.is_none() {
-            if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call)
-            {
+            if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call) {
                 return emitted;
             }
         }
@@ -26392,12 +26398,15 @@ impl CodeGen {
             }
         }
         // Map Ok(x) and Err(x) for Result
+        // Use closure return type hint (ok_err_hint) when no expected_ty is available,
+        // since closures with explicit return types override outer type context.
+        let resolved_hint = expected_ty.or(ok_err_hint);
         if func == "Ok" && call.args.len() == 1 {
             let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
                 &call.args[0],
-                self.expected_result_type_arg(expected_ty, 0),
+                self.expected_result_type_arg(resolved_hint, 0),
             );
-            if let Some(expected) = expected_ty {
+            if let Some(expected) = resolved_hint {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Result<") {
                     return format!("{}::Ok({})", expected_cpp, arg);
@@ -26419,9 +26428,9 @@ impl CodeGen {
         if func == "Err" && call.args.len() == 1 {
             let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
                 &call.args[0],
-                self.expected_result_type_arg(expected_ty, 1),
+                self.expected_result_type_arg(resolved_hint, 1),
             );
-            if let Some(expected) = expected_ty {
+            if let Some(expected) = resolved_hint {
                 let expected_cpp = self.map_type(expected);
                 if expected_cpp.starts_with("rusty::Result<") {
                     return format!("{}::Err({})", expected_cpp, arg);
@@ -32786,7 +32795,7 @@ impl CodeGen {
                 inner.return_value_scopes.clear();
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
-                inner.return_type_hints.push(None);
+                inner.push_return_type_hint(&closure.output);
                 inner.emit_block(&block.block);
                 let mut body_str = inner.into_output();
                 if !closure_param_prelude.is_empty() {
@@ -32804,6 +32813,11 @@ impl CodeGen {
             }
             _ => {
                 // Single expression body → return it
+                // Push the explicit return type hint so Err/Ok inside can use it for qualification
+                inner.return_value_scopes.clear();
+                inner.return_type_hints.clear();
+                inner.push_return_value_scope("auto");
+                inner.push_return_type_hint(&closure.output);
                 let body = inner.emit_expr_to_string(&closure.body);
                 if closure_param_prelude.is_empty() {
                     format!(
