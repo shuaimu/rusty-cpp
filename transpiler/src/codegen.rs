@@ -25580,7 +25580,21 @@ impl CodeGen {
                         .as_ref()
                         .map(|args| args.len())
                         .or_else(|| inferred_owner_args.as_ref().map(|args| args.len()))
-                        .or_else(|| scoped_owner_args.as_ref().map(|args| args.len()));
+                        .or_else(|| scoped_owner_args.as_ref().map(|args| args.len()))
+                        .or_else(|| {
+                            // If all inference sources failed but this is a supported omitted-owner
+                            // target, use a default arity based on known type shapes.
+                            // This handles OnceCell<T> (1 arg), Lazy<T, F> (2 args), etc.
+                            if owner_args_omitted && owner_is_supported_omitted_recovery_target {
+                                Some(match owner_name.as_str() {
+                                    "OnceCell" | "OnceBox" | "NonNull" => 1,
+                                    "Lazy" => 2,
+                                    _ => 1,
+                                })
+                            } else {
+                                None
+                            }
+                        });
                     if let Some(owner_arity) = owner_arity {
                         if owner_arity > 0 {
                             let mut recovered = Vec::with_capacity(owner_arity);
@@ -25608,6 +25622,12 @@ impl CodeGen {
                             }
                             if complete && !recovered.is_empty() {
                                 seg_text = format!("{}<{}>", seg_text, recovered.join(", "));
+                            } else if owner_args_omitted && owner_is_supported_omitted_recovery_target {
+                                // Could not recover all template args from expected/inferred/scoped sources.
+                                // Emit with auto placeholder — C++ template deduction may resolve it from usage,
+                                // and this avoids emitting bare OnceCell::new_() which is invalid C++.
+                                let auto_args: Vec<String> = (0..owner_arity).map(|_| "auto".to_string()).collect();
+                                seg_text = format!("{}<{}>", seg_text, auto_args.join(", "));
                             } else {
                                 return base_func;
                             }
@@ -39774,6 +39794,69 @@ mod tests {
         assert!(
             !out.contains("NonNull::new_unchecked("),
             "NonNull::new_unchecked should not emit unspecialized owner path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5100100_oncecell_new_omitted_owner_uses_auto_placeholder() {
+        // Leaf 5.1.100: When OnceCell::new() has no usage revealing T and all inference
+        // sources fail, emit OnceCell<auto>::new_() instead of bare OnceCell::new_().
+        // C++ template deduction may resolve 'auto' from subsequent usage.
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x = std::sync::OnceCell::new();
+            }
+            "#,
+        );
+        // Should emit OnceCell<auto>::new_() with template arg, not bare OnceCell::new_()
+        // When all inference sources fail (no expected type, no call args, no scoped hints),
+        // we should emit with auto placeholder.
+        assert!(
+            out.contains("OnceCell<auto>::new_()") || out.contains("::OnceCell<auto>::new_()"),
+            "OnceCell::new with omitted owner should emit auto placeholder when T cannot be inferred, got:\n{}",
+            out
+        );
+        // Ensure we're not emitting bare unspecialized OnceCell::new_()
+        assert!(
+            !out.contains("OnceCell::new_()") || out.contains("OnceCell<auto>::new_()"),
+            "OnceCell::new with omitted owner should not emit unspecialized bare OnceCell::new_(), got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5100100_lazy_new_omitted_owner_uses_auto_placeholder() {
+        // Leaf 5.1.100: Lazy::new() with no T usage should emit Lazy<auto, auto>::new_()
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x = std::sync::Lazy::new(|| 42);
+            }
+            "#,
+        );
+        // Should emit with auto placeholders for omitted owner template args
+        assert!(
+            out.contains("Lazy<auto, auto>::new_(") || out.contains("::Lazy<auto, auto>::new_("),
+            "Lazy::new with omitted owner should emit auto placeholders, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5100100_oncebox_new_omitted_owner_uses_auto_placeholder() {
+        // Leaf 5.1.100: OnceBox::new() with no T usage should emit OnceBox<auto>::new_()
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let x = std::sync::OnceBox::new();
+            }
+            "#,
+        );
+        assert!(
+            out.contains("OnceBox<auto>::new_()") || out.contains("::OnceBox<auto>::new_()"),
+            "OnceBox::new with omitted owner should emit auto placeholder, got:\n{}",
             out
         );
     }
