@@ -25411,6 +25411,68 @@ impl CodeGen {
                                 .filter(|mapped| mapped != "auto" && !mapped.contains("/* TODO"))
                         });
                     inferred.map(|inner| vec![Some(inner)])
+                } else if matches!(method_name, "new" | "new_" | "make") {
+                    // Infer template arg from the argument expression (e.g. Box::new_(92) → T=i32)
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .map(|ty| self.map_type(&ty))
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
+                            })
+                        });
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            "OnceCell" => {
+                if matches!(method_name, "from" | "with_value") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .map(|ty| self.map_type(&ty))
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
+                            })
+                        });
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            "OnceBox" => {
+                if matches!(method_name, "from") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .map(|ty| self.map_type(&ty))
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
+                            })
+                        });
+                    if let Some(inferred) = inferred {
+                        Some(vec![Some(inferred)])
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -25552,6 +25614,7 @@ impl CodeGen {
                 | "OnceCell"
                 | "OnceBox"
                 | "Lazy"
+                | "Box"
         ) || (owner_name == "Box" && box_owner_recovery_enabled);
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
@@ -25680,13 +25743,22 @@ impl CodeGen {
                                 }
                             }
                             if complete && !recovered.is_empty() {
-                                seg_text = format!("{}<{}>", seg_text, recovered.join(", "));
+                                // Box needs rusty:: prefix to become rusty::Box<T>
+                                if owner_name == "Box" {
+                                    seg_text = format!("rusty::Box<{}>", recovered.join(", "));
+                                } else {
+                                    seg_text = format!("{}<{}>", seg_text, recovered.join(", "));
+                                }
                             } else if owner_args_omitted && owner_is_supported_omitted_recovery_target {
                                 // Could not recover all template args from expected/inferred/scoped sources.
                                 // Emit with auto placeholder — C++ template deduction may resolve it from usage,
                                 // and this avoids emitting bare OnceCell::new_() which is invalid C++.
                                 let auto_args: Vec<String> = (0..owner_arity).map(|_| "auto".to_string()).collect();
-                                seg_text = format!("{}<{}>", seg_text, auto_args.join(", "));
+                                if owner_name == "Box" {
+                                    seg_text = format!("rusty::Box<{}>", auto_args.join(", "));
+                                } else {
+                                    seg_text = format!("{}<{}>", seg_text, auto_args.join(", "));
+                                }
                             } else {
                                 return base_func;
                             }
@@ -37235,8 +37307,8 @@ fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
                     method.as_str(),
                     "new" | "new_" | "from" | "try_from" | "from_byte_string"
                 ),
-                "OnceCell" => matches!(method.as_str(), "new" | "new_" | "with_value"),
-                "OnceBox" => matches!(method.as_str(), "new" | "new_"),
+                "OnceCell" => matches!(method.as_str(), "new" | "new_" | "with_value" | "from"),
+                "OnceBox" => matches!(method.as_str(), "new" | "new_" | "from"),
                 "Lazy" => matches!(method.as_str(), "new" | "new_" | "force"),
                 "Box" => matches!(method.as_str(), "new" | "new_" | "make"),
                 _ => false,
@@ -42638,7 +42710,12 @@ mod tests {
     #[test]
     fn test_box_new_mapping() {
         let out = transpile_str("fn f() { let b = Box::new(42); }");
-        assert!(out.contains("rusty::Box::new_(42)"), "expected rusty::Box::new_(42), got:\n{}", out);
+        // Box now correctly infers template arg from argument, producing rusty::Box<int32_t>::new_
+        assert!(
+            out.contains("rusty::Box<int32_t>::new_(42)"),
+            "expected rusty::Box<int32_t>::new_(42), got:\n{}",
+            out
+        );
     }
 
     #[test]
