@@ -22492,6 +22492,44 @@ impl CodeGen {
             _ => return None,
         };
 
+        // Infer closure return type for get_or_try_init/get_or_init from receiver.
+        // e.g., `cell.get_or_try_init(|| Err(()))` on `cell: OnceCell<String>`
+        // → infer closure return type = Result<String, E> so Err() knows the error type.
+        let is_get_or_init = method_name == "get_or_init";
+        let is_get_or_try_init = method_name == "get_or_try_init";
+        if (is_get_or_init || is_get_or_try_init) && arg_idx == 0 {
+            let receiver_ty = self.infer_simple_expr_type(receiver)?;
+            let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+            let syn::Type::Path(tp) = receiver_ty else {
+                return None;
+            };
+            let last = tp.path.segments.last()?;
+            let receiver_owner_name = last.ident.to_string();
+            // Only handle known OnceCell/Lazy/OnceBox types that have a type parameter
+            if !matches!(receiver_owner_name.as_str(), "OnceCell" | "OnceBox" | "Lazy" | "NonNull")
+            {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let Some(inner_ty) = args.args.iter().filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            }).nth(0) else {
+                return None;
+            };
+            // For get_or_try_init, closure returns Result<T, E>. For get_or_init, returns T.
+            if is_get_or_try_init {
+                // Wrap inner type in Result<T, E> where E is a type parameter.
+                // This gives the closure an expected return type so Err/Ok can qualify.
+                let result_ty: syn::Type = parse_quote!(Result<#inner_ty, E>);
+                return Some(result_ty);
+            } else {
+                return Some(inner_ty);
+            }
+        }
+
         let receiver_ty = self.infer_simple_expr_type(receiver)?;
         let syn::Type::Path(tp) = receiver_ty else {
             return None;
@@ -22924,6 +22962,22 @@ impl CodeGen {
                 } else {
                     self.match_expr_unreachable_fallback().to_string()
                 }
+            }
+            syn::Expr::Closure(closure) => {
+                // Propagate expected return type to closure body emission.
+                // The expected type (e.g. Result<T, E> for get_or_try_init) must be
+                // pushed AFTER the closure's own output hint so it takes precedence
+                // during Err/Ok qualification in the lambda body.
+                // Create an inner context that inherits from self, then push the expected
+                // return type hint. emit_closure_to_string_with_param_scopes internally
+                // creates its own inner context which clears hints, so we push on the
+                // intermediate context here (one level above what the closure emits into).
+                let mut inner = self.new_inner_for_block();
+                if let Some(t) = expected_ty {
+                    let rt = syn::ReturnType::Type(Default::default(), Box::new(t.clone()));
+                    inner.push_return_type_hint(&rt);
+                }
+                inner.emit_closure_to_string_with_param_scopes(closure, None, None)
             }
             _ => self.emit_expr_to_string(expr),
         }
