@@ -24401,13 +24401,42 @@ impl CodeGen {
         }
     }
 
+    /// Returns true if `ty` looks like a type parameter (e.g., `T`, `F`, `E`).
+    /// These are single-segment paths with an uppercase-first-identifier — Rust's
+    /// convention for type parameter names. Type parameters are not valid C++
+    /// template arguments, so we skip them and fall through to decltype inference.
+    fn is_type_parameter(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0]
+                        .ident
+                        .to_string()
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+            }
+            syn::Type::Reference(r) => Self::is_type_parameter(&r.elem),
+            syn::Type::Paren(p) => Self::is_type_parameter(&p.elem),
+            syn::Type::Group(g) => Self::is_type_parameter(&g.elem),
+            _ => false,
+        }
+    }
+
     fn infer_hint_type_from_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
         let expr = self.peel_paren_group_expr(expr);
         match expr {
             syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
-                self.lookup_local_binding_type(&name)
+                // Try local binding type, but skip it if it's a type parameter.
+                // Type parameters (e.g., T, F, E) are not valid C++ template args —
+                // falling through to decltype-based inference is better.
+                let local_binding_ty = self
+                    .lookup_local_binding_type(&name)
+                    .filter(|ty| !Self::is_type_parameter(ty));
+                local_binding_ty
                     .or_else(|| self.lookup_local_placeholder_type_hint(&name).cloned())
                     .or_else(|| {
                         Some(syn::Type::Path(syn::TypePath {
