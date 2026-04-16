@@ -22971,13 +22971,18 @@ impl CodeGen {
                 // Create an inner context that inherits from self, then push the expected
                 // return type hint. emit_closure_to_string_with_param_scopes internally
                 // creates its own inner context which clears hints, so we push on the
-                // intermediate context here (one level above what the closure emits into).
+                // Create an inner context (for mutability to push hints).
                 let mut inner = self.new_inner_for_block();
-                if let Some(t) = expected_ty {
-                    let rt = syn::ReturnType::Type(Default::default(), Box::new(t.clone()));
-                    inner.push_return_type_hint(&rt);
-                }
-                inner.emit_closure_to_string_with_param_scopes(closure, None, None)
+                // Push the expected return type as a syn::ReturnType for the closure body.
+                let expected_rt = expected_ty.map(|t| {
+                    syn::ReturnType::Type(Default::default(), Box::new(t.clone()))
+                });
+                inner.emit_closure_to_string_with_param_scopes(
+                    closure,
+                    None,
+                    None,
+                    expected_rt.as_ref(),
+                )
             }
             _ => self.emit_expr_to_string(expr),
         }
@@ -26482,8 +26487,29 @@ impl CodeGen {
             );
             if let Some(expected) = resolved_hint {
                 let expected_cpp = self.map_type(expected);
-                if expected_cpp.starts_with("rusty::Result<") {
+                if expected_cpp.starts_with("rusty::Result<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
                     return format!("{}::Ok({})", expected_cpp, arg);
+                }
+                // map_type may produce "Result<...>" (without rusty:: prefix) when Result
+                // isn't a locally declared type. If the ok type T is concrete (not a type
+                // parameter in scope), we can still construct rusty::Result<...>::Ok(...).
+                if expected_cpp.starts_with("Result<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    if let Some(t_type) = self.expected_result_type_arg(resolved_hint, 0) {
+                        let t_mapped = self.map_type(t_type);
+                        let t_is_concrete = !matches!(t_type, syn::Type::Infer(_))
+                            && !self.is_type_param_in_scope(&t_mapped);
+                        if t_is_concrete {
+                            let e_mapped = self
+                                .expected_result_type_arg(resolved_hint, 1)
+                                .map(|e| self.map_type(e))
+                                .unwrap_or_else(|| "auto".to_string());
+                            return format!("rusty::Result<{}, {}>::Ok({})", t_mapped, e_mapped, arg);
+                        }
+                    }
                 }
                 if expected_cpp == "rusty::fmt::Result" {
                     return format!("{}::Ok({})", expected_cpp, arg);
@@ -26506,8 +26532,29 @@ impl CodeGen {
             );
             if let Some(expected) = resolved_hint {
                 let expected_cpp = self.map_type(expected);
-                if expected_cpp.starts_with("rusty::Result<") {
+                if expected_cpp.starts_with("rusty::Result<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
                     return format!("{}::Err({})", expected_cpp, arg);
+                }
+                // map_type may produce "Result<...>" (without rusty:: prefix) when Result
+                // isn't a locally declared type. If the error type E is concrete (not a type
+                // parameter in scope), we can still construct rusty::Result<...>::Err(...).
+                if expected_cpp.starts_with("Result<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    if let Some(e_type) = self.expected_result_type_arg(resolved_hint, 1) {
+                        let e_mapped = self.map_type(e_type);
+                        let e_is_concrete = !matches!(e_type, syn::Type::Infer(_))
+                            && !self.is_type_param_in_scope(&e_mapped);
+                        if e_is_concrete {
+                            let t_mapped = self
+                                .expected_result_type_arg(resolved_hint, 0)
+                                .map(|t| self.map_type(t))
+                                .unwrap_or_else(|| "auto".to_string());
+                            return format!("rusty::Result<{}, {}>::Err({})", t_mapped, e_mapped, arg);
+                        }
+                    }
                 }
                 if expected_cpp == "rusty::fmt::Result" {
                     return format!("{}::Err({})", expected_cpp, arg);
@@ -32778,7 +32825,7 @@ impl CodeGen {
     /// - Type paths / constants (ALL_CAPS names)
     /// Emit a closure expression as a C++ lambda.
     fn emit_closure_to_string(&self, closure: &syn::ExprClosure) -> String {
-        self.emit_closure_to_string_with_param_scopes(closure, None, None)
+        self.emit_closure_to_string_with_param_scopes(closure, None, None, None)
     }
 
     fn emit_closure_to_string_with_iterator_map_context(
@@ -32786,7 +32833,7 @@ impl CodeGen {
         closure: &syn::ExprClosure,
     ) -> String {
         let param_scope = self.collect_closure_param_names_for_scope(closure);
-        self.emit_closure_to_string_with_param_scopes(closure, Some(param_scope), None)
+        self.emit_closure_to_string_with_param_scopes(closure, Some(param_scope), None, None)
     }
 
     fn emit_closure_to_string_with_char_predicate_context(
@@ -32798,6 +32845,7 @@ impl CodeGen {
             closure,
             None,
             Some(char_predicate_param_scope),
+            None,
         )
     }
 
@@ -32806,6 +32854,7 @@ impl CodeGen {
         closure: &syn::ExprClosure,
         map_param_scope: Option<HashSet<String>>,
         char_predicate_param_scope: Option<HashSet<String>>,
+        expected_return_type: Option<&syn::ReturnType>,
     ) -> String {
         let untyped_param_scope = self.collect_untyped_closure_param_names_for_scope(closure);
         let is_move_closure = closure.capture.is_some();
@@ -32870,6 +32919,12 @@ impl CodeGen {
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
                 inner.push_return_type_hint(&closure.output);
+                // If we have an additional expected return type from outer context
+                // (e.g. Result<T, E> from get_or_try_init), push it on top so it
+                // overrides the closure's own hint for Err/Ok qualification.
+                if let Some(expected_rt) = expected_return_type {
+                    inner.push_return_type_hint(expected_rt);
+                }
                 inner.emit_block(&block.block);
                 let mut body_str = inner.into_output();
                 if !closure_param_prelude.is_empty() {
@@ -32892,6 +32947,12 @@ impl CodeGen {
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
                 inner.push_return_type_hint(&closure.output);
+                // If we have an additional expected return type from outer context
+                // (e.g. Result<T, E> from get_or_try_init), push it on top so it
+                // overrides the closure's own hint for Err/Ok qualification.
+                if let Some(expected_rt) = expected_return_type {
+                    inner.push_return_type_hint(expected_rt);
+                }
                 let body = inner.emit_expr_to_string(&closure.body);
                 if closure_param_prelude.is_empty() {
                     format!(
