@@ -4031,7 +4031,7 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - Sub-task 5.1.106.2: "template argument 2 is invalid" (20 errors) - Lazy<T, F> where F (closure type) can't be inferred. Deep architectural.
           - Sub-task 5.1.106.3: "'Box' used without template arguments" (12 errors) - Box::new_() in nested closures still missing template args. Remaining inference gap.
           - Sub-task 5.1.106.4: "invalid use of void expression" (10 errors) - Closures returning () wrapped in Ok(Result<T, E>) incorrectly. Void-to-Result wrapping needs fix.
-          - Sub-task 5.1.106.5: "'Err' was not declared" (5 errors) - Unqualified Err/Ok in lambda bodies. Partial fix from 5.1.102 but more cases exist.
+          - Sub-task 5.1.106.5: "'Err' was not declared" (5 errors) - Fixed by emitting rusty::Err(...) instead of Err(...) as fallback when expected type is unknown. Partial fix applied - 3 insertions.
           - Sub-task 5.1.106.6: "'Ok<<expression error>>'" (4 errors) - Ok/Err with malformed type args from inference chain failures.
           - Sub-task 5.1.106.7: "no matching function for get_or_try_init" (15 errors) - Const vs non-const method signature mismatch, closure type deduction failure.
           - Sub-task 5.1.106.8: "use of deleted function" (14 errors) - Copy constructor used on move-only types (Box, Vec, String). Need to emit std::move() in more places.
