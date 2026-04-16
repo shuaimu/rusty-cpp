@@ -26640,7 +26640,9 @@ impl CodeGen {
             if let Some(args) = self.lookup_constructor_template_args("Err") {
                 return format!("rusty::Result<{}, {}>::Err({})", args[0], args[1], arg);
             }
-            return format!("Err({})", arg);
+            // Fallback for unqualified Err(...) - prefix with rusty:: since we know
+            // Result is always in rusty:: namespace and plain Err is not valid C++.
+            return format!("rusty::Err({})", arg);
         }
         if let Some(emitted) = self.try_emit_omitted_assoc_static_call_with_arg_decltype(call) {
             return emitted;
