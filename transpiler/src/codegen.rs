@@ -26025,6 +26025,51 @@ impl CodeGen {
                 }
             }
         }
+        // Lower static-style Box::from_raw(ptr) to receiver-form into_raw().
+        // This avoids fragile owner-template recovery when the pointer argument
+        // type is only available as a placeholder-like surface.
+        if let syn::Expr::Path(func_path) = call.func.as_ref() {
+            if call.args.len() == 1 && func_path.path.segments.len() >= 2 {
+                let owner = func_path.path.segments.iter().nth_back(1);
+                let method = func_path.path.segments.last();
+                if matches!(
+                    owner.map(|seg| seg.ident.to_string()).as_deref(),
+                    Some("Box")
+                ) && matches!(
+                    method.map(|seg| seg.ident.to_string()).as_deref(),
+                    Some("from_raw")
+                ) {
+                    // Infer template arg from the pointer argument's pointee type.
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg_ty| {
+                            let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+                            match arg_ty {
+                                // T* → Box<T>
+                                syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                                _ => None,
+                            }
+                        })
+                        .or_else(|| {
+                            // Fallback: try decltype of the argument expression
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_pointer_t<std::remove_reference_t<decltype(({}))>>", arg_cpp)
+                            })
+                        });
+                    if let Some(inner) = inferred {
+                        let ptr_arg = self.emit_expr_maybe_move(&call.args[0]);
+                        let boxed_cpp = format!("rusty::Box<{}>", inner);
+                        return format!("{}::from_raw({})", boxed_cpp, ptr_arg);
+                    }
+                    // Fallback: emit with the pointer argument as-is
+                    let ptr_arg = self.emit_expr_maybe_move(&call.args[0]);
+                    return format!("rusty::Box::from_raw({})", ptr_arg);
+                }
+            }
+        }
         // Lower static-style Box::into_raw(value) to receiver-form into_raw().
         // This avoids fragile owner-template recovery when the value expression
         // type is only available as a local placeholder-like surface.
@@ -42381,7 +42426,7 @@ mod tests {
     #[test]
     fn test_box_new_mapping() {
         let out = transpile_str("fn f() { let b = Box::new(42); }");
-        assert!(out.contains("rusty::Box::new_(42)"));
+        assert!(out.contains("rusty::Box::new_(42)"), "expected rusty::Box::new_(42), got:\n{}", out);
     }
 
     #[test]
@@ -47451,6 +47496,42 @@ mod tests {
         assert!(!out.contains("Box::from_raw("), "{out}");
         assert!(!out.contains("Box::into_raw("), "{out}");
         assert!(!out.contains("Box<val>::into_raw("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5100100_box_from_raw_nullptr_infers_template_arg() {
+        // Box::from_raw from null pointer - template arg should be inferred
+        // from the expected return type context.
+        let out = transpile_str(
+            r#"
+            fn make_null_box<T>() -> Box<T> {
+                unsafe { Box::from_raw(std::ptr::null_mut()) }
+            }
+            "#,
+        );
+        // Should emit Box<T>::from_raw() with template arg from expected type.
+        assert!(
+            out.contains("Box<") && out.contains("::from_raw("),
+            "expected Box<T>::from_raw pattern, got:\n{}", out
+        );
+        assert!(!out.contains("Box::from_raw("), "should not emit bare Box::from_raw, got:\n{}", out);
+    }
+
+    #[test]
+    fn test_leaf5100101_box_from_raw_with_explicit_template() {
+        // Box::from_raw with explicit type parameter should still work.
+        let out = transpile_str(
+            r#"
+            fn from_explicit() {
+                let p = std::ptr::null_mut::<i32>();
+                let _ = unsafe { Box::<i32>::from_raw(p) };
+            }
+            "#,
+        );
+        assert!(
+            out.contains("Box<") && out.contains("::from_raw("),
+            "expected Box<T>::from_raw pattern, got:\n{}", out
+        );
     }
 
     #[test]
