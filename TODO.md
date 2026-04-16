@@ -4027,6 +4027,15 @@ Work on tasks defined in TODO.md. Repeat the following steps, don’t stop until
           - [x] *done* Leaf 5.1.104: Fix `Result<&T, E>` forming pointer to reference. Used `std::remove_reference_t<T>` in `ok_ref()`/`as_ref()`/`as_mut()` to avoid pointer-to-reference.
           - [x] *done* Leaf 5.1.105: Fix namespace mappings. Added `sync → sync_mod` rename in using declarations, `thread::scope`/`sleep` mapping, `std::time::Duration` runtime stub, `std::time/path/ffi` → `rusty::` expression path mapping. Also emit `const auto&` for `get_or_init`/`wait`/`force` reference-returning methods.
           - [ ] Leaf 5.1.106: Fix remaining ~306 errors (deep architectural: void-returning closures wrapped in Ok(), template inference without usage, `get_or_try_init` signatures) and re-run matrix to verify 9/9 pass
+          - Sub-task 5.1.106.1: "template argument 1 is invalid" (53 errors) - OnceCell::from/OnceBox::from/with_value cascading inference failures. Root cause: closures inside get_or_init don't provide expected type context. Deep architectural - requires multi-pass inference.
+          - Sub-task 5.1.106.2: "template argument 2 is invalid" (20 errors) - Lazy<T, F> where F (closure type) can't be inferred. Deep architectural.
+          - Sub-task 5.1.106.3: "'Box' used without template arguments" (12 errors) - Box::new_() in nested closures still missing template args. Remaining inference gap.
+          - Sub-task 5.1.106.4: "invalid use of void expression" (10 errors) - Closures returning () wrapped in Ok(Result<T, E>) incorrectly. Void-to-Result wrapping needs fix.
+          - Sub-task 5.1.106.5: "'Err' was not declared" (5 errors) - Unqualified Err/Ok in lambda bodies. Partial fix from 5.1.102 but more cases exist.
+          - Sub-task 5.1.106.6: "'Ok<<expression error>>'" (4 errors) - Ok/Err with malformed type args from inference chain failures.
+          - Sub-task 5.1.106.7: "no matching function for get_or_try_init" (15 errors) - Const vs non-const method signature mismatch, closure type deduction failure.
+          - Sub-task 5.1.106.8: "use of deleted function" (14 errors) - Copy constructor used on move-only types (Box, Vec, String). Need to emit std::move() in more places.
+          - Sub-task 5.1.106.9: Other (~171 errors) - operator== mismatches, namespace collisions, incomplete types.
         - [x] *done* Expand matrix harness/CI coverage from seven crates to ten crates and add harness regression checks for the new matrix shape
           - Added matrix entries/version pins for `smallvec`, `itertools`, and `once_cell` in `tests/transpile_tests/run_parity_matrix.sh` and `tests/transpile_tests/run_tests.sh`
           - Extended CI parity artifact upload paths and parity harness assertions for the ten-crate list
