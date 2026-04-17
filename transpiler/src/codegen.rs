@@ -10640,12 +10640,36 @@ impl CodeGen {
             let syn::Stmt::Local(local) = stmt else {
                 continue;
             };
-            if get_local_type(local).is_some() || local.init.is_some() {
+            if get_local_type(local).is_some() {
                 continue;
             }
             let Some(name) = local_binding_name(local) else {
                 continue;
             };
+            // Uninitialized locals (let x;) are always candidates.
+            // Initialized locals are candidates only when the initializer is a
+            // generic constructor call whose type args could not be resolved
+            // (e.g., `let cell = OnceCell::new();` where T is unknown).
+            if let Some(init) = &local.init {
+                let Some(owner_target) = call_owner_placeholder_target(&init.expr) else {
+                    continue;
+                };
+                // Only include if the inferred type was not already resolved
+                // (i.e., the initializer still has an unbound type param).
+                if let Some(inferred) =
+                    self.infer_local_binding_type_from_initializer(&init.expr)
+                {
+                    if !self.type_contains_infer(&inferred) {
+                        continue; // T was already resolved, not a candidate
+                    }
+                }
+                // Double-check: if a placeholder hint was already collected for
+                // this name during an earlier scan pass, skip it.
+                if self.lookup_local_placeholder_type_hint(&name).is_some() {
+                    continue;
+                }
+                let _ = owner_target; // used above for filtering
+            }
             candidates.insert(name);
         }
         if candidates.is_empty() {
@@ -10711,7 +10735,9 @@ impl CodeGen {
                             .infer_local_binding_type_from_initializer(&assign.right)
                             .or_else(|| self.infer_simple_expr_type(&assign.right))
                         {
-                            if !self.type_contains_infer(&rhs_ty) {
+                            if !self.type_contains_infer(&rhs_ty)
+                                && !self.type_contains_in_scope_type_param(&rhs_ty)
+                            {
                                 hints.insert(name, rhs_ty);
                             }
                         }
@@ -10867,7 +10893,9 @@ impl CodeGen {
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
-            if self.type_contains_infer(&expected_ty) {
+            if self.type_contains_infer(&expected_ty)
+                || self.type_contains_in_scope_type_param(&expected_ty)
+            {
                 continue;
             }
             hints.insert(name, expected_ty);
@@ -10929,6 +10957,8 @@ impl CodeGen {
         hints: &mut HashMap<String, syn::Type>,
     ) {
         let method_name = method_call.method.to_string();
+
+        // Phase 1: check if any argument is a candidate (existing logic)
         for (idx, arg) in method_call.args.iter().enumerate() {
             let Some(name) = extract_simple_local_ident(arg) else {
                 continue;
@@ -10948,10 +10978,110 @@ impl CodeGen {
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
-            if self.type_contains_infer(&expected_ty) {
+            if self.type_contains_infer(&expected_ty)
+                || self.type_contains_in_scope_type_param(&expected_ty)
+            {
                 continue;
             }
             hints.insert(name, expected_ty);
+        }
+
+        // Phase 2: check if the receiver is a candidate and infer owner type
+        // from the method call.  For example, `cell.set(42)` where `cell` is
+        // a candidate initialized with `OnceCell::new()` → infer `OnceCell<i32>`.
+        if let Some(receiver_name) = extract_simple_local_ident(&method_call.receiver) {
+            if candidates.contains(&receiver_name) && !hints.contains_key(&receiver_name) {
+                if let Some(owner_ty) = self.infer_owner_type_from_method_usage(
+                    &receiver_name,
+                    &method_name,
+                    &method_call.args,
+                ) {
+                    if !self.type_contains_infer(&owner_ty)
+                        && !self.type_contains_in_scope_type_param(&owner_ty)
+                    {
+                        hints.insert(receiver_name, owner_ty);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Given a method call on a candidate local (e.g., `cell.set(42)` where
+    /// `cell` was initialized with `OnceCell::new()`), try to infer the full
+    /// owner type (e.g., `OnceCell<i32>`) from the method name and arguments.
+    fn infer_owner_type_from_method_usage(
+        &self,
+        _receiver_name: &str,
+        method_name: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    ) -> Option<syn::Type> {
+        // For methods that accept the element type as their first argument,
+        // we can infer T from the argument's type.
+        // OnceCell/OnceBox/Lazy: set(T), get_or_init(|| T), get_or_try_init(|| Result<T, E>)
+        // Box: not typically called as methods (Box::new is a static call)
+        // Vec: push(T), insert(_, T)
+        match method_name {
+            "set" | "push" | "try_push" => {
+                let arg = args.first()?;
+                let arg_ty = self.infer_simple_expr_type(arg)?;
+                Some(parse_quote!(OnceCell<#arg_ty>))
+            }
+            "get_or_init" => {
+                // The closure argument returns T
+                let arg = args.first()?;
+                let ret_ty = self.infer_closure_return_type(arg)?;
+                Some(parse_quote!(OnceCell<#ret_ty>))
+            }
+            "get_or_try_init" => {
+                // The closure argument returns Result<T, E>
+                let arg = args.first()?;
+                let ret_ty = self.infer_closure_return_type(arg)?;
+                // Extract T from Result<T, E> if possible
+                if let syn::Type::Path(tp) = &ret_ty {
+                    if let Some(last) = tp.path.segments.last() {
+                        if last.ident == "Result" {
+                            if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
+                                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                                    return Some(parse_quote!(OnceCell<#inner>));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(parse_quote!(OnceCell<#ret_ty>))
+            }
+            "insert" | "try_insert" => {
+                // insert(index, T) — T is the second argument
+                let arg = args.get(1)?;
+                let arg_ty = self.infer_simple_expr_type(arg)?;
+                Some(parse_quote!(OnceCell<#arg_ty>))
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to infer the return type of a closure expression.
+    fn infer_closure_return_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        match expr {
+            syn::Expr::Closure(closure) => {
+                // Check explicit return type annotation
+                if let syn::ReturnType::Type(_, ty) = &closure.output {
+                    return Some((**ty).clone());
+                }
+                // Infer from the body expression
+                self.infer_simple_expr_type(&closure.body)
+            }
+            syn::Expr::Call(call) => {
+                // If it's a call expression wrapping a closure, recurse
+                if let Some(arg) = call.args.first() {
+                    let inner = self.infer_closure_return_type(arg);
+                    if inner.is_some() {
+                        return inner;
+                    }
+                }
+                self.infer_simple_expr_type(expr)
+            }
+            _ => self.infer_simple_expr_type(expr),
         }
     }
 
@@ -17483,6 +17613,73 @@ impl CodeGen {
             syn::Type::Slice(s) => self.type_contains_infer(&s.elem),
             _ => false,
         }
+    }
+
+    /// Returns true if the type contains any in-scope type parameters
+    /// (e.g., `A`, `T`, `E` from the enclosing generic context).
+    /// Such types cannot be used as concrete template arguments.
+    /// Returns true if the type contains type parameters that are NOT in scope
+    /// (i.e., leaked from an outer context). Types with in-scope params are fine.
+    fn type_contains_in_scope_type_param(&self, ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                // Check each path segment's identifier
+                for seg in &tp.path.segments {
+                    let name = seg.ident.to_string();
+                    // If it's a valid type param in scope, that's fine — don't flag it.
+                    if self.is_type_param_in_scope(&name) || self.is_struct_type_param(&name) {
+                        continue;
+                    }
+                    // Reject unresolved single-segment uppercase names that look like
+                    // generic type params but aren't declared in the current scope.
+                    // For example, `A` from an enclosing struct's generic context
+                    // leaking into a free test function.
+                    // Only flag single-letter names that are NOT known concrete types.
+                    if name.len() == 1 && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        && !self.local_declared_types.contains(&name)
+                        && !self.declared_item_names.contains(&name)
+                    {
+                        return true;
+                    }
+                }
+                // Check generic arguments recursively
+                tp.path.segments.iter().any(|seg| match &seg.arguments {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner) => {
+                                self.type_contains_in_scope_type_param(inner)
+                            }
+                            _ => false,
+                        })
+                    }
+                    _ => false,
+                })
+            }
+            syn::Type::Reference(r) => self.type_contains_in_scope_type_param(&r.elem),
+            syn::Type::Paren(p) => self.type_contains_in_scope_type_param(&p.elem),
+            syn::Type::Group(g) => self.type_contains_in_scope_type_param(&g.elem),
+            syn::Type::Tuple(t) => {
+                t.elems.iter().any(|elem| self.type_contains_in_scope_type_param(elem))
+            }
+            syn::Type::Array(a) => self.type_contains_in_scope_type_param(&a.elem),
+            syn::Type::Slice(s) => self.type_contains_in_scope_type_param(&s.elem),
+            syn::Type::Infer(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if `name` is a type parameter of the current struct
+    /// (e.g., `A` in `impl<A: Array> SmallVec<A>` when emitting SmallVec methods).
+    fn is_struct_type_param(&self, name: &str) -> bool {
+        if let Some(struct_name) = &self.current_struct {
+            let key = self.scoped_type_key(struct_name);
+            if let Some(params) = self.declared_type_params.get(struct_name)
+                .or_else(|| self.declared_type_params.get(&key))
+            {
+                return params.iter().any(|p| p == name);
+            }
+        }
+        false
     }
 
     fn substitute_owner_infer_with_hint(
@@ -33021,12 +33218,16 @@ impl CodeGen {
                 inner.return_value_scopes.clear();
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
-                inner.push_return_type_hint(&closure.output);
+                if inner.should_push_return_type_hint_for_closure(&closure.output) {
+                    inner.push_return_type_hint(&closure.output);
+                }
                 // If we have an additional expected return type from outer context
                 // (e.g. Result<T, E> from get_or_try_init), push it on top so it
                 // overrides the closure's own hint for Err/Ok qualification.
                 if let Some(expected_rt) = expected_return_type {
-                    inner.push_return_type_hint(expected_rt);
+                    if inner.should_push_return_type_hint_for_closure(expected_rt) {
+                        inner.push_return_type_hint(expected_rt);
+                    }
                 }
                 inner.emit_block(&block.block);
                 let mut body_str = inner.into_output();
@@ -33049,12 +33250,16 @@ impl CodeGen {
                 inner.return_value_scopes.clear();
                 inner.return_type_hints.clear();
                 inner.push_return_value_scope("auto");
-                inner.push_return_type_hint(&closure.output);
+                if inner.should_push_return_type_hint_for_closure(&closure.output) {
+                    inner.push_return_type_hint(&closure.output);
+                }
                 // If we have an additional expected return type from outer context
                 // (e.g. Result<T, E> from get_or_try_init), push it on top so it
                 // overrides the closure's own hint for Err/Ok qualification.
                 if let Some(expected_rt) = expected_return_type {
-                    inner.push_return_type_hint(expected_rt);
+                    if inner.should_push_return_type_hint_for_closure(expected_rt) {
+                        inner.push_return_type_hint(expected_rt);
+                    }
                 }
                 let body = inner.emit_expr_to_string(&closure.body);
                 if closure_param_prelude.is_empty() {
@@ -34062,6 +34267,25 @@ impl CodeGen {
 
     fn current_return_type_hint(&self) -> Option<&syn::Type> {
         self.return_type_hints.last().and_then(|hint| hint.as_ref())
+    }
+
+    // In module mode, trait-object error surfaces like `Box<dyn Error>` are
+    // currently erased to `void*`. For closure lambdas with `auto` return type,
+    // forcing that erased Result hint breaks `?` lowering (`RUSTY_TRY_INTO` can
+    // no longer convert concrete errors into `void*`). In that case, keep the
+    // legacy inferred Result constructor path by skipping the explicit hint.
+    fn should_push_return_type_hint_for_closure(&self, output: &syn::ReturnType) -> bool {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return true;
+        };
+        let Some(err_ty) = self.expected_result_type_arg(Some(ty), 1) else {
+            return true;
+        };
+        let mapped_err = self.map_type(err_ty);
+        if !matches!(mapped_err.as_str(), "void*" | "const void*") {
+            return true;
+        }
+        !type_contains_trait_object(err_ty)
     }
 
     fn current_try_macro(&self) -> &'static str {
@@ -37236,6 +37460,28 @@ fn type_has_generic_placeholder(ty: &syn::Type) -> bool {
         syn::Type::Tuple(t) => t.elems.iter().any(type_has_generic_placeholder),
         syn::Type::Array(a) => type_has_generic_placeholder(&a.elem),
         syn::Type::Slice(s) => type_has_generic_placeholder(&s.elem),
+        _ => false,
+    }
+}
+
+fn type_contains_trait_object(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::TraitObject(_) => true,
+        syn::Type::Path(tp) => tp.path.segments.iter().any(|seg| match &seg.arguments {
+            syn::PathArguments::AngleBracketed(args) => {
+                args.args.iter().any(|arg| match arg {
+                    syn::GenericArgument::Type(inner) => type_contains_trait_object(inner),
+                    _ => false,
+                })
+            }
+            _ => false,
+        }),
+        syn::Type::Reference(r) => type_contains_trait_object(&r.elem),
+        syn::Type::Paren(p) => type_contains_trait_object(&p.elem),
+        syn::Type::Group(g) => type_contains_trait_object(&g.elem),
+        syn::Type::Tuple(t) => t.elems.iter().any(type_contains_trait_object),
+        syn::Type::Array(a) => type_contains_trait_object(&a.elem),
+        syn::Type::Slice(s) => type_contains_trait_object(&s.elem),
         _ => false,
     }
 }
@@ -46075,6 +46321,24 @@ mod tests {
         assert!(out.contains("RUSTY_TRY_INTO(v.try_push_str("));
         assert!(out.contains(", rusty::Result<ArrayString, CapErr>)"));
         assert!(!out.contains("rusty::Result<std::tuple<>, CapErr> try_from_str"));
+    }
+
+    #[test]
+    fn test_leaf415433333333281_closure_box_dyn_error_try_avoids_erased_void_ptr_hint() {
+        let out = transpile_str(
+            r#"
+            fn g() -> Result<(), i32> { Ok(()) }
+            fn f() {
+                let _ = || -> Result<(), Box<dyn std::error::Error>> {
+                    g()?;
+                    Ok(())
+                }();
+            }
+        "#,
+        );
+        assert!(out.contains("RUSTY_TRY("), "{out}");
+        assert!(!out.contains("RUSTY_TRY_INTO("), "{out}");
+        assert!(!out.contains("rusty::Result<std::tuple<>, void*>::Ok"), "{out}");
     }
 
     // ── Phase 11: Doc comments, tests, build integration ────────
