@@ -1290,6 +1290,17 @@ private:
 };
 ```
 
+#### Why `Task<T>` and not `Future<T>`?
+
+Rust has two layers:
+
+- `Future` is a trait (`poll(...)` contract).
+- `async fn` returns a concrete compiler-generated state-machine type (`impl Future`).
+
+In this runtime, `Task<T>` is that concrete state-machine owner (coroutine handle + `poll` + awaiter support), so the transpiler maps `async fn` to `rusty::Task<...>` directly.
+
+Using `Task` also avoids confusion with `std::future`, which has different semantics from Rust's poll-based `Future`.
+
 #### Executor — The Event Loop (like tokio)
 
 ```cpp
