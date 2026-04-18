@@ -1163,28 +1163,65 @@ This is consistent with the forward correctness guarantee: if Rust's borrow chec
 
 ### 3.8 Async/Await → Pollable State Machine on C++20 Coroutines
 
-Rust's async model is a lazy, poll-based state machine. C++20 coroutines provide the state machine generation, but default to eager execution. The transpiler builds Rust's poll model on top of C++20 coroutines by customizing the `promise_type`.
+Start from Rust semantics, then map to C++:
+
+#### Rust Async Model First
+
+Rust async is trait-based and poll-driven:
+
+```rust
+pub trait Future {
+    type Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>;
+}
+```
+
+Key properties:
+
+- `async fn` does not run immediately. It returns a lazy future value.
+- The compiler lowers `async fn` into a stackless state machine that captures locals across suspension points.
+- Each call to `poll(...)` advances that state machine until:
+  - it reaches another suspension point (`Poll::Pending`), or
+  - it finishes (`Poll::Ready(output)`).
+- For `Future`, `Poll::Ready` is terminal (complete). `Poll::Pending` is not complete.
+- Progress after `Pending` depends on the `Waker` in `Context`; the runtime/executor re-polls when wake is signaled.
+
+In short: Rust async is "lazy state machine + explicit polling contract", not "spawned thread" and not eager execution.
+
+With that contract as the source of truth, C++20 coroutines are used as the codegen mechanism for the same state-machine shape.
 
 #### Core Types
 
 ```cpp
 #include <coroutine>
 #include <functional>
+#include <utility>
 
 // Poll<T> — Rust's Poll enum
 template<typename T>
 struct Poll {
-    rusty::Option<T> value;  // None = Pending, Some = Ready
+    bool ready;
+    T value;
 
-    static Poll ready(T v) { return Poll{rusty::Option<T>::some(std::move(v))}; }
-    static Poll pending()  { return Poll{rusty::Option<T>::none()}; }
-    bool is_ready() const  { return value.is_some(); }
+    static Poll ready_with(T v) { return Poll{true, std::move(v)}; }
+    static Poll pending() { return Poll{false, T{}}; }
+    bool is_ready() const { return ready; }
+    bool is_pending() const { return !ready; }
+};
+
+template<>
+struct Poll<void> {
+    bool ready;
+    static Poll ready_with() { return Poll{true}; }
+    static Poll pending() { return Poll{false}; }
+    bool is_ready() const { return ready; }
+    bool is_pending() const { return !ready; }
 };
 
 // Waker — notification callback for IO readiness
 struct Waker {
     std::function<void()> wake_fn;
-    void wake() { if (wake_fn) wake_fn(); }
+    void wake() const { if (wake_fn) wake_fn(); }
 };
 
 struct Context {
@@ -1199,8 +1236,9 @@ template<typename T>
 class Task {
 public:
     struct promise_type {
-        rusty::Option<T> result;
+        T result{};
         Context* current_ctx = nullptr;
+        std::coroutine_handle<> continuation{};
 
         Task get_return_object() {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
@@ -1210,30 +1248,44 @@ public:
         std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
 
-        void return_value(T value) {
-            result = rusty::Option<T>::some(std::move(value));
-        }
+        void return_value(T value) { result = std::move(value); }
         void unhandled_exception() { std::terminate(); }
     };
 
     // poll() — drives the state machine one step (like Rust's Future::poll)
     Poll<T> poll(Context& cx) {
-        if (handle_.done()) {
-            return Poll<T>::ready(std::move(*handle_.promise().result));
+        if (!handle_ || handle_.done()) {
+            return Poll<T>::ready_with(std::move(handle_.promise().result));
         }
         handle_.promise().current_ctx = &cx;
         handle_.resume();  // runs until next co_await or co_return
         if (handle_.done()) {
-            return Poll<T>::ready(std::move(*handle_.promise().result));
+            return Poll<T>::ready_with(std::move(handle_.promise().result));
         }
         return Poll<T>::pending();
     }
 
+    // Awaiter support: makes Task<T> co_await-able
+    bool await_ready() const { return handle_.done(); }
+    void await_suspend(std::coroutine_handle<> caller) {
+        handle_.promise().continuation = caller;
+    }
+    T await_resume() { return std::move(handle_.promise().result); }
+
     ~Task() { if (handle_) handle_.destroy(); }
-    Task(Task&& o) : handle_(std::exchange(o.handle_, nullptr)) {}
+    Task(Task&& o) noexcept : handle_(std::exchange(o.handle_, nullptr)) {}
+    Task& operator=(Task&& o) noexcept {
+        if (this != &o) {
+            if (handle_) handle_.destroy();
+            handle_ = std::exchange(o.handle_, nullptr);
+        }
+        return *this;
+    }
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
 
 private:
-    Task(std::coroutine_handle<promise_type> h) : handle_(h) {}
+    explicit Task(std::coroutine_handle<promise_type> h) : handle_(h) {}
     std::coroutine_handle<promise_type> handle_;
 };
 ```
@@ -1242,30 +1294,29 @@ private:
 
 ```cpp
 class Executor {
-    std::vector<std::function<Poll<void>(Context&)>> tasks;
-    std::queue<size_t> ready_queue;
-
 public:
     void spawn(Task<void> task) {
-        tasks.push_back([t = std::move(task)](Context& cx) mutable {
-            return t.poll(cx);
-        });
-        ready_queue.push(tasks.size() - 1);
+        tasks_.push_back(std::move(task));
+        ready_queue_.push(tasks_.size() - 1);
     }
 
     void run() {
-        while (!ready_queue.empty()) {
-            auto idx = ready_queue.front();
-            ready_queue.pop();
+        while (!ready_queue_.empty()) {
+            auto idx = ready_queue_.front();
+            ready_queue_.pop();
 
-            Waker waker{[this, idx]() { ready_queue.push(idx); }};
+            Waker waker{[this, idx]() { ready_queue_.push(idx); }};
             Context cx{&waker};
 
-            auto result = tasks[idx](cx);
+            auto result = tasks_[idx].poll(cx);
             // Pending → waker will re-enqueue when IO fires
             // Ready → task is done
         }
     }
+
+private:
+    std::vector<Task<void>> tasks_;
+    std::queue<size_t> ready_queue_;
 };
 ```
 
@@ -1280,12 +1331,16 @@ async fn fetch(url: &str) -> Result<String, Error> {
 ```
 
 ```cpp
-Task<rusty::Result<rusty::String, Error>> fetch(std::string_view url) {
+rusty::Task<rusty::Result<rusty::String, Error>> fetch(std::string_view url) {
     auto response = co_await client.get(url).send();
-    if (response.is_err()) co_return rusty::Result<rusty::String, Error>::err(response.unwrap_err());
+    if (response.is_err()) {
+        co_return rusty::Result<rusty::String, Error>::Err(response.unwrap_err());
+    }
     auto body = co_await response.unwrap().text();
-    if (body.is_err()) co_return rusty::Result<rusty::String, Error>::err(body.unwrap_err());
-    co_return rusty::Result<rusty::String, Error>::ok(body.unwrap());
+    if (body.is_err()) {
+        co_return rusty::Result<rusty::String, Error>::Err(body.unwrap_err());
+    }
+    co_return rusty::Result<rusty::String, Error>::Ok(body.unwrap());
 }
 ```
 
