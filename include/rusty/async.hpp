@@ -51,6 +51,14 @@ struct Context {
     Waker* waker;
 };
 
+// Thread-local context pointer set while a Task is being polled.
+// Awaiters can use this to register wake-ups instead of directly resuming handles.
+inline thread_local Context* current_context_tls = nullptr;
+
+inline Context* current_context() {
+    return current_context_tls;
+}
+
 // ── Task<T>: lazy coroutine future ─────────────────────────────
 template<typename T>
 class Task {
@@ -66,18 +74,38 @@ public:
 
         // KEY: suspend_always makes it LAZY — nothing runs until poll()
         std::suspend_always initial_suspend() { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
+        auto final_suspend() noexcept {
+            struct FinalAwaiter {
+                bool await_ready() noexcept { return false; }
+
+                void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                    auto continuation = h.promise().continuation;
+                    if (continuation) {
+                        continuation.resume();
+                    }
+                }
+
+                void await_resume() noexcept {}
+            };
+            return FinalAwaiter{};
+        }
 
         void return_value(T value) { result = std::move(value); }
         void unhandled_exception() { std::terminate(); }
     };
 
     Poll<T> poll(Context& cx) {
-        if (!handle_ || handle_.done()) {
+        if (!handle_) {
+            return Poll<T>::ready_with(T{});
+        }
+        if (handle_.done()) {
             return Poll<T>::ready_with(std::move(handle_.promise().result));
         }
         handle_.promise().current_ctx = &cx;
+        Context* prev_ctx = current_context_tls;
+        current_context_tls = &cx;
         handle_.resume();
+        current_context_tls = prev_ctx;
         if (handle_.done()) {
             return Poll<T>::ready_with(std::move(handle_.promise().result));
         }
@@ -114,13 +142,28 @@ class Task<void> {
 public:
     struct promise_type {
         Context* current_ctx = nullptr;
+        std::coroutine_handle<> continuation{};
 
         Task get_return_object() {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
         std::suspend_always initial_suspend() { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
+        auto final_suspend() noexcept {
+            struct FinalAwaiter {
+                bool await_ready() noexcept { return false; }
+
+                void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+                    auto continuation = h.promise().continuation;
+                    if (continuation) {
+                        continuation.resume();
+                    }
+                }
+
+                void await_resume() noexcept {}
+            };
+            return FinalAwaiter{};
+        }
 
         void return_void() {}
         void unhandled_exception() { std::terminate(); }
@@ -131,7 +174,10 @@ public:
             return Poll<void>::ready_with();
         }
         handle_.promise().current_ctx = &cx;
+        Context* prev_ctx = current_context_tls;
+        current_context_tls = &cx;
         handle_.resume();
+        current_context_tls = prev_ctx;
         if (handle_.done()) {
             return Poll<void>::ready_with();
         }
@@ -139,7 +185,7 @@ public:
     }
 
     bool await_ready() const { return handle_.done(); }
-    void await_suspend(std::coroutine_handle<>) {}
+    void await_suspend(std::coroutine_handle<> caller) { handle_.promise().continuation = caller; }
     void await_resume() {}
 
     ~Task() { if (handle_) handle_.destroy(); }
