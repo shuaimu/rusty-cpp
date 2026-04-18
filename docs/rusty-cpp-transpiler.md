@@ -2023,7 +2023,7 @@ This approach effectively lets Rust serve as a **safe DSL for C++** — write in
 This section replaces the previous leaf-by-leaf chronological log with a thematic integration of the same work.
 The goal is to keep the document aligned to Sections 1-9 (language model and design), while still preserving the practical implementation outcomes from parity work.
 
-Date baseline for this status snapshot: **April 5, 2026**.
+Date baseline for this status snapshot: **April 18, 2026**.
 
 ### 10.1 Crosswalk: Where the Former Appended Content Now Lives
 
@@ -2032,7 +2032,7 @@ Date baseline for this status snapshot: **April 5, 2026**.
 | Whole-crate transpilation planning and orchestration | §10.2, §10.3 | Current pipeline (`parity-test`), crate/module orchestration, stage model |
 | Real-crate gap fixing (`either`, expanded tests) | §10.4.1-§10.4.7, §10.5.1 | Import/path lowering, constructor/type-context recovery, pattern lowering, runtime shims |
 | Phase 18/20 leaf progress | §10.4, §10.5, §10.6 | Consolidated by technical theme instead of timeline |
-| Seven-crate matrix harness and CI behavior | §10.3.3, §10.5.2, §10.7 | Deterministic first-failure diagnostics, matrix execution contract |
+| Matrix harness and CI behavior | §10.3.3, §10.5.2, §10.7 | Deterministic first-failure diagnostics, matrix execution contract |
 | "Wrong approaches" checklist | §11 | Grouped design constraints tied to architecture decisions |
 
 #### 10.1.1 Former Section-Range Migration Map
@@ -2101,7 +2101,9 @@ The architecture from §6 is implemented with parity-driven hardening in the fol
 
 #### 10.3.2 Mid-End Lowering
 
-- Expected-type propagation was extended from typed `let` into assignment, return, and match-arm contexts.
+- Expected-type propagation now covers typed `let`, assignment, return, match-arm, and closure-body contexts.
+- Generic constructor call-site inference includes block-level forward scans for owner-placeholder locals and usage-driven recovery of missing template args.
+- Owner-placeholder recovery is wired for `OnceCell`/`OnceBox`/`Lazy`/`Box` constructor families (`new/new_`, `from`, `with_value`) with expected-type substitution; unresolved sites degrade to explicit `auto` placeholders instead of invalid partial specialization.
 - Constructor lowering was hardened for variant constructors, `Some/Ok/Err`, and omitted-template associated calls.
 - UFCS and trait-method call rewrites were narrowed to auditable patterns to avoid over-rewrites.
 
@@ -2156,6 +2158,9 @@ Integrated outcomes:
 - generic function-call argument expected-type recovery now specializes declared argument types with call-site template substitutions (explicit turbofish and inferred fn-path substitutions), preserving associated-type payload coercions.
 - tuple/option constructor coercion now uses typed constructor forms only in associated-type contexts that require it (`std::tuple<...>{...}` / `std::make_optional<...>(...)`); default emission remains `std::make_tuple(...)` / untyped `std::make_optional(...)` outside those contexts.
 - owner-template recovery now handles `SmallVec` explicit and omitted owner forms with nested infer placeholders (`[_; N]`-style), expected-type hints, and local usage hints so constructor/call lowering does not leak omitted-template C++ forms.
+- local owner-placeholder scans now use forward usage evidence (`set`, `get_or_init`, `get_or_try_init`, assignments, and associated-call argument positions) to backfill omitted generic args for earlier initializers.
+- `OnceCell`/`OnceBox` fallback inner-type inference scans the block for consistent initializer evidence and extracts `Result<T, E>` payloads for `get_or_try_init` closures.
+- expected owner substitution now resolves `_` and single-letter type params in associated-call argument hints, while `infer_hint_type_from_expr` skips unresolved type-parameter bindings to avoid leaking `T/F/E` into emitted C++ template args.
 
 Directly supports:
 
@@ -2204,6 +2209,8 @@ Integrated outcomes:
 - closure-body return-context handling was hardened to avoid regressions.
 - expression-block IIFE lowering now reuses shared statement/local emission paths (`emit_stmt`/`emit_local`) so local shadowing semantics in `{ let x = x; ... }` value-position blocks stay aligned with normal block lowering.
 - `if`-expression IIFE branch-tail lowering now propagates expected type through block-tail statement emission, so constructor/associated-call specialization remains context-correct inside typed branch expressions.
+- closure emission now pushes outer expected return hints into inner closure contexts when closure output is default/unresolved, which stabilizes `get_or_try_init(|| Err(...))` and related `Result`-returning lambdas.
+- `Ok/Err` qualification in closures now normalizes to `rusty::Ok`/`rusty::Err` (including unqualified and turbofish forms) with fail-early guardrails for unresolved constructor-context cases.
 
 Directly supports:
 
@@ -2224,6 +2231,8 @@ Integrated outcomes:
 - mixed optional-like surfaces in iterator/test-shape lowering now normalize `std::optional` receiver methods (`is_some`/`is_none`/`unwrap` → `has_value`/`!has_value`/`value`) while preserving runtime `Option` surfaces.
 - pointer-helper cast lowering now preserves reference payload address semantics even when pointer target types are emitted as alias forms (`std::add_pointer_t<...>`): reference-like cast sources are emitted as `&expr` before pointer-typed adaptation in generic cast/read paths.
 - runtime compatibility surfaces now include `rusty::mem::align_of<T>()`, `rusty::alloc::LayoutErr`, `Layout::from_size_align(...)`, `rusty::alloc::realloc(...)`, and `rusty::vec_extend_from_slice(...)` so expanded crate code no longer relies on missing memory/allocation/vector helper APIs.
+- receiver lowering for `get_or_init`/`wait`/`force` families now binds references explicitly so pointer/reference categories survive downstream method lowering.
+- this iteration also added shared runtime/transpiler surfaces for `Box::from_raw` template inference, `thread::scope`, `thread::sleep(Duration)`, `Barrier::new_`, `Barrier::wait() const`, `Result<const T&, E>` pointer-safety adaptation, and cross-type comparison helpers used by parity crates (`rusty::String` vs `std::string`, `NonZero<T>` equality).
 
 Directly supports:
 
@@ -2249,6 +2258,15 @@ Directly supports:
 - §2.6 Impl blocks
 - §6 Architecture (deterministic build artifacts)
 
+#### 10.4.8 April 12-18, 2026 Commit-Integrated Additions
+
+Integrated outcomes from `d67bf42..bb69a16`:
+
+- generic constructor/type-inference infrastructure and rollout to `OnceCell`/`OnceBox`/`Lazy`/`Box` owner placeholders (`b6c1137`, `1d3100d`, `0736977`, `c1e27c2`, `caa49d3`, `508fb20`, `c6ed939`, `e0c71fd`).
+- closure `Result` typing and `Ok/Err` qualification hardening for `get_or_try_init`/related lambda bodies (`6bb5e14`, `6d0c74b`, `45fe626`, `f989d5e`, `897e589`).
+- runtime/import/module-surface additions needed by parity expansion (`17c59ea`, `577cb20`, `a900f00`, `03b2cb6`, `c198aee`, `e5e3908`, `4e92c3e`, `5689a73`, `806001f`).
+- post-once_cell regression stabilization across transpiler/runtime parity surfaces (`060c66f`, `10d31da`, `ec41837`, `cc8e417`, `bb69a16`).
+
 ### 10.5 Parity Program Status
 
 #### 10.5.1 Phase 18 (`either`) Consolidated Outcome
@@ -2259,19 +2277,18 @@ Key result:
 
 - parity work moved from syntax/bootstrap blockers to semantic-shape correctness (constructors, match lowering, import/path/runtime surfaces), with repeated reprobe cycles until the first deterministic blocker family advanced.
 
-#### 10.5.2 Phase 20 (Seven-Crate Matrix) Consolidated Outcome
+#### 10.5.2 Phase 20+ (Nine-Crate Matrix) Consolidated Outcome
 
 Target matrix:
 
-- `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`
+- `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`, `smallvec`, `once_cell`
 
 Current observed matrix frontier:
 
-- latest full matrix run (`/tmp/rusty-parity-matrix-10-5-40-10o-1775915467`) now passes all seven crates (`pass=7`, `fail=0`).
-- latest verification rerun after lazy `if let` TRY-type-probe hardening (`/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200`) also passes all seven crates (`pass=7`, `fail=0`).
-- focused `bitflags` repro after Leaf 10.5.40.10 (`/tmp/rusty-parity-matrix-10-5-40-10n-1775915403`) passes (`pass=1`, `fail=0`).
-- the prior `bitflags` Stage E semantic/parsing/fmt frontier is removed by shared transpiler fixes in Leaf 10.5.40.10.
-- the prior `bitflags` Stage D `decltype((RUSTY_TRY_INTO(...)))` template-argument regression is removed by shared lazy if-let storage typing hardening (Leaf 10.5.40.11).
+- latest full g++ matrix run (`/tmp/rusty-parity-matrix-fix-20260418-gpp-all`) passes all nine crates (`pass=9`, `fail=0`).
+- focused `once_cell` g++ repro (`/tmp/rusty-parity-matrix-fix-20260418-once-gpp/once_cell`) passes (`75 passed`, `0 failed`).
+- latest full clang matrix repro (`/tmp/rusty-parity-matrix-fix-20260418-full-clang`) is `pass=8`, `fail=1` with remaining failure at `once_cell` (`export using ...` outside module purview).
+- `itertools` remains intentionally deferred from the active matrix set while the nine-crate parity baseline is stabilized.
 
 Crate-focused progress integrated from former appendices:
 
@@ -2280,20 +2297,22 @@ Crate-focused progress integrated from former appendices:
 - `cfg-if`: baseline resiliency and alias/import typing fixes
 - `take_mut`: type/lifetime order, ptr/mem path lowering, and template/context fixes
 - `semver`: import/re-export lowering and expanded build-shape fixes
-- `bitflags`: Stage D+E parity chain through Leaf 10.5.40.10 is closed; helper/parsing/format semantic parity now passes in matrix runs
-- `arrayvec`: remaining deterministic frontier, advanced through many Stage D blocker families
+- `bitflags`: Stage D+E parity chain is closed in active matrix runs
+- `arrayvec`: post-once_cell regressions from recent codegen/runtime edits were fixed and revalidated in full g++ matrix runs
+- `smallvec`: deterministic Stage D/E leaf chain is collapsed in the active matrix set
+- `once_cell`: constructor/closure/result-typing families now pass in the active g++ matrix set
 
 ### 10.6 Active Frontier and Next Work
 
-The `bitflags` Stage D→E active frontier from the 10.5.40 leaf chain is now closed.
+The active g++ frontier from the April 11, 2026 ten-crate snapshot is closed for the current nine-crate matrix set (`itertools` deferred).
 
 Current status snapshot:
 
-1. Focused `bitflags` parity repro passes: `/tmp/rusty-parity-matrix-10-5-40-10n-1775915403/bitflags/{baseline.txt,build.log,run.log,matrix.log}`.
-2. Full seven-crate matrix passes: `/tmp/rusty-parity-matrix-10-5-40-10o-1775915467/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
-3. Full seven-crate matrix verification rerun also passes after Leaf 10.5.40.11 hardening: `/tmp/rusty-parity-matrix-iflet-try-decltype-1775920200/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags}/...` (`pass=7`, `fail=0`).
-4. Next active work should follow the top unfinished TODO leaf after 10.5.40.11 closure.
-5. Expanded ten-crate matrix snapshot (2026-04-11) is `pass=7`, `fail=3` with deterministic failing set `{smallvec, itertools, once_cell}`; canonical artifacts: `/tmp/rusty-parity-matrix-priority-20260411/{smallvec,itertools,once_cell}/{baseline.txt,build.log,run.log,matrix.log}`.
+1. Focused `once_cell` g++ parity repro passes: `/tmp/rusty-parity-matrix-fix-20260418-once-gpp/once_cell/{baseline.txt,build.log,run.log,matrix.log}` (`75 passed`, `0 failed`).
+2. Full nine-crate g++ matrix passes: `/tmp/rusty-parity-matrix-fix-20260418-gpp-all/{either,tap,cfg-if,take_mut,arrayvec,semver,bitflags,smallvec,once_cell}/...` (`pass=9`, `fail=0`).
+3. Full nine-crate clang repro currently remains `pass=8`, `fail=1` with `once_cell` failing module-purview export emission: `/tmp/rusty-parity-matrix-fix-20260418-full-clang/once_cell/{baseline.txt,build.log,run.log,matrix.log}`.
+4. Next active work is clang module-purview export cleanup for `once_cell`, then re-enabling `itertools` in the active matrix.
+5. Historical April 11, 2026 frontier chain is retained below for traceability.
 6. `smallvec` focused repro after `Leaf 5.1.2` (`/tmp/rusty-parity-matrix-5-1-2-20260411/smallvec/...`) collapses the prior unresolved `std::boxed`/`std::rc` and omitted-owner `SmallVec` template-arity family; first deterministic Stage D head now moves to incomplete-type/type-ordering fallout (`invalid use of incomplete type 'SmallVec<...>'`).
 7. `itertools` focused repro after `Leaf 5.1.3` (`/tmp/rusty-parity-matrix-5-1-3-20260411g/itertools/...`) collapses the prior early adapter/type-order compile-head cluster (`VecDequeIntoIter`/`VecIntoIter`, early `::intersperse::Intersperse`, related namespace ordering fallout) from the first deterministic slot; new first Stage D head now starts at `merge_join` associated-type alias lowering (`MergeJoinBy = MergeBy<I, J, MergeFuncLR<F, T>>` with unbound `T`, `runner.cpp:1170`), followed by downstream `ziptuple::Zip`/`EitherOrBoth` runtime-surface fallout.
 8. Full ten-crate matrix repro after `Leaf 5.1.4` (`tests/transpile_tests/run_parity_matrix.sh --work-root /tmp/rusty-parity-matrix-10x-20260411h --keep-work-dirs`) recorded deterministic first failing crate `semver`; canonical artifacts: `/tmp/rusty-parity-matrix-10x-20260411h/semver/{baseline.txt,build.log,run.log,matrix.log}`.
