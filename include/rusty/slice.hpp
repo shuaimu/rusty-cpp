@@ -385,6 +385,12 @@ private:
     Iter iter_;
 };
 
+template<typename Iter>
+class take_next_iter;
+
+template<typename Iter>
+auto make_take_next_iter(Iter&& iter, size_t remaining);
+
 template<typename T>
 class repeat_next_iter {
 public:
@@ -419,6 +425,40 @@ private:
     }
 
     value_type value_;
+};
+
+template<typename F>
+class repeat_with_next_iter {
+public:
+    using func_type = std::decay_t<F>;
+    using value_type = std::invoke_result_t<func_type&>;
+
+    explicit repeat_with_next_iter(func_type func) : func_(std::move(func)) {}
+
+    repeat_with_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    rusty::Option<value_type> next() {
+        return rusty::Option<value_type>(func_());
+    }
+
+    auto take(size_t remaining) & {
+        return make_take_next_iter(*this, remaining);
+    }
+
+    auto take(size_t remaining) && {
+        return make_take_next_iter(std::move(*this), remaining);
+    }
+
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(
+            std::numeric_limits<size_t>::max(),
+            rusty::Option<size_t>(rusty::None));
+    }
+
+private:
+    func_type func_;
 };
 
 template<typename Iter>
@@ -785,6 +825,12 @@ auto make_repeat_next_iter(T&& value) {
     return repeat_next_iter<stored_value>(std::forward<T>(value));
 }
 
+template<typename F>
+auto make_repeat_with_next_iter(F&& func) {
+    using stored_func = std::decay_t<F>;
+    return repeat_with_next_iter<stored_func>(std::forward<F>(func));
+}
+
 template<typename Range>
 decltype(auto) preserve_for_in_range(Range&& range) {
     if constexpr (std::is_lvalue_reference_v<Range>) {
@@ -825,6 +871,11 @@ decltype(auto) iter(Range&& range) {
 template<typename T>
 auto repeat(T&& value) {
     return detail::make_repeat_next_iter(std::forward<T>(value));
+}
+
+template<typename F>
+auto repeat_with(F&& func) {
+    return detail::make_repeat_with_next_iter(std::forward<F>(func));
 }
 
 template<typename Range>

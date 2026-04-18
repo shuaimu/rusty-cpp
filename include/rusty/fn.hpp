@@ -2,6 +2,7 @@
 #define RUSTY_FN_HPP
 
 #include <cstddef>
+#include <functional>
 #include <type_traits>
 #include <utility>
 
@@ -67,68 +68,89 @@ public:
 
 private:
     pointer ptr_;
+    std::function<Ret(Args...)> callable_;
 
 public:
     /// @safe - Default constructor (null)
-    constexpr SafeFn() noexcept : ptr_(nullptr) {}
+    SafeFn() noexcept : ptr_(nullptr), callable_() {}
 
     /// @safe - Nullptr constructor
-    constexpr SafeFn(std::nullptr_t) noexcept : ptr_(nullptr) {}
+    SafeFn(std::nullptr_t) noexcept : ptr_(nullptr), callable_() {}
 
     /// @safe - Construct from function pointer
     /// The analyzer will verify the target function is @safe
-    constexpr SafeFn(pointer fn) noexcept : ptr_(fn) {}
+    SafeFn(pointer fn) noexcept : ptr_(fn), callable_(fn) {}
+
+    /// @safe - Construct from any callable matching the signature
+    template<typename F>
+    requires (!std::is_same_v<std::remove_cvref_t<F>, SafeFn>)
+          && std::is_invocable_r_v<Ret, F&, Args...>
+    SafeFn(F&& fn) : ptr_(nullptr), callable_(std::forward<F>(fn)) {}
 
     /// @safe - Copy constructor
-    constexpr SafeFn(const SafeFn&) noexcept = default;
+    SafeFn(const SafeFn&) noexcept = default;
 
     /// @safe - Copy assignment
-    constexpr SafeFn& operator=(const SafeFn&) noexcept = default;
+    SafeFn& operator=(const SafeFn&) noexcept = default;
 
     /// @safe - Assign from function pointer
-    constexpr SafeFn& operator=(pointer fn) noexcept {
+    SafeFn& operator=(pointer fn) noexcept {
         ptr_ = fn;
+        callable_ = fn;
+        return *this;
+    }
+
+    /// @safe - Assign from callable
+    template<typename F>
+    requires (!std::is_same_v<std::remove_cvref_t<F>, SafeFn>)
+          && std::is_invocable_r_v<Ret, F&, Args...>
+    SafeFn& operator=(F&& fn) {
+        ptr_ = nullptr;
+        callable_ = std::forward<F>(fn);
         return *this;
     }
 
     /// @safe - Assign nullptr
-    constexpr SafeFn& operator=(std::nullptr_t) noexcept {
+    SafeFn& operator=(std::nullptr_t) noexcept {
         ptr_ = nullptr;
+        callable_ = nullptr;
         return *this;
     }
 
     /// @safe - Call the function
     /// Always safe because the analyzer verified the target is @safe
     Ret operator()(Args... args) const {
-        return ptr_(std::forward<Args>(args)...);
+        return callable_(std::forward<Args>(args)...);
     }
 
     /// @safe - Check if non-null
-    constexpr explicit operator bool() const noexcept {
-        return ptr_ != nullptr;
+    explicit operator bool() const noexcept {
+        return static_cast<bool>(callable_);
     }
 
     /// @safe - Get the underlying pointer
-    /// Returns the raw function pointer (for interop with C APIs)
-    constexpr pointer get() const noexcept {
+    /// Returns the raw function pointer when backed by a plain function pointer.
+    pointer get() const noexcept {
         return ptr_;
     }
 
     /// @safe - Comparison operators
-    constexpr bool operator==(SafeFn other) const noexcept {
-        return ptr_ == other.ptr_;
+    bool operator==(SafeFn other) const noexcept {
+        if (!*this && !other) return true;
+        if (ptr_ && other.ptr_) return ptr_ == other.ptr_;
+        return false;
     }
 
-    constexpr bool operator!=(SafeFn other) const noexcept {
-        return ptr_ != other.ptr_;
+    bool operator!=(SafeFn other) const noexcept {
+        return !(*this == other);
     }
 
-    constexpr bool operator==(std::nullptr_t) const noexcept {
-        return ptr_ == nullptr;
+    bool operator==(std::nullptr_t) const noexcept {
+        return !*this;
     }
 
-    constexpr bool operator!=(std::nullptr_t) const noexcept {
-        return ptr_ != nullptr;
+    bool operator!=(std::nullptr_t) const noexcept {
+        return static_cast<bool>(*this);
     }
 };
 

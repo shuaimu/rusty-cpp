@@ -51,6 +51,7 @@
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
 #include "rusty/net.hpp"
+#include "rusty/process.hpp"
 
 // Error trait-shape helpers used by transpiled expanded output
 #include "rusty/error.hpp"
@@ -171,6 +172,27 @@ namespace rusty {
             return std::string_view(value.as_str());
         } else {
             return std::string_view(std::forward<T>(value));
+        }
+    }
+
+    inline String to_owned(std::string_view value) {
+        return String::from(value);
+    }
+
+    inline String to_owned(const char* value) {
+        return String::from(value);
+    }
+
+    inline String to_owned(const str& value) {
+        return String::from(value.as_str());
+    }
+
+    template<typename T>
+    auto to_owned(const T& value) {
+        if constexpr (requires { value.clone(); }) {
+            return value.clone();
+        } else {
+            return T(value);
         }
     }
 

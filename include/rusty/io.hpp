@@ -341,6 +341,9 @@ inline Stderr stderr_() { return Stderr{}; }
 template<typename... Args>
 inline void _print(Args&&...) {}
 
+template<typename... Args>
+inline void _eprint(Args&&...) {}
+
 namespace detail {
 
 template<typename T>

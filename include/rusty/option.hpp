@@ -54,17 +54,15 @@ public:
     
     Option(T val) : has_value(true), value(std::move(val)) {}
 
-    Option(const std::optional<T>& opt) : has_value(opt.has_value()) {
+    template<typename U>
+    requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
+    Option(U&& opt) : has_value(opt.has_value()) {
         if (has_value) {
-            new (&value) T(*opt);
-        } else {
-            dummy = 0;
-        }
-    }
-
-    Option(std::optional<T>&& opt) : has_value(opt.has_value()) {
-        if (has_value) {
-            new (&value) T(std::move(*opt));
+            if constexpr (std::is_lvalue_reference_v<U>) {
+                new (&value) T(*opt);
+            } else {
+                new (&value) T(std::move(*opt));
+            }
         } else {
             dummy = 0;
         }
@@ -115,26 +113,19 @@ public:
         return *this;
     }
 
-    Option& operator=(const std::optional<T>& opt) {
+    template<typename U>
+    requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
+    Option& operator=(U&& opt) {
         if (has_value) {
             value.~T();
         }
         has_value = opt.has_value();
         if (has_value) {
-            new (&value) T(*opt);
-        } else {
-            dummy = 0;
-        }
-        return *this;
-    }
-
-    Option& operator=(std::optional<T>&& opt) {
-        if (has_value) {
-            value.~T();
-        }
-        has_value = opt.has_value();
-        if (has_value) {
-            new (&value) T(std::move(*opt));
+            if constexpr (std::is_lvalue_reference_v<U>) {
+                new (&value) T(*opt);
+            } else {
+                new (&value) T(std::move(*opt));
+            }
         } else {
             dummy = 0;
         }
@@ -164,6 +155,14 @@ public:
 
     // Explicit bool conversion
     explicit operator bool() const { return has_value; }
+
+    // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
+    // shapes that should preserve Option semantics rather than payload access.
+    Option& operator*() & { return *this; }
+    const Option& operator*() const & { return *this; }
+    Option&& operator*() && { return std::move(*this); }
+    Option* operator->() { return this; }
+    const Option* operator->() const { return this; }
     
     // Unwrap the value (panics if None) - Rust style
     // @lifetime: owned
@@ -184,6 +183,12 @@ public:
         }
         return value;
     }
+
+    // Unsafe Rust parity helper. Runtime checks remain for now.
+    T unwrap_unchecked() { return unwrap(); }
+
+    // Unsafe Rust parity helper for borrowed access.
+    const T& unwrap_unchecked() const { return unwrap(); }
 
     // Expect with custom message - Rust style
     // @lifetime: owned
@@ -368,8 +373,16 @@ public:
     
     Option(None_t) : ptr(nullptr) {}
 
+    Option(std::nullopt_t) : ptr(nullptr) {}
+
     
     Option(T& ref) : ptr(&ref) {}
+
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+          && requires(U& u) { *u; }
+          && std::is_convertible_v<decltype(*std::declval<U&>()), T&>
+    Option(U& ref_like) : ptr(&static_cast<T&>(*ref_like)) {}
 
     // Copy constructor - pointer/reference options are always copyable
     Option(const Option& other) = default;
@@ -409,9 +422,35 @@ public:
     // Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
 
+    // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
+    Option& operator*() & { return *this; }
+    const Option& operator*() const & { return *this; }
+    Option&& operator*() && { return std::move(*this); }
+    Option* operator->() { return this; }
+    const Option* operator->() const { return this; }
+
     // Unwrap the reference (panics if None)
     // @lifetime: (&'a) -> &'a T
     T& unwrap() {
+        if (!ptr) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return *ptr;
+    }
+
+    // Const overload for borrowed Option references.
+    T& unwrap() const {
+        if (!ptr) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return *ptr;
+    }
+
+    // Unsafe Rust parity helper. Runtime checks remain for now.
+    T& unwrap_unchecked() { return unwrap(); }
+
+    // Unsafe Rust parity helper for const receivers.
+    T& unwrap_unchecked() const {
         if (!ptr) {
             throw std::runtime_error("Called unwrap on None");
         }
@@ -427,6 +466,13 @@ public:
         return *ptr;
     }
 
+    T& expect(const char* msg) const {
+        if (!ptr) {
+            throw std::runtime_error(msg);
+        }
+        return *ptr;
+    }
+
     // Unwrap with default reference
     // @lifetime: (&'a, &'b) -> &'c T where 'a: 'c, 'b: 'c
     T& unwrap_or(T& default_ref) {
@@ -434,6 +480,39 @@ public:
             return *ptr;
         }
         return default_ref;
+    }
+
+    T& unwrap_or(T& default_ref) const {
+        if (ptr) {
+            return *ptr;
+        }
+        return default_ref;
+    }
+
+    template<typename F>
+    T& unwrap_or_else(F&& f) {
+        if (ptr) {
+            return *ptr;
+        }
+        if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
+            std::forward<F>(f)();
+            throw std::runtime_error("Called unwrap_or_else on None");
+        } else {
+            return static_cast<T&>(std::forward<F>(f)());
+        }
+    }
+
+    template<typename F>
+    T& unwrap_or_else(F&& f) const {
+        if (ptr) {
+            return *ptr;
+        }
+        if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
+            std::forward<F>(f)();
+            throw std::runtime_error("Called unwrap_or_else on None");
+        } else {
+            return static_cast<T&>(std::forward<F>(f)());
+        }
     }
 
     // Map function over the reference
@@ -510,8 +589,28 @@ public:
     
     Option(None_t) : ptr(nullptr) {}
 
+    Option(std::nullopt_t) : ptr(nullptr) {}
+
     
     Option(const T& ref) : ptr(&ref) {}
+
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, T>)
+          && requires(const U& u) { *u; }
+          && std::is_convertible_v<decltype(*std::declval<const U&>()), const T&>
+    Option(const U& ref_like) : ptr(&static_cast<const T&>(*ref_like)) {}
+
+    // Convert Option<U&> -> Option<const T&> when references are compatible.
+    template<typename U>
+    requires std::is_convertible_v<U&, T&>
+    Option(const Option<U&>& other)
+        : ptr(other.is_some() ? &static_cast<const T&>(other.unwrap()) : nullptr) {}
+
+    // Convert Option<const U&> -> Option<const T&> when references are compatible.
+    template<typename U>
+    requires std::is_convertible_v<const U&, const T&>
+    Option(const Option<const U&>& other)
+        : ptr(other.is_some() ? &static_cast<const T&>(other.unwrap()) : nullptr) {}
 
     // Copy constructor - pointer/reference options are always copyable
     Option(const Option& other) = default;
@@ -551,6 +650,13 @@ public:
     // Explicit bool conversion
     explicit operator bool() const { return ptr != nullptr; }
 
+    // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
+    Option& operator*() & { return *this; }
+    const Option& operator*() const & { return *this; }
+    Option&& operator*() && { return std::move(*this); }
+    Option* operator->() { return this; }
+    const Option* operator->() const { return this; }
+
     // Unwrap the reference (panics if None)
     // @lifetime: (&'a) -> &'a const T
     const T& unwrap() const {
@@ -559,6 +665,9 @@ public:
         }
         return *ptr;
     }
+
+    // Unsafe Rust parity helper. Runtime checks remain for now.
+    const T& unwrap_unchecked() const { return unwrap(); }
 
     // Expect with custom message
     // @lifetime: (&'a) -> &'a const T
@@ -576,6 +685,19 @@ public:
             return *ptr;
         }
         return default_ref;
+    }
+
+    template<typename F>
+    const T& unwrap_or_else(F&& f) const {
+        if (ptr) {
+            return *ptr;
+        }
+        if constexpr (std::is_void_v<std::invoke_result_t<F>>) {
+            std::forward<F>(f)();
+            throw std::runtime_error("Called unwrap_or_else on None");
+        } else {
+            return static_cast<const T&>(std::forward<F>(f)());
+        }
     }
 
     // Map function over the reference
@@ -598,8 +720,18 @@ public:
         return None;
     }
 
+    // as_mut() on Option<const T&> preserves const-reference payloads.
+    // This matches Rust parity for APIs that treat reference options uniformly.
+    Option<const T&> as_mut() const & {
+        if (ptr) {
+            return Option<const T&>(*ptr);
+        }
+        return None;
+    }
+
     // Prevent calling as_ref() on rvalue
     Option<const T&> as_ref() const && = delete;
+    Option<const T&> as_mut() const && = delete;
 
     // Check if contains specific value
     bool contains(const T& value) const {
@@ -644,6 +776,32 @@ bool operator==(const Option<T>& lhs, const Option<T>& rhs) {
 
 template<typename T>
 bool operator!=(const Option<T>& lhs, const Option<T>& rhs) {
+    return !(lhs == rhs);
+}
+
+template<typename T, typename U>
+requires (!std::is_same_v<T, U>)
+      && (requires(const T& l, const U& r) { l == r; }
+          || requires(const T& l, const U& r) { r == l; })
+bool operator==(const Option<T>& lhs, const Option<U>& rhs) {
+    if (lhs.is_none() && rhs.is_none()) return true;
+    if (lhs.is_some() && rhs.is_some()) {
+        const auto& l = lhs.as_ref().unwrap();
+        const auto& r = rhs.as_ref().unwrap();
+        if constexpr (requires { l == r; }) {
+            return l == r;
+        } else {
+            return r == l;
+        }
+    }
+    return false;
+}
+
+template<typename T, typename U>
+requires (!std::is_same_v<T, U>)
+      && (requires(const T& l, const U& r) { l == r; }
+          || requires(const T& l, const U& r) { r == l; })
+bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
     return !(lhs == rhs);
 }
 

@@ -7,6 +7,7 @@
 #include <iterator>
 #include <ostream>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <vector>
@@ -66,6 +67,12 @@ private:
 public:
     // Constructors
     String() : data_(nullptr), len_(0), capacity_(0) {}
+
+    // Converting constructors for parity with transpiled call sites that
+    // materialize std::string/std::string_view intermediates.
+    String(const char* cstr) : String(String::from(cstr)) {}
+    String(const std::string& str) : String(String::from(str)) {}
+    String(std::string_view sv) : String(String::from(sv)) {}
     
     // @lifetime: owned
     static String new_() {

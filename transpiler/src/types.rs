@@ -119,8 +119,11 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         }
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
         "std::path::Path" => Some(("rusty::path::Path", false)),
+        "std::path::PathBuf" => Some(("rusty::path::PathBuf", false)),
         "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
         "std::ffi::CStr" => Some(("rusty::ffi::CStr", false)),
+        "std::process::Child" => Some(("rusty::process::Child", false)),
+        "std::process::Command" => Some(("rusty::process::Command", false)),
 
         // MaybeUninit
         "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
@@ -163,6 +166,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "repeat" | "iter::repeat" | "core::iter::repeat" | "std::iter::repeat" => {
             Some("rusty::repeat")
         }
+        "iter::repeat_with" | "core::iter::repeat_with" | "std::iter::repeat_with" => {
+            Some("rusty::repeat_with")
+        }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         "Vec::extend_from_slice"
         | "std::vec::Vec::extend_from_slice"
@@ -180,6 +186,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "io::stdout" | "std::io::stdout" => Some("rusty::io::stdout_"),
         "io::stderr" | "std::io::stderr" => Some("rusty::io::stderr_"),
         "io::_print" | "std::io::_print" => Some("rusty::io::_print"),
+        "io::_eprint" | "std::io::_eprint" => Some("rusty::io::_eprint"),
         "io::Cursor::new" | "std::io::Cursor::new" => Some("rusty::io::Cursor::new_"),
 
         // Expanded-Rust runtime compatibility shims.
@@ -202,9 +209,15 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::ptr::mut_ptr::offset" | "std::ptr::mut_ptr::offset" | "ptr::mut_ptr::offset" => {
             Some("rusty::ptr::offset")
         }
+        "core::ptr::mut_ptr::wrapping_offset"
+        | "std::ptr::mut_ptr::wrapping_offset"
+        | "ptr::mut_ptr::wrapping_offset" => Some("rusty::ptr::offset"),
         "core::ptr::const_ptr::offset"
         | "std::ptr::const_ptr::offset"
         | "ptr::const_ptr::offset" => Some("rusty::ptr::offset"),
+        "core::ptr::const_ptr::wrapping_offset"
+        | "std::ptr::const_ptr::wrapping_offset"
+        | "ptr::const_ptr::wrapping_offset" => Some("rusty::ptr::offset"),
         "std::ptr::copy" | "ptr::copy" => Some("rusty::ptr::copy"),
         "std::ptr::copy_nonoverlapping" | "ptr::copy_nonoverlapping" => {
             Some("rusty::ptr::copy_nonoverlapping")
@@ -698,6 +711,14 @@ mod tests {
         );
         assert_eq!(
             map_function_path("core::ptr::const_ptr::offset"),
+            Some("rusty::ptr::offset")
+        );
+        assert_eq!(
+            map_function_path("std::ptr::mut_ptr::wrapping_offset"),
+            Some("rusty::ptr::offset")
+        );
+        assert_eq!(
+            map_function_path("ptr::const_ptr::wrapping_offset"),
             Some("rusty::ptr::offset")
         );
         assert_eq!(map_function_path("ptr::copy"), Some("rusty::ptr::copy"));

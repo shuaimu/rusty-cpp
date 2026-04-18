@@ -92,12 +92,12 @@ public:
         }
     }
 
-    // No copy or move - Cell itself is not copyable/movable
-    // (though the inner value is)
+    // No copy - copying a Cell would create aliased interior-mutable state.
     Cell(const Cell&) = delete;
     Cell& operator=(const Cell&) = delete;
-    Cell(Cell&&) = delete;
-    Cell& operator=(Cell&&) = delete;
+    // Move is allowed (matches Rust move semantics for Cell<T>).
+    Cell(Cell&&) = default;
+    Cell& operator=(Cell&&) = default;
 };
 
 // @safe - Helper function to create a Cell

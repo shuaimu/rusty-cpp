@@ -244,39 +244,104 @@ auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args.
 
 class Scope {
 private:
-    struct ScopedThread {
+    struct ScopedThreadBase {
+        virtual ~ScopedThreadBase() = default;
+        virtual void join_if_needed() = 0;
+    };
+
+    template<typename T>
+    struct ScopedThreadState final : ScopedThreadBase {
         std::thread thread_;
+        std::shared_future<T> future_;
+        bool joined_ = false;
 
-        ScopedThread(std::thread&& t) : thread_(std::move(t)) {}
+        ScopedThreadState(std::thread&& t, std::future<T>&& f)
+            : thread_(std::move(t))
+            , future_(std::move(f).share())
+        {}
 
-        // Must join in destructor (scoped threads are NOT detached)
-        ~ScopedThread() {
-            if (thread_.joinable()) {
-                thread_.join();
+        rusty::Result<T, std::exception_ptr> join() {
+            if (joined_) {
+                return rusty::Result<T, std::exception_ptr>::Err(
+                    std::make_exception_ptr(std::runtime_error("Thread already joined"))
+                );
+            }
+            if (!thread_.joinable()) {
+                return rusty::Result<T, std::exception_ptr>::Err(
+                    std::make_exception_ptr(std::runtime_error("Thread not joinable"))
+                );
+            }
+            thread_.join();
+            joined_ = true;
+            try {
+                if constexpr (std::is_void_v<T>) {
+                    future_.get();
+                    return rusty::Result<T, std::exception_ptr>::Ok();
+                } else {
+                    return rusty::Result<T, std::exception_ptr>::Ok(future_.get());
+                }
+            } catch (...) {
+                return rusty::Result<T, std::exception_ptr>::Err(std::current_exception());
             }
         }
 
-        ScopedThread(const ScopedThread&) = delete;
-        ScopedThread(ScopedThread&&) = default;
+        void join_if_needed() override {
+            if (thread_.joinable() && !joined_) {
+                thread_.join();
+                joined_ = true;
+            }
+        }
     };
 
-    std::vector<ScopedThread> threads_;
+    std::vector<std::shared_ptr<ScopedThreadBase>> threads_;
 
 public:
+    template<typename T>
+    class ScopedJoinHandle {
+    private:
+        std::shared_ptr<ScopedThreadState<T>> state_;
+
+    public:
+        explicit ScopedJoinHandle(std::shared_ptr<ScopedThreadState<T>> state)
+            : state_(std::move(state))
+        {}
+
+        rusty::Result<T, std::exception_ptr> join() const {
+            if (!state_) {
+                return rusty::Result<T, std::exception_ptr>::Err(
+                    std::make_exception_ptr(std::runtime_error("Invalid scoped join handle"))
+                );
+            }
+            return state_->join();
+        }
+    };
+
     // Spawn thread within scope - NO Send requirement (lifetime guaranteed)
     template<typename Fn, typename... Args>
         requires std::invocable<Fn, Args...>
-    void spawn(Fn&& fn, Args&&... args) {
-        std::thread t([fn = std::forward<Fn>(fn),
-                      ...args = std::forward<Args>(args)]() mutable {
-            std::invoke(fn, std::forward<Args>(args)...);
-        });
-
-        threads_.emplace_back(std::move(t));
+    auto spawn(Fn&& fn, Args&&... args) -> ScopedJoinHandle<std::invoke_result_t<Fn, Args...>> {
+        using ReturnType = std::invoke_result_t<Fn, Args...>;
+        auto task = std::make_shared<std::packaged_task<ReturnType()>>(
+            [fn = std::forward<Fn>(fn),
+             ...args = std::forward<Args>(args)]() mutable -> ReturnType {
+                return std::invoke(fn, std::forward<Args>(args)...);
+            });
+        auto future = task->get_future();
+        std::thread t([task = std::move(task)]() mutable { (*task)(); });
+        auto state =
+            std::make_shared<ScopedThreadState<ReturnType>>(std::move(t), std::move(future));
+        threads_.push_back(state);
+        return ScopedJoinHandle<ReturnType>(std::move(state));
     }
 
     // Destructor joins all threads (blocks until all complete)
-    ~Scope() = default;
+    ~Scope() {
+        for (auto& state : threads_) {
+            if (state) {
+                state->join_if_needed();
+            }
+        }
+    }
 };
 
 // ============================================================================
@@ -296,6 +361,12 @@ void scope(F&& func) {
 template<typename Rep, typename Period>
 inline void sleep(const std::chrono::duration<Rep, Period>& duration) {
     std::this_thread::sleep_for(duration);
+}
+
+template<typename DurationLike>
+    requires requires(const DurationLike& d) { d.inner; }
+inline void sleep(const DurationLike& duration) {
+    std::this_thread::sleep_for(duration.inner);
 }
 
 /// Convenience overload accepting a raw seconds count.

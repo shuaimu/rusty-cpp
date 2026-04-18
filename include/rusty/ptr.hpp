@@ -202,6 +202,22 @@ inline constexpr const T* cast_const(T& value) noexcept {
 }
 
 template<typename T>
+inline Option<const T&> as_ref(const T* ptr) {
+    if (ptr == nullptr) {
+        return Option<const T&>(None);
+    }
+    return Option<const T&>(*ptr);
+}
+
+template<typename T>
+inline Option<T&> as_mut(T* ptr) {
+    if (ptr == nullptr) {
+        return Option<T&>(None);
+    }
+    return Option<T&>(*ptr);
+}
+
+template<typename T>
 inline T read(const T* src) {
     // Mirror Rust `ptr::read` move-out semantics even from `*const T`-shaped
     // call sites. This surface is intentionally unsafe: callers must guarantee

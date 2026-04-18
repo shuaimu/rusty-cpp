@@ -1,6 +1,8 @@
 #ifndef RUSTY_UNSAFE_CELL_HPP
 #define RUSTY_UNSAFE_CELL_HPP
 
+#include <utility>
+
 // UnsafeCell<T> - The core primitive for interior mutability
 //
 // This is the fundamental building block for all interior mutability in Rust.
@@ -85,9 +87,15 @@ public:
     // SAFETY: Caller must ensure no aliasing or data races
     // @lifetime: (&'a, T) -> T
     T replace(T new_value) const {
-        T old = *get();
-        *get() = new_value;
+        T old = std::move(*get());
+        *get() = std::move(new_value);
         return old;
+    }
+
+    // Consume the cell and return the inner value by move.
+    // Mirrors Rust's UnsafeCell::into_inner(self) -> T.
+    T into_inner() {
+        return std::move(value);
     }
 
     // No copy - UnsafeCell is not copyable (would alias the inner value)
@@ -109,7 +117,7 @@ public:
 // Helper function to create an UnsafeCell
 template<typename T>
 UnsafeCell<T> make_unsafe_cell(T value) {
-    return UnsafeCell<T>(value);
+    return UnsafeCell<T>(std::move(value));
 }
 
 } // namespace rusty

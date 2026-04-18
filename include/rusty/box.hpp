@@ -156,6 +156,14 @@ public:
         return into_raw();
     }
 
+    // Take ownership of a raw pointer (Rust: Box::from_raw)
+    // Caller must ensure pointer was allocated with compatible allocator.
+    // @unsafe
+    // @lifetime: owned
+    static Box<T> from_raw(T* p) {
+        return Box<T>(p);
+    }
+
     // Get raw pointer without transferring ownership
     // @unsafe - returns raw pointer, use operator* or operator-> instead
     // @lifetime: (&'a) -> &'a

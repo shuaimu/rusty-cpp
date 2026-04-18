@@ -8,6 +8,7 @@
 #include <tuple>
 #include <array>
 #include <cstdlib>
+#include <memory>
 #include <rusty/option.hpp>
 
 // Result<T, E> - Represents either success (Ok) or failure (Err)
@@ -41,12 +42,21 @@ private:
         static constexpr size_t extent = N;
     };
 
+    template<typename X>
+    using stored_type_t = std::conditional_t<
+        std::is_reference_v<X>,
+        std::add_pointer_t<std::remove_reference_t<X>>,
+        X>;
+
+    using OkStored = stored_type_t<T>;
+    using ErrStored = stored_type_t<E>;
+
     struct UninitTag {};
 
     // Use aligned storage for union-like behavior (C++11 compatible)
     union Storage {
-        typename std::aligned_storage<sizeof(T), alignof(T)>::type ok_storage;
-        typename std::aligned_storage<sizeof(E), alignof(E)>::type err_storage;
+        typename std::aligned_storage<sizeof(OkStored), alignof(OkStored)>::type ok_storage;
+        typename std::aligned_storage<sizeof(ErrStored), alignof(ErrStored)>::type err_storage;
         
         Storage() {}
         ~Storage() {}
@@ -57,24 +67,91 @@ private:
     // Construct storage without materializing either payload variant.
     explicit Result(UninitTag) noexcept : is_ok_value(false) {}
     
-    T& ok_ref() { return *reinterpret_cast<std::remove_reference_t<T>*>(&storage.ok_storage); }
-    const T& ok_ref() const { return *reinterpret_cast<const std::remove_reference_t<T>*>(&storage.ok_storage); }
-    E& err_ref() { return *reinterpret_cast<std::remove_reference_t<E>*>(&storage.err_storage); }
-    const E& err_ref() const { return *reinterpret_cast<const E*>(&storage.err_storage); }
+    OkStored& ok_stored_ref() { return *reinterpret_cast<OkStored*>(&storage.ok_storage); }
+    const OkStored& ok_stored_ref() const {
+        return *reinterpret_cast<const OkStored*>(&storage.ok_storage);
+    }
+    ErrStored& err_stored_ref() { return *reinterpret_cast<ErrStored*>(&storage.err_storage); }
+    const ErrStored& err_stored_ref() const {
+        return *reinterpret_cast<const ErrStored*>(&storage.err_storage);
+    }
+
+    static OkStored to_ok_storage(T value) requires std::is_reference_v<T> {
+        return std::addressof(value);
+    }
+
+    template<typename U>
+    static OkStored to_ok_storage(U&& value) requires (!std::is_reference_v<T>) {
+        return OkStored(std::forward<U>(value));
+    }
+
+    static ErrStored to_err_storage(E value) requires std::is_reference_v<E> {
+        return std::addressof(value);
+    }
+
+    template<typename U>
+    static ErrStored to_err_storage(U&& value) requires (!std::is_reference_v<E>) {
+        return ErrStored(std::forward<U>(value));
+    }
+
+    decltype(auto) ok_ref() {
+        if constexpr (std::is_reference_v<T>) {
+            return *ok_stored_ref();
+        } else {
+            return *reinterpret_cast<std::remove_reference_t<T>*>(&storage.ok_storage);
+        }
+    }
+    decltype(auto) ok_ref() const {
+        if constexpr (std::is_reference_v<T>) {
+            return *ok_stored_ref();
+        } else {
+            return *reinterpret_cast<const std::remove_reference_t<T>*>(&storage.ok_storage);
+        }
+    }
+    decltype(auto) err_ref() {
+        if constexpr (std::is_reference_v<E>) {
+            return *err_stored_ref();
+        } else {
+            return *reinterpret_cast<std::remove_reference_t<E>*>(&storage.err_storage);
+        }
+    }
+    decltype(auto) err_ref() const {
+        if constexpr (std::is_reference_v<E>) {
+            return *err_stored_ref();
+        } else {
+            return *reinterpret_cast<const std::remove_reference_t<E>*>(&storage.err_storage);
+        }
+    }
     
     void destroy() {
         if (is_ok_value) {
-            ok_ref().~T();
+            if constexpr (!std::is_reference_v<T>) {
+                ok_ref().~T();
+            }
         } else {
-            err_ref().~E();
+            if constexpr (!std::is_reference_v<E>) {
+                err_ref().~E();
+            }
         }
     }
     
 public:
+    using ok_type = T;
+    using err_type = E;
+
     // Constructors for Ok variant
-    static Result Ok(T value) {
+    static Result Ok(T value) requires std::is_reference_v<T> {
         Result r(UninitTag{});
-        new (&r.storage.ok_storage) T(std::move(value));
+        new (&r.storage.ok_storage) OkStored(to_ok_storage(value));
+        r.is_ok_value = true;
+        return r;
+    }
+
+    template<typename U = T>
+    requires (!std::is_reference_v<T> && std::is_constructible_v<OkStored, U&&>)
+    static Result Ok(U&& value) {
+        Result r(UninitTag{});
+        new (&r.storage.ok_storage) OkStored(to_ok_storage(std::forward<U>(value)));
         r.is_ok_value = true;
         return r;
     }
@@ -94,33 +171,42 @@ public:
     }
     
     // Constructors for Err variant
-    static Result Err(E error) {
+    static Result Err(E error) requires std::is_reference_v<E> {
         Result r(UninitTag{});
-        new (&r.storage.err_storage) E(std::move(error));
+        new (&r.storage.err_storage) ErrStored(to_err_storage(error));
+        r.is_ok_value = false;
+        return r;
+    }
+
+    template<typename U = E>
+    requires (!std::is_reference_v<E> && std::is_constructible_v<ErrStored, U&&>)
+    static Result Err(U&& error) {
+        Result r(UninitTag{});
+        new (&r.storage.err_storage) ErrStored(to_err_storage(std::forward<U>(error)));
         r.is_ok_value = false;
         return r;
     }
     
     // Default constructor (creates Err with default E)
     Result() : is_ok_value(false) {
-        new (&storage.err_storage) E();
+        new (&storage.err_storage) ErrStored();
     }
     
     // Copy constructor
     Result(const Result& other) : is_ok_value(other.is_ok_value) {
         if (is_ok_value) {
-            new (&storage.ok_storage) T(other.ok_ref());
+            new (&storage.ok_storage) OkStored(other.ok_stored_ref());
         } else {
-            new (&storage.err_storage) E(other.err_ref());
+            new (&storage.err_storage) ErrStored(other.err_stored_ref());
         }
     }
     
     // Move constructor
     Result(Result&& other) noexcept : is_ok_value(other.is_ok_value) {
         if (is_ok_value) {
-            new (&storage.ok_storage) T(std::move(other.ok_ref()));
+            new (&storage.ok_storage) OkStored(std::move(other.ok_stored_ref()));
         } else {
-            new (&storage.err_storage) E(std::move(other.err_ref()));
+            new (&storage.err_storage) ErrStored(std::move(other.err_stored_ref()));
         }
     }
     
@@ -130,9 +216,9 @@ public:
             destroy();
             is_ok_value = other.is_ok_value;
             if (is_ok_value) {
-                new (&storage.ok_storage) T(other.ok_ref());
+                new (&storage.ok_storage) OkStored(other.ok_stored_ref());
             } else {
-                new (&storage.err_storage) E(other.err_ref());
+                new (&storage.err_storage) ErrStored(other.err_stored_ref());
             }
         }
         return *this;
@@ -144,9 +230,9 @@ public:
             destroy();
             is_ok_value = other.is_ok_value;
             if (is_ok_value) {
-                new (&storage.ok_storage) T(std::move(other.ok_ref()));
+                new (&storage.ok_storage) OkStored(std::move(other.ok_stored_ref()));
             } else {
-                new (&storage.err_storage) E(std::move(other.err_ref()));
+                new (&storage.err_storage) ErrStored(std::move(other.err_stored_ref()));
             }
         }
         return *this;
@@ -210,11 +296,16 @@ public:
         if (!is_ok_value) {
             throw std::runtime_error("Called unwrap on an Err value");
         }
-        return std::move(ok_ref());
+        if constexpr (std::is_reference_v<T>) {
+            return ok_ref();
+        } else {
+            return std::move(ok_ref());
+        }
     }
 
     // Const unwrap fallback for read-only Result values.
-    T unwrap() const {
+    auto unwrap() const
+        -> std::conditional_t<std::is_reference_v<T>, T, const std::remove_reference_t<T>&> {
         if (!is_ok_value) {
             throw std::runtime_error("Called unwrap on an Err value");
         }
@@ -226,11 +317,16 @@ public:
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
         }
-        return std::move(err_ref());
+        if constexpr (std::is_reference_v<E>) {
+            return err_ref();
+        } else {
+            return std::move(err_ref());
+        }
     }
 
     // Const unwrap_err fallback for read-only Result values.
-    E unwrap_err() const {
+    auto unwrap_err() const
+        -> std::conditional_t<std::is_reference_v<E>, E, const std::remove_reference_t<E>&> {
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
         }
@@ -345,6 +441,9 @@ private:
     }
     
 public:
+    using ok_type = void;
+    using err_type = E;
+
     // Constructor for Ok variant
     static Result Ok() {
         Result r;
@@ -353,9 +452,18 @@ public:
     }
     
     // Constructor for Err variant
-    static Result Err(E error) {
+    static Result Err(E error) requires std::is_reference_v<E> {
         Result r;
-        new (&r.storage.err_storage) E(std::move(error));
+        new (&r.storage.err_storage) E(error);
+        r.is_ok_value = false;
+        return r;
+    }
+
+    template<typename U = E>
+    requires (!std::is_reference_v<E> && std::is_constructible_v<E, U&&>)
+    static Result Err(U&& error) {
+        Result r;
+        new (&r.storage.err_storage) E(std::forward<U>(error));
         r.is_ok_value = false;
         return r;
     }
@@ -434,7 +542,11 @@ public:
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
         }
-        return std::move(err_ref());
+        if constexpr (std::is_reference_v<E>) {
+            return err_ref();
+        } else {
+            return std::move(err_ref());
+        }
     }
 
     E unwrap_err() const {
@@ -464,16 +576,38 @@ public:
     }
 };
 
-// Helper function to create Ok Result
+template<typename R>
+struct result_ok_type;
+
+template<typename R>
+struct result_err_type;
+
 template<typename T, typename E>
-Result<T, E> Ok(T value) {
-    return Result<T, E>::Ok(std::move(value));
+struct result_ok_type<Result<T, E>> {
+    using type = T;
+};
+
+template<typename T, typename E>
+struct result_err_type<Result<T, E>> {
+    using type = E;
+};
+
+template<typename R>
+using result_ok_t = typename result_ok_type<std::remove_cvref_t<R>>::type;
+
+template<typename R>
+using result_err_t = typename result_err_type<std::remove_cvref_t<R>>::type;
+
+// Helper function to create Ok Result
+template<typename T, typename E, typename U>
+Result<T, E> Ok(U&& value) {
+    return Result<T, E>::Ok(std::forward<U>(value));
 }
 
 // Helper function to create Err Result
-template<typename T, typename E>
-Result<T, E> Err(E error) {
-    return Result<T, E>::Err(std::move(error));
+template<typename T, typename E, typename U>
+Result<T, E> Err(U&& error) {
+    return Result<T, E>::Err(std::forward<U>(error));
 }
 
 } // namespace rusty

@@ -100,6 +100,18 @@ public:
     // Use Option<Arc<T>> for nullable Arc
     Arc() = delete;
 
+    static Arc<T> default_()
+    requires requires { T::default_(); }
+    {
+        return Arc<T>::new_(T::default_());
+    }
+
+    static Arc<T> default_()
+    requires (!requires { T::default_(); } && requires { T{}; })
+    {
+        return Arc<T>::new_(T{});
+    }
+
     // Rust-idiomatic factory method - Arc::new()
     // @lifetime: owned
     static Arc<T> new_(T value) {
@@ -231,6 +243,12 @@ public:
     // @safe - Clone - explicitly create a new Arc to the same value
     Arc clone() const {
         return Arc(*this);
+    }
+
+    // Support UFCS/associated-call lowering shape: Arc::clone(&value)
+    static Arc clone(const Arc* value) {
+        assert(value != nullptr);
+        return value->clone();
     }
 
     // Try to get mutable reference if we're the only owner

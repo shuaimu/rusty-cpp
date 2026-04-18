@@ -1,8 +1,10 @@
 #pragma once
 
-#include <mutex>
 #include <condition_variable>
 #include <cstddef>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 
 namespace rusty {
 
@@ -21,13 +23,20 @@ namespace rusty {
 //
 class Barrier {
 private:
-    // Mutable to support Rust's interior mutability pattern:
-    // Rust Barrier::wait(&self) takes shared reference.
-    mutable std::mutex mtx_;
-    mutable std::condition_variable cv_;
-    std::size_t threshold_;
-    mutable std::size_t count_;
-    mutable std::size_t generation_;
+    struct State {
+        mutable std::mutex mtx;
+        mutable std::condition_variable cv;
+        std::size_t threshold;
+        mutable std::size_t count;
+        mutable std::size_t generation;
+
+        explicit State(std::size_t count_)
+            : threshold(count_), count(count_), generation(0) {}
+    };
+
+    // Keep state behind indirection so Barrier stays movable for tuple/vector
+    // construction patterns used by transpiled tests.
+    std::unique_ptr<State> state_;
 
 public:
     // Result of a barrier wait operation
@@ -47,7 +56,7 @@ public:
 
     // Constructor - specify number of threads that must call wait()
     explicit Barrier(std::size_t count)
-        : threshold_(count), count_(count), generation_(0) {
+        : state_(std::make_unique<State>(count)) {
         if (count == 0) {
             throw std::invalid_argument("Barrier count must be greater than 0");
         }
@@ -58,27 +67,27 @@ public:
     // Wait for all threads to arrive at the barrier
     // Returns a BarrierWaitResult indicating if this thread is the leader
     BarrierWaitResult wait() const {
-        std::unique_lock<std::mutex> lock(mtx_);
-        std::size_t gen = generation_;
+        std::unique_lock<std::mutex> lock(state_->mtx);
+        std::size_t gen = state_->generation;
 
-        if (--count_ == 0) {
+        if (--state_->count == 0) {
             // Last thread to arrive - this is the leader
-            generation_++;
-            count_ = threshold_;
-            cv_.notify_all();
+            state_->generation++;
+            state_->count = state_->threshold;
+            state_->cv.notify_all();
             return BarrierWaitResult(true);
         }
 
         // Not the last thread - wait for the leader to release everyone
-        cv_.wait(lock, [this, gen] { return gen != generation_; });
+        state_->cv.wait(lock, [this, gen] { return gen != state_->generation; });
         return BarrierWaitResult(false);
     }
 
-    // Non-copyable, non-movable
+    // Non-copyable, movable.
     Barrier(const Barrier&) = delete;
     Barrier& operator=(const Barrier&) = delete;
-    Barrier(Barrier&&) = delete;
-    Barrier& operator=(Barrier&&) = delete;
+    Barrier(Barrier&&) noexcept = default;
+    Barrier& operator=(Barrier&&) noexcept = default;
 
     ~Barrier() = default;
 };

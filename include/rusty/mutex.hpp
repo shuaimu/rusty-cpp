@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <type_traits>
 #include "option.hpp"
 #include "result.hpp"
 #include "unsafe_cell.hpp"
@@ -168,6 +169,15 @@ public:
     // @safe - Constructor initializes mutex and data
     explicit Mutex(T value) : data_(std::move(value)) {}
 
+    static Mutex default_()
+    requires (requires { T::default_(); } || std::is_default_constructible_v<T>) {
+        if constexpr (requires { T::default_(); }) {
+            return Mutex(T::default_());
+        } else {
+            return Mutex(T{});
+        }
+    }
+
     // @safe - Acquires lock and returns LockResult (has internal @unsafe block)
     // Returns Result<MutexGuard<T>, PoisonError<T>> like Rust's std::sync::Mutex
     // Note: C++ doesn't have poisoning, so this always returns Ok
@@ -215,11 +225,19 @@ public:
         }
     }
 
-    // Mutex is not copyable or movable
+    // Mutex is not copyable, but Rust values are movable by default.
+    // Moving reinitializes the mutex and moves the protected payload.
     Mutex(const Mutex&) = delete;
     Mutex& operator=(const Mutex&) = delete;
-    Mutex(Mutex&&) = delete;
-    Mutex& operator=(Mutex&&) = delete;
+    Mutex(Mutex&& other) noexcept(std::is_nothrow_move_constructible_v<T>)
+        : mtx_(), data_(std::move(other.data_)) {}
+    Mutex& operator=(Mutex&& other) noexcept(std::is_nothrow_move_assignable_v<T>) {
+        if (this != &other) {
+            std::scoped_lock lock(*mtx_.get(), *other.mtx_.get());
+            data_ = std::move(other.data_);
+        }
+        return *this;
+    }
 
     // @safe - RAII destructor
     ~Mutex() = default;

@@ -9,6 +9,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <rusty/result.hpp>
 
@@ -92,7 +93,7 @@ inline std::uint8_t* realloc(
 namespace __export {
 
 template<typename T>
-constexpr decltype(auto) must_use(T&& value) {
+constexpr std::remove_cvref_t<T> must_use(T&& value) {
     return std::forward<T>(value);
 }
 

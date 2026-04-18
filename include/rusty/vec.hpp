@@ -255,6 +255,21 @@ public:
         other.size_ = 0;
         other.capacity_ = 0;
     }
+
+    // Converting move constructor for Vec<U> -> Vec<T> when element conversion exists.
+    template<typename U>
+    requires (!std::is_same_v<U, T> && std::is_constructible_v<T, U>)
+    Vec(Vec<U>&& other) : data_(nullptr), size_(0), capacity_(0) {
+        reserve(other.len());
+        for (size_t i = 0; i < other.len(); ++i) {
+            if constexpr (std::is_convertible_v<U, T>) {
+                push(static_cast<T>(std::move(other[i])));
+            } else {
+                push(T(std::move(other[i])));
+            }
+        }
+        other.clear();
+    }
     
     // Move assignment
     Vec& operator=(Vec&& other) {

@@ -72,6 +72,14 @@ public:
         return inner_.exchange(value, to_std_memory_order(order));
     }
 
+    T* get_mut() noexcept {
+        return reinterpret_cast<T*>(&inner_);
+    }
+
+    const T* get_mut() const noexcept {
+        return reinterpret_cast<const T*>(&inner_);
+    }
+
     rusty::Result<T, T> compare_exchange(
         T current,
         T new_value,
