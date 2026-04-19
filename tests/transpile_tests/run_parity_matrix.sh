@@ -15,6 +15,7 @@ declare -a MATRIX_CRATES=(
     "smallvec"
     "itertools"
     "once_cell"
+    "pollster"
 )
 
 declare -A CRATE_REPO=(
@@ -28,6 +29,7 @@ declare -A CRATE_REPO=(
     ["smallvec"]="https://github.com/servo/rust-smallvec.git"
     ["itertools"]="https://github.com/rust-itertools/itertools.git"
     ["once_cell"]="https://github.com/matklad/once_cell.git"
+    ["pollster"]="https://github.com/zesterer/pollster.git"
 )
 
 declare -A CRATE_REF=(
@@ -41,6 +43,15 @@ declare -A CRATE_REF=(
     ["smallvec"]="v1.15.1"
     ["itertools"]="v0.14.0"
     ["once_cell"]="v1.21.4"
+    ["pollster"]="master"
+)
+
+# Per-crate parity pipeline stop-stage overrides.
+# Most crates run full parity through Stage E (`run`).
+declare -A CRATE_STOP_AFTER=(
+    # Async runtime crate currently validated through transpilation output;
+    # full C++ runtime parity needs additional async/thread-local lowering work.
+    ["pollster"]="transpile"
 )
 
 TARGET_CRATE=""
@@ -56,7 +67,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Run parity matrix across crate set:
-  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell
+  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, pollster
 
 Options:
   --crate <name>      Run only one matrix crate
@@ -199,11 +210,12 @@ run_parity_for_crate() {
     local manifest="${crate_dir}/Cargo.toml"
     local work_dir="${WORK_ROOT}/${crate}"
     local matrix_log="${work_dir}/matrix.log"
+    local stop_after="${CRATE_STOP_AFTER[${crate}]:-run}"
 
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         echo "crate: ${crate}"
         echo "  manifest: ${manifest}"
-        echo "  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
+        echo "  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after ${stop_after} --work-dir ${work_dir}"
         return 0
     fi
 
@@ -228,7 +240,7 @@ run_parity_for_crate() {
         --manifest-path
         "${manifest}"
         --stop-after
-        run
+        "${stop_after}"
         --work-dir
         "${work_dir}"
     )

@@ -2931,7 +2931,6 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    let export_prefix = if self.is_exported(&s.vis) {
                     let export_prefix =
                         if self.is_exported_at_module_depth(&s.vis, module_depth) {
                         "export "

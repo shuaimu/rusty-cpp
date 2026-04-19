@@ -50,6 +50,14 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 | `itertools` | Iterator adapter chains, closures, trait-heavy generic APIs |
 | `once_cell` | Static initialization, interior mutability, sync and thread-safe paths |
 
+### Tier 5: Async runtime surface (focused)
+| Crate | What it tests |
+|-------|--------------|
+| `pollster` | Minimal `block_on` executor, `Future`/`Poll`/waker interaction |
+
+`pollster` currently runs through the transpile stage in parity-matrix while
+runtime/library-surface parity for thread-local/task APIs is still being expanded.
+
 ## What the tests check
 
 1. Transpilation succeeds (no panics, no errors)

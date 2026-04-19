@@ -331,7 +331,8 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
-    let file: syn::File = syn::parse_str(rust_source).map_err(|e| format!("Parse error: {}", e))?;
+    let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
+        .map_err(|e| format!("Parse error: {}", e))?;
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
     if has_cpp_module_imports {
         match options.cpp_module_symbol_index.as_ref() {
@@ -388,6 +389,22 @@ pub fn transpile_full_with_options(
     }
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
+}
+
+fn parse_with_expand_hygiene_fallback(rust_source: &str) -> Result<syn::File, syn::Error> {
+    match syn::parse_str::<syn::File>(rust_source) {
+        Ok(file) => Ok(file),
+        Err(primary_err) => {
+            // rustc/cargo-expand output can contain hygiene-prefixed statement
+            // forms such as `super let ...` that are not valid source syntax.
+            // Normalize that artifact and retry parsing once.
+            let normalized = rust_source.replace("super let ", "let ");
+            if normalized == rust_source {
+                return Err(primary_err);
+            }
+            syn::parse_str::<syn::File>(&normalized).map_err(|_| primary_err)
+        }
+    }
 }
 
 fn file_contains_cpp_module_imports(file: &syn::File) -> bool {
@@ -1269,6 +1286,26 @@ mod tests {
     fn test_transpile_error() {
         let result = transpile("fn {{{ invalid", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transpile_parses_cargo_expand_super_let_hygiene_artifact() {
+        let result = transpile(
+            r#"
+            fn f(v: i32) -> i32 {
+                let out = {
+                    super let mut inner = v;
+                    inner += 1;
+                    inner
+                };
+                out
+            }
+            "#,
+            None,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let output = result.unwrap();
+        assert!(output.contains("int32_t f"));
     }
 
     #[test]

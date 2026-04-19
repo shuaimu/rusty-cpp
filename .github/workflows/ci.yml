@@ -67,6 +67,7 @@ jobs:
             ${{ runner.temp }}/rusty-parity-matrix/smallvec/**
             ${{ runner.temp }}/rusty-parity-matrix/itertools/**
             ${{ runner.temp }}/rusty-parity-matrix/once_cell/**
+            ${{ runner.temp }}/rusty-parity-matrix/pollster/**
           if-no-files-found: warn
           retention-days: 14
 

@@ -160,6 +160,11 @@ run_test "once_cell" \
     "v1.21.4" \
     "Single-assignment cells — statics, sync, interior mutability"
 
+run_test "pollster" \
+    "https://github.com/zesterer/pollster.git" \
+    "master" \
+    "Minimal async executor — Future/Poll/waker block_on paths"
+
 # ── Summary ─────────────────────────────────────────────
 
 echo "╔═══════════════════════════════════════════════════╗"
