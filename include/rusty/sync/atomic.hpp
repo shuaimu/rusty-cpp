@@ -161,6 +161,15 @@ private:
 };
 
 using AtomicBool = Atomic<bool>;
+using AtomicI8 = Atomic<std::int8_t>;
+using AtomicI16 = Atomic<std::int16_t>;
+using AtomicI32 = Atomic<std::int32_t>;
+using AtomicI64 = Atomic<std::int64_t>;
+using AtomicIsize = Atomic<std::ptrdiff_t>;
+using AtomicU8 = Atomic<std::uint8_t>;
+using AtomicU16 = Atomic<std::uint16_t>;
+using AtomicU32 = Atomic<std::uint32_t>;
+using AtomicU64 = Atomic<std::uint64_t>;
 using AtomicUsize = Atomic<std::size_t>;
 
 template<typename T>

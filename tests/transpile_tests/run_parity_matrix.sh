@@ -13,7 +13,7 @@ declare -a MATRIX_CRATES=(
     "semver"
     "bitflags"
     "smallvec"
-    # "itertools"  # deferred: 2914 errors, needs deep architectural work (type inference, test framework filtering)
+    "itertools"
     "once_cell"
 )
 

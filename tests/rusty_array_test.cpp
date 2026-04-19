@@ -57,6 +57,42 @@ void test_range_from_next_and_count_shape() {
     printf("PASS\n");
 }
 
+void test_range_empty_when_start_exceeds_end() {
+    printf("test_range_empty_when_start_exceeds_end: ");
+    {
+        auto r = rusty::range<size_t>(3, 1);
+        assert(!r.next().has_value());
+        assert(!r.next_back().has_value());
+        assert(r.count() == 0);
+
+        size_t seen = 0;
+        for (auto&& _ : rusty::for_in(rusty::range<size_t>(3, 1))) {
+            (void)_;
+            ++seen;
+        }
+        assert(seen == 0);
+    }
+    printf("PASS\n");
+}
+
+void test_range_inclusive_empty_when_start_exceeds_end() {
+    printf("test_range_inclusive_empty_when_start_exceeds_end: ");
+    {
+        auto r = rusty::range_inclusive<size_t>(3, 1);
+        assert(!r.next().has_value());
+        assert(!r.next_back().has_value());
+        assert(r.count() == 0);
+
+        size_t seen = 0;
+        for (auto&& _ : rusty::for_in(rusty::range_inclusive<size_t>(3, 1))) {
+            (void)_;
+            ++seen;
+        }
+        assert(seen == 0);
+    }
+    printf("PASS\n");
+}
+
 void test_range_bounds_helpers_shape() {
     printf("test_range_bounds_helpers_shape: ");
     {
@@ -719,6 +755,8 @@ int main() {
 
     test_range_next_and_count();
     test_range_from_next_and_count_shape();
+    test_range_empty_when_start_exceeds_end();
+    test_range_inclusive_empty_when_start_exceeds_end();
     test_range_bounds_helpers_shape();
     test_saturating_math_helpers_shape();
     test_slice_helpers_basic_shapes();

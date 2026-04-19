@@ -15,10 +15,16 @@
 #include <stdexcept>
 #include <tuple>
 #include <variant>
+#include <functional>
+#include <new>
 #include <rusty/vec.hpp>
+#include <rusty/box.hpp>
 #include <rusty/maybe_uninit.hpp>
 
 namespace rusty {
+template<typename T>
+class Box;
+
 template<typename Container>
 auto as_slice(Container&& container);
 }
@@ -395,10 +401,8 @@ decltype(auto) adapt_as_ptr_result(const Container&, Ptr ptr) {
                 using ConstItem = std::add_const_t<container_item_t<Container>>;
                 return reinterpret_cast<std::add_pointer_t<ConstItem>>(ptr);
             }
-            return reinterpret_cast<std::add_pointer_t<std::add_const_t<Payload>>>(ptr);
-        } else {
-            return reinterpret_cast<std::add_pointer_t<std::add_const_t<Payload>>>(ptr);
         }
+        return ptr;
     }
 }
 
@@ -418,10 +422,8 @@ decltype(auto) adapt_as_mut_ptr_result(Container&, Ptr ptr) {
             if constexpr (std::is_same_v<std::remove_cv_t<Item>, std::remove_cv_t<Payload>>) {
                 return reinterpret_cast<std::add_pointer_t<container_item_t<Container>>>(ptr);
             }
-            return reinterpret_cast<std::add_pointer_t<Payload>>(ptr);
-        } else {
-            return reinterpret_cast<std::add_pointer_t<Payload>>(ptr);
         }
+        return ptr;
     }
 }
 } // namespace detail
@@ -431,6 +433,79 @@ decltype(auto) adapt_as_mut_ptr_result(Container&, Ptr ptr) {
 template<typename T>
 std::vector<T> array_repeat(T value, size_t count) {
     return std::vector<T>(count, value);
+}
+
+template<size_t N, typename F>
+auto array_from_fn(F&& func) {
+    using mapped_type =
+        std::decay_t<decltype(std::invoke(std::declval<F&>(), static_cast<size_t>(0)))>;
+    auto mapper = std::forward<F>(func);
+    return [&]<size_t... I>(std::index_sequence<I...>) {
+        return std::array<mapped_type, N>{
+            std::invoke(mapper, static_cast<size_t>(I))...};
+    }(std::make_index_sequence<N>{});
+}
+
+template<typename Range>
+void rotate_left(Range&& range, size_t mid) {
+    auto&& view = range;
+    auto first = std::begin(view);
+    auto last = std::end(view);
+    const auto len = static_cast<size_t>(std::distance(first, last));
+    if (len == 0) {
+        return;
+    }
+    mid %= len;
+    std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(mid)), last);
+}
+
+template<typename Range>
+void rotate_right(Range&& range, size_t k) {
+    auto&& view = range;
+    auto first = std::begin(view);
+    auto last = std::end(view);
+    const auto len = static_cast<size_t>(std::distance(first, last));
+    if (len == 0) {
+        return;
+    }
+    k %= len;
+    if (k == 0) {
+        return;
+    }
+    const auto pivot = len - k;
+    std::rotate(first, std::next(first, static_cast<std::ptrdiff_t>(pivot)), last);
+}
+
+template<typename A, typename B>
+constexpr auto min(A&& a, B&& b) {
+    return std::min(std::forward<A>(a), std::forward<B>(b));
+}
+
+template<typename A, typename B>
+constexpr auto max(A&& a, B&& b) {
+    return std::max(std::forward<A>(a), std::forward<B>(b));
+}
+
+template<typename T, typename Alloc>
+Box<std::span<T>> into_boxed_slice(std::vector<T, Alloc> values) {
+    const auto len = values.size();
+    T* storage =
+        (len == 0) ? nullptr : static_cast<T*>(::operator new(sizeof(T) * len));
+    for (size_t i = 0; i < len; ++i) {
+        new (storage + i) T(std::move(values[i]));
+    }
+    return Box<std::span<T>>::new_(std::span<T>(storage, len));
+}
+
+template<typename T>
+Box<std::span<T>> into_boxed_slice(Vec<T> values) {
+    const auto len = values.len();
+    T* storage =
+        (len == 0) ? nullptr : static_cast<T*>(::operator new(sizeof(T) * len));
+    for (size_t i = 0; i < len; ++i) {
+        new (storage + i) T(std::move(values[i]));
+    }
+    return Box<std::span<T>>::new_(std::span<T>(storage, len));
 }
 
 /// Collect any iterable range into rusty::Vec<T>.
@@ -592,6 +667,14 @@ inline size_t len(char* cstr) {
 }
 
 template<typename Container>
+size_t len(const Container& container);
+
+template<typename T>
+size_t len(const rusty::Box<T>& container) {
+    return rusty::len(*container);
+}
+
+template<typename Container>
 size_t len(const Container& container) {
     if constexpr (requires { container.len(); }) {
         return static_cast<size_t>(container.len());
@@ -710,6 +793,37 @@ constexpr auto saturating_sub(T lhs, U rhs) {
     }
 }
 
+template<typename T, typename U>
+constexpr auto saturating_mul(T lhs, U rhs) {
+    using R = std::common_type_t<T, U>;
+    static_assert(std::is_integral_v<R>, "rusty::saturating_mul requires integral operands");
+    const R a = static_cast<R>(lhs);
+    const R b = static_cast<R>(rhs);
+    if constexpr (std::is_unsigned_v<R>) {
+        const R max = std::numeric_limits<R>::max();
+        if (a != 0 && b > max / a) {
+            return max;
+        }
+        return static_cast<R>(a * b);
+    } else {
+        if (a == 0 || b == 0) {
+            return static_cast<R>(0);
+        }
+        const auto wide_a = static_cast<__int128>(a);
+        const auto wide_b = static_cast<__int128>(b);
+        const auto wide = wide_a * wide_b;
+        const auto max = static_cast<__int128>(std::numeric_limits<R>::max());
+        const auto min = static_cast<__int128>(std::numeric_limits<R>::min());
+        if (wide > max) {
+            return std::numeric_limits<R>::max();
+        }
+        if (wide < min) {
+            return std::numeric_limits<R>::min();
+        }
+        return static_cast<R>(wide);
+    }
+}
+
 /// Lazy filter_map view for transpiled iterator chains (`iter().filter_map(...)`).
 /// The mapping closure is only evaluated while iterating the view.
 template<typename Range, typename Func>
@@ -792,6 +906,8 @@ auto filter_map(Range&& range, Func&& func) {
 /// - `x[a..b]` -> `slice(x, a, b)`
 namespace detail {
 
+#ifndef RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
+#define RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
 template<typename T>
 struct is_std_array_like : std::false_type {};
 
@@ -800,6 +916,7 @@ struct is_std_array_like<std::array<T, N>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_std_array_like_v = is_std_array_like<T>::value;
+#endif
 
 // Preserve backing storage when `slice_full` is invoked with an rvalue
 // `std::array{...}` temporary. Returning a plain `std::span` here would
@@ -968,6 +1085,16 @@ auto slice_full(const Container& container) {
     }
 }
 
+template<typename T>
+auto slice_full(rusty::Box<T>& container) {
+    return slice_full(*container);
+}
+
+template<typename T>
+auto slice_full(const rusty::Box<T>& container) {
+    return slice_full(*container);
+}
+
 // Explicit helper surface for Rust-style `.as_slice()` lowering.
 // Keeps const-view semantics even for mutable lvalue receivers and supports
 // temporary receivers through forwarding-reference binding.
@@ -1132,13 +1259,24 @@ public:
 
     struct iterator {
         T current;
+        T end;
+        bool done;
         T operator*() const { return current; }
-        iterator& operator++() { ++current; return *this; }
-        bool operator!=(const iterator& other) const { return current != other.current; }
+        iterator& operator++() {
+            if (!done) {
+                ++current;
+                done = (current == end);
+            }
+            return *this;
+        }
+        bool operator!=(const iterator& other) const {
+            (void)other;
+            return !done;
+        }
     };
 
-    iterator begin() const { return {start}; }
-    iterator end() const { return {end_}; }
+    iterator begin() const { return {start, end_, start >= end_}; }
+    iterator end() const { return {end_, end_, true}; }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
@@ -1149,7 +1287,7 @@ public:
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     rusty::Option<T> next() {
-        if (start == end_) {
+        if (start >= end_) {
             return rusty::None;
         }
         T current = start;
@@ -1157,8 +1295,19 @@ public:
         return rusty::Option<T>(current);
     }
 
+    rusty::Option<T> next_back() {
+        if (start >= end_) {
+            return rusty::None;
+        }
+        --end_;
+        return rusty::Option<T>(end_);
+    }
+
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
     size_t count() const {
+        if (start >= end_) {
+            return 0;
+        }
         T current = start;
         size_t n = 0;
         while (current != end_) {
@@ -1200,10 +1349,13 @@ public:
         bool done;
         T operator*() const { return current; }
         iterator& operator++() { if (current == end) done = true; else ++current; return *this; }
-        bool operator!=(const iterator& other) const { return !done; }
+        bool operator!=(const iterator& other) const {
+            (void)other;
+            return !done;
+        }
     };
 
-    iterator begin() const { return {start, end_, false}; }
+    iterator begin() const { return {start, end_, start > end_}; }
     iterator end() const { return {end_, end_, true}; }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
@@ -1215,7 +1367,7 @@ public:
 
     /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
     rusty::Option<T> next() {
-        if (done_) {
+        if (done_ || start > end_) {
             return rusty::None;
         }
         T current = start;
@@ -1227,9 +1379,22 @@ public:
         return rusty::Option<T>(current);
     }
 
+    rusty::Option<T> next_back() {
+        if (done_ || start > end_) {
+            return rusty::None;
+        }
+        T current = end_;
+        if (start == end_) {
+            done_ = true;
+        } else {
+            --end_;
+        }
+        return rusty::Option<T>(current);
+    }
+
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
     size_t count() const {
-        if (done_) {
+        if (done_ || start > end_) {
             return 0;
         }
         T current = start;

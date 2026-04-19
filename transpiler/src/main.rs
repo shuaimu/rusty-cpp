@@ -668,10 +668,7 @@ export void rusty_test_tests_regular_case() {
 
     #[test]
     fn test_parity_cpp_compiler_from_env_trims_and_falls_back_on_empty() {
-        assert_eq!(
-            parity_cpp_compiler_from_env(Some("  ".to_string())),
-            "g++"
-        );
+        assert_eq!(parity_cpp_compiler_from_env(Some("  ".to_string())), "g++");
         assert_eq!(
             parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string())),
             "/usr/bin/clang++"
@@ -1604,6 +1601,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 }
                 // Skip using declarations for undefined namespaces
                 if trimmed.starts_with("using ")
+                    && !trimmed.contains('=')
                     && (trimmed.contains("::Left")
                         || trimmed.contains("::Right")
                         || trimmed.contains("iterator::")

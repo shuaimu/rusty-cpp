@@ -75,6 +75,13 @@ public:
         return replace(T{});
     }
 
+    // @safe - Clone the cell by copying inner value when copyable.
+    template<typename U = T>
+    typename std::enable_if_t<std::is_copy_constructible_v<U>, Cell>
+    clone() const {
+        return Cell(get());
+    }
+
     // @unsafe - Get a raw pointer to the value (unsafe in Rust, but needed for C++ interop)
     // @lifetime: (&'a) -> *mut T where return: 'a
     T* get_mut() const {

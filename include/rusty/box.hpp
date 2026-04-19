@@ -92,6 +92,28 @@ public:
         }
     }
 
+    // Clone by deep-copying the pointee when the pointee supports cloning.
+    // This mirrors Rust's `Clone for Box<T>` behavior.
+    // @lifetime: owned
+    Box clone() const {
+        if constexpr (requires(const T& value) { value.clone(); }) {
+            // @unsafe
+            {
+                return Box<T>(new T(ptr->clone()));
+            }
+        } else if constexpr (std::is_copy_constructible<T>::value) {
+            // @unsafe
+            {
+                return Box<T>(new T(*ptr));
+            }
+        } else {
+            static_assert(
+                std::is_copy_constructible<T>::value,
+                "rusty::Box::clone requires a cloneable or copyable pointee type"
+            );
+        }
+    }
+
     // Destructor - automatic cleanup
     ~Box() {
         // @unsafe

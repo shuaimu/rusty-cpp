@@ -1,6 +1,7 @@
 #ifndef RUSTY_SLICE_HPP
 #define RUSTY_SLICE_HPP
 
+#include <array>
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -26,6 +27,17 @@ auto from_raw_parts(const T* ptr, size_t len) {
 template<typename T>
 auto from_raw_parts_mut(T* ptr, size_t len) {
     return std::span<T>(ptr, len);
+}
+
+template<typename Range, typename Value>
+void fill(Range&& range, Value&& value) {
+    if constexpr (std::is_pointer_v<std::remove_reference_t<Range>>) {
+        auto&& view = *std::forward<Range>(range);
+        std::fill(std::begin(view), std::end(view), std::forward<Value>(value));
+    } else {
+        auto&& view = std::forward<Range>(range);
+        std::fill(std::begin(view), std::end(view), std::forward<Value>(value));
+    }
 }
 
 namespace slice_iter {
@@ -125,6 +137,18 @@ private:
 namespace detail {
 template<typename T>
 inline constexpr bool dependent_false_v = false;
+
+#ifndef RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
+#define RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
+template<typename T>
+struct is_std_array_like : std::false_type {};
+
+template<typename T, std::size_t N>
+struct is_std_array_like<std::array<T, N>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_std_array_like_v = is_std_array_like<T>::value;
+#endif
 
 template<typename T, typename = void>
 struct slice_has_is_some : std::false_type {};
@@ -343,6 +367,35 @@ public:
         }
         return next_result(entry_type(
             index_++,
+            option_like_take_value(item))
+        );
+    }
+
+    auto next_back() {
+        static_assert(
+            requires(Iter& iter) { iter.next_back(); },
+            "rusty::enumerate::next_back requires next_back() on the inner iterator"
+        );
+        static_assert(
+            requires(const Iter& iter) { iter.size_hint(); },
+            "rusty::enumerate::next_back requires size_hint() on the inner iterator"
+        );
+
+        using item_type = next_item_t<Iter>;
+        using entry_type = std::tuple<size_t, item_type>;
+        using next_result = rusty::Option<entry_type>;
+
+        const auto hint = iter_.size_hint();
+        size_t remaining = std::get<0>(hint);
+        auto item = iter_.next_back();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        if (remaining == 0) {
+            remaining = 1;
+        }
+        return next_result(entry_type(
+            index_ + (remaining - 1),
             option_like_take_value(item))
         );
     }
@@ -609,6 +662,71 @@ private:
     size_t remaining_;
 };
 
+template<typename LeftIter, typename RightIter>
+class chain_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<LeftIter>>,
+        "rusty::chain requires left iterator next() to return Option/optional-like value");
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<RightIter>>,
+        "rusty::chain requires right iterator next() to return Option/optional-like value");
+
+    chain_next_iter(LeftIter left, RightIter right)
+        : left_(std::forward<LeftIter>(left)),
+          right_(std::forward<RightIter>(right)),
+          left_done_(false) {}
+
+    chain_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using left_item = next_item_t<std::remove_reference_t<LeftIter>>;
+        using item_type = std::decay_t<left_item>;
+        using next_result = rusty::Option<item_type>;
+
+        if (!left_done_) {
+            auto item = left_.next();
+            if (option_like_has_value(item)) {
+                return next_result(option_like_take_value(item));
+            }
+            left_done_ = true;
+        }
+
+        auto item = right_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        if constexpr (requires { left_.size_hint(); right_.size_hint(); }) {
+            auto left_hint = left_.size_hint();
+            auto right_hint = right_.size_hint();
+            const auto lower =
+                static_cast<size_t>(std::get<0>(left_hint))
+                + static_cast<size_t>(std::get<0>(right_hint));
+            auto upper = rusty::Option<size_t>(rusty::None);
+            auto left_upper = std::get<1>(left_hint);
+            auto right_upper = std::get<1>(right_hint);
+            if (left_upper.is_some() && right_upper.is_some()) {
+                upper = rusty::Option<size_t>(
+                    static_cast<size_t>(left_upper.unwrap())
+                    + static_cast<size_t>(right_upper.unwrap()));
+            }
+            return std::make_tuple(lower, upper);
+        }
+        return std::make_tuple(0, rusty::Option<size_t>(rusty::None));
+    }
+
+private:
+    LeftIter left_;
+    RightIter right_;
+    bool left_done_;
+};
+
 struct filter_size_hint {
     size_t _0;
     rusty::Option<size_t> _1;
@@ -807,6 +925,19 @@ auto make_filter_next_iter(Iter&& iter, Pred&& pred) {
         std::forward<Pred>(pred));
 }
 
+template<typename LeftIter, typename RightIter>
+auto make_chain_next_iter(LeftIter&& left, RightIter&& right) {
+    using stored_left =
+        std::conditional_t<std::is_lvalue_reference_v<LeftIter>, LeftIter, std::decay_t<LeftIter>>;
+    using stored_right = std::conditional_t<
+        std::is_lvalue_reference_v<RightIter>,
+        RightIter,
+        std::decay_t<RightIter>>;
+    return chain_next_iter<stored_left, stored_right>(
+        std::forward<LeftIter>(left),
+        std::forward<RightIter>(right));
+}
+
 template<typename Iter, typename State, typename Func>
 auto make_scan_next_iter(Iter&& iter, State&& state, Func&& func) {
     using stored_iter =
@@ -876,6 +1007,53 @@ auto repeat(T&& value) {
 template<typename F>
 auto repeat_with(F&& func) {
     return detail::make_repeat_with_next_iter(std::forward<F>(func));
+}
+
+template<typename T>
+struct empty_iter {
+    using Item = T;
+
+    empty_iter into_iter() const { return *this; }
+
+    rusty::Option<T> next() { return rusty::None; }
+
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(0u, rusty::Option<size_t>(0u));
+    }
+};
+
+template<typename T>
+empty_iter<T> empty() {
+    return empty_iter<T>{};
+}
+
+template<typename T>
+struct once_iter {
+    using Item = T;
+
+    explicit once_iter(T value) : value_(std::move(value)) {}
+
+    once_iter into_iter() const { return *this; }
+
+    rusty::Option<T> next() {
+        if (!value_.is_some()) {
+            return rusty::None;
+        }
+        return rusty::Option<T>(value_.take().unwrap());
+    }
+
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        const auto remaining = value_.is_some() ? static_cast<size_t>(1) : static_cast<size_t>(0);
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
+private:
+    rusty::Option<T> value_;
+};
+
+template<typename T>
+once_iter<std::decay_t<T>> once(T&& value) {
+    return once_iter<std::decay_t<T>>(std::forward<T>(value));
 }
 
 template<typename Range>
@@ -950,6 +1128,21 @@ decltype(auto) map(Range&& range, Func&& func) {
             detail::dependent_false_v<std::remove_reference_t<Range>>,
             "rusty::map requires next() to return an Option/optional-like value"
         );
+    } else if constexpr (
+        detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Range>>>)
+    {
+        auto&& range_ref = std::forward<Range>(range);
+        auto mapper = std::forward<Func>(func);
+        using range_type = std::remove_cv_t<std::remove_reference_t<Range>>;
+        constexpr std::size_t N = std::tuple_size_v<range_type>;
+        using item_ref = decltype(std::declval<range_type&>()[0]);
+        using mapped_type = std::decay_t<decltype(std::invoke(
+            mapper,
+            detail::deref_if_pointer(std::declval<item_ref>())))>;
+        return [&]<std::size_t... I>(std::index_sequence<I...>) {
+            return std::array<mapped_type, N>{
+                std::invoke(mapper, detail::deref_if_pointer(range_ref[I]))...};
+        }(std::make_index_sequence<N>{});
     } else if constexpr (
         requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }
     ) {
@@ -1080,6 +1273,22 @@ decltype(auto) skip(Range&& range, size_t remaining) {
     }
 }
 
+template<typename Left, typename Right>
+decltype(auto) chain(Left&& left, Right&& right) {
+    if constexpr (
+        detail::has_option_like_next_v<std::remove_reference_t<Left>>
+        && detail::has_option_like_next_v<std::remove_reference_t<Right>>)
+    {
+        return detail::make_chain_next_iter(
+            std::forward<Left>(left),
+            std::forward<Right>(right));
+    } else {
+        return chain(
+            iter(std::forward<Left>(left)),
+            iter(std::forward<Right>(right)));
+    }
+}
+
 template<typename Range, typename State, typename Func>
 decltype(auto) scan(Range&& range, State&& state, Func&& func) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
@@ -1142,6 +1351,49 @@ auto fold(Range&& range, Acc init, Func&& func) {
             std::forward<decltype(item)>(item));
     }
     return acc;
+}
+
+template<typename Range, typename Acc, typename Func>
+auto try_fold(Range&& range, Acc init, Func&& func) {
+    using range_iter = decltype(for_in(std::forward<Range>(range)));
+    using item_ref = decltype(*std::begin(std::declval<range_iter&>()));
+    using acc_type = std::remove_cvref_t<Acc>;
+    using step_type = std::remove_cvref_t<std::invoke_result_t<Func&, acc_type, item_ref>>;
+
+    auto acc = static_cast<acc_type>(std::move(init));
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        auto step = std::invoke(
+            func,
+            std::move(acc),
+            std::forward<decltype(item)>(item));
+        if constexpr (requires(const step_type& s) {
+                          s.is_ok();
+                          s.is_err();
+                      }) {
+            if (step.is_err()) {
+                return step;
+            }
+            acc = step.unwrap();
+        } else if constexpr (requires(const step_type& s) {
+                                 s.is_some();
+                                 s.is_none();
+                             }) {
+            if (step.is_none()) {
+                return step;
+            }
+            acc = step.unwrap();
+        } else {
+            acc = std::move(step);
+        }
+    }
+
+    if constexpr (requires(acc_type value) { step_type::Ok(value); }) {
+        return step_type::Ok(std::move(acc));
+    } else if constexpr (requires(acc_type value) { step_type(value); }) {
+        return step_type(std::move(acc));
+    } else {
+        return acc;
+    }
 }
 
 namespace ops {

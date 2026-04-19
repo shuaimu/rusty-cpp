@@ -69,6 +69,16 @@ Option<T> checked_add(T a, T b) {
     return Option<T>(result);
 }
 
+template<typename A, typename B>
+requires(
+    std::is_integral_v<std::remove_cvref_t<A>>
+    && std::is_integral_v<std::remove_cvref_t<B>>
+    && !std::is_same_v<std::remove_cvref_t<A>, std::remove_cvref_t<B>>)
+auto checked_add(A a, B b) {
+    using Common = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return checked_add<Common>(static_cast<Common>(a), static_cast<Common>(b));
+}
+
 template<typename T>
 requires std::is_integral_v<T>
 Option<T> checked_sub(T a, T b) {
@@ -79,6 +89,16 @@ Option<T> checked_sub(T a, T b) {
     return Option<T>(result);
 }
 
+template<typename A, typename B>
+requires(
+    std::is_integral_v<std::remove_cvref_t<A>>
+    && std::is_integral_v<std::remove_cvref_t<B>>
+    && !std::is_same_v<std::remove_cvref_t<A>, std::remove_cvref_t<B>>)
+auto checked_sub(A a, B b) {
+    using Common = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return checked_sub<Common>(static_cast<Common>(a), static_cast<Common>(b));
+}
+
 template<typename T>
 requires std::is_integral_v<T>
 Option<T> checked_mul(T a, T b) {
@@ -87,6 +107,16 @@ Option<T> checked_mul(T a, T b) {
         return Option<T>(rusty::None);
     }
     return Option<T>(result);
+}
+
+template<typename A, typename B>
+requires(
+    std::is_integral_v<std::remove_cvref_t<A>>
+    && std::is_integral_v<std::remove_cvref_t<B>>
+    && !std::is_same_v<std::remove_cvref_t<A>, std::remove_cvref_t<B>>)
+auto checked_mul(A a, B b) {
+    using Common = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return checked_mul<Common>(static_cast<Common>(a), static_cast<Common>(b));
 }
 
 template<typename T>
@@ -101,6 +131,16 @@ Option<T> checked_div(T a, T b) {
         }
     }
     return Option<T>(a / b);
+}
+
+template<typename A, typename B>
+requires(
+    std::is_integral_v<std::remove_cvref_t<A>>
+    && std::is_integral_v<std::remove_cvref_t<B>>
+    && !std::is_same_v<std::remove_cvref_t<A>, std::remove_cvref_t<B>>)
+auto checked_div(A a, B b) {
+    using Common = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return checked_div<Common>(static_cast<Common>(a), static_cast<Common>(b));
 }
 
 template<typename T>

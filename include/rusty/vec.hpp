@@ -12,6 +12,7 @@
 #include <limits>
 #include <span>
 #include <type_traits>
+#include <vector>
 #include <rusty/alloc.hpp>
 #include <rusty/function.hpp>
 #include <rusty/mem.hpp>
@@ -289,6 +290,17 @@ public:
             other.capacity_ = 0;
         }
         return *this;
+    }
+
+    // Interop bridge for code paths that still materialize std::vector.
+    operator std::vector<T>() && {
+        std::vector<T> out;
+        out.reserve(size_);
+        for (size_t i = 0; i < size_; ++i) {
+            out.push_back(std::move(data_[i]));
+        }
+        clear();
+        return out;
     }
     
     // Destructor

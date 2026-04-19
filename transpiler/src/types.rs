@@ -64,6 +64,33 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "std::sync::atomic::AtomicBool" | "core::sync::atomic::AtomicBool" => {
             Some(("rusty::sync::atomic::AtomicBool", false))
         }
+        "std::sync::atomic::AtomicI8" | "core::sync::atomic::AtomicI8" => {
+            Some(("rusty::sync::atomic::AtomicI8", false))
+        }
+        "std::sync::atomic::AtomicI16" | "core::sync::atomic::AtomicI16" => {
+            Some(("rusty::sync::atomic::AtomicI16", false))
+        }
+        "std::sync::atomic::AtomicI32" | "core::sync::atomic::AtomicI32" => {
+            Some(("rusty::sync::atomic::AtomicI32", false))
+        }
+        "std::sync::atomic::AtomicI64" | "core::sync::atomic::AtomicI64" => {
+            Some(("rusty::sync::atomic::AtomicI64", false))
+        }
+        "std::sync::atomic::AtomicIsize" | "core::sync::atomic::AtomicIsize" => {
+            Some(("rusty::sync::atomic::AtomicIsize", false))
+        }
+        "std::sync::atomic::AtomicU8" | "core::sync::atomic::AtomicU8" => {
+            Some(("rusty::sync::atomic::AtomicU8", false))
+        }
+        "std::sync::atomic::AtomicU16" | "core::sync::atomic::AtomicU16" => {
+            Some(("rusty::sync::atomic::AtomicU16", false))
+        }
+        "std::sync::atomic::AtomicU32" | "core::sync::atomic::AtomicU32" => {
+            Some(("rusty::sync::atomic::AtomicU32", false))
+        }
+        "std::sync::atomic::AtomicU64" | "core::sync::atomic::AtomicU64" => {
+            Some(("rusty::sync::atomic::AtomicU64", false))
+        }
         "std::sync::atomic::AtomicUsize" | "core::sync::atomic::AtomicUsize" => {
             Some(("rusty::sync::atomic::AtomicUsize", false))
         }
@@ -71,9 +98,16 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
             Some(("rusty::sync::atomic::AtomicPtr", true))
         }
         "AtomicBool" | "atomic::AtomicBool" => Some(("rusty::sync::atomic::AtomicBool", false)),
-        "AtomicUsize" | "atomic::AtomicUsize" => {
-            Some(("rusty::sync::atomic::AtomicUsize", false))
-        }
+        "AtomicI8" | "atomic::AtomicI8" => Some(("rusty::sync::atomic::AtomicI8", false)),
+        "AtomicI16" | "atomic::AtomicI16" => Some(("rusty::sync::atomic::AtomicI16", false)),
+        "AtomicI32" | "atomic::AtomicI32" => Some(("rusty::sync::atomic::AtomicI32", false)),
+        "AtomicI64" | "atomic::AtomicI64" => Some(("rusty::sync::atomic::AtomicI64", false)),
+        "AtomicIsize" | "atomic::AtomicIsize" => Some(("rusty::sync::atomic::AtomicIsize", false)),
+        "AtomicU8" | "atomic::AtomicU8" => Some(("rusty::sync::atomic::AtomicU8", false)),
+        "AtomicU16" | "atomic::AtomicU16" => Some(("rusty::sync::atomic::AtomicU16", false)),
+        "AtomicU32" | "atomic::AtomicU32" => Some(("rusty::sync::atomic::AtomicU32", false)),
+        "AtomicU64" | "atomic::AtomicU64" => Some(("rusty::sync::atomic::AtomicU64", false)),
+        "AtomicUsize" | "atomic::AtomicUsize" => Some(("rusty::sync::atomic::AtomicUsize", false)),
         "AtomicPtr" | "atomic::AtomicPtr" => Some(("rusty::sync::atomic::AtomicPtr", true)),
         "std::sync::atomic::Ordering" | "core::sync::atomic::Ordering" => {
             Some(("rusty::sync::atomic::Ordering", false))
@@ -91,6 +125,26 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         }
         "slice::IterMut" | "core::slice::IterMut" | "std::slice::IterMut" => {
             Some(("rusty::slice_iter::Iter", true))
+        }
+        "iter::Empty" | "core::iter::Empty" | "std::iter::Empty" => {
+            Some(("rusty::empty_iter", true))
+        }
+        "iter::Once" | "core::iter::Once" | "std::iter::Once" => Some(("rusty::once_iter", true)),
+        "ops::Range" | "core::ops::Range" | "std::ops::Range" => Some(("rusty::range", true)),
+        "ops::RangeInclusive" | "core::ops::RangeInclusive" | "std::ops::RangeInclusive" => {
+            Some(("rusty::range_inclusive", true))
+        }
+        "ops::RangeFrom" | "core::ops::RangeFrom" | "std::ops::RangeFrom" => {
+            Some(("rusty::range_from", true))
+        }
+        "ops::RangeTo" | "core::ops::RangeTo" | "std::ops::RangeTo" => {
+            Some(("rusty::range_to", true))
+        }
+        "ops::RangeToInclusive" | "core::ops::RangeToInclusive" | "std::ops::RangeToInclusive" => {
+            Some(("rusty::range_to_inclusive", true))
+        }
+        "ops::RangeFull" | "core::ops::RangeFull" | "std::ops::RangeFull" => {
+            Some(("rusty::range_full", false))
         }
         "core::fmt::Result" | "fmt::Result" => Some(("rusty::fmt::Result", false)),
         "core::fmt::Formatter" | "fmt::Formatter" => Some(("rusty::fmt::Formatter", false)),
@@ -166,6 +220,8 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "repeat" | "iter::repeat" | "core::iter::repeat" | "std::iter::repeat" => {
             Some("rusty::repeat")
         }
+        "iter::once" | "core::iter::once" | "std::iter::once" => Some("rusty::once"),
+        "iter::empty" | "core::iter::empty" | "std::iter::empty" => Some("rusty::empty"),
         "iter::repeat_with" | "core::iter::repeat_with" | "std::iter::repeat_with" => {
             Some("rusty::repeat_with")
         }
